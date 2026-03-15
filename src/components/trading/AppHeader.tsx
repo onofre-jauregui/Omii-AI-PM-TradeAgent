@@ -15,61 +15,69 @@ interface AppHeaderProps {
 
 export function AppHeader({ onNavigate }: AppHeaderProps) {
   return (
-    <header className="border-b border-border bg-card/80 backdrop-blur-sm sticky top-0 z-50">
-      <div className="container mx-auto px-4 max-w-[1400px] flex items-center justify-between h-14">
+    <header className="frosted-glass sticky top-0 z-50 transition-shadow duration-300" style={{ boxShadow: '0 1px 0 rgba(0,0,0,0.1)' }}>
+      <div className="mx-auto max-w-[980px] px-6 flex items-center justify-between h-12">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <Bot className="h-6 w-6 text-primary" />
-            <span className="font-mono font-bold text-lg text-foreground tracking-tight">
-              POLYBOT
+            <Bot className="h-5 w-5 text-foreground" />
+            <span className="text-sm font-medium tracking-tight text-foreground">
+              Polybot
             </span>
           </div>
-          <span className="text-xs font-mono text-muted-foreground border border-border px-2 py-0.5 rounded-sm">
-            v0.1.0
-          </span>
         </div>
+        <nav className="hidden md:flex items-center gap-8">
+          <button onClick={() => onNavigate?.("dashboard")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Dashboard
+          </button>
+          <button onClick={() => onNavigate?.("markets")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Markets
+          </button>
+          <button onClick={() => onNavigate?.("strategies")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Strategies
+          </button>
+          <button onClick={() => onNavigate?.("agent")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Agent
+          </button>
+          <button onClick={() => onNavigate?.("log")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Trade Log
+          </button>
+        </nav>
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="flex items-center gap-1 text-profit">
-              <Activity className="h-3 w-3 animate-pulse-glow" />
-              LIVE
+          <div className="flex items-center gap-3 text-xs">
+            <span className="flex items-center gap-1.5 text-profit">
+              <Activity className="h-3 w-3" />
+              Live
             </span>
-          </div>
-          <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
-            <Zap className="h-3 w-3 text-warning" />
-            <span>AGENT: IDLE</span>
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Zap className="h-3 w-3 text-warning" />
+              Idle
+            </span>
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button className="rounded-full focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background">
-                <Avatar className="h-8 w-8 cursor-pointer border border-border hover:border-primary/50 transition-colors">
-                  <AvatarFallback className="bg-primary/10 text-primary font-mono text-xs">
+              <button className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <Avatar className="h-7 w-7 cursor-pointer transition-opacity duration-300 hover:opacity-80">
+                  <AvatarFallback className="bg-secondary text-foreground text-[10px] font-medium">
                     AT
                   </AvatarFallback>
                 </Avatar>
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48 bg-card border-border">
-              <div className="px-3 py-2">
-                <p className="text-sm font-mono font-medium text-foreground">Anon Trader</p>
-                <p className="text-xs font-mono text-muted-foreground">trader@example.com</p>
+            <DropdownMenuContent align="end" className="w-48 rounded-xl apple-shadow">
+              <div className="px-3 py-2.5">
+                <p className="text-sm font-medium text-foreground">Anon Trader</p>
+                <p className="text-xs text-muted-foreground">trader@example.com</p>
               </div>
               <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="font-mono text-xs cursor-pointer gap-2"
-                onClick={() => onNavigate?.("profile")}
-              >
-                <User className="h-3.5 w-3.5" /> Profile
+              <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => onNavigate?.("profile")}>
+                <User className="h-4 w-4" /> Profile
               </DropdownMenuItem>
-              <DropdownMenuItem
-                className="font-mono text-xs cursor-pointer gap-2"
-                onClick={() => onNavigate?.("settings")}
-              >
-                <Settings className="h-3.5 w-3.5" /> Settings
+              <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => onNavigate?.("settings")}>
+                <Settings className="h-4 w-4" /> Settings
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="font-mono text-xs cursor-pointer gap-2 text-loss">
-                <LogOut className="h-3.5 w-3.5" /> Sign out
+              <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive">
+                <LogOut className="h-4 w-4" /> Sign out
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
