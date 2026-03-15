@@ -4,9 +4,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Brain, Cpu, Send, MessageSquare, Settings, Loader2, BookOpen } from "lucide-react";
+import { Brain, Cpu, Send, MessageSquare, Settings, Loader2, BookOpen, AlertTriangle } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
@@ -28,6 +29,7 @@ async function streamChat({
   model,
   temperature,
   systemPrompt,
+  tradingMode,
   onDelta,
   onDone,
   onError,
@@ -37,6 +39,7 @@ async function streamChat({
   model: string;
   temperature: number;
   systemPrompt: string;
+  tradingMode: string;
   onDelta: (text: string) => void;
   onDone: () => void;
   onError: (error: string) => void;
@@ -47,7 +50,7 @@ async function streamChat({
       "Content-Type": "application/json",
       Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
     },
-    body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt }),
+    body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt, tradingMode }),
   });
 
   if (!resp.ok) {
@@ -91,7 +94,6 @@ async function streamChat({
     }
   }
 
-  // Flush
   if (buffer.trim()) {
     for (let raw of buffer.split("\n")) {
       if (!raw) continue;
@@ -114,11 +116,12 @@ export function AgentPanel() {
   const { getActiveStrategies } = useStrategies();
   const [selectedModel, setSelectedModel] = useState("gemini-flash");
   const [temperature, setTemperature] = useState([0.3]);
+  const [tradingMode, setTradingMode] = useState<"paper" | "live">("paper");
   const [systemPrompt, setSystemPrompt] = useState(
     `You are an expert algorithmic trading agent for prediction markets (Polymarket). Analyze market data, news sentiment, and probability shifts to identify profitable trading opportunities. Consider:\n- Market liquidity and volume\n- Historical price patterns\n- News catalysts and timing\n- Risk/reward ratios\n- Correlation with other markets\n\nProvide clear trade signals with entry/exit prices and confidence levels.`
   );
   const [chatMessages, setChatMessages] = useState<Msg[]>([
-    { role: "assistant", content: "🤖 Agent ready. I can analyze markets, suggest trades, and explain my reasoning. Active strategies are loaded automatically. What would you like to explore?" },
+    { role: "assistant", content: "🤖 Agent ready. I can analyze markets, execute trades, and explain my reasoning. Active strategies are loaded automatically.\n\nTry saying: **\"Go trade\"** or **\"Analyze the top markets and find opportunities\"**" },
   ]);
   const [chatInput, setChatInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -143,7 +146,7 @@ export function AgentPanel() {
       assistantSoFar += chunk;
       setChatMessages(prev => {
         const last = prev[prev.length - 1];
-        if (last?.role === "assistant" && prev.length > chatMessages.length) {
+        if (last?.role === "assistant" && prev.length > newMessages.length) {
           return prev.map((m, i) => i === prev.length - 1 ? { ...m, content: assistantSoFar } : m);
         }
         return [...prev, { role: "assistant", content: assistantSoFar }];
@@ -151,11 +154,12 @@ export function AgentPanel() {
     };
 
     await streamChat({
-      messages: newMessages.filter(m => m.role === "user" || m.content !== chatMessages[0]?.content),
+      messages: newMessages.slice(1), // skip initial greeting
       strategies: activeStrategies.map(s => ({ name: s.name, instructions: s.instructions })),
       model: selectedModel,
       temperature: temperature[0],
       systemPrompt,
+      tradingMode,
       onDelta: upsertAssistant,
       onDone: () => setIsLoading(false),
       onError: (err) => {
@@ -202,7 +206,6 @@ export function AgentPanel() {
                 <span className="text-xs font-mono text-foreground">{temperature[0]}</span>
               </div>
               <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} className="w-full" />
-              <p className="text-[10px] text-muted-foreground">Lower = more deterministic, Higher = more creative</p>
             </div>
 
             <div className="space-y-2">
@@ -210,13 +213,49 @@ export function AgentPanel() {
               <Textarea
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                className="bg-secondary border-border font-mono text-xs min-h-[120px] resize-none"
+                className="bg-secondary border-border font-mono text-xs min-h-[100px] resize-none"
               />
             </div>
           </CardContent>
         </Card>
 
-        {/* Active Strategies Badge List */}
+        {/* Trading Mode */}
+        <Card className={`bg-card border-border ${tradingMode === "live" ? "border-loss/50" : "border-primary/30"}`}>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-mono font-semibold">TRADING MODE</Label>
+                  <Badge
+                    variant="outline"
+                    className={`text-[10px] font-mono ${tradingMode === "live" ? "border-loss/50 text-loss" : "border-primary/50 text-primary"}`}
+                  >
+                    {tradingMode === "live" ? "🔴 LIVE" : "📝 PAPER"}
+                  </Badge>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {tradingMode === "live"
+                    ? "Real trades will be executed on Polymarket"
+                    : "Simulated trades — no real money at risk"}
+                </p>
+              </div>
+              <Switch
+                checked={tradingMode === "live"}
+                onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")}
+              />
+            </div>
+            {tradingMode === "live" && (
+              <div className="mt-3 p-2 rounded-md bg-loss/10 border border-loss/20 flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 text-loss shrink-0 mt-0.5" />
+                <p className="text-[10px] text-loss font-mono">
+                  CAUTION: Live mode requires Polymarket API credentials configured in Settings. Trades use real funds.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Active Strategies */}
         <Card className="bg-card border-border">
           <CardHeader className="pb-2">
             <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
@@ -225,7 +264,7 @@ export function AgentPanel() {
           </CardHeader>
           <CardContent>
             {activeStrategies.length === 0 ? (
-              <p className="text-xs text-muted-foreground font-mono">No active strategies. Enable strategies in the Strategies tab.</p>
+              <p className="text-xs text-muted-foreground font-mono">No active strategies. Enable them in the Strategies tab.</p>
             ) : (
               <div className="flex flex-wrap gap-2">
                 {activeStrategies.map(s => (
@@ -236,19 +275,27 @@ export function AgentPanel() {
               </div>
             )}
             <p className="text-[10px] text-muted-foreground mt-2">
-              Active strategy instructions are automatically injected into the agent's context.
+              Active strategy instructions are injected into the agent's context when trading.
             </p>
           </CardContent>
         </Card>
       </div>
 
       {/* Chat Panel */}
-      <Card className="bg-card border-border flex flex-col h-[650px]">
+      <Card className="bg-card border-border flex flex-col h-[700px]">
         <CardHeader className="pb-3 border-b border-border">
-          <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
-            <MessageSquare className="h-4 w-4" /> AGENT CHAT
-            {isLoading && <Loader2 className="h-3 w-3 animate-spin text-primary ml-auto" />}
-          </CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" /> AGENT CHAT
+              {isLoading && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
+            </CardTitle>
+            <Badge
+              variant="outline"
+              className={`text-[10px] font-mono ${tradingMode === "live" ? "border-loss/50 text-loss" : "border-primary/50 text-primary"}`}
+            >
+              {tradingMode === "live" ? "🔴 LIVE" : "📝 PAPER"}
+            </Badge>
+          </div>
         </CardHeader>
         <CardContent className="flex-1 overflow-y-auto p-4 space-y-3">
           {chatMessages.map((msg, i) => (
@@ -276,7 +323,7 @@ export function AgentPanel() {
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder="Ask the agent to analyze markets..."
+              placeholder={tradingMode === "live" ? "⚠️ Live mode — tell the agent what to trade..." : "Tell the agent to analyze or trade..."}
               className="bg-secondary border-border font-mono text-sm"
               disabled={isLoading}
             />
