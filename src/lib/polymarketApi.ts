@@ -63,10 +63,11 @@ function formatDate(dateStr: string): string {
   }
 }
 
-function formatVolume(vol: number): string {
-  if (vol >= 1_000_000) return `$${(vol / 1_000_000).toFixed(1)}M`;
-  if (vol >= 1_000) return `$${(vol / 1_000).toFixed(0)}K`;
-  return `$${vol.toFixed(0)}`;
+function formatVolume(vol: number | string): string {
+  const v = Number(vol) || 0;
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${(v / 1_000).toFixed(0)}K`;
+  return `$${v.toFixed(0)}`;
 }
 
 export async function fetchPolymarketEvents(limit = 20, tag?: string): Promise<ParsedMarket[]> {
