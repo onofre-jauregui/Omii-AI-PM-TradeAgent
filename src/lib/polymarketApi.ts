@@ -70,15 +70,6 @@ function formatVolume(vol: number): string {
 }
 
 export async function fetchPolymarketEvents(limit = 20, tag?: string): Promise<ParsedMarket[]> {
-  const params: Record<string, string> = { endpoint: "events", limit: String(limit) };
-  if (tag) params.tag = tag;
-
-  const { data, error } = await supabase.functions.invoke("polymarket-proxy", {
-    body: null,
-    headers: {},
-  });
-
-  // Use query params via URL
   const url = new URL(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/polymarket-proxy`);
   url.searchParams.set("endpoint", "events");
   url.searchParams.set("limit", String(limit));
