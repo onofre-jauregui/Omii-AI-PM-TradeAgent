@@ -14,58 +14,32 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
 
   return (
-    <div className="min-h-screen bg-background terminal-grid">
+    <div className="min-h-screen bg-background">
       <AppHeader onNavigate={setActiveTab} />
-      <main className="container mx-auto px-4 py-6 max-w-[1400px]">
-        <div className="mb-6">
+      <main className="mx-auto max-w-[980px] px-6 py-12">
+        <div className="mb-12 apple-reveal">
           <PortfolioChart />
         </div>
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="bg-card border border-border p-1 h-auto flex-wrap">
-            <TabsTrigger value="dashboard" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              DASHBOARD
-            </TabsTrigger>
-            <TabsTrigger value="markets" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              MARKETS
-            </TabsTrigger>
-            <TabsTrigger value="strategies" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              STRATEGIES
-            </TabsTrigger>
-            <TabsTrigger value="agent" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              AI AGENT
-            </TabsTrigger>
-            <TabsTrigger value="log" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              TRADE LOG
-            </TabsTrigger>
-            <TabsTrigger value="settings" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              SETTINGS
-            </TabsTrigger>
-            <TabsTrigger value="profile" className="font-mono text-xs data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              PROFILE
-            </TabsTrigger>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
+          <TabsList className="md:hidden bg-secondary rounded-full p-1 h-auto flex-wrap">
+            {["dashboard", "markets", "strategies", "agent", "log", "settings", "profile"].map((tab) => (
+              <TabsTrigger
+                key={tab}
+                value={tab}
+                className="text-xs rounded-full px-4 py-1.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:apple-shadow transition-all duration-300"
+              >
+                {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              </TabsTrigger>
+            ))}
           </TabsList>
 
-          <TabsContent value="dashboard">
-            <PortfolioOverview />
-          </TabsContent>
-          <TabsContent value="markets">
-            <MarketsPanel />
-          </TabsContent>
-          <TabsContent value="strategies">
-            <StrategiesPanel />
-          </TabsContent>
-          <TabsContent value="agent">
-            <AgentPanel />
-          </TabsContent>
-          <TabsContent value="log">
-            <TradeLog />
-          </TabsContent>
-          <TabsContent value="settings">
-            <SettingsPanel />
-          </TabsContent>
-          <TabsContent value="profile">
-            <ProfilePanel />
-          </TabsContent>
+          <TabsContent value="dashboard"><PortfolioOverview /></TabsContent>
+          <TabsContent value="markets"><MarketsPanel /></TabsContent>
+          <TabsContent value="strategies"><StrategiesPanel /></TabsContent>
+          <TabsContent value="agent"><AgentPanel /></TabsContent>
+          <TabsContent value="log"><TradeLog /></TabsContent>
+          <TabsContent value="settings"><SettingsPanel /></TabsContent>
+          <TabsContent value="profile"><ProfilePanel /></TabsContent>
         </Tabs>
       </main>
     </div>

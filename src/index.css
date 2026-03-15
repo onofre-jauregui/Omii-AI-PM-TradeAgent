@@ -2,59 +2,101 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
-
 @layer base {
   :root {
-    --background: 220 20% 7%;
-    --foreground: 210 20% 90%;
+    --background: 0 0% 100%;
+    --foreground: 0 0% 11%;
 
-    --card: 220 18% 10%;
-    --card-foreground: 210 20% 90%;
+    --card: 0 0% 96.5%;
+    --card-foreground: 0 0% 11%;
 
-    --popover: 220 18% 10%;
-    --popover-foreground: 210 20% 90%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 11%;
 
-    --primary: 142 70% 45%;
-    --primary-foreground: 220 20% 7%;
+    --primary: 211 100% 44%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 220 15% 15%;
-    --secondary-foreground: 210 20% 80%;
+    --secondary: 0 0% 96.5%;
+    --secondary-foreground: 0 0% 11%;
 
-    --muted: 220 15% 13%;
-    --muted-foreground: 215 15% 50%;
+    --muted: 0 0% 96.5%;
+    --muted-foreground: 0 0% 43%;
 
-    --accent: 38 92% 50%;
-    --accent-foreground: 220 20% 7%;
+    --accent: 0 0% 96.5%;
+    --accent-foreground: 0 0% 11%;
 
     --destructive: 0 72% 51%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 220 15% 18%;
-    --input: 220 15% 15%;
-    --ring: 142 70% 45%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 211 100% 44%;
 
-    --radius: 0.5rem;
+    --radius: 18px;
 
-    --profit: 142 70% 45%;
+    --profit: 142 64% 40%;
     --loss: 0 72% 51%;
     --warning: 38 92% 50%;
-    --info: 210 100% 56%;
+    --info: 211 100% 44%;
 
-    --sidebar-background: 220 18% 8%;
-    --sidebar-foreground: 210 20% 80%;
-    --sidebar-primary: 142 70% 45%;
-    --sidebar-primary-foreground: 220 20% 7%;
-    --sidebar-accent: 220 15% 13%;
-    --sidebar-accent-foreground: 210 20% 80%;
-    --sidebar-border: 220 15% 18%;
-    --sidebar-ring: 142 70% 45%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 0 0% 11%;
+    --sidebar-primary: 211 100% 44%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 96.5%;
+    --sidebar-accent-foreground: 0 0% 11%;
+    --sidebar-border: 0 0% 90%;
+    --sidebar-ring: 211 100% 44%;
 
-    --chart-1: 142 70% 45%;
-    --chart-2: 210 100% 56%;
+    --chart-1: 211 100% 44%;
+    --chart-2: 142 64% 40%;
     --chart-3: 38 92% 50%;
     --chart-4: 280 65% 60%;
     --chart-5: 0 72% 51%;
+  }
+
+  .dark {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 96%;
+
+    --card: 0 0% 7%;
+    --card-foreground: 0 0% 96%;
+
+    --popover: 0 0% 7%;
+    --popover-foreground: 0 0% 96%;
+
+    --primary: 211 100% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 11%;
+    --secondary-foreground: 0 0% 96%;
+
+    --muted: 0 0% 11%;
+    --muted-foreground: 0 0% 55%;
+
+    --accent: 0 0% 11%;
+    --accent-foreground: 0 0% 96%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 16%;
+    --input: 0 0% 16%;
+    --ring: 211 100% 50%;
+
+    --profit: 142 64% 45%;
+    --loss: 0 72% 55%;
+    --warning: 38 92% 55%;
+    --info: 211 100% 50%;
+
+    --sidebar-background: 0 0% 0%;
+    --sidebar-foreground: 0 0% 96%;
+    --sidebar-primary: 211 100% 50%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 0 0% 11%;
+    --sidebar-accent-foreground: 0 0% 96%;
+    --sidebar-border: 0 0% 16%;
+    --sidebar-ring: 211 100% 50%;
   }
 }
 
@@ -63,17 +105,14 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground font-sans;
+    @apply bg-background text-foreground antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 }
 
 @layer utilities {
-  .font-mono {
-    font-family: 'JetBrains Mono', monospace;
-  }
-  .font-sans {
-    font-family: 'Inter', sans-serif;
-  }
   .text-profit {
     color: hsl(var(--profit));
   }
@@ -92,16 +131,31 @@
   .bg-loss {
     background-color: hsl(var(--loss));
   }
-  .glow-profit {
-    box-shadow: 0 0 20px hsl(var(--profit) / 0.2);
+  .apple-shadow {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
   }
-  .glow-primary {
-    box-shadow: 0 0 20px hsl(var(--primary) / 0.15);
+  .apple-shadow-hover {
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
   }
-  .terminal-grid {
-    background-image: 
-      linear-gradient(hsl(var(--border) / 0.3) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(var(--border) / 0.3) 1px, transparent 1px);
-    background-size: 20px 20px;
+  .frosted-glass {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+  .dark .frosted-glass {
+    background: rgba(0, 0, 0, 0.72);
+  }
+  .apple-reveal {
+    animation: appleReveal 0.6s cubic-bezier(0.25, 0.1, 0.25, 1) both;
+  }
+  @keyframes appleReveal {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }

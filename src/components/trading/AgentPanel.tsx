@@ -1,4 +1,3 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Brain, Cpu, Send, MessageSquare, Settings, Loader2, BookOpen, AlertTriangle } from "lucide-react";
+import { Cpu, Send, MessageSquare, Loader2, BookOpen, AlertTriangle } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
@@ -24,91 +23,44 @@ type Msg = { role: "user" | "assistant"; content: string };
 const AGENT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trading-agent`;
 
 async function streamChat({
-  messages,
-  strategies,
-  model,
-  temperature,
-  systemPrompt,
-  tradingMode,
-  onDelta,
-  onDone,
-  onError,
+  messages, strategies, model, temperature, systemPrompt, tradingMode, onDelta, onDone, onError,
 }: {
-  messages: Msg[];
-  strategies: { name: string; instructions: string }[];
-  model: string;
-  temperature: number;
-  systemPrompt: string;
-  tradingMode: string;
-  onDelta: (text: string) => void;
-  onDone: () => void;
-  onError: (error: string) => void;
+  messages: Msg[]; strategies: { name: string; instructions: string }[]; model: string; temperature: number; systemPrompt: string; tradingMode: string; onDelta: (text: string) => void; onDone: () => void; onError: (error: string) => void;
 }) {
   const resp = await fetch(AGENT_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
     body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt, tradingMode }),
   });
-
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: "Unknown error" }));
-    onError(err.error || `Error ${resp.status}`);
-    return;
-  }
-
+  if (!resp.ok) { const err = await resp.json().catch(() => ({ error: "Unknown error" })); onError(err.error || `Error ${resp.status}`); return; }
   if (!resp.body) { onError("No response body"); return; }
-
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let done = false;
-
   while (!done) {
     const { done: readerDone, value } = await reader.read();
     if (readerDone) break;
     buffer += decoder.decode(value, { stream: true });
-
-    let newlineIdx: number;
-    while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-      let line = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
-
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) !== -1) {
+      let line = buffer.slice(0, idx); buffer = buffer.slice(idx + 1);
       if (line.endsWith("\r")) line = line.slice(0, -1);
-      if (line.startsWith(":") || line.trim() === "") continue;
-      if (!line.startsWith("data: ")) continue;
-
+      if (line.startsWith(":") || line.trim() === "" || !line.startsWith("data: ")) continue;
       const jsonStr = line.slice(6).trim();
       if (jsonStr === "[DONE]") { done = true; break; }
-
-      try {
-        const parsed = JSON.parse(jsonStr);
-        const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-        if (content) onDelta(content);
-      } catch {
-        buffer = line + "\n" + buffer;
-        break;
-      }
+      try { const p = JSON.parse(jsonStr); const c = p.choices?.[0]?.delta?.content; if (c) onDelta(c); }
+      catch { buffer = line + "\n" + buffer; break; }
     }
   }
-
   if (buffer.trim()) {
     for (let raw of buffer.split("\n")) {
-      if (!raw) continue;
-      if (raw.endsWith("\r")) raw = raw.slice(0, -1);
-      if (!raw.startsWith("data: ")) continue;
-      const jsonStr = raw.slice(6).trim();
+      if (!raw || !raw.startsWith("data: ")) continue;
+      const jsonStr = raw.replace(/\r$/, "").slice(6).trim();
       if (jsonStr === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(jsonStr);
-        const content = parsed.choices?.[0]?.delta?.content as string | undefined;
-        if (content) onDelta(content);
-      } catch { /* ignore */ }
+      try { const p = JSON.parse(jsonStr); const c = p.choices?.[0]?.delta?.content; if (c) onDelta(c); } catch {}
     }
   }
-
   onDone();
 }
 
@@ -118,20 +70,17 @@ export function AgentPanel() {
   const [temperature, setTemperature] = useState([0.3]);
   const [tradingMode, setTradingMode] = useState<"paper" | "live">("paper");
   const [systemPrompt, setSystemPrompt] = useState(
-    `You are an expert algorithmic trading agent for prediction markets (Polymarket). Analyze market data, news sentiment, and probability shifts to identify profitable trading opportunities. Consider:\n- Market liquidity and volume\n- Historical price patterns\n- News catalysts and timing\n- Risk/reward ratios\n- Correlation with other markets\n\nProvide clear trade signals with entry/exit prices and confidence levels.`
+    `You are an expert algorithmic trading agent for prediction markets (Polymarket). Analyze market data, news sentiment, and probability shifts to identify profitable trading opportunities. Provide clear trade signals with entry/exit prices and confidence levels.`
   );
   const [chatMessages, setChatMessages] = useState<Msg[]>([
-    { role: "assistant", content: "🤖 Agent ready. I can analyze markets, execute trades, and explain my reasoning. Active strategies are loaded automatically.\n\nTry saying: **\"Go trade\"** or **\"Analyze the top markets and find opportunities\"**" },
+    { role: "assistant", content: "Agent ready. I can analyze markets, execute trades, and explain my reasoning. Active strategies are loaded automatically.\n\nTry: **\"Go trade\"** or **\"Analyze the top markets\"**" },
   ]);
   const [chatInput, setChatInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
-
   const activeStrategies = getActiveStrategies();
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
 
   const handleSend = async () => {
     if (!chatInput.trim() || isLoading) return;
@@ -140,199 +89,152 @@ export function AgentPanel() {
     setChatMessages(newMessages);
     setChatInput("");
     setIsLoading(true);
-
     let assistantSoFar = "";
     const upsertAssistant = (chunk: string) => {
       assistantSoFar += chunk;
       setChatMessages(prev => {
         const last = prev[prev.length - 1];
-        if (last?.role === "assistant" && prev.length > newMessages.length) {
+        if (last?.role === "assistant" && prev.length > newMessages.length)
           return prev.map((m, i) => i === prev.length - 1 ? { ...m, content: assistantSoFar } : m);
-        }
         return [...prev, { role: "assistant", content: assistantSoFar }];
       });
     };
-
     await streamChat({
-      messages: newMessages.slice(1), // skip initial greeting
+      messages: newMessages.slice(1),
       strategies: activeStrategies.map(s => ({ name: s.name, instructions: s.instructions })),
-      model: selectedModel,
-      temperature: temperature[0],
-      systemPrompt,
-      tradingMode,
+      model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode,
       onDelta: upsertAssistant,
       onDone: () => setIsLoading(false),
-      onError: (err) => {
-        setChatMessages(prev => [...prev, { role: "assistant", content: `❌ Error: ${err}` }]);
-        setIsLoading(false);
-      },
+      onError: (err) => { setChatMessages(prev => [...prev, { role: "assistant", content: `Error: ${err}` }]); setIsLoading(false); },
     });
   };
 
   return (
-    <div className="grid md:grid-cols-2 gap-6 animate-slide-up">
-      {/* Config Panel */}
-      <div className="space-y-4">
-        <Card className="bg-card border-border">
-          <CardHeader className="pb-3">
-            <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
-              <Settings className="h-4 w-4" /> MODEL CONFIGURATION
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label className="text-xs font-mono text-muted-foreground">AI MODEL</Label>
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger className="bg-secondary border-border font-mono text-sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {MODELS.map((m) => (
-                    <SelectItem key={m.value} value={m.value}>
-                      <span className="flex items-center gap-2">
-                        <Cpu className="h-3 w-3" />
-                        {m.label}
-                        <span className="text-muted-foreground text-[10px]">({m.provider})</span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+    <div className="grid md:grid-cols-5 gap-6 apple-reveal">
+      {/* Config */}
+      <div className="md:col-span-2 space-y-4">
+        <div className="rounded-2xl bg-card p-5 apple-shadow space-y-5">
+          <h3 className="text-sm font-medium text-muted-foreground">Model Configuration</h3>
+          <div className="space-y-2">
+            <Label className="text-sm text-muted-foreground">AI Model</Label>
+            <Select value={selectedModel} onValueChange={setSelectedModel}>
+              <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MODELS.map((m) => (
+                  <SelectItem key={m.value} value={m.value}>
+                    <span className="flex items-center gap-2">
+                      <Cpu className="h-3 w-3" /> {m.label}
+                      <span className="text-muted-foreground text-[10px]">({m.provider})</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between">
+              <Label className="text-sm text-muted-foreground">Temperature</Label>
+              <span className="text-sm text-foreground">{temperature[0]}</span>
             </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs font-mono text-muted-foreground">TEMPERATURE</Label>
-                <span className="text-xs font-mono text-foreground">{temperature[0]}</span>
-              </div>
-              <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} className="w-full" />
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-xs font-mono text-muted-foreground">SYSTEM PROMPT</Label>
-              <Textarea
-                value={systemPrompt}
-                onChange={(e) => setSystemPrompt(e.target.value)}
-                className="bg-secondary border-border font-mono text-xs min-h-[100px] resize-none"
-              />
-            </div>
-          </CardContent>
-        </Card>
+            <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-sm text-muted-foreground">System Prompt</Label>
+            <Textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} className="rounded-xl border-0 bg-secondary text-sm min-h-[100px] resize-none" />
+          </div>
+        </div>
 
         {/* Trading Mode */}
-        <Card className={`bg-card border-border ${tradingMode === "live" ? "border-loss/50" : "border-primary/30"}`}>
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <Label className="text-sm font-mono font-semibold">TRADING MODE</Label>
-                  <Badge
-                    variant="outline"
-                    className={`text-[10px] font-mono ${tradingMode === "live" ? "border-loss/50 text-loss" : "border-primary/50 text-primary"}`}
-                  >
-                    {tradingMode === "live" ? "🔴 LIVE" : "📝 PAPER"}
-                  </Badge>
-                </div>
-                <p className="text-[10px] text-muted-foreground">
-                  {tradingMode === "live"
-                    ? "Real trades will be executed on Polymarket"
-                    : "Simulated trades — no real money at risk"}
-                </p>
+        <div className={`rounded-2xl p-5 apple-shadow transition-all duration-300 ${tradingMode === "live" ? "bg-loss/5 ring-1 ring-loss/20" : "bg-card"}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-foreground">Trading Mode</span>
+                <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
+                  {tradingMode === "live" ? "Live" : "Paper"}
+                </Badge>
               </div>
-              <Switch
-                checked={tradingMode === "live"}
-                onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")}
-              />
+              <p className="text-xs text-muted-foreground mt-1">
+                {tradingMode === "live" ? "Real trades on Polymarket" : "Simulated — no real money"}
+              </p>
             </div>
-            {tradingMode === "live" && (
-              <div className="mt-3 p-2 rounded-md bg-loss/10 border border-loss/20 flex items-start gap-2">
-                <AlertTriangle className="h-4 w-4 text-loss shrink-0 mt-0.5" />
-                <p className="text-[10px] text-loss font-mono">
-                  CAUTION: Live mode requires Polymarket API credentials configured in Settings. Trades use real funds.
-                </p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+            <Switch checked={tradingMode === "live"} onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")} />
+          </div>
+          {tradingMode === "live" && (
+            <div className="mt-3 flex items-start gap-2 text-xs text-loss">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              Requires Polymarket API credentials. Uses real funds.
+            </div>
+          )}
+        </div>
 
-        {/* Active Strategies */}
-        <Card className="bg-card border-border">
-          <CardHeader className="pb-2">
-            <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
-              <BookOpen className="h-4 w-4" /> LOADED STRATEGIES
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {activeStrategies.length === 0 ? (
-              <p className="text-xs text-muted-foreground font-mono">No active strategies. Enable them in the Strategies tab.</p>
-            ) : (
-              <div className="flex flex-wrap gap-2">
-                {activeStrategies.map(s => (
-                  <Badge key={s.id} variant="outline" className="font-mono text-[10px] border-primary/50 text-primary">
-                    {s.name}
-                  </Badge>
-                ))}
-              </div>
-            )}
-            <p className="text-[10px] text-muted-foreground mt-2">
-              Active strategy instructions are injected into the agent's context when trading.
-            </p>
-          </CardContent>
-        </Card>
+        {/* Loaded Strategies */}
+        <div className="rounded-2xl bg-card p-5 apple-shadow">
+          <div className="flex items-center gap-2 mb-3">
+            <BookOpen className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium text-muted-foreground">Loaded Strategies</h3>
+          </div>
+          {activeStrategies.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No active strategies.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {activeStrategies.map(s => (
+                <Badge key={s.id} variant="secondary" className="text-[11px] rounded-full font-normal">{s.name}</Badge>
+              ))}
+            </div>
+          )}
+          <p className="text-[11px] text-muted-foreground mt-2">Strategy instructions are injected into the agent's context.</p>
+        </div>
       </div>
 
-      {/* Chat Panel */}
-      <Card className="bg-card border-border flex flex-col h-[700px]">
-        <CardHeader className="pb-3 border-b border-border">
-          <div className="flex items-center justify-between">
-            <CardTitle className="font-mono text-sm text-muted-foreground flex items-center gap-2">
-              <MessageSquare className="h-4 w-4" /> AGENT CHAT
-              {isLoading && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
-            </CardTitle>
-            <Badge
-              variant="outline"
-              className={`text-[10px] font-mono ${tradingMode === "live" ? "border-loss/50 text-loss" : "border-primary/50 text-primary"}`}
-            >
-              {tradingMode === "live" ? "🔴 LIVE" : "📝 PAPER"}
-            </Badge>
+      {/* Chat */}
+      <div className="md:col-span-3 rounded-2xl bg-card apple-shadow flex flex-col h-[700px] overflow-hidden">
+        <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium text-foreground">Agent Chat</h3>
+            {isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
           </div>
-        </CardHeader>
-        <CardContent className="flex-1 overflow-y-auto p-4 space-y-3">
+          <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
+            {tradingMode === "live" ? "Live" : "Paper"}
+          </Badge>
+        </div>
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {chatMessages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[85%] px-3 py-2 rounded-lg text-sm ${
+              <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
                 msg.role === "user"
-                  ? "bg-primary/20 text-foreground"
+                  ? "bg-primary text-primary-foreground"
                   : "bg-secondary text-foreground"
               }`}>
                 {msg.role === "assistant" ? (
-                  <div className="prose prose-sm prose-invert max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded">
+                  <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded-md [&_strong]:font-medium">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                   </div>
-                ) : (
-                  msg.content
-                )}
+                ) : msg.content}
               </div>
             </div>
           ))}
           <div ref={chatEndRef} />
-        </CardContent>
-        <div className="p-4 border-t border-border">
+        </div>
+        <div className="px-5 py-4 border-t border-border">
           <div className="flex gap-2">
             <Input
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder={tradingMode === "live" ? "⚠️ Live mode — tell the agent what to trade..." : "Tell the agent to analyze or trade..."}
-              className="bg-secondary border-border font-mono text-sm"
+              placeholder={tradingMode === "live" ? "Live mode — tell the agent what to trade..." : "Ask the agent to analyze or trade..."}
+              className="rounded-xl border-0 bg-secondary text-sm h-11"
               disabled={isLoading}
             />
-            <Button size="icon" onClick={handleSend} className="shrink-0" disabled={isLoading}>
+            <Button size="icon" onClick={handleSend} disabled={isLoading} className="rounded-full h-11 w-11 shrink-0">
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </Button>
           </div>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }
