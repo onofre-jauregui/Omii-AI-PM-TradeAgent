@@ -17,9 +17,6 @@ const Index = () => {
     <div className="min-h-screen bg-background">
       <AppHeader onNavigate={setActiveTab} />
       <main className="mx-auto max-w-[980px] px-6 py-12">
-        <div className="mb-12 apple-reveal">
-          <PortfolioChart />
-        </div>
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
           <TabsList className="md:hidden bg-secondary rounded-full p-1 h-auto flex-wrap">
             {["dashboard", "markets", "strategies", "agent", "log", "settings", "profile"].map((tab) => (
@@ -33,7 +30,12 @@ const Index = () => {
             ))}
           </TabsList>
 
-          <TabsContent value="dashboard"><PortfolioOverview /></TabsContent>
+          <TabsContent value="dashboard">
+            <div className="mb-12 apple-reveal">
+              <PortfolioChart />
+            </div>
+            <PortfolioOverview />
+          </TabsContent>
           <TabsContent value="markets"><MarketsPanel /></TabsContent>
           <TabsContent value="strategies"><StrategiesPanel /></TabsContent>
           <TabsContent value="agent"><AgentPanel /></TabsContent>
