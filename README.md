@@ -1,73 +1,84 @@
-# Welcome to your Lovable project
+# Omii TradeAgent
 
-## Project info
+AI-powered trading agent for Kalshi event contracts.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Features
 
-## How can I edit this code?
+- Live Kalshi market data with auto-refresh
+- AI trading agent with tool calling (fetch markets, place orders, cancel orders, check portfolio)
+- Limit and market order execution via Kalshi CLOB API
+- Server-side risk management (position limits, daily loss caps, drawdown monitoring, auto-halt)
+- Compliance logging with full audit trail and CSV export
+- Real-time portfolio tracking from database
+- Configurable trading strategies injected into agent context
+- Paper trading mode for testing without real money
 
-There are several ways of editing your application.
+## Tech Stack
 
-**Use Lovable**
+- **Frontend**: React, TypeScript, Vite, Tailwind CSS, shadcn/ui, Recharts
+- **Backend**: Supabase (PostgreSQL + Edge Functions)
+- **AI**: OpenRouter / OpenAI-compatible API with tool calling
+- **Exchange**: Kalshi REST API v2 with HMAC-SHA256 authentication
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+## Setup
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+git clone <repo-url>
+cd omii-tradeagent
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+### Environment Variables
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+Create a `.env` file:
 
-**Use GitHub Codespaces**
+```
+VITE_SUPABASE_URL=your-supabase-url
+VITE_SUPABASE_PUBLISHABLE_KEY=your-supabase-anon-key
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+### Supabase Secrets
 
-## What technologies are used for this project?
+Set these in your Supabase project dashboard under Settings > Edge Functions:
 
-This project is built with:
+```
+OPENROUTER_API_KEY=sk-or-...        # or OPENAI_API_KEY
+AI_BASE_URL=https://openrouter.ai/api  # optional, defaults to OpenRouter
+KALSHI_API_KEY_ID=your-kalshi-key-id
+KALSHI_API_PRIVATE_KEY=your-kalshi-private-key
+KALSHI_ENVIRONMENT=demo              # or "production" for real trading
+```
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Deployment
 
-## How can I deploy this project?
+Build for production:
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+```sh
+npm run build
+```
 
-## Can I connect a custom domain to my Lovable project?
+Deploy the `dist/` folder to Vercel, Netlify, or any static hosting provider.
 
-Yes, you can!
+Deploy Supabase edge functions:
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+```sh
+supabase functions deploy kalshi-proxy
+supabase functions deploy execute-trade
+supabase functions deploy trading-agent
+```
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Architecture
+
+```
+src/
+  lib/kalshiApi.ts          # Kalshi API client (market data, orders, positions)
+  lib/strategiesContext.tsx  # Trading strategy state management
+  components/trading/       # All UI panels (Markets, Agent, TradeLog, etc.)
+  integrations/supabase/    # Supabase client and types
+
+supabase/functions/
+  kalshi-proxy/             # Authenticated proxy to Kalshi REST API
+  execute-trade/            # Order execution with risk checks + compliance logging
+  trading-agent/            # AI agent with tool calling for autonomous trading
+```

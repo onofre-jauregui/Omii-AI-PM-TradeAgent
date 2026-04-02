@@ -92,8 +92,11 @@ serve(async (req) => {
 
   try {
     const { messages, strategies, model, temperature, systemPrompt, tradingMode } = await req.json();
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
+
+    // AI gateway configuration — supports OpenRouter, OpenAI, or any OpenAI-compatible API
+    const AI_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || Deno.env.get("OPENAI_API_KEY");
+    const AI_BASE_URL = Deno.env.get("AI_BASE_URL") || "https://openrouter.ai/api";
+    if (!AI_API_KEY) throw new Error("AI API key not configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY in Supabase secrets.");
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
@@ -177,10 +180,10 @@ Always be transparent about your reasoning and risk assessment. Format responses
     while (maxIterations > 0) {
       maxIterations--;
 
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      const response = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${LOVABLE_API_KEY}`,
+          Authorization: `Bearer ${AI_API_KEY}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -222,10 +225,10 @@ Always be transparent about your reasoning and risk assessment. Format responses
 
       // If no tool calls, stream the final response
       if (choice.finish_reason !== "tool_calls" || !choice.message?.tool_calls?.length) {
-        const streamResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+        const streamResponse = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${LOVABLE_API_KEY}`,
+            Authorization: `Bearer ${AI_API_KEY}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -449,10 +452,10 @@ Always be transparent about your reasoning and risk assessment. Format responses
     }
 
     // Exhausted iterations, final stream
-    const streamResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    const streamResponse = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
+        Authorization: `Bearer ${AI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
