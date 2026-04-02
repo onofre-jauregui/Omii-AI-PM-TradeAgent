@@ -3,6 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AppHeader } from "@/components/trading/AppHeader";
 import { PortfolioChart } from "@/components/trading/PortfolioChart";
 import { PortfolioOverview } from "@/components/trading/PortfolioOverview";
+import { StrategyPerformance } from "@/components/trading/StrategyPerformance";
 import { MarketsPanel } from "@/components/trading/MarketsPanel";
 import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
 import { AgentPanel } from "@/components/trading/AgentPanel";
@@ -34,6 +35,9 @@ const Index = () => {
           <TabsContent value="dashboard">
             <div className="mb-12 apple-reveal">
               <PortfolioChart />
+            </div>
+            <div className="mb-12">
+              <StrategyPerformance />
             </div>
             <PortfolioOverview />
           </TabsContent>

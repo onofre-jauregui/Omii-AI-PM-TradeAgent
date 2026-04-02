@@ -31,7 +31,8 @@ const TRADE_TOOL = {
         price: { type: "number", description: "Limit price in cents (1-99)" },
         amount: { type: "number", description: "Dollar amount to trade" },
         orderType: { type: "string", enum: ["limit", "market"], description: "Order type (default: limit)" },
-        strategy: { type: "string", description: "Which strategy this trade follows" },
+        strategy: { type: "string", description: "Which strategy this trade follows (use the strategy name)" },
+        strategyId: { type: "string", description: "The strategy ID (e.g. S-001, S-002). Always include this when trading for a specific strategy." },
         reasoning: { type: "string", description: "Brief explanation of why this trade is being made" },
       },
       required: ["ticker", "marketQuestion", "side", "action", "price", "amount", "reasoning"],
@@ -103,15 +104,16 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Build strategy context
+    // Build strategy context — include IDs so agent can tag trades properly
     let strategyBlock = "";
     if (strategies && strategies.length > 0) {
       strategyBlock =
-        "\n\n## Active Trading Strategies\nYou MUST follow these strategy instructions when analyzing markets and suggesting trades:\n\n";
+        "\n\n## Active Trading Strategies\nYou MUST follow these strategy instructions when analyzing markets and suggesting trades.\nALWAYS include the strategyId (e.g. S-001) and strategy name when executing trades so performance is tracked per-strategy.\n\n";
       for (const s of strategies) {
-        strategyBlock += `### ${s.name}\n${s.instructions}\n\n`;
+        const sid = s.id || s.name;
+        strategyBlock += `### [${sid}] ${s.name}\n${s.instructions}\n\n`;
       }
-      strategyBlock += "When suggesting or executing trades, always reference which strategy you are applying and why.\n";
+      strategyBlock += "When executing trades, set strategyId to the strategy's ID (e.g. 'S-001') and strategy to the strategy name.\n";
     }
 
     const mode = tradingMode || "paper";
@@ -324,6 +326,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
                   price: args.price,
                   amount: args.amount,
                   strategy: args.strategy || null,
+                  strategy_id: args.strategyId || null,
                   mode: "paper",
                   status: "filled",
                   filled_price: args.price,

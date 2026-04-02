@@ -12,6 +12,86 @@ export type Database = {
   }
   public: {
     Tables: {
+      strategies: {
+        Row: {
+          id: string
+          name: string
+          description: string
+          instructions: string
+          active: boolean
+          mode: string
+          starting_balance: number
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id: string
+          name: string
+          description?: string
+          instructions?: string
+          active?: boolean
+          mode?: string
+          starting_balance?: number
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          name?: string
+          description?: string
+          instructions?: string
+          active?: boolean
+          mode?: string
+          starting_balance?: number
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      strategy_snapshots: {
+        Row: {
+          id: string
+          strategy_id: string
+          balance: number
+          total_pnl: number
+          total_trades: number
+          winning_trades: number
+          losing_trades: number
+          open_positions: number
+          recorded_at: string
+        }
+        Insert: {
+          id?: string
+          strategy_id: string
+          balance: number
+          total_pnl?: number
+          total_trades?: number
+          winning_trades?: number
+          losing_trades?: number
+          open_positions?: number
+          recorded_at?: string
+        }
+        Update: {
+          id?: string
+          strategy_id?: string
+          balance?: number
+          total_pnl?: number
+          total_trades?: number
+          winning_trades?: number
+          losing_trades?: number
+          open_positions?: number
+          recorded_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "strategy_snapshots_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       trades: {
         Row: {
           id: string
@@ -23,6 +103,7 @@ export type Database = {
           price: number
           amount: number
           strategy: string | null
+          strategy_id: string | null
           mode: string
           status: string
           pnl: number | null
@@ -47,6 +128,7 @@ export type Database = {
           price: number
           amount: number
           strategy?: string | null
+          strategy_id?: string | null
           mode?: string
           status?: string
           pnl?: number | null
@@ -71,6 +153,7 @@ export type Database = {
           price?: number
           amount?: number
           strategy?: string | null
+          strategy_id?: string | null
           mode?: string
           status?: string
           pnl?: number | null

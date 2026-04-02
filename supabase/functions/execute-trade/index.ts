@@ -247,7 +247,7 @@ serve(async (req) => {
   try {
     const {
       ticker, marketId, marketQuestion, side, action, price, amount,
-      strategy, mode, notes, orderType, timeInForce,
+      strategy, strategyId, mode, notes, orderType, timeInForce,
     } = await req.json();
 
     const resolvedTicker = ticker || marketId;
@@ -290,6 +290,7 @@ serve(async (req) => {
         market_question: marketQuestion || resolvedTicker,
         side, action, price, amount,
         strategy: strategy || null,
+        strategy_id: strategyId || null,
         mode: tradeMode,
         status: "failed",
         exchange: tradeMode === "paper" ? "paper" : "kalshi",
@@ -314,6 +315,7 @@ serve(async (req) => {
         market_question: marketQuestion || resolvedTicker,
         side, action, price, amount,
         strategy: strategy || null,
+        strategy_id: strategyId || null,
         mode: "paper",
         status: "filled",
         filled_price: price,
@@ -351,6 +353,7 @@ serve(async (req) => {
         market_question: marketQuestion || resolvedTicker,
         side, action, price, amount,
         strategy: strategy || null,
+        strategy_id: strategyId || null,
         mode: "live",
         status: "failed",
         exchange: "kalshi",
@@ -424,6 +427,7 @@ serve(async (req) => {
         market_question: marketQuestion || resolvedTicker,
         side, action, price, amount,
         strategy: strategy || null,
+        strategy_id: strategyId || null,
         mode: "live",
         status: "failed",
         exchange: "kalshi",
@@ -462,6 +466,7 @@ serve(async (req) => {
       market_question: marketQuestion || resolvedTicker,
       side, action, price, amount,
       strategy: strategy || null,
+        strategy_id: strategyId || null,
       mode: "live",
       status: orderStatus,
       exchange: "kalshi",

@@ -101,7 +101,7 @@ export function AgentPanel() {
     };
     await streamChat({
       messages: newMessages.slice(1),
-      strategies: activeStrategies.map(s => ({ name: s.name, instructions: s.instructions })),
+      strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
       model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode,
       onDelta: upsertAssistant,
       onDone: () => setIsLoading(false),
