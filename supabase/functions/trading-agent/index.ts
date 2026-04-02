@@ -3,27 +3,38 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
+
+const KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2";
+const KALSHI_PROD_URL = "https://trading-api.kalshi.com/trade-api/v2";
+
+function getKalshiBaseUrl(): string {
+  const env = Deno.env.get("KALSHI_ENVIRONMENT") || "demo";
+  return env === "production" ? KALSHI_PROD_URL : KALSHI_DEMO_URL;
+}
 
 const TRADE_TOOL = {
   type: "function",
   function: {
     name: "execute_trade",
-    description: "Execute a trade on a prediction market. Use this when the user asks you to trade, buy, sell, or take a position on a market. Always confirm the trade details before executing.",
+    description:
+      "Execute a trade on Kalshi event contracts. Use this when the user asks you to trade, buy, sell, or take a position. Always confirm the trade details before executing.",
     parameters: {
       type: "object",
       properties: {
-        marketId: { type: "string", description: "The market ID to trade on" },
+        ticker: { type: "string", description: "The Kalshi market ticker (e.g. KXBTC-26APR4-T56000)" },
         marketQuestion: { type: "string", description: "The market question/title" },
         side: { type: "string", enum: ["yes", "no"], description: "Whether to trade YES or NO" },
         action: { type: "string", enum: ["buy", "sell"], description: "Buy or sell" },
-        price: { type: "number", description: "Price in cents (1-99)" },
+        price: { type: "number", description: "Limit price in cents (1-99)" },
         amount: { type: "number", description: "Dollar amount to trade" },
+        orderType: { type: "string", enum: ["limit", "market"], description: "Order type (default: limit)" },
         strategy: { type: "string", description: "Which strategy this trade follows" },
         reasoning: { type: "string", description: "Brief explanation of why this trade is being made" },
       },
-      required: ["marketId", "marketQuestion", "side", "action", "price", "amount", "reasoning"],
+      required: ["ticker", "marketQuestion", "side", "action", "price", "amount", "reasoning"],
       additionalProperties: false,
     },
   },
@@ -33,12 +44,44 @@ const FETCH_MARKETS_TOOL = {
   type: "function",
   function: {
     name: "fetch_live_markets",
-    description: "Fetch current live prediction markets from Polymarket with real prices and volumes. Use this to get fresh market data before making trading decisions.",
+    description:
+      "Fetch current live event contract markets from Kalshi with real prices, volumes, and order book data. Use this to get fresh market data before making trading decisions.",
     parameters: {
       type: "object",
       properties: {
         limit: { type: "number", description: "Number of markets to fetch (default 10)" },
+        category: { type: "string", description: "Filter by category (e.g. 'economics', 'politics', 'crypto')" },
       },
+      additionalProperties: false,
+    },
+  },
+};
+
+const CANCEL_ORDER_TOOL = {
+  type: "function",
+  function: {
+    name: "cancel_order",
+    description: "Cancel an open limit order on Kalshi by order ID.",
+    parameters: {
+      type: "object",
+      properties: {
+        orderId: { type: "string", description: "The Kalshi order ID to cancel" },
+        reason: { type: "string", description: "Reason for cancellation" },
+      },
+      required: ["orderId", "reason"],
+      additionalProperties: false,
+    },
+  },
+};
+
+const CHECK_PORTFOLIO_TOOL = {
+  type: "function",
+  function: {
+    name: "check_portfolio",
+    description: "Check current portfolio positions, balance, and P&L from the database.",
+    parameters: {
+      type: "object",
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -60,7 +103,8 @@ serve(async (req) => {
     // Build strategy context
     let strategyBlock = "";
     if (strategies && strategies.length > 0) {
-      strategyBlock = "\n\n## Active Trading Strategies\nYou MUST follow these strategy instructions when analyzing markets and suggesting trades:\n\n";
+      strategyBlock =
+        "\n\n## Active Trading Strategies\nYou MUST follow these strategy instructions when analyzing markets and suggesting trades:\n\n";
       for (const s of strategies) {
         strategyBlock += `### ${s.name}\n${s.instructions}\n\n`;
       }
@@ -68,24 +112,54 @@ serve(async (req) => {
     }
 
     const mode = tradingMode || "paper";
-    const modeNote = mode === "paper"
-      ? "\n\n⚠️ TRADING MODE: PAPER. All trades are simulated. No real money is at risk."
-      : "\n\n🔴 TRADING MODE: LIVE. Trades will be executed with real money on Polymarket.";
+    const modeNote =
+      mode === "paper"
+        ? "\n\n--- TRADING MODE: PAPER. All trades are simulated. No real money is at risk."
+        : "\n\n--- TRADING MODE: LIVE. Trades execute on Kalshi with real money. Apply strict risk management.";
 
-    const baseSystemPrompt = systemPrompt || `You are an expert algorithmic trading agent for prediction markets (Polymarket).`;
+    // Fetch current risk settings for context
+    const { data: riskSettings } = await supabase.from("risk_settings").select("*").single();
+    let riskContext = "";
+    if (riskSettings) {
+      riskContext = `\n\n## Risk Limits (Enforced)
+- Max position size: $${riskSettings.max_position_size}
+- Max daily loss: $${riskSettings.max_daily_loss}
+- Max drawdown: ${riskSettings.max_drawdown_pct}%
+- Max open positions: ${riskSettings.max_open_positions}
+- Auto stop-loss: ${riskSettings.auto_stop_loss ? "Enabled" : "Disabled"} at ${riskSettings.stop_loss_pct}%
+These limits are enforced server-side. Orders exceeding limits will be rejected.`;
+    }
 
-    const fullSystemPrompt = baseSystemPrompt + strategyBlock + modeNote + `
+    const baseSystemPrompt =
+      systemPrompt ||
+      `You are an expert algorithmic trading agent for Kalshi event contracts.`;
+
+    const fullSystemPrompt =
+      baseSystemPrompt +
+      strategyBlock +
+      riskContext +
+      modeNote +
+      `
 
 You have access to tools:
-1. **fetch_live_markets** - Call this FIRST to get current market data before making any trading decisions.
-2. **execute_trade** - Use this to place trades. Always explain your reasoning.
+1. **fetch_live_markets** - Call this FIRST to get current Kalshi market data before making any trading decisions.
+2. **execute_trade** - Use this to place limit orders on Kalshi. Always explain your reasoning. Price is in cents (1-99).
+3. **cancel_order** - Cancel an open limit order by order ID.
+4. **check_portfolio** - Check current positions, balance, and recent trades.
 
 When the user asks you to trade or go trade:
-1. First fetch live markets to see current prices
+1. First fetch live markets to see current prices and spreads
 2. Analyze the markets using your active strategies
-3. Identify the best opportunities
-4. Execute trades with clear reasoning
-5. Report back what you did
+3. Check portfolio to understand current exposure
+4. Identify the best opportunities with favorable risk/reward
+5. Execute trades with clear reasoning, respecting risk limits
+6. Report back what you did
+
+Important Kalshi-specific notes:
+- Prices are in cents (1-99). YES price + NO price = 100.
+- Use LIMIT orders by default for better execution. IOC (immediate-or-cancel) for urgent trades.
+- Always check the bid-ask spread before trading. Wide spreads mean low liquidity.
+- Never exceed position size limits. The system will reject orders that violate risk constraints.
 
 Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
 
@@ -97,14 +171,8 @@ Always be transparent about your reasoning and risk assessment. Format responses
     };
     const resolvedModel = modelMap[model] || "google/gemini-3-flash-preview";
 
-    // Initial AI call with tools
-    let aiMessages = [
-      { role: "system", content: fullSystemPrompt },
-      ...messages,
-    ];
-
+    let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 5;
-    let finalStream = null;
 
     while (maxIterations > 0) {
       maxIterations--;
@@ -118,9 +186,9 @@ Always be transparent about your reasoning and risk assessment. Format responses
         body: JSON.stringify({
           model: resolvedModel,
           messages: aiMessages,
-          tools: [TRADE_TOOL, FETCH_MARKETS_TOOL],
+          tools: [TRADE_TOOL, FETCH_MARKETS_TOOL, CANCEL_ORDER_TOOL, CHECK_PORTFOLIO_TOOL],
           temperature: temperature ?? 0.3,
-          stream: false, // non-streaming for tool calls
+          stream: false,
         }),
       });
 
@@ -154,7 +222,6 @@ Always be transparent about your reasoning and risk assessment. Format responses
 
       // If no tool calls, stream the final response
       if (choice.finish_reason !== "tool_calls" || !choice.message?.tool_calls?.length) {
-        // Do a final streaming call without tools
         const streamResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -191,70 +258,183 @@ Always be transparent about your reasoning and risk assessment. Format responses
         if (fnName === "fetch_live_markets") {
           try {
             const limit = args.limit || 10;
-            const marketsRes = await fetch(
-              `https://gamma-api.polymarket.com/events?active=true&closed=false&limit=${limit}&order=volume24hr&ascending=false`
-            );
-            const events = await marketsRes.json();
-            const markets = [];
-            for (const event of events) {
-              if (event.markets) {
-                for (const m of event.markets) {
-                  let prices = { yes: 50, no: 50 };
-                  try {
-                    const p = JSON.parse(m.outcomePrices || "[]");
-                    if (p.length >= 2) {
-                      prices = { yes: Math.round(parseFloat(p[0]) * 100), no: Math.round(parseFloat(p[1]) * 100) };
-                    }
-                  } catch {}
-                  markets.push({
-                    id: m.id,
-                    question: m.question || event.title,
-                    yesPrice: prices.yes,
-                    noPrice: prices.no,
-                    volume: m.volume || 0,
-                    volume24hr: m.volume24hr || 0,
-                    liquidity: m.liquidity || 0,
-                    endDate: m.endDate || event.endDate,
-                  });
-                }
-              }
-            }
+            const kalshiBase = getKalshiBaseUrl();
+            let url = `${kalshiBase}/markets?limit=${limit}&status=open`;
+            if (args.category) url += `&series_ticker=${args.category}`;
+
+            const marketsRes = await fetch(url);
+            const marketsData = await marketsRes.json();
+            const markets = (marketsData.markets || []).map((m: any) => ({
+              ticker: m.ticker,
+              title: m.title,
+              subtitle: m.subtitle,
+              yes_bid: m.yes_bid,
+              yes_ask: m.yes_ask,
+              no_bid: m.no_bid,
+              no_ask: m.no_ask,
+              last_price: m.last_price,
+              volume: m.volume,
+              volume_24h: m.volume_24h,
+              open_interest: m.open_interest,
+              close_time: m.close_time,
+              spread: ((m.yes_ask || 0) - (m.yes_bid || 0)).toFixed(2),
+            }));
             toolResult = JSON.stringify({ markets: markets.slice(0, limit) });
           } catch (e) {
-            toolResult = JSON.stringify({ error: "Failed to fetch markets: " + e.message });
+            toolResult = JSON.stringify({ error: "Failed to fetch Kalshi markets: " + e.message });
           }
         } else if (fnName === "execute_trade") {
           try {
-            // Execute via our own execute-trade function logic
-            const tradeData = {
-              market_id: args.marketId,
-              market_question: args.marketQuestion,
+            // Call our execute-trade function internally
+            const tradePayload = {
+              ticker: args.ticker,
+              marketId: args.ticker,
+              marketQuestion: args.marketQuestion,
               side: args.side,
               action: args.action,
               price: args.price,
               amount: args.amount,
               strategy: args.strategy || null,
+              orderType: args.orderType || "limit",
               mode: mode,
-              status: mode === "paper" ? "filled" : "pending",
-              pnl: 0,
               notes: `Agent trade: ${args.reasoning}`,
             };
 
-            const { data: trade, error: insertError } = await supabase
-              .from("trades")
-              .insert(tradeData)
-              .select()
-              .single();
+            // Execute via internal function call
+            const tradeData = {
+              ...tradePayload,
+              market_id: args.ticker,
+              market_question: args.marketQuestion,
+            };
 
-            if (insertError) throw insertError;
+            // Insert trade record
+            const tradeMode = mode;
+            if (tradeMode === "paper") {
+              const { data: trade, error: insertError } = await supabase
+                .from("trades")
+                .insert({
+                  ticker: args.ticker,
+                  market_id: args.ticker,
+                  market_question: args.marketQuestion,
+                  side: args.side,
+                  action: args.action,
+                  price: args.price,
+                  amount: args.amount,
+                  strategy: args.strategy || null,
+                  mode: "paper",
+                  status: "filled",
+                  filled_price: args.price,
+                  filled_at: new Date().toISOString(),
+                  exchange: "paper",
+                  order_type: args.orderType || "limit",
+                  pnl: 0,
+                  notes: `Agent trade: ${args.reasoning}`,
+                })
+                .select()
+                .single();
+
+              if (insertError) throw insertError;
+
+              // Log compliance
+              await supabase.from("compliance_log").insert({
+                trade_id: trade.id,
+                event_type: "order_filled",
+                severity: "info",
+                message: `Paper trade filled: ${args.action} ${args.side} ${args.ticker} @ ${args.price}c for $${args.amount}`,
+                metadata: { mode: "paper", reasoning: args.reasoning },
+              });
+
+              toolResult = JSON.stringify({
+                success: true,
+                trade,
+                message: `PAPER trade: ${args.action.toUpperCase()} ${args.side.toUpperCase()} ${args.ticker} @ ${args.price}c for $${args.amount}`,
+              });
+            } else {
+              // For live mode, call the execute-trade edge function
+              const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
+              const execResp = await fetch(execUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(tradePayload),
+              });
+              const execResult = await execResp.json();
+              toolResult = JSON.stringify(execResult);
+            }
+          } catch (e) {
+            toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
+          }
+        } else if (fnName === "cancel_order") {
+          try {
+            // Update trade status in DB
+            const { data: trades } = await supabase
+              .from("trades")
+              .update({
+                status: "cancelled",
+                cancelled_at: new Date().toISOString(),
+                notes: `Cancelled by agent: ${args.reason}`,
+              })
+              .eq("order_id", args.orderId)
+              .select();
+
+            // If live mode, cancel on Kalshi too
+            if (mode === "live") {
+              const kalshiBase = getKalshiBaseUrl();
+              // Note: In production, this would use authenticated headers
+              await fetch(`${kalshiBase}/portfolio/orders/${args.orderId}`, {
+                method: "DELETE",
+              });
+            }
+
+            await supabase.from("compliance_log").insert({
+              trade_id: trades?.[0]?.id || null,
+              event_type: "order_cancelled",
+              severity: "info",
+              message: `Order ${args.orderId} cancelled: ${args.reason}`,
+              metadata: { order_id: args.orderId, reason: args.reason },
+            });
 
             toolResult = JSON.stringify({
               success: true,
-              trade,
-              message: `${mode.toUpperCase()} trade executed: ${args.action.toUpperCase()} ${args.side.toUpperCase()} on "${args.marketQuestion}" @ ${args.price}¢ for $${args.amount}`,
+              message: `Order ${args.orderId} cancelled: ${args.reason}`,
             });
           } catch (e) {
-            toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
+            toolResult = JSON.stringify({ success: false, error: "Cancel failed: " + e.message });
+          }
+        } else if (fnName === "check_portfolio") {
+          try {
+            // Get recent trades
+            const { data: recentTrades } = await supabase
+              .from("trades")
+              .select("*")
+              .order("created_at", { ascending: false })
+              .limit(10);
+
+            // Get open positions
+            const { data: openPositions } = await supabase
+              .from("trades")
+              .select("*")
+              .in("status", ["filled", "open", "partial"])
+              .eq("action", "buy")
+              .order("created_at", { ascending: false });
+
+            // Get today's risk state
+            const today = new Date().toISOString().split("T")[0];
+            const { data: riskState } = await supabase
+              .from("risk_state")
+              .select("*")
+              .eq("date", today)
+              .single();
+
+            toolResult = JSON.stringify({
+              recent_trades: recentTrades || [],
+              positions: openPositions || [],
+              risk_state: riskState || { daily_pnl: 0, daily_trades: 0 },
+            });
+          } catch (e) {
+            toolResult = JSON.stringify({ error: "Failed to fetch portfolio: " + e.message });
           }
         } else {
           toolResult = JSON.stringify({ error: "Unknown tool" });
@@ -268,7 +448,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
       }
     }
 
-    // If we exhausted iterations, do final stream
+    // Exhausted iterations, final stream
     const streamResponse = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
       headers: {

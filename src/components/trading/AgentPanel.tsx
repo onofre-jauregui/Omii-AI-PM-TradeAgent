@@ -70,10 +70,10 @@ export function AgentPanel() {
   const [temperature, setTemperature] = useState([0.3]);
   const [tradingMode, setTradingMode] = useState<"paper" | "live">("paper");
   const [systemPrompt, setSystemPrompt] = useState(
-    `You are an expert algorithmic trading agent for prediction markets (Polymarket). Analyze market data, news sentiment, and probability shifts to identify profitable trading opportunities. Provide clear trade signals with entry/exit prices and confidence levels.`
+    `You are an expert algorithmic trading agent for Kalshi event contracts. Analyze market data, news sentiment, probability shifts, and order book depth to identify profitable trading opportunities. Use limit orders for better execution. Provide clear trade signals with entry/exit prices and confidence levels.`
   );
   const [chatMessages, setChatMessages] = useState<Msg[]>([
-    { role: "assistant", content: "Agent ready. I can analyze markets, execute trades, and explain my reasoning. Active strategies are loaded automatically.\n\nTry: **\"Go trade\"** or **\"Analyze the top markets\"**" },
+    { role: "assistant", content: "Agent ready. I can analyze Kalshi event contracts, execute limit orders, check your portfolio, and cancel open orders. Active strategies are loaded automatically.\n\nTry: **\"Go trade\"** or **\"Analyze the top markets\"** or **\"Check my portfolio\"**" },
   ]);
   const [chatInput, setChatInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -157,7 +157,7 @@ export function AgentPanel() {
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                {tradingMode === "live" ? "Real trades on Polymarket" : "Simulated — no real money"}
+                {tradingMode === "live" ? "Real trades on Kalshi" : "Simulated -- no real money"}
               </p>
             </div>
             <Switch checked={tradingMode === "live"} onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")} />
@@ -165,7 +165,7 @@ export function AgentPanel() {
           {tradingMode === "live" && (
             <div className="mt-3 flex items-start gap-2 text-xs text-loss">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              Requires Polymarket API credentials. Uses real funds.
+              Requires Kalshi API credentials. Uses real funds. Risk limits enforced.
             </div>
           )}
         </div>
@@ -225,7 +225,7 @@ export function AgentPanel() {
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder={tradingMode === "live" ? "Live mode — tell the agent what to trade..." : "Ask the agent to analyze or trade..."}
+              placeholder={tradingMode === "live" ? "Live mode -- tell the agent what to trade..." : "Ask the agent to analyze or trade..."}
               className="rounded-xl border-0 bg-secondary text-sm h-11"
               disabled={isLoading}
             />

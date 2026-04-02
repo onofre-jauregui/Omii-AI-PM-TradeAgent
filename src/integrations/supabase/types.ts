@@ -7,8 +7,6 @@ export type Json =
   | Json[]
 
 export type Database = {
-  // Allows to automatically instantiate createClient with right options
-  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "14.4"
   }
@@ -16,49 +14,225 @@ export type Database = {
     Tables: {
       trades: {
         Row: {
-          action: string
-          amount: number
-          created_at: string
           id: string
+          ticker: string | null
           market_id: string
           market_question: string
-          mode: string
-          notes: string | null
-          pnl: number | null
-          price: number
           side: string
-          status: string
+          action: string
+          price: number
+          amount: number
           strategy: string | null
+          mode: string
+          status: string
+          pnl: number | null
+          notes: string | null
+          order_id: string | null
+          order_type: string | null
+          time_in_force: string | null
+          expiration_ts: string | null
+          filled_price: number | null
+          filled_at: string | null
+          cancelled_at: string | null
+          exchange: string | null
+          created_at: string
         }
         Insert: {
-          action: string
-          amount: number
-          created_at?: string
           id?: string
+          ticker?: string | null
           market_id: string
           market_question: string
-          mode?: string
-          notes?: string | null
-          pnl?: number | null
-          price: number
           side: string
-          status?: string
+          action: string
+          price: number
+          amount: number
           strategy?: string | null
+          mode?: string
+          status?: string
+          pnl?: number | null
+          notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
+          time_in_force?: string | null
+          expiration_ts?: string | null
+          filled_price?: number | null
+          filled_at?: string | null
+          cancelled_at?: string | null
+          exchange?: string | null
+          created_at?: string
         }
         Update: {
-          action?: string
-          amount?: number
-          created_at?: string
           id?: string
+          ticker?: string | null
           market_id?: string
           market_question?: string
-          mode?: string
-          notes?: string | null
-          pnl?: number | null
-          price?: number
           side?: string
-          status?: string
+          action?: string
+          price?: number
+          amount?: number
           strategy?: string | null
+          mode?: string
+          status?: string
+          pnl?: number | null
+          notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
+          time_in_force?: string | null
+          expiration_ts?: string | null
+          filled_price?: number | null
+          filled_at?: string | null
+          cancelled_at?: string | null
+          exchange?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
+      compliance_log: {
+        Row: {
+          id: string
+          trade_id: string | null
+          event_type: string
+          severity: string
+          message: string
+          metadata: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          trade_id?: string | null
+          event_type: string
+          severity?: string
+          message: string
+          metadata?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          trade_id?: string | null
+          event_type?: string
+          severity?: string
+          message?: string
+          metadata?: Json
+          created_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "compliance_log_trade_id_fkey"
+            columns: ["trade_id"]
+            isOneToOne: false
+            referencedRelation: "trades"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
+      risk_state: {
+        Row: {
+          id: string
+          date: string
+          daily_pnl: number
+          daily_trades: number
+          open_position_count: number
+          open_position_value: number
+          max_drawdown_today: number
+          peak_portfolio_value: number
+          is_trading_halted: boolean
+          halt_reason: string | null
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          date?: string
+          daily_pnl?: number
+          daily_trades?: number
+          open_position_count?: number
+          open_position_value?: number
+          max_drawdown_today?: number
+          peak_portfolio_value?: number
+          is_trading_halted?: boolean
+          halt_reason?: string | null
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          date?: string
+          daily_pnl?: number
+          daily_trades?: number
+          open_position_count?: number
+          open_position_value?: number
+          max_drawdown_today?: number
+          peak_portfolio_value?: number
+          is_trading_halted?: boolean
+          halt_reason?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      risk_settings: {
+        Row: {
+          id: string
+          max_daily_loss: number
+          max_drawdown_pct: number
+          max_position_size: number
+          max_open_positions: number
+          auto_stop_loss: boolean
+          stop_loss_pct: number
+          default_order_type: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          max_daily_loss?: number
+          max_drawdown_pct?: number
+          max_position_size?: number
+          max_open_positions?: number
+          auto_stop_loss?: boolean
+          stop_loss_pct?: number
+          default_order_type?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          max_daily_loss?: number
+          max_drawdown_pct?: number
+          max_position_size?: number
+          max_open_positions?: number
+          auto_stop_loss?: boolean
+          stop_loss_pct?: number
+          default_order_type?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      api_keys: {
+        Row: {
+          id: string
+          provider: string
+          key_id: string
+          encrypted_secret: string
+          is_valid: boolean | null
+          last_validated_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          provider: string
+          key_id: string
+          encrypted_secret: string
+          is_valid?: boolean | null
+          last_validated_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          provider?: string
+          key_id?: string
+          encrypted_secret?: string
+          is_valid?: boolean | null
+          last_validated_at?: string | null
+          created_at?: string
+          updated_at?: string
         }
         Relationships: []
       }

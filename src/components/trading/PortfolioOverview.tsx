@@ -1,25 +1,117 @@
-import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock } from "lucide-react";
-import { MOCK_POSITIONS } from "@/lib/mockData";
+import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2 } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
+
+interface Position {
+  market_id: string;
+  market_question: string;
+  side: string;
+  action: string;
+  price: number;
+  amount: number;
+  pnl: number | null;
+  strategy: string | null;
+  filled_price: number | null;
+}
+
+interface PortfolioStats {
+  totalValue: number;
+  totalPnl: number;
+  winRate: number;
+  openPositionCount: number;
+  totalTrades: number;
+}
 
 export function PortfolioOverview() {
-  const totalValue = MOCK_POSITIONS.reduce((s, p) => s + p.value, 0);
-  const totalPnl = MOCK_POSITIONS.reduce((s, p) => s + p.pnl, 0);
-  const pnlPercent = ((totalPnl / (totalValue - totalPnl)) * 100).toFixed(1);
-  const winRate = 68;
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [stats, setStats] = useState<PortfolioStats>({
+    totalValue: 0, totalPnl: 0, winRate: 0, openPositionCount: 0, totalTrades: 0,
+  });
+  const [loading, setLoading] = useState(true);
+
+  const loadPortfolio = useCallback(async () => {
+    setLoading(true);
+
+    // Fetch filled buy trades as open positions (simplified: buys without matching sells)
+    const { data: buyTrades } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("status", "filled")
+      .eq("action", "buy")
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    // Fetch all filled trades for stats
+    const { data: allTrades } = await supabase
+      .from("trades")
+      .select("pnl, status, action")
+      .eq("status", "filled");
+
+    if (buyTrades) {
+      setPositions(buyTrades as Position[]);
+    }
+
+    if (allTrades) {
+      const totalPnl = allTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+      const winners = allTrades.filter(t => (t.pnl || 0) > 0).length;
+      const totalWithPnl = allTrades.filter(t => t.pnl !== null && t.pnl !== 0).length;
+
+      setStats({
+        totalValue: buyTrades?.reduce((sum, t) => sum + (t as any).amount, 0) || 0,
+        totalPnl,
+        winRate: totalWithPnl > 0 ? Math.round((winners / totalWithPnl) * 100) : 0,
+        openPositionCount: buyTrades?.length || 0,
+        totalTrades: allTrades.length,
+      });
+    }
+
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadPortfolio();
+
+    const channel = supabase
+      .channel("portfolio-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
+        loadPortfolio();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [loadPortfolio]);
+
+  const pnlPercent = stats.totalValue > 0
+    ? ((stats.totalPnl / stats.totalValue) * 100).toFixed(1)
+    : "0.0";
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        <span className="ml-3 text-sm text-muted-foreground">Loading portfolio...</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8 apple-reveal">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={DollarSign} label="Portfolio Value" value={`$${totalValue.toLocaleString()}`} />
+        <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.totalValue.toLocaleString()}`} />
         <StatCard
-          icon={totalPnl >= 0 ? TrendingUp : TrendingDown}
+          icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
           label="Total P&L"
-          value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toLocaleString()}`}
-          valueClass={totalPnl >= 0 ? "text-profit" : "text-loss"}
+          value={`${stats.totalPnl >= 0 ? '+' : ''}$${stats.totalPnl.toLocaleString()}`}
+          valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
           sub={`${pnlPercent}%`}
         />
-        <StatCard icon={Target} label="Win Rate" value={`${winRate}%`} valueClass="text-profit" />
-        <StatCard icon={BarChart3} label="Open Positions" value={`${MOCK_POSITIONS.length}`} />
+        <StatCard
+          icon={Target}
+          label="Win Rate"
+          value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
+          valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
+        />
+        <StatCard icon={BarChart3} label="Positions" value={`${stats.openPositionCount}`} />
       </div>
 
       <div className="rounded-2xl bg-card apple-shadow">
@@ -28,24 +120,31 @@ export function PortfolioOverview() {
             <Clock className="h-4 w-4 text-muted-foreground" />
             <h3 className="text-sm font-medium text-muted-foreground">Active Positions</h3>
           </div>
-          <div className="space-y-1">
-            {MOCK_POSITIONS.map((pos) => (
-              <div key={pos.id} className="flex items-center justify-between py-4 border-b border-border last:border-0">
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-foreground">{pos.market}</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {pos.side.toUpperCase()} @ {pos.entry}¢ → {pos.current}¢
-                  </p>
+          {positions.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-8 text-center">No open positions. Use the Agent to start trading.</p>
+          ) : (
+            <div className="space-y-1">
+              {positions.map((pos, i) => (
+                <div key={`${pos.market_id}-${i}`} className="flex items-center justify-between py-4 border-b border-border last:border-0">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-foreground">{pos.market_question}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {pos.side.toUpperCase()} @ {pos.filled_price || pos.price}c · ${pos.amount}
+                      {pos.strategy && <span> · {pos.strategy}</span>}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    {pos.pnl !== null && pos.pnl !== 0 && (
+                      <p className={`text-sm font-medium tabular-nums ${(pos.pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        {(pos.pnl ?? 0) >= 0 ? '+' : ''}${(pos.pnl ?? 0).toFixed(2)}
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">${pos.amount.toFixed(2)}</p>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <p className={`text-sm font-medium tabular-nums ${pos.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                    {pos.pnl >= 0 ? '+' : ''}${pos.pnl.toFixed(2)}
-                  </p>
-                  <p className="text-xs text-muted-foreground">${pos.value.toFixed(2)}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

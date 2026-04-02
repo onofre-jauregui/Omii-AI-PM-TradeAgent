@@ -9,6 +9,7 @@ import { AgentPanel } from "@/components/trading/AgentPanel";
 import { TradeLog } from "@/components/trading/TradeLog";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
+import { CompliancePanel } from "@/components/trading/CompliancePanel";
 
 const Index = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
@@ -19,7 +20,7 @@ const Index = () => {
       <main className="mx-auto max-w-[980px] px-6 py-12">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
           <TabsList className="md:hidden bg-secondary rounded-full p-1 h-auto flex-wrap">
-            {["dashboard", "markets", "strategies", "agent", "log", "settings", "profile"].map((tab) => (
+            {["dashboard", "markets", "strategies", "agent", "log", "compliance", "settings", "profile"].map((tab) => (
               <TabsTrigger
                 key={tab}
                 value={tab}
@@ -40,6 +41,7 @@ const Index = () => {
           <TabsContent value="strategies"><StrategiesPanel /></TabsContent>
           <TabsContent value="agent"><AgentPanel /></TabsContent>
           <TabsContent value="log"><TradeLog /></TabsContent>
+          <TabsContent value="compliance"><CompliancePanel /></TabsContent>
           <TabsContent value="settings"><SettingsPanel /></TabsContent>
           <TabsContent value="profile"><ProfilePanel /></TabsContent>
         </Tabs>

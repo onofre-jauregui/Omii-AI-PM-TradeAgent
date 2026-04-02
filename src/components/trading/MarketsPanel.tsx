@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { useState, useEffect, useCallback } from "react";
-import { fetchPolymarketEvents, formatVolume, type ParsedMarket } from "@/lib/polymarketApi";
+import { fetchKalshiMarkets, formatVolume, type ParsedMarket } from "@/lib/kalshiApi";
 import { MOCK_MARKETS } from "@/lib/mockData";
 
 export function MarketsPanel() {
@@ -19,14 +19,16 @@ export function MarketsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchPolymarketEvents(30);
+      const data = await fetchKalshiMarkets(30);
       setMarkets(data);
       setLastUpdated(new Date());
     } catch (err) {
       console.error("Failed to fetch live markets, using mock data:", err);
-      setError("Using cached data — live feed unavailable");
+      setError("Using cached data -- live feed unavailable");
       setMarkets(MOCK_MARKETS.map(m => ({
-        ...m, description: "", volume24hr: 0, liquidity: 0, slug: "", active: true,
+        ...m, ticker: m.id, description: "", volume24hr: 0, liquidity: 0,
+        openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0,
+        yesAsk: 0, noBid: 0, noAsk: 0,
       })));
     } finally {
       setLoading(false);
@@ -49,7 +51,7 @@ export function MarketsPanel() {
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search markets..."
+            placeholder="Search Kalshi markets..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-11 rounded-xl bg-card border-0 apple-shadow h-11 text-sm"
@@ -79,7 +81,7 @@ export function MarketsPanel() {
       {loading && markets.length === 0 ? (
         <div className="flex items-center justify-center py-16">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          <span className="ml-3 text-sm text-muted-foreground">Loading live markets...</span>
+          <span className="ml-3 text-sm text-muted-foreground">Loading Kalshi markets...</span>
         </div>
       ) : (
         <div className="space-y-3">
@@ -99,6 +101,9 @@ export function MarketsPanel() {
                     <span className="flex items-center gap-1">
                       <Clock className="h-3 w-3" /> {market.endDate}
                     </span>
+                    {market.spread > 0 && (
+                      <span className="text-[10px]">Spread: {market.spread}c</span>
+                    )}
                     <Badge variant="secondary" className="text-[10px] rounded-full font-normal">
                       {market.category}
                     </Badge>
@@ -111,14 +116,14 @@ export function MarketsPanel() {
                       <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
                         <div className="h-full bg-profit rounded-full transition-all duration-500" style={{ width: `${market.yesPrice}%` }} />
                       </div>
-                      <span className="text-xs font-medium text-profit w-8 text-right">{market.yesPrice}¢</span>
+                      <span className="text-xs font-medium text-profit w-8 text-right">{market.yesPrice}c</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-muted-foreground w-5">No</span>
                       <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
                         <div className="h-full bg-loss rounded-full transition-all duration-500" style={{ width: `${market.noPrice}%` }} />
                       </div>
-                      <span className="text-xs font-medium text-loss w-8 text-right">{market.noPrice}¢</span>
+                      <span className="text-xs font-medium text-loss w-8 text-right">{market.noPrice}c</span>
                     </div>
                   </div>
                   <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
@@ -144,34 +149,47 @@ export function MarketsPanel() {
                 <DialogTitle className="text-base font-medium leading-snug pr-6">
                   {selectedMarket.question}
                 </DialogTitle>
+                <p className="text-xs text-muted-foreground font-mono">{selectedMarket.ticker}</p>
               </DialogHeader>
 
               <div className="space-y-3">
                 <div>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-xs text-muted-foreground">Yes</span>
-                    <span className="text-lg font-medium text-profit">{selectedMarket.yesPrice}¢</span>
+                    <span className="text-lg font-medium text-profit">{selectedMarket.yesPrice}c</span>
                   </div>
                   <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
                     <div className="h-full bg-profit rounded-full transition-all duration-500" style={{ width: `${selectedMarket.yesPrice}%` }} />
                   </div>
+                  {selectedMarket.yesBid > 0 && (
+                    <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+                      <span>Bid: {selectedMarket.yesBid}c</span>
+                      <span>Ask: {selectedMarket.yesAsk}c</span>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-xs text-muted-foreground">No</span>
-                    <span className="text-lg font-medium text-loss">{selectedMarket.noPrice}¢</span>
+                    <span className="text-lg font-medium text-loss">{selectedMarket.noPrice}c</span>
                   </div>
                   <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
                     <div className="h-full bg-loss rounded-full transition-all duration-500" style={{ width: `${selectedMarket.noPrice}%` }} />
                   </div>
+                  {selectedMarket.noBid > 0 && (
+                    <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
+                      <span>Bid: {selectedMarket.noBid}c</span>
+                      <span>Ask: {selectedMarket.noAsk}c</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <StatBox icon={BarChart3} label="Total Volume" value={formatVolume(selectedMarket.volume)} />
                 <StatBox icon={TrendingUp} label="24h Volume" value={formatVolume(selectedMarket.volume24hr)} />
-                <StatBox icon={Droplets} label="Liquidity" value={formatVolume(selectedMarket.liquidity)} />
-                <StatBox icon={Clock} label="End Date" value={selectedMarket.endDate} />
+                <StatBox icon={Droplets} label="Open Interest" value={formatVolume(selectedMarket.openInterest)} />
+                <StatBox icon={Clock} label="Closes" value={selectedMarket.endDate} />
               </div>
 
               {selectedMarket.description && (
@@ -182,21 +200,21 @@ export function MarketsPanel() {
 
               <div className="flex gap-3">
                 <Button className="flex-1 h-10 rounded-full text-sm bg-profit/10 text-profit hover:bg-profit/20 border-0">
-                  Buy Yes @ {selectedMarket.yesPrice}¢
+                  Buy Yes @ {selectedMarket.yesAsk || selectedMarket.yesPrice}c
                 </Button>
                 <Button className="flex-1 h-10 rounded-full text-sm bg-loss/10 text-loss hover:bg-loss/20 border-0">
-                  Buy No @ {selectedMarket.noPrice}¢
+                  Buy No @ {selectedMarket.noAsk || selectedMarket.noPrice}c
                 </Button>
               </div>
 
-              {selectedMarket.slug && (
+              {selectedMarket.ticker && (
                 <a
-                  href={`https://polymarket.com/event/${selectedMarket.slug}`}
+                  href={`https://kalshi.com/markets/${selectedMarket.ticker}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center gap-1.5 text-xs text-primary hover:opacity-80 transition-opacity duration-300"
                 >
-                  <ExternalLink className="h-3 w-3" /> View on Polymarket
+                  <ExternalLink className="h-3 w-3" /> View on Kalshi
                 </a>
               )}
             </div>

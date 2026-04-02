@@ -1,20 +1,13 @@
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Area, AreaChart, XAxis, YAxis } from "recharts";
-import { TrendingUp } from "lucide-react";
+import { Loader2 } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
-const chartData = [
-  { date: "Jan 1", value: 5000 },
-  { date: "Jan 15", value: 5120 },
-  { date: "Feb 1", value: 5350 },
-  { date: "Feb 15", value: 5180 },
-  { date: "Mar 1", value: 5620 },
-  { date: "Mar 5", value: 5480 },
-  { date: "Mar 8", value: 5750 },
-  { date: "Mar 10", value: 5900 },
-  { date: "Mar 12", value: 5820 },
-  { date: "Mar 14", value: 6100 },
-  { date: "Mar 15", value: 6220 },
-];
+interface ChartPoint {
+  date: string;
+  value: number;
+}
 
 const chartConfig = {
   value: {
@@ -24,9 +17,67 @@ const chartConfig = {
 };
 
 export function PortfolioChart() {
-  const currentValue = chartData[chartData.length - 1].value;
-  const startValue = chartData[0].value;
-  const totalReturn = (((currentValue - startValue) / startValue) * 100).toFixed(1);
+  const [chartData, setChartData] = useState<ChartPoint[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const loadChartData = useCallback(async () => {
+    setLoading(true);
+
+    // Fetch all filled trades ordered by date to build a cumulative P&L chart
+    const { data: trades } = await supabase
+      .from("trades")
+      .select("created_at, amount, pnl, action, status")
+      .eq("status", "filled")
+      .order("created_at", { ascending: true });
+
+    if (trades && trades.length > 0) {
+      const startingBalance = 5000; // Assumed starting balance
+      let cumulativeValue = startingBalance;
+      const points: ChartPoint[] = [{ date: "Start", value: startingBalance }];
+
+      for (const trade of trades) {
+        const pnl = trade.pnl || 0;
+        cumulativeValue += pnl;
+        // Subtract cost for buys, add for sells
+        if (trade.action === "buy") {
+          cumulativeValue -= trade.amount;
+        } else {
+          cumulativeValue += trade.amount;
+        }
+        points.push({
+          date: new Date(trade.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          value: Math.round(cumulativeValue),
+        });
+      }
+
+      setChartData(points);
+    } else {
+      // No trades yet, show flat line at starting balance
+      setChartData([
+        { date: "Start", value: 5000 },
+        { date: "Now", value: 5000 },
+      ]);
+    }
+
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    loadChartData();
+  }, [loadChartData]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const currentValue = chartData.length > 0 ? chartData[chartData.length - 1].value : 0;
+  const startValue = chartData.length > 0 ? chartData[0].value : 0;
+  const totalReturn = startValue > 0 ? (((currentValue - startValue) / startValue) * 100).toFixed(1) : "0.0";
+  const isPositive = currentValue >= startValue;
 
   return (
     <div className="space-y-6">
@@ -39,8 +90,8 @@ export function PortfolioChart() {
         </div>
         <div className="text-right">
           <p className="text-muted-foreground text-sm mb-1">Return</p>
-          <p className="text-2xl font-light text-profit" style={{ letterSpacing: '-0.02em' }}>
-            +{totalReturn}%
+          <p className={`text-2xl font-light ${isPositive ? 'text-profit' : 'text-loss'}`} style={{ letterSpacing: '-0.02em' }}>
+            {isPositive ? '+' : ''}{totalReturn}%
           </p>
         </div>
       </div>

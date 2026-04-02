@@ -21,7 +21,10 @@ export function AppHeader({ onNavigate }: AppHeaderProps) {
           <div className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-foreground" />
             <span className="text-sm font-medium tracking-tight text-foreground">
-              Polybot
+              Omii TradeAgent
+            </span>
+            <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded-full">
+              Kalshi
             </span>
           </div>
         </div>
@@ -40,6 +43,9 @@ export function AppHeader({ onNavigate }: AppHeaderProps) {
           </button>
           <button onClick={() => onNavigate?.("log")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
             Trade Log
+          </button>
+          <button onClick={() => onNavigate?.("compliance")} className="text-xs text-muted-foreground hover:text-foreground transition-colors duration-300">
+            Compliance
           </button>
         </nav>
         <div className="flex items-center gap-4">
