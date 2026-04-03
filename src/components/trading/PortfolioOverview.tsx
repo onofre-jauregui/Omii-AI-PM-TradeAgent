@@ -1,6 +1,9 @@
-import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2 } from "lucide-react";
+import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2, Wallet } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+
+// Starting paper capital — paper trades are simulated against this balance
+const PAPER_STARTING_BALANCE = 10_000;
 
 interface Position {
   market_id: string;
@@ -14,54 +17,92 @@ interface Position {
   filled_price: number | null;
 }
 
-interface PortfolioStats {
-  totalValue: number;
+interface Stats {
+  portfolioValue: number;
+  cashAvailable: number;
   totalPnl: number;
   winRate: number;
   openPositionCount: number;
   totalTrades: number;
 }
 
-// ─── Stat cards only (top of dashboard) ──────────────────────────────────────
-export function PortfolioStats() {
-  const [stats, setStats] = useState<PortfolioStats>({
-    totalValue: 0, totalPnl: 0, winRate: 0, openPositionCount: 0, totalTrades: 0,
+// ─── Stat cards ───────────────────────────────────────────────────────────────
+// mode: 'paper' | 'live' | undefined (all)
+export function PortfolioStats({ mode }: { mode?: "paper" | "live" }) {
+  const [stats, setStats] = useState<Stats>({
+    portfolioValue: 0, cashAvailable: 0, totalPnl: 0,
+    winRate: 0, openPositionCount: 0, totalTrades: 0,
   });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: buyTrades }, { data: allTrades }] = await Promise.all([
-      supabase.from("trades").select("amount").eq("status", "filled").eq("action", "buy").limit(20),
-      supabase.from("trades").select("pnl, status, action").eq("status", "filled"),
+
+    let filledBuysQuery = supabase
+      .from("trades").select("amount, pnl, mode").eq("status", "filled").eq("action", "buy");
+    let allTradesQuery = supabase
+      .from("trades").select("pnl, status, action, mode").eq("status", "filled");
+    let sellsQuery = supabase
+      .from("trades").select("amount, mode").eq("status", "filled").eq("action", "sell");
+
+    if (mode) {
+      filledBuysQuery = filledBuysQuery.eq("mode", mode);
+      allTradesQuery = allTradesQuery.eq("mode", mode);
+      sellsQuery = sellsQuery.eq("mode", mode);
+    }
+
+    const [{ data: buys }, { data: allTrades }, { data: sells }] = await Promise.all([
+      filledBuysQuery,
+      allTradesQuery,
+      sellsQuery,
     ]);
 
+    const totalBuyAmount = (buys ?? []).reduce((sum, t) => sum + (t.amount || 0), 0);
+    const totalSellAmount = (sells ?? []).reduce((sum, t) => sum + (t.amount || 0), 0);
     const totalPnl = (allTrades ?? []).reduce((sum, t) => sum + (t.pnl || 0), 0);
     const winners = (allTrades ?? []).filter(t => (t.pnl || 0) > 0).length;
     const totalWithPnl = (allTrades ?? []).filter(t => t.pnl !== null && t.pnl !== 0).length;
 
+    let portfolioValue: number;
+    let cashAvailable: number;
+
+    if (mode === "paper") {
+      // Paper balance = starting capital + all realized P&L
+      portfolioValue = PAPER_STARTING_BALANCE + totalPnl;
+      // Cash not currently tied up in open positions
+      cashAvailable = PAPER_STARTING_BALANCE - totalBuyAmount + totalSellAmount + totalPnl;
+      cashAvailable = Math.max(0, cashAvailable);
+    } else {
+      // Live: sum of invested amounts (real portfolio balance requires Kalshi API call)
+      portfolioValue = totalBuyAmount - totalSellAmount + totalPnl;
+      cashAvailable = 0; // Would need Kalshi balance API
+    }
+
     setStats({
-      totalValue: (buyTrades ?? []).reduce((sum, t: any) => sum + (t.amount || 0), 0),
+      portfolioValue,
+      cashAvailable,
       totalPnl,
       winRate: totalWithPnl > 0 ? Math.round((winners / totalWithPnl) * 100) : 0,
-      openPositionCount: (buyTrades ?? []).length,
+      openPositionCount: (buys ?? []).length,
       totalTrades: (allTrades ?? []).length,
     });
     setLoading(false);
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     load();
     const ch = supabase
-      .channel("portfolio-stats-rt")
+      .channel(`portfolio-stats-rt-${mode ?? "all"}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [load]);
+  }, [load, mode]);
 
-  const pnlPercent = stats.totalValue > 0
-    ? ((stats.totalPnl / stats.totalValue) * 100).toFixed(1)
-    : "0.0";
+  const pnlPercent = mode === "paper"
+    ? ((stats.totalPnl / PAPER_STARTING_BALANCE) * 100).toFixed(1)
+    : stats.portfolioValue > 0
+      ? ((stats.totalPnl / stats.portfolioValue) * 100).toFixed(1)
+      : "0.0";
 
   if (loading) {
     return (
@@ -71,13 +112,41 @@ export function PortfolioStats() {
     );
   }
 
+  if (mode === "paper") {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard
+          icon={Wallet}
+          label="Paper Balance"
+          value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+          sub={`Started at $${PAPER_STARTING_BALANCE.toLocaleString()}`}
+        />
+        <StatCard
+          icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
+          label="Total P&L"
+          value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+          valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
+          sub={`${pnlPercent}%`}
+        />
+        <StatCard
+          icon={Target}
+          label="Win Rate"
+          value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
+          valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
+        />
+        <StatCard icon={BarChart3} label="Open Positions" value={`${stats.openPositionCount}`} />
+      </div>
+    );
+  }
+
+  // Live / all-mode stat cards
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.totalValue.toLocaleString()}`} />
+      <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} />
       <StatCard
         icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
         label="Total P&L"
-        value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString()}`}
+        value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
         valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
         sub={`${pnlPercent}%`}
       />
@@ -92,32 +161,34 @@ export function PortfolioStats() {
   );
 }
 
-// ─── Active positions list (bottom of dashboard) ──────────────────────────────
-export function PortfolioOverview() {
+// ─── Active positions list ────────────────────────────────────────────────────
+export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data } = await supabase
+    let q = supabase
       .from("trades")
       .select("*")
       .eq("status", "filled")
       .eq("action", "buy")
       .order("created_at", { ascending: false })
       .limit(20);
+    if (mode) q = q.eq("mode", mode);
+    const { data } = await q;
     setPositions((data ?? []) as Position[]);
     setLoading(false);
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     load();
     const ch = supabase
-      .channel("portfolio-positions-rt")
+      .channel(`portfolio-positions-rt-${mode ?? "all"}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
       .subscribe();
     return () => { supabase.removeChannel(ch); };
-  }, [load]);
+  }, [load, mode]);
 
   if (loading) {
     return (
@@ -132,11 +203,15 @@ export function PortfolioOverview() {
       <div className="px-6 py-4">
         <div className="flex items-center gap-2 mb-4">
           <Clock className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium text-muted-foreground">Active Positions</h3>
+          <h3 className="text-sm font-medium text-muted-foreground">
+            {mode === "paper" ? "Open Paper Positions" : "Active Positions"}
+          </h3>
         </div>
         {positions.length === 0 ? (
           <p className="text-sm text-muted-foreground py-8 text-center">
-            No open positions. Use the Agent to start trading.
+            {mode === "paper"
+              ? "No open paper positions. Use the Demo agent to start paper trading."
+              : "No open positions. Use the Live Agent to start trading."}
           </p>
         ) : (
           <div className="space-y-1">
@@ -179,7 +254,7 @@ function StatCard({ icon: Icon, label, value, valueClass = "text-foreground", su
         <span className="text-xs text-muted-foreground">{label}</span>
       </div>
       <p className={`text-xl font-medium tabular-nums ${valueClass}`}>{value}</p>
-      {sub && <p className={`text-sm ${valueClass} mt-0.5`}>{sub}</p>}
+      {sub && <p className={`text-sm text-muted-foreground mt-0.5`}>{sub}</p>}
     </div>
   );
 }

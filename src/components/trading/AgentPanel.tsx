@@ -64,11 +64,11 @@ async function streamChat({
   onDone();
 }
 
-export function AgentPanel() {
+export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolean }) {
   const { getActiveStrategies } = useStrategies();
   const [selectedModel, setSelectedModel] = useState("gemini-flash");
   const [temperature, setTemperature] = useState([0.3]);
-  const [tradingMode, setTradingMode] = useState<"paper" | "live">("paper");
+  const [tradingMode, setTradingMode] = useState<"paper" | "live">(forcePaperMode ? "paper" : "paper");
   const [systemPrompt, setSystemPrompt] = useState(
     `You are an expert algorithmic trading agent for Kalshi event contracts. Analyze market data, news sentiment, probability shifts, and order book depth to identify profitable trading opportunities. Use limit orders for better execution. Provide clear trade signals with entry/exit prices and confidence levels.`
   );
@@ -147,28 +147,38 @@ export function AgentPanel() {
         </div>
 
         {/* Trading Mode */}
-        <div className={`rounded-2xl p-5 apple-shadow transition-all duration-300 ${tradingMode === "live" ? "bg-loss/5 ring-1 ring-loss/20" : "bg-card"}`}>
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-foreground">Trading Mode</span>
-                <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
-                  {tradingMode === "live" ? "Live" : "Paper"}
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                {tradingMode === "live" ? "Real trades on Kalshi" : "Simulated -- no real money"}
-              </p>
+        {forcePaperMode ? (
+          <div className="rounded-2xl bg-primary/5 ring-1 ring-primary/20 p-5 apple-shadow">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-foreground">Trading Mode</span>
+              <Badge variant="secondary" className="text-[10px] rounded-full bg-primary/10 text-primary">Paper</Badge>
             </div>
-            <Switch checked={tradingMode === "live"} onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")} />
+            <p className="text-xs text-muted-foreground mt-1">Demo mode — simulated trades only, no real money.</p>
           </div>
-          {tradingMode === "live" && (
-            <div className="mt-3 flex items-start gap-2 text-xs text-loss">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              Requires Kalshi API credentials. Uses real funds. Risk limits enforced.
+        ) : (
+          <div className={`rounded-2xl p-5 apple-shadow transition-all duration-300 ${tradingMode === "live" ? "bg-loss/5 ring-1 ring-loss/20" : "bg-card"}`}>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">Trading Mode</span>
+                  <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
+                    {tradingMode === "live" ? "Live" : "Paper"}
+                  </Badge>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {tradingMode === "live" ? "Real trades on Kalshi" : "Simulated -- no real money"}
+                </p>
+              </div>
+              <Switch checked={tradingMode === "live"} onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")} />
             </div>
-          )}
-        </div>
+            {tradingMode === "live" && (
+              <div className="mt-3 flex items-start gap-2 text-xs text-loss">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                Requires Kalshi API credentials. Uses real funds. Risk limits enforced.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Loaded Strategies */}
         <div className="rounded-2xl bg-card p-5 apple-shadow">

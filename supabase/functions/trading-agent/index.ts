@@ -8,7 +8,7 @@ const corsHeaders = {
 };
 
 // Always use production Kalshi API for real live market data
-const KALSHI_PROD_URL = "https://trading-api.kalshi.com/trade-api/v2";
+const KALSHI_PROD_URL = "https://api.elections.kalshi.com/trade-api/v2";
 
 function getKalshiBaseUrl(): string {
   return KALSHI_PROD_URL;

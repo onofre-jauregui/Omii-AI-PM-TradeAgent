@@ -7,6 +7,7 @@ import { StrategyPerformance } from "@/components/trading/StrategyPerformance";
 import { MarketsPanel } from "@/components/trading/MarketsPanel";
 import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
 import { AgentPanel } from "@/components/trading/AgentPanel";
+import { DemoPanel } from "@/components/trading/DemoPanel";
 import { TradeLog } from "@/components/trading/TradeLog";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
@@ -16,7 +17,8 @@ const TAB_LABELS: Record<string, string> = {
   dashboard: "Dashboard",
   markets: "Markets",
   strategies: "Strategies",
-  agent: "Agent",
+  demo: "Demo — Paper Trading",
+  agent: "Live Agent",
   log: "Trade Log",
   compliance: "Compliance",
   settings: "Settings",
@@ -51,16 +53,17 @@ const Index = () => {
         <main className="flex-1 overflow-y-auto px-8 py-8 max-w-[900px] w-full mx-auto">
           {activeTab === "dashboard" && (
             <div className="space-y-8 apple-reveal">
-              <PortfolioStats />
+              <PortfolioStats mode="live" />
               <PortfolioChart />
               <StrategyPerformance />
-              <PortfolioOverview />
+              <PortfolioOverview mode="live" />
             </div>
           )}
           {activeTab === "markets" && <MarketsPanel />}
           {activeTab === "strategies" && <StrategiesPanel />}
+          {activeTab === "demo" && <DemoPanel />}
           {activeTab === "agent" && <AgentPanel />}
-          {activeTab === "log" && <TradeLog />}
+          {activeTab === "log" && <TradeLog filterMode="live" />}
           {activeTab === "compliance" && <CompliancePanel />}
           {activeTab === "settings" && <SettingsPanel />}
           {activeTab === "profile" && <ProfilePanel />}

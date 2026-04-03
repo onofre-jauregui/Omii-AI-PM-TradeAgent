@@ -25,37 +25,39 @@ interface Trade {
   created_at: string;
 }
 
-export function TradeLog() {
+export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadTrades = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await supabase
+    let q = supabase
       .from("trades")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(50);
+    if (filterMode) q = q.eq("mode", filterMode);
+    const { data, error } = await q;
 
     if (!error && data) {
       setTrades(data as Trade[]);
     }
     setLoading(false);
-  }, []);
+  }, [filterMode]);
 
   useEffect(() => {
     loadTrades();
 
     // Subscribe to real-time updates
     const channel = supabase
-      .channel("trades-realtime")
+      .channel(`trades-realtime-${filterMode ?? "all"}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
         loadTrades();
       })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [loadTrades]);
+  }, [loadTrades, filterMode]);
 
   const statusColor = (status: string) => {
     switch (status) {
@@ -74,7 +76,9 @@ export function TradeLog() {
         <div className="px-6 py-4 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium text-muted-foreground">Trade History</h3>
+            <h3 className="text-sm font-medium text-muted-foreground">
+              {filterMode === "paper" ? "Paper Trade History" : filterMode === "live" ? "Live Trade History" : "Trade History"}
+            </h3>
             <span className="text-[10px] text-muted-foreground">({trades.length} trades)</span>
           </div>
           <Button variant="ghost" size="sm" onClick={loadTrades} disabled={loading} className="h-7 text-xs gap-1">
