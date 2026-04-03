@@ -7,12 +7,11 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2";
+// Always use production Kalshi API for real live market data
 const KALSHI_PROD_URL = "https://trading-api.kalshi.com/trade-api/v2";
 
 function getKalshiBaseUrl(): string {
-  const env = Deno.env.get("KALSHI_ENVIRONMENT") || "demo";
-  return env === "production" ? KALSHI_PROD_URL : KALSHI_DEMO_URL;
+  return KALSHI_PROD_URL;
 }
 
 const TRADE_TOOL = {
@@ -94,15 +93,25 @@ serve(async (req) => {
   try {
     const { messages, strategies, model, temperature, systemPrompt, tradingMode } = await req.json();
 
-    // AI gateway configuration — supports OpenRouter, OpenAI, or any OpenAI-compatible API
-    const AI_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || Deno.env.get("OPENAI_API_KEY");
-    const AI_BASE_URL = Deno.env.get("AI_BASE_URL") || "https://openrouter.ai/api";
-    if (!AI_API_KEY) throw new Error("AI API key not configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY in Supabase secrets.");
-
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
+
+    // AI gateway — read from DB api_keys table first, fall back to env vars
+    const [{ data: orKey }, { data: oaiKey }] = await Promise.all([
+      supabase.from("api_keys").select("encrypted_secret").eq("provider", "openrouter").single(),
+      supabase.from("api_keys").select("encrypted_secret").eq("provider", "openai").single(),
+    ]);
+
+    const AI_API_KEY =
+      orKey?.encrypted_secret ||
+      Deno.env.get("OPENROUTER_API_KEY") ||
+      oaiKey?.encrypted_secret ||
+      Deno.env.get("OPENAI_API_KEY");
+
+    const AI_BASE_URL = "https://openrouter.ai/api";
+    if (!AI_API_KEY) throw new Error("AI API key not configured. Add an OpenRouter or OpenAI key in Settings.");
 
     // Build strategy context — include IDs so agent can tag trades properly
     let strategyBlock = "";

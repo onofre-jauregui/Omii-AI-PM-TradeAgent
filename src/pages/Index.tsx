@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { AppHeader } from "@/components/trading/AppHeader";
+import { useState, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { Sidebar } from "@/components/trading/Sidebar";
 import { PortfolioChart } from "@/components/trading/PortfolioChart";
-import { PortfolioOverview } from "@/components/trading/PortfolioOverview";
+import { PortfolioOverview, PortfolioStats } from "@/components/trading/PortfolioOverview";
 import { StrategyPerformance } from "@/components/trading/StrategyPerformance";
 import { MarketsPanel } from "@/components/trading/MarketsPanel";
 import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
@@ -12,44 +12,60 @@ import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { CompliancePanel } from "@/components/trading/CompliancePanel";
 
+const TAB_LABELS: Record<string, string> = {
+  dashboard: "Dashboard",
+  markets: "Markets",
+  strategies: "Strategies",
+  agent: "Agent",
+  log: "Trade Log",
+  compliance: "Compliance",
+  settings: "Settings",
+  profile: "Profile",
+};
+
 const Index = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [userEmail, setUserEmail] = useState<string | undefined>();
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUserEmail(session?.user?.email ?? undefined);
+    });
+  }, []);
 
   return (
-    <div className="min-h-screen bg-background">
-      <AppHeader onNavigate={setActiveTab} />
-      <main className="mx-auto max-w-[980px] px-6 py-12">
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
-          <TabsList className="md:hidden bg-secondary rounded-full p-1 h-auto flex-wrap">
-            {["dashboard", "markets", "strategies", "agent", "log", "compliance", "settings", "profile"].map((tab) => (
-              <TabsTrigger
-                key={tab}
-                value={tab}
-                className="text-xs rounded-full px-4 py-1.5 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:apple-shadow transition-all duration-300"
-              >
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+    <div className="flex min-h-screen bg-background">
+      <Sidebar activeTab={activeTab} onNavigate={setActiveTab} userEmail={userEmail} />
 
-          <TabsContent value="dashboard">
-            <div className="mb-12 apple-reveal">
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top header — active page name centered */}
+        <header
+          className="frosted-glass sticky top-0 z-40 h-12 flex items-center justify-center shrink-0"
+          style={{ boxShadow: "0 1px 0 rgba(0,0,0,0.08)" }}
+        >
+          <h1 className="text-sm font-medium text-foreground tracking-tight">
+            {TAB_LABELS[activeTab] ?? activeTab}
+          </h1>
+        </header>
+
+        <main className="flex-1 overflow-y-auto px-8 py-8 max-w-[900px] w-full mx-auto">
+          {activeTab === "dashboard" && (
+            <div className="space-y-8 apple-reveal">
+              <PortfolioStats />
               <PortfolioChart />
-            </div>
-            <div className="mb-12">
               <StrategyPerformance />
+              <PortfolioOverview />
             </div>
-            <PortfolioOverview />
-          </TabsContent>
-          <TabsContent value="markets"><MarketsPanel /></TabsContent>
-          <TabsContent value="strategies"><StrategiesPanel /></TabsContent>
-          <TabsContent value="agent"><AgentPanel /></TabsContent>
-          <TabsContent value="log"><TradeLog /></TabsContent>
-          <TabsContent value="compliance"><CompliancePanel /></TabsContent>
-          <TabsContent value="settings"><SettingsPanel /></TabsContent>
-          <TabsContent value="profile"><ProfilePanel /></TabsContent>
-        </Tabs>
-      </main>
+          )}
+          {activeTab === "markets" && <MarketsPanel />}
+          {activeTab === "strategies" && <StrategiesPanel />}
+          {activeTab === "agent" && <AgentPanel />}
+          {activeTab === "log" && <TradeLog />}
+          {activeTab === "compliance" && <CompliancePanel />}
+          {activeTab === "settings" && <SettingsPanel />}
+          {activeTab === "profile" && <ProfilePanel />}
+        </main>
+      </div>
     </div>
   );
 };

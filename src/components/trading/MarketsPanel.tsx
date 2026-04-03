@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2 } from "lucide-react";
+import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2, Radio } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { useState, useEffect, useCallback } from "react";
 import { fetchKalshiMarkets, formatVolume, type ParsedMarket } from "@/lib/kalshiApi";
@@ -37,7 +37,7 @@ export function MarketsPanel() {
 
   useEffect(() => {
     loadMarkets();
-    const interval = setInterval(loadMarkets, 60_000);
+    const interval = setInterval(loadMarkets, 10_000);
     return () => clearInterval(interval);
   }, [loadMarkets]);
 
@@ -73,9 +73,14 @@ export function MarketsPanel() {
       )}
 
       {lastUpdated && !error && (
-        <p className="text-xs text-muted-foreground">
-          Live · Updated {lastUpdated.toLocaleTimeString()} · {markets.length} markets · Auto-refresh 60s
-        </p>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-profit" />
+          </span>
+          <span className="text-profit font-medium">Live</span>
+          <span>· Updated {lastUpdated.toLocaleTimeString()} · {markets.length} markets · 10s refresh</span>
+        </div>
       )}
 
       {loading && markets.length === 0 ? (

@@ -22,64 +22,42 @@ interface PortfolioStats {
   totalTrades: number;
 }
 
-export function PortfolioOverview() {
-  const [positions, setPositions] = useState<Position[]>([]);
+// ─── Stat cards only (top of dashboard) ──────────────────────────────────────
+export function PortfolioStats() {
   const [stats, setStats] = useState<PortfolioStats>({
     totalValue: 0, totalPnl: 0, winRate: 0, openPositionCount: 0, totalTrades: 0,
   });
   const [loading, setLoading] = useState(true);
 
-  const loadPortfolio = useCallback(async () => {
+  const load = useCallback(async () => {
     setLoading(true);
+    const [{ data: buyTrades }, { data: allTrades }] = await Promise.all([
+      supabase.from("trades").select("amount").eq("status", "filled").eq("action", "buy").limit(20),
+      supabase.from("trades").select("pnl, status, action").eq("status", "filled"),
+    ]);
 
-    // Fetch filled buy trades as open positions (simplified: buys without matching sells)
-    const { data: buyTrades } = await supabase
-      .from("trades")
-      .select("*")
-      .eq("status", "filled")
-      .eq("action", "buy")
-      .order("created_at", { ascending: false })
-      .limit(20);
+    const totalPnl = (allTrades ?? []).reduce((sum, t) => sum + (t.pnl || 0), 0);
+    const winners = (allTrades ?? []).filter(t => (t.pnl || 0) > 0).length;
+    const totalWithPnl = (allTrades ?? []).filter(t => t.pnl !== null && t.pnl !== 0).length;
 
-    // Fetch all filled trades for stats
-    const { data: allTrades } = await supabase
-      .from("trades")
-      .select("pnl, status, action")
-      .eq("status", "filled");
-
-    if (buyTrades) {
-      setPositions(buyTrades as Position[]);
-    }
-
-    if (allTrades) {
-      const totalPnl = allTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
-      const winners = allTrades.filter(t => (t.pnl || 0) > 0).length;
-      const totalWithPnl = allTrades.filter(t => t.pnl !== null && t.pnl !== 0).length;
-
-      setStats({
-        totalValue: buyTrades?.reduce((sum, t) => sum + (t as any).amount, 0) || 0,
-        totalPnl,
-        winRate: totalWithPnl > 0 ? Math.round((winners / totalWithPnl) * 100) : 0,
-        openPositionCount: buyTrades?.length || 0,
-        totalTrades: allTrades.length,
-      });
-    }
-
+    setStats({
+      totalValue: (buyTrades ?? []).reduce((sum, t: any) => sum + (t.amount || 0), 0),
+      totalPnl,
+      winRate: totalWithPnl > 0 ? Math.round((winners / totalWithPnl) * 100) : 0,
+      openPositionCount: (buyTrades ?? []).length,
+      totalTrades: (allTrades ?? []).length,
+    });
     setLoading(false);
   }, []);
 
   useEffect(() => {
-    loadPortfolio();
-
-    const channel = supabase
-      .channel("portfolio-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
-        loadPortfolio();
-      })
+    load();
+    const ch = supabase
+      .channel("portfolio-stats-rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
       .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [loadPortfolio]);
+    return () => { supabase.removeChannel(ch); };
+  }, [load]);
 
   const pnlPercent = stats.totalValue > 0
     ? ((stats.totalPnl / stats.totalValue) * 100).toFixed(1)
@@ -87,65 +65,105 @@ export function PortfolioOverview() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-16">
-        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-        <span className="ml-3 text-sm text-muted-foreground">Loading portfolio...</span>
+      <div className="flex items-center justify-center py-6">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
       </div>
     );
   }
 
   return (
-    <div className="space-y-8 apple-reveal">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.totalValue.toLocaleString()}`} />
-        <StatCard
-          icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
-          label="Total P&L"
-          value={`${stats.totalPnl >= 0 ? '+' : ''}$${stats.totalPnl.toLocaleString()}`}
-          valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
-          sub={`${pnlPercent}%`}
-        />
-        <StatCard
-          icon={Target}
-          label="Win Rate"
-          value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
-          valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
-        />
-        <StatCard icon={BarChart3} label="Positions" value={`${stats.openPositionCount}`} />
-      </div>
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.totalValue.toLocaleString()}`} />
+      <StatCard
+        icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
+        label="Total P&L"
+        value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString()}`}
+        valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
+        sub={`${pnlPercent}%`}
+      />
+      <StatCard
+        icon={Target}
+        label="Win Rate"
+        value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
+        valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
+      />
+      <StatCard icon={BarChart3} label="Open Positions" value={`${stats.openPositionCount}`} />
+    </div>
+  );
+}
 
-      <div className="rounded-2xl bg-card apple-shadow">
-        <div className="px-6 py-4">
-          <div className="flex items-center gap-2 mb-4">
-            <Clock className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium text-muted-foreground">Active Positions</h3>
-          </div>
-          {positions.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-8 text-center">No open positions. Use the Agent to start trading.</p>
-          ) : (
-            <div className="space-y-1">
-              {positions.map((pos, i) => (
-                <div key={`${pos.market_id}-${i}`} className="flex items-center justify-between py-4 border-b border-border last:border-0">
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-foreground">{pos.market_question}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {pos.side.toUpperCase()} @ {pos.filled_price || pos.price}c · ${pos.amount}
-                      {pos.strategy && <span> · {pos.strategy}</span>}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    {pos.pnl !== null && pos.pnl !== 0 && (
-                      <p className={`text-sm font-medium tabular-nums ${(pos.pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {(pos.pnl ?? 0) >= 0 ? '+' : ''}${(pos.pnl ?? 0).toFixed(2)}
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground">${pos.amount.toFixed(2)}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+// ─── Active positions list (bottom of dashboard) ──────────────────────────────
+export function PortfolioOverview() {
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("status", "filled")
+      .eq("action", "buy")
+      .order("created_at", { ascending: false })
+      .limit(20);
+    setPositions((data ?? []) as Position[]);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+    const ch = supabase
+      .channel("portfolio-positions-rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [load]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-10">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl bg-card apple-shadow">
+      <div className="px-6 py-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Clock className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium text-muted-foreground">Active Positions</h3>
         </div>
+        {positions.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-8 text-center">
+            No open positions. Use the Agent to start trading.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {positions.map((pos, i) => (
+              <div
+                key={`${pos.market_id}-${i}`}
+                className="flex items-center justify-between py-4 border-b border-border last:border-0"
+              >
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-foreground">{pos.market_question}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {pos.side.toUpperCase()} @ {pos.filled_price || pos.price}c · ${pos.amount}
+                    {pos.strategy && <span> · {pos.strategy}</span>}
+                  </p>
+                </div>
+                <div className="text-right">
+                  {pos.pnl !== null && pos.pnl !== 0 && (
+                    <p className={`text-sm font-medium tabular-nums ${(pos.pnl ?? 0) >= 0 ? "text-profit" : "text-loss"}`}>
+                      {(pos.pnl ?? 0) >= 0 ? "+" : ""}${(pos.pnl ?? 0).toFixed(2)}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground">${pos.amount.toFixed(2)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

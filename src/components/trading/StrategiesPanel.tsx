@@ -1,17 +1,194 @@
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Plus, Pencil, Trash2, BookOpen, Save, X, TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2 } from "lucide-react";
-import { useState } from "react";
+import {
+  Plus, Pencil, Trash2, BookOpen, Save, X,
+  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2,
+} from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
 import { useStrategies, type Strategy } from "@/lib/strategiesContext";
+import { supabase } from "@/integrations/supabase/client";
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+} from "recharts";
 
+// ─── Strategy detail chart ────────────────────────────────────────────────────
+function StrategyDetailModal({
+  strategy,
+  onClose,
+  onEdit,
+}: {
+  strategy: Strategy;
+  onClose: () => void;
+  onEdit: () => void;
+}) {
+  const { strategyStats } = useStrategies();
+  const stats = strategyStats[strategy.id];
+  const pnl = stats?.totalPnl ?? 0;
+  const roi = stats?.roi ?? 0;
+  const balance = stats?.balance ?? strategy.starting_balance;
+
+  const [chartData, setChartData] = useState<{ date: string; balance: number }[]>([]);
+  const [loadingChart, setLoadingChart] = useState(true);
+
+  const buildChart = useCallback(async () => {
+    setLoadingChart(true);
+    const { data: trades } = await supabase
+      .from("trades")
+      .select("strategy, strategy_id, pnl, created_at, status")
+      .eq("status", "filled")
+      .order("created_at", { ascending: true });
+
+    if (!trades || trades.length === 0) {
+      setChartData([{ date: "Start", balance: strategy.starting_balance }]);
+      setLoadingChart(false);
+      return;
+    }
+
+    const relevant = trades.filter(
+      t => t.strategy_id === strategy.id || t.strategy === strategy.name || t.strategy === strategy.id
+    );
+
+    let running = strategy.starting_balance;
+    const points: { date: string; balance: number }[] = [
+      { date: "Start", balance: running },
+    ];
+
+    const dayMap = new Map<string, typeof trades>();
+    for (const t of relevant) {
+      const day = new Date(t.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      if (!dayMap.has(day)) dayMap.set(day, []);
+      dayMap.get(day)!.push(t);
+    }
+
+    for (const [day, dayTrades] of dayMap) {
+      for (const t of dayTrades) running += t.pnl || 0;
+      points.push({ date: day, balance: Math.round(running * 100) / 100 });
+    }
+
+    setChartData(points);
+    setLoadingChart(false);
+  }, [strategy]);
+
+  useEffect(() => { buildChart(); }, [buildChart]);
+
+  const isProfit = pnl >= 0;
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="rounded-2xl border-0 apple-shadow max-w-xl p-0 overflow-hidden">
+        <div className="p-6 space-y-5">
+          <DialogHeader>
+            <div className="flex items-center gap-2 mb-1">
+              <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strategy.id}</Badge>
+              <Badge variant="secondary" className={`text-[10px] rounded-full ${
+                strategy.mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
+              }`}>{strategy.mode}</Badge>
+              {strategy.active && (
+                <Badge variant="secondary" className="text-[10px] rounded-full bg-profit/10 text-profit">Active</Badge>
+              )}
+            </div>
+            <DialogTitle className="text-lg font-medium">{strategy.name}</DialogTitle>
+            {strategy.description && (
+              <p className="text-sm text-muted-foreground leading-relaxed">{strategy.description}</p>
+            )}
+          </DialogHeader>
+
+          {/* Stats row */}
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              { label: "Balance", value: `$${Math.round(balance).toLocaleString()}`, icon: DollarSign, cls: "" },
+              { label: "P&L", value: `${isProfit ? "+" : ""}$${pnl.toFixed(2)}`, icon: isProfit ? TrendingUp : TrendingDown, cls: isProfit ? "text-profit" : "text-loss" },
+              { label: "ROI", value: `${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%`, icon: BarChart3, cls: roi >= 0 ? "text-profit" : "text-loss" },
+              { label: "Win Rate", value: stats?.totalTrades ? `${stats.winRate}%` : "--", icon: Target, cls: "" },
+            ].map(({ label, value, icon: Icon, cls }) => (
+              <div key={label} className="rounded-xl bg-secondary p-3">
+                <div className="flex items-center gap-1 mb-1">
+                  <Icon className="h-3 w-3 text-muted-foreground" />
+                  <span className="text-[9px] text-muted-foreground">{label}</span>
+                </div>
+                <p className={`text-sm font-medium tabular-nums ${cls}`}>{value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Performance chart */}
+          <div className="rounded-xl bg-secondary p-4">
+            <p className="text-xs text-muted-foreground mb-3 font-medium">Balance Over Time</p>
+            {loadingChart ? (
+              <div className="flex items-center justify-center h-32">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              </div>
+            ) : chartData.length <= 1 ? (
+              <div className="flex items-center justify-center h-32">
+                <p className="text-xs text-muted-foreground">No trade history yet</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={140}>
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                  <XAxis dataKey="date" tick={{ fontSize: 9 }} stroke="hsl(var(--muted-foreground))" />
+                  <YAxis
+                    tick={{ fontSize: 9 }}
+                    stroke="hsl(var(--muted-foreground))"
+                    tickFormatter={(v) => `$${v}`}
+                    width={50}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: "hsl(var(--card))", border: "none", borderRadius: 8, fontSize: 11 }}
+                    formatter={(v: number) => [`$${v.toFixed(2)}`, "Balance"]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="balance"
+                    stroke={isProfit ? "hsl(var(--profit))" : "hsl(var(--loss))"}
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Trades summary */}
+          {stats && stats.totalTrades > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {stats.totalTrades} total trades · {stats.winningTrades}W / {stats.losingTrades}L
+            </p>
+          )}
+
+          {/* Instructions */}
+          {strategy.instructions && (
+            <div className="rounded-xl bg-secondary p-3 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <BookOpen className="h-3 w-3 text-muted-foreground" />
+                <span className="text-[10px] text-muted-foreground font-medium">Agent Instructions</span>
+              </div>
+              <p className="text-xs text-foreground leading-relaxed line-clamp-4">{strategy.instructions}</p>
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <Button onClick={onEdit} variant="secondary" className="flex-1 rounded-full gap-2 text-sm">
+              <Pencil className="h-3.5 w-3.5" /> Edit Strategy
+            </Button>
+            <Button variant="secondary" onClick={onClose} className="rounded-full px-5 text-sm">Close</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Main panel ───────────────────────────────────────────────────────────────
 export function StrategiesPanel() {
   const { strategies, strategyStats, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
+  const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null);
   const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [newStrategy, setNewStrategy] = useState({
@@ -51,7 +228,7 @@ export function StrategiesPanel() {
     <div className="space-y-8 apple-reveal">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.02em' }}>Strategies</h2>
+          <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>Strategies</h2>
           <p className="text-sm text-muted-foreground mt-1">
             {strategies.length} strategies · {strategies.filter(s => s.active).length} active
           </p>
@@ -72,22 +249,18 @@ export function StrategiesPanel() {
             <div
               key={strat.id}
               className={`rounded-2xl bg-card p-5 cursor-pointer transition-all duration-300 hover:apple-shadow-hover ${
-                strat.active ? 'apple-shadow ring-1 ring-primary/20' : 'apple-shadow'
+                strat.active ? "apple-shadow ring-1 ring-primary/20" : "apple-shadow"
               }`}
-              onClick={() => setEditingStrategy({ ...strat })}
+              onClick={() => setDetailStrategy({ ...strat })}
             >
               {/* Header */}
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1 min-w-0 pr-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">
-                      {strat.id}
-                    </Badge>
+                    <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strat.id}</Badge>
                     <Badge variant="secondary" className={`text-[10px] rounded-full ${
                       strat.mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
-                    }`}>
-                      {strat.mode}
-                    </Badge>
+                    }`}>{strat.mode}</Badge>
                   </div>
                   <h3 className="text-sm font-medium text-foreground">{strat.name}</h3>
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{strat.description}</p>
@@ -113,8 +286,8 @@ export function StrategiesPanel() {
                     {pnl >= 0 ? <TrendingUp className="h-2.5 w-2.5 text-profit" /> : <TrendingDown className="h-2.5 w-2.5 text-loss" />}
                     <span className="text-[9px] text-muted-foreground">P&L</span>
                   </div>
-                  <p className={`text-xs font-medium tabular-nums ${pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                    {pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}
+                  <p className={`text-xs font-medium tabular-nums ${pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                    {pnl >= 0 ? "+" : ""}${pnl.toFixed(0)}
                   </p>
                 </div>
                 <div className="rounded-lg bg-secondary p-2">
@@ -122,8 +295,8 @@ export function StrategiesPanel() {
                     <BarChart3 className="h-2.5 w-2.5 text-muted-foreground" />
                     <span className="text-[9px] text-muted-foreground">ROI</span>
                   </div>
-                  <p className={`text-xs font-medium tabular-nums ${roi >= 0 ? 'text-profit' : 'text-loss'}`}>
-                    {roi >= 0 ? '+' : ''}{roi.toFixed(1)}%
+                  <p className={`text-xs font-medium tabular-nums ${roi >= 0 ? "text-profit" : "text-loss"}`}>
+                    {roi >= 0 ? "+" : ""}{roi.toFixed(1)}%
                   </p>
                 </div>
                 <div className="rounded-lg bg-secondary p-2">
@@ -132,19 +305,17 @@ export function StrategiesPanel() {
                     <span className="text-[9px] text-muted-foreground">Win</span>
                   </div>
                   <p className="text-xs font-medium tabular-nums">
-                    {stats?.totalTrades ? `${stats.winRate}%` : '--'}
+                    {stats?.totalTrades ? `${stats.winRate}%` : "--"}
                   </p>
                 </div>
               </div>
 
-              {/* Trades count */}
               {stats && stats.totalTrades > 0 && (
                 <p className="text-[10px] text-muted-foreground mt-2">
                   {stats.totalTrades} trades · {stats.winningTrades}W / {stats.losingTrades}L
                 </p>
               )}
 
-              {/* Instructions preview */}
               {strat.instructions && (
                 <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-3">
                   <BookOpen className="h-3 w-3 shrink-0" />
@@ -152,7 +323,6 @@ export function StrategiesPanel() {
                 </div>
               )}
 
-              {/* Actions */}
               <div className="flex gap-2 mt-4" onClick={(e) => e.stopPropagation()}>
                 <Button
                   size="sm"
@@ -175,6 +345,18 @@ export function StrategiesPanel() {
           );
         })}
       </div>
+
+      {/* Strategy Detail Modal */}
+      {detailStrategy && (
+        <StrategyDetailModal
+          strategy={detailStrategy}
+          onClose={() => setDetailStrategy(null)}
+          onEdit={() => {
+            setEditingStrategy({ ...detailStrategy });
+            setDetailStrategy(null);
+          }}
+        />
+      )}
 
       {/* Edit Dialog */}
       <Dialog open={!!editingStrategy} onOpenChange={(open) => !open && setEditingStrategy(null)}>
@@ -199,7 +381,13 @@ export function StrategiesPanel() {
                 <div className="space-y-1.5">
                   <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
                   <p className="text-xs text-muted-foreground">These instructions are injected into the AI agent's context when this strategy is active.</p>
-                  <Textarea value={editingStrategy.instructions} onChange={(e) => setEditingStrategy({ ...editingStrategy, instructions: e.target.value })} className="rounded-xl border-0 bg-secondary text-sm min-h-[180px] resize-none" placeholder="Describe how the agent should apply this strategy..." />
+                  <Textarea
+                    value={editingStrategy.instructions}
+                    onChange={(e) => setEditingStrategy({ ...editingStrategy, instructions: e.target.value })}
+                    className="rounded-xl border-0 bg-secondary text-sm min-h-[140px] resize-y"
+                    placeholder="Describe how the agent should apply this strategy..."
+                    style={{ resize: "vertical" }}
+                  />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5">
@@ -258,7 +446,14 @@ export function StrategiesPanel() {
             </div>
             <div className="space-y-1.5">
               <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
-              <Textarea value={newStrategy.instructions} onChange={(e) => setNewStrategy({ ...newStrategy, instructions: e.target.value })} className="rounded-xl border-0 bg-secondary text-sm min-h-[160px] resize-none" placeholder="Describe how the AI agent should use this strategy..." />
+              <p className="text-xs text-muted-foreground">Tell the AI how to apply this strategy when trading.</p>
+              <Textarea
+                value={newStrategy.instructions}
+                onChange={(e) => setNewStrategy({ ...newStrategy, instructions: e.target.value })}
+                className="rounded-xl border-0 bg-secondary text-sm min-h-[120px] resize-y"
+                placeholder="Describe how the AI agent should use this strategy..."
+                style={{ resize: "vertical" }}
+              />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">

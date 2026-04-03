@@ -8,12 +8,25 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// Always use production Kalshi API for live data — paper trades are simulated locally
 const KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2";
-const KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2";
 
 function getKalshiBaseUrl(): string {
-  const env = Deno.env.get("KALSHI_ENVIRONMENT") || "demo";
-  return env === "production" ? KALSHI_BASE_URL : KALSHI_DEMO_URL;
+  return KALSHI_BASE_URL;
+}
+
+// Read Kalshi live credentials: DB api_keys table first, env var fallback
+async function getKalshiCredentials(supabase: any): Promise<{ keyId: string | null; privateKey: string | null }> {
+  const { data } = await supabase
+    .from("api_keys")
+    .select("key_id, encrypted_secret")
+    .eq("provider", "kalshi_live")
+    .single();
+
+  return {
+    keyId: data?.key_id || Deno.env.get("KALSHI_API_KEY_ID") || null,
+    privateKey: data?.encrypted_secret || Deno.env.get("KALSHI_API_PRIVATE_KEY") || null,
+  };
 }
 
 function generateAuthHeaders(
@@ -343,8 +356,7 @@ serve(async (req) => {
     }
 
     // ── Live Trading on Kalshi ──
-    const kalshiKeyId = Deno.env.get("KALSHI_API_KEY_ID");
-    const kalshiPrivateKey = Deno.env.get("KALSHI_API_PRIVATE_KEY");
+    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase);
 
     if (!kalshiKeyId || !kalshiPrivateKey) {
       const { data: failedTrade } = await supabase.from("trades").insert({

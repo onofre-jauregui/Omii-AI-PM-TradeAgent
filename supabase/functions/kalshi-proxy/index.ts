@@ -9,12 +9,11 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
 };
 
+// Always use production Kalshi API — real live market data for both paper and live trading
 const KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2";
-const KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2";
 
 function getKalshiBaseUrl(): string {
-  const env = Deno.env.get("KALSHI_ENVIRONMENT") || "demo";
-  return env === "production" ? KALSHI_BASE_URL : KALSHI_DEMO_URL;
+  return KALSHI_BASE_URL;
 }
 
 // Generate Kalshi API auth headers using HMAC-SHA256
@@ -54,15 +53,25 @@ serve(async (req) => {
 
     let headers: Record<string, string> = { "Content-Type": "application/json" };
 
-    // For authenticated endpoints, get Kalshi credentials
+    // For authenticated endpoints, get Kalshi credentials (DB first, env fallback)
     if (!isPublicEndpoint) {
-      const kalshiKeyId = Deno.env.get("KALSHI_API_KEY_ID");
-      const kalshiPrivateKey = Deno.env.get("KALSHI_API_PRIVATE_KEY");
+      const adminClient = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      );
+      const { data: keyRow } = await adminClient
+        .from("api_keys")
+        .select("key_id, encrypted_secret")
+        .eq("provider", "kalshi_live")
+        .single();
+
+      const kalshiKeyId = keyRow?.key_id || Deno.env.get("KALSHI_API_KEY_ID");
+      const kalshiPrivateKey = keyRow?.encrypted_secret || Deno.env.get("KALSHI_API_PRIVATE_KEY");
 
       if (!kalshiKeyId || !kalshiPrivateKey) {
         return new Response(
           JSON.stringify({
-            error: "Kalshi API credentials not configured. Set KALSHI_API_KEY_ID and KALSHI_API_PRIVATE_KEY.",
+            error: "Kalshi live API credentials not configured. Add them in Settings.",
           }),
           { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );

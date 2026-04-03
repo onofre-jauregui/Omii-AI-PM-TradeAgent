@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
-import { ShieldCheck, AlertTriangle, Info, XCircle, RefreshCw, Loader2, Download } from "lucide-react";
+import { ShieldCheck, AlertTriangle, Info, XCircle, RefreshCw, Loader2, Download, Radio } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -49,10 +49,18 @@ export function CompliancePanel() {
   useEffect(() => {
     loadEntries();
 
+    // Listen to all changes on compliance_log (INSERT + UPDATE)
     const channel = supabase
       .channel("compliance-realtime")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "compliance_log" }, () => {
         loadEntries();
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "compliance_log" }, () => {
+        loadEntries();
+      })
+      // Also reload when new trades come in (they trigger compliance entries)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "trades" }, () => {
+        setTimeout(loadEntries, 500); // slight delay to let edge fn write compliance entry
       })
       .subscribe();
 
@@ -90,7 +98,15 @@ export function CompliancePanel() {
           <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.02em' }}>Compliance Log</h2>
           <p className="text-sm text-muted-foreground mt-1">Audit trail of all trade executions, risk checks, and system events.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {/* Live indicator */}
+          <div className="flex items-center gap-1.5 text-xs text-profit mr-1">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-profit" />
+            </span>
+            Live
+          </div>
           <Button variant="secondary" size="sm" onClick={exportLog} className="rounded-full gap-1 text-xs">
             <Download className="h-3 w-3" /> Export CSV
           </Button>
@@ -143,8 +159,10 @@ export function CompliancePanel() {
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>
           ) : entries.length === 0 ? (
-            <div className="flex items-center justify-center py-16">
+            <div className="flex flex-col items-center justify-center py-16 gap-2">
+              <ShieldCheck className="h-8 w-8 text-muted-foreground/30" />
               <span className="text-sm text-muted-foreground">No compliance entries yet.</span>
+              <span className="text-xs text-muted-foreground">Entries auto-populate when the agent executes trades.</span>
             </div>
           ) : (
             <div className="divide-y divide-border">
