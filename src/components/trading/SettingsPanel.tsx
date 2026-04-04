@@ -4,49 +4,31 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle, Cpu, RefreshCw } from "lucide-react";
+import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
-interface AIModel {
-  id: string;
-  name: string;
-  provider: string;
-  contextLength?: number;
-}
-
-const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-ai-models`;
-
 function StatusBadge({ saved }: { saved: boolean }) {
   return saved ? (
-    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-profit bg-profit/10 px-2.5 py-1 rounded-full">
+    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-profit bg-profit/10 px-2.5 py-1 rounded-full shrink-0">
       <CheckCircle className="h-3 w-3" /> Configured
     </span>
   ) : (
-    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground bg-secondary px-2.5 py-1 rounded-full">
+    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground bg-secondary px-2.5 py-1 rounded-full shrink-0">
       <Circle className="h-3 w-3" /> Not configured
     </span>
   );
 }
 
 export function SettingsPanel() {
-  // Kalshi live trading keys (for real money)
   const [kalshiLive, setKalshiLive] = useState({ key_id: "", private_key: "" });
-  // AI provider keys (only one needed — OpenRouter covers all models)
   const [aiKeys, setAiKeys] = useState({ openrouter: "", openai: "", anthropic: "", google: "" });
 
   const [savedProviders, setSavedProviders] = useState<Set<string>>(new Set());
-  const [saving, setSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
-
-  // Model preferences
-  const [availableModels, setAvailableModels] = useState<AIModel[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
-  const [agentModel, setAgentModel] = useState("");
-  const [tradingModel, setTradingModel] = useState("");
-  const [modelSaving, setModelSaving] = useState(false);
-  const [modelSaveStatus, setModelSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [aiSaving, setAiSaving] = useState(false);
+  const [aiSaveStatus, setAiSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [kalshiSaving, setKalshiSaving] = useState(false);
+  const [kalshiSaveStatus, setKalshiSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   const [notifications, setNotifications] = useState({
     tradeExecuted: true, positionClosed: true, stopLossHit: true, dailySummary: false, agentAlerts: true,
@@ -57,7 +39,6 @@ export function SettingsPanel() {
   });
   const [riskSaving, setRiskSaving] = useState(false);
 
-  // Load which providers already have keys saved
   const loadSavedKeys = useCallback(async () => {
     const { data } = await supabase.from("api_keys").select("provider, key_id");
     if (data) {
@@ -66,62 +47,6 @@ export function SettingsPanel() {
       if (kalshi) setKalshiLive(prev => ({ ...prev, key_id: kalshi.key_id }));
     }
   }, []);
-
-  const loadModelPreferences = useCallback(async () => {
-    const { data } = await supabase
-      .from("api_keys")
-      .select("provider, key_id")
-      .in("provider", ["model_agent", "model_trading"]);
-    if (data) {
-      const agent = data.find(r => r.provider === "model_agent");
-      const trading = data.find(r => r.provider === "model_trading");
-      if (agent?.key_id) setAgentModel(agent.key_id);
-      if (trading?.key_id) setTradingModel(trading.key_id);
-    }
-  }, []);
-
-  const fetchAvailableModels = useCallback(async () => {
-    setFetchingModels(true);
-    setFetchModelsError(null);
-    try {
-      const res = await fetch(LIST_MODELS_URL, {
-        headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
-      });
-      const data = await res.json();
-      if (data.models?.length > 0) {
-        setAvailableModels(data.models);
-      } else {
-        setFetchModelsError(data.error || "No models returned. Make sure you have saved an AI API key.");
-      }
-    } catch (e: any) {
-      setFetchModelsError("Failed to reach the model list service.");
-    } finally {
-      setFetchingModels(false);
-    }
-  }, []);
-
-  const saveModelPreferences = async () => {
-    setModelSaving(true);
-    setModelSaveStatus("idle");
-    try {
-      const prefs = [
-        agentModel ? { provider: "model_agent", key_id: agentModel, encrypted_secret: agentModel } : null,
-        tradingModel ? { provider: "model_trading", key_id: tradingModel, encrypted_secret: tradingModel } : null,
-      ].filter(Boolean) as { provider: string; key_id: string; encrypted_secret: string }[];
-      for (const pref of prefs) {
-        await supabase.from("api_keys").upsert(
-          { ...pref, updated_at: new Date().toISOString() },
-          { onConflict: "provider" }
-        );
-      }
-      setModelSaveStatus("success");
-      setTimeout(() => setModelSaveStatus("idle"), 3000);
-    } catch {
-      setModelSaveStatus("error");
-    } finally {
-      setModelSaving(false);
-    }
-  };
 
   const loadRiskSettings = useCallback(async () => {
     const { data } = await supabase.from("risk_settings").select("*").single();
@@ -141,30 +66,17 @@ export function SettingsPanel() {
   useEffect(() => {
     loadSavedKeys();
     loadRiskSettings();
-    loadModelPreferences();
-  }, [loadSavedKeys, loadRiskSettings, loadModelPreferences]);
+  }, [loadSavedKeys, loadRiskSettings]);
 
-  const handleSaveApiKeys = async () => {
-    setSaving(true);
-    setSaveStatus("idle");
+  const handleSaveAiKeys = async () => {
+    setAiSaving(true);
+    setAiSaveStatus("idle");
     try {
       const keysToSave = [
-        // Kalshi live — only save if both fields filled
-        kalshiLive.key_id && kalshiLive.private_key
-          ? { provider: "kalshi_live", key_id: kalshiLive.key_id, encrypted_secret: kalshiLive.private_key }
-          : null,
-        aiKeys.openrouter
-          ? { provider: "openrouter", key_id: "default", encrypted_secret: aiKeys.openrouter }
-          : null,
-        aiKeys.openai
-          ? { provider: "openai", key_id: "default", encrypted_secret: aiKeys.openai }
-          : null,
-        aiKeys.anthropic
-          ? { provider: "anthropic", key_id: "default", encrypted_secret: aiKeys.anthropic }
-          : null,
-        aiKeys.google
-          ? { provider: "google", key_id: "default", encrypted_secret: aiKeys.google }
-          : null,
+        aiKeys.openrouter ? { provider: "openrouter", key_id: "default", encrypted_secret: aiKeys.openrouter } : null,
+        aiKeys.openai     ? { provider: "openai",     key_id: "default", encrypted_secret: aiKeys.openai }     : null,
+        aiKeys.anthropic  ? { provider: "anthropic",  key_id: "default", encrypted_secret: aiKeys.anthropic }  : null,
+        aiKeys.google     ? { provider: "google",     key_id: "default", encrypted_secret: aiKeys.google }     : null,
       ].filter(Boolean) as { provider: string; key_id: string; encrypted_secret: string }[];
 
       for (const key of keysToSave) {
@@ -173,14 +85,32 @@ export function SettingsPanel() {
           { onConflict: "provider" }
         );
       }
-
       await loadSavedKeys();
-      setSaveStatus("success");
-      setTimeout(() => setSaveStatus("idle"), 3000);
+      setAiSaveStatus("success");
+      setTimeout(() => setAiSaveStatus("idle"), 3000);
     } catch {
-      setSaveStatus("error");
+      setAiSaveStatus("error");
     } finally {
-      setSaving(false);
+      setAiSaving(false);
+    }
+  };
+
+  const handleSaveKalshiKeys = async () => {
+    if (!kalshiLive.key_id || !kalshiLive.private_key) return;
+    setKalshiSaving(true);
+    setKalshiSaveStatus("idle");
+    try {
+      await supabase.from("api_keys").upsert(
+        { provider: "kalshi_live", key_id: kalshiLive.key_id, encrypted_secret: kalshiLive.private_key, updated_at: new Date().toISOString() },
+        { onConflict: "provider" }
+      );
+      await loadSavedKeys();
+      setKalshiSaveStatus("success");
+      setTimeout(() => setKalshiSaveStatus("idle"), 3000);
+    } catch {
+      setKalshiSaveStatus("error");
+    } finally {
+      setKalshiSaving(false);
     }
   };
 
@@ -214,45 +144,19 @@ export function SettingsPanel() {
     <div className="space-y-8 apple-reveal">
       <div>
         <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>Settings</h2>
-        <p className="text-sm text-muted-foreground mt-1">API keys are stored in your database and used by the trading engine automatically.</p>
+        <p className="text-sm text-muted-foreground mt-1">API keys are stored securely in your database and used by the agent and trading engine.</p>
       </div>
 
-      {/* ── API Keys ────────────────────────────────────────────── */}
+      {/* ── AI Model Keys ───────────────────────────────────────── */}
       <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
-        <div className="px-6 py-4 border-b border-border flex items-center gap-2">
-          <Key className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-sm font-medium">API Keys</h3>
-        </div>
-
-        {/* Kalshi Live */}
-        <div className="px-6 py-5 border-b border-border space-y-3">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-sm font-medium">Kalshi — Live Trading</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Required only for real-money trading. Paper trading works without this.
-              </p>
-            </div>
-            <StatusBadge saved={savedProviders.has("kalshi_live")} />
+        <div className="px-6 py-4 border-b border-border">
+          <div className="flex items-center gap-2">
+            <Key className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium">AI Model Keys</h3>
+            <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Required for agent</span>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Input
-              type="password"
-              value={kalshiLive.key_id}
-              onChange={(e) => setKalshiLive(prev => ({ ...prev, key_id: e.target.value }))}
-              placeholder="API Key ID"
-              className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
-            />
-            <Input
-              type="password"
-              value={kalshiLive.private_key}
-              onChange={(e) => setKalshiLive(prev => ({ ...prev, private_key: e.target.value }))}
-              placeholder="RSA Private Key"
-              className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
-            />
-          </div>
-          <p className="text-[10px] text-muted-foreground">
-            Generate at kalshi.com → Account → API Keys. Your private key never leaves your server.
+          <p className="text-xs text-muted-foreground mt-1">
+            Add at least one key. OpenRouter is recommended — one key unlocks 200+ models from all providers.
           </p>
         </div>
 
@@ -265,7 +169,7 @@ export function SettingsPanel() {
                 <span className="text-[10px] text-primary bg-primary/10 px-2 py-0.5 rounded-full font-medium">Recommended</span>
               </div>
               <p className="text-xs text-muted-foreground mt-0.5">
-                One key gives access to GPT-4, Gemini, Claude, Llama, and 200+ models.
+                Access GPT-4o, Claude, Gemini, Llama and 200+ models with one key. ~$5 to start.
               </p>
             </div>
             <StatusBadge saved={savedProviders.has("openrouter")} />
@@ -284,7 +188,9 @@ export function SettingsPanel() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-sm font-medium">OpenAI</p>
-              <p className="text-xs text-muted-foreground mt-0.5">GPT-4o, o1, o3, and other OpenAI models directly.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Use GPT-4o, o1, o3 and other OpenAI models directly via the OpenAI API.
+              </p>
             </div>
             <StatusBadge saved={savedProviders.has("openai")} />
           </div>
@@ -302,7 +208,9 @@ export function SettingsPanel() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-sm font-medium">Anthropic</p>
-              <p className="text-xs text-muted-foreground mt-0.5">Claude Opus, Sonnet, and Haiku models directly.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Use Claude Opus, Sonnet, and Haiku directly via the Anthropic API.
+              </p>
             </div>
             <StatusBadge saved={savedProviders.has("anthropic")} />
           </div>
@@ -320,7 +228,9 @@ export function SettingsPanel() {
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-sm font-medium">Google AI</p>
-              <p className="text-xs text-muted-foreground mt-0.5">Gemini 2.5 Pro, Flash, and other Gemini models directly.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Use Gemini 2.5 Pro, Flash, and other Gemini models via Google AI Studio.
+              </p>
             </div>
             <StatusBadge saved={savedProviders.has("google")} />
           </div>
@@ -333,117 +243,78 @@ export function SettingsPanel() {
           />
         </div>
 
-        {/* Save button */}
         <div className="px-6 py-4">
-          <Button
-            className="w-full rounded-full gap-2 text-sm"
-            onClick={handleSaveApiKeys}
-            disabled={saving}
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> :
-             saveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
-             saveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+          <Button className="w-full rounded-full gap-2 text-sm" onClick={handleSaveAiKeys} disabled={aiSaving}>
+            {aiSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+             aiSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+             aiSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
              <Save className="h-4 w-4" />}
-            {saveStatus === "success" ? "Saved — engine will use these keys" :
-             saveStatus === "error" ? "Save failed — try again" :
-             "Save API Keys"}
+            {aiSaveStatus === "success" ? "Saved — models now available in Agent tab" :
+             aiSaveStatus === "error" ? "Save failed — try again" :
+             "Save AI Keys"}
           </Button>
         </div>
       </div>
 
-      {/* ── Model Preferences ───────────────────────────────────── */}
-      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Cpu className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">Model Preferences</h3>
+      {/* ── Kalshi Live Trading ─────────────────────────────────── */}
+      <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+        <div className="px-6 py-4 border-b border-border">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Key className="h-4 w-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
+              <StatusBadge saved={savedProviders.has("kalshi_live")} />
+            </div>
+            <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Real money only</span>
           </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={fetchAvailableModels}
-            disabled={fetchingModels}
-            className="rounded-full text-xs gap-1.5 h-7 px-3"
-          >
-            {fetchingModels
-              ? <Loader2 className="h-3 w-3 animate-spin" />
-              : <RefreshCw className="h-3 w-3" />}
-            {fetchingModels ? "Fetching…" : availableModels.length > 0 ? "Refresh Models" : "Fetch Available Models"}
-          </Button>
+          <p className="text-xs text-muted-foreground mt-1">
+            Paper trading works without these. Only add when you're ready to trade with real money on Kalshi.
+          </p>
         </div>
 
-        {fetchModelsError && (
-          <div className="flex items-start gap-2 rounded-xl bg-loss/10 px-4 py-3">
-            <AlertCircle className="h-3.5 w-3.5 text-loss shrink-0 mt-0.5" />
-            <p className="text-xs text-loss">{fetchModelsError}</p>
+        <div className="px-6 py-5 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">API Key ID</Label>
+              <Input
+                type="password"
+                value={kalshiLive.key_id}
+                onChange={(e) => setKalshiLive(prev => ({ ...prev, key_id: e.target.value }))}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">RSA Private Key</Label>
+              <Input
+                type="password"
+                value={kalshiLive.private_key}
+                onChange={(e) => setKalshiLive(prev => ({ ...prev, private_key: e.target.value }))}
+                placeholder="Paste PEM private key"
+                className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+              />
+            </div>
           </div>
-        )}
-
-        {availableModels.length === 0 && !fetchModelsError ? (
-          <p className="text-xs text-muted-foreground">
-            Save an API key above, then click <span className="font-medium text-foreground">Fetch Available Models</span> to see all models you have access to.
+          <p className="text-[10px] text-muted-foreground">
+            Generate at kalshi.com → Account → API Keys. Your private key signs requests and never leaves your server.
           </p>
-        ) : availableModels.length > 0 && (
-          <>
-            <p className="text-xs text-muted-foreground">
-              {availableModels.length} models available from your saved provider keys.
-            </p>
+        </div>
 
-            <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Agent Chat Model</Label>
-              <Select value={agentModel} onValueChange={setAgentModel}>
-                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
-                  <SelectValue placeholder="Select a model…" />
-                </SelectTrigger>
-                <SelectContent className="max-h-72">
-                  {availableModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      <div className="flex flex-col gap-0.5 py-0.5">
-                        <span className="text-sm">{m.name}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono">{m.id}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[10px] text-muted-foreground">Used in the Agent tab when you chat interactively.</p>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Auto-Trading Model</Label>
-              <Select value={tradingModel} onValueChange={setTradingModel}>
-                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
-                  <SelectValue placeholder="Select a model…" />
-                </SelectTrigger>
-                <SelectContent className="max-h-72">
-                  {availableModels.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      <div className="flex flex-col gap-0.5 py-0.5">
-                        <span className="text-sm">{m.name}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono">{m.id}</span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[10px] text-muted-foreground">Used when strategies run autonomously. Pick a fast, cost-effective model.</p>
-            </div>
-
-            <Button
-              className="w-full rounded-full gap-2 text-sm"
-              onClick={saveModelPreferences}
-              disabled={modelSaving || (!agentModel && !tradingModel)}
-            >
-              {modelSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
-               modelSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
-               modelSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
-               <Save className="h-4 w-4" />}
-              {modelSaveStatus === "success" ? "Model preferences saved" :
-               modelSaveStatus === "error" ? "Save failed — try again" :
-               "Save Model Preferences"}
-            </Button>
-          </>
-        )}
+        <div className="px-6 pb-5">
+          <Button
+            className="w-full rounded-full gap-2 text-sm"
+            onClick={handleSaveKalshiKeys}
+            disabled={kalshiSaving || (!kalshiLive.key_id || !kalshiLive.private_key)}
+          >
+            {kalshiSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+             kalshiSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+             kalshiSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+             <Save className="h-4 w-4" />}
+            {kalshiSaveStatus === "success" ? "Kalshi credentials saved" :
+             kalshiSaveStatus === "error" ? "Save failed — try again" :
+             "Save Kalshi Keys"}
+          </Button>
+        </div>
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">

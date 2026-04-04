@@ -87,6 +87,264 @@ const CHECK_PORTFOLIO_TOOL = {
   },
 };
 
+// ─── Provider routing ────────────────────────────────────────────────────────
+
+type Provider = "openrouter" | "anthropic" | "openai" | "google";
+
+function getProvider(model: string): Provider {
+  if (model.startsWith("claude-")) return "anthropic";
+  if (
+    model.startsWith("gpt-") ||
+    model.startsWith("o1-") ||
+    model.startsWith("o3-") ||
+    model.startsWith("o4-")
+  )
+    return "openai";
+  // "gemini-*" without slash = direct Google; "google/gemini-*" with slash = OpenRouter
+  if (model.startsWith("gemini-") || model.startsWith("models/")) return "google";
+  return "openrouter"; // anything with "/" (e.g. "google/gemini-flash-1.5") or unknown
+}
+
+// Returns { baseUrl, apiKey, headers } for non-Anthropic providers (OpenAI-compatible)
+function getOpenAICompatConfig(
+  provider: Provider,
+  keys: Record<string, string>
+): { baseUrl: string; apiKey: string } | null {
+  if (provider === "openai") {
+    const key = keys["openai"];
+    if (!key) return null;
+    return { baseUrl: "https://api.openai.com/v1", apiKey: key };
+  }
+  if (provider === "google") {
+    const key = keys["google"];
+    if (!key) return null;
+    return { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: key };
+  }
+  // openrouter
+  const key = keys["openrouter"];
+  if (!key) return null;
+  return { baseUrl: "https://openrouter.ai/api/v1", apiKey: key };
+}
+
+// ─── Anthropic format converters ────────────────────────────────────────────
+
+/** Convert OpenAI-style tools to Anthropic input_schema format */
+function toAnthropicTools(tools: any[]): any[] {
+  return tools.map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    input_schema: t.function.parameters,
+  }));
+}
+
+/** Convert OpenAI-style messages to Anthropic format. Returns { system, messages } */
+function toAnthropicMessages(msgs: any[]): { system: string; messages: any[] } {
+  let system = "";
+  const out: any[] = [];
+
+  for (const m of msgs) {
+    if (m.role === "system") {
+      system += (system ? "\n\n" : "") + m.content;
+      continue;
+    }
+    if (m.role === "tool") {
+      // Anthropic tool_result must be a user message
+      const last = out[out.length - 1];
+      const block = {
+        type: "tool_result",
+        tool_use_id: m.tool_call_id,
+        content: m.content,
+      };
+      if (last?.role === "user" && Array.isArray(last.content)) {
+        last.content.push(block);
+      } else {
+        out.push({ role: "user", content: [block] });
+      }
+      continue;
+    }
+    if (m.role === "assistant" && m.tool_calls?.length) {
+      // Convert tool_calls to Anthropic tool_use content blocks
+      const content: any[] = [];
+      if (m.content) content.push({ type: "text", text: m.content });
+      for (const tc of m.tool_calls) {
+        content.push({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.function.name,
+          input:
+            typeof tc.function.arguments === "string"
+              ? JSON.parse(tc.function.arguments)
+              : tc.function.arguments,
+        });
+      }
+      out.push({ role: "assistant", content });
+      continue;
+    }
+    // Regular user/assistant message
+    out.push({ role: m.role, content: m.content });
+  }
+
+  return { system, messages: out };
+}
+
+/** Convert Anthropic response back to OpenAI format for the loop */
+function fromAnthropicResponse(data: any): any {
+  const content = data.content || [];
+  const textBlocks = content.filter((b: any) => b.type === "text");
+  const toolBlocks = content.filter((b: any) => b.type === "tool_use");
+
+  const message: any = {
+    role: "assistant",
+    content: textBlocks.map((b: any) => b.text).join("") || null,
+    tool_calls: toolBlocks.map((b: any) => ({
+      id: b.id,
+      type: "function",
+      function: {
+        name: b.name,
+        arguments: JSON.stringify(b.input),
+      },
+    })),
+  };
+
+  const finishReason =
+    data.stop_reason === "tool_use"
+      ? "tool_calls"
+      : data.stop_reason === "end_turn"
+      ? "stop"
+      : data.stop_reason;
+
+  return {
+    choices: [
+      {
+        message,
+        finish_reason: finishReason,
+      },
+    ],
+  };
+}
+
+/** Non-streaming call to Anthropic */
+async function callAnthropicNonStream(
+  model: string,
+  apiKey: string,
+  msgs: any[],
+  tools: any[],
+  temperature: number
+): Promise<any> {
+  const { system, messages } = toAnthropicMessages(msgs);
+  const body: any = {
+    model,
+    max_tokens: 8192,
+    messages,
+    temperature,
+  };
+  if (system) body.system = system;
+  if (tools.length > 0) body.tools = toAnthropicTools(tools);
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const status = resp.status;
+    const text = await resp.text();
+    throw new Error(`Anthropic error ${status}: ${text}`);
+  }
+  const data = await resp.json();
+  return fromAnthropicResponse(data);
+}
+
+/** Stream Anthropic response and re-emit as OpenAI SSE for the frontend */
+async function streamAnthropicAsSSE(
+  model: string,
+  apiKey: string,
+  msgs: any[],
+  temperature: number
+): Promise<Response> {
+  const { system, messages } = toAnthropicMessages(msgs);
+  const body: any = {
+    model,
+    max_tokens: 8192,
+    messages,
+    temperature,
+    stream: true,
+  };
+  if (system) body.system = system;
+
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Anthropic stream error ${resp.status}: ${text}`);
+  }
+
+  // Convert Anthropic SSE → OpenAI SSE
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  (async () => {
+    const reader = resp.body!.getReader();
+    let buf = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          let line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (!line.startsWith("data: ")) continue;
+          const json = line.slice(6).trim();
+          try {
+            const evt = JSON.parse(json);
+            if (
+              evt.type === "content_block_delta" &&
+              evt.delta?.type === "text_delta" &&
+              evt.delta.text
+            ) {
+              const chunk = {
+                choices: [{ delta: { content: evt.delta.text } }],
+              };
+              await writer.write(
+                encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+              );
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      }
+    } finally {
+      await writer.write(encoder.encode("data: [DONE]\n\n"));
+      await writer.close();
+    }
+  })();
+
+  return new Response(readable, {
+    headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
+  });
+}
+
+// ─── Main handler ────────────────────────────────────────────────────────────
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -98,22 +356,66 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // AI gateway — read from DB api_keys table first, fall back to env vars
-    const [{ data: orKey }, { data: oaiKey }] = await Promise.all([
-      supabase.from("api_keys").select("encrypted_secret").eq("provider", "openrouter").single(),
-      supabase.from("api_keys").select("encrypted_secret").eq("provider", "openai").single(),
-    ]);
+    // Read all saved AI provider keys from DB
+    const { data: keyRows } = await supabase
+      .from("api_keys")
+      .select("provider, encrypted_secret")
+      .in("provider", ["openrouter", "openai", "anthropic", "google"]);
 
-    const AI_API_KEY =
-      orKey?.encrypted_secret ||
-      Deno.env.get("OPENROUTER_API_KEY") ||
-      oaiKey?.encrypted_secret ||
-      Deno.env.get("OPENAI_API_KEY");
+    const keys: Record<string, string> = {};
+    for (const row of keyRows || []) {
+      if (row.encrypted_secret) keys[row.provider] = row.encrypted_secret;
+    }
+    // Fall back to env vars
+    if (!keys["openrouter"]) keys["openrouter"] = Deno.env.get("OPENROUTER_API_KEY") || "";
+    if (!keys["openai"]) keys["openai"] = Deno.env.get("OPENAI_API_KEY") || "";
+    if (!keys["anthropic"]) keys["anthropic"] = Deno.env.get("ANTHROPIC_API_KEY") || "";
+    if (!keys["google"]) keys["google"] = Deno.env.get("GOOGLE_AI_API_KEY") || "";
 
-    const AI_BASE_URL = "https://openrouter.ai/api";
-    if (!AI_API_KEY) throw new Error("AI API key not configured. Add an OpenRouter or OpenAI key in Settings.");
+    // Resolve model
+    const modelMap: Record<string, string> = {
+      "gemini-flash": "google/gemini-flash-1.5",
+      "gemini-pro": "google/gemini-pro-1.5",
+      "gpt5": "openai/gpt-4o",
+      "gpt5-mini": "openai/gpt-4o-mini",
+    };
+    let resolvedModel = modelMap[model] || (model?.trim() || null);
+    if (!resolvedModel) {
+      const { data: savedModel } = await supabase
+        .from("api_keys")
+        .select("key_id")
+        .eq("provider", "model_agent")
+        .single();
+      resolvedModel = savedModel?.key_id || "google/gemini-flash-1.5";
+    }
 
-    // Build strategy context — include IDs so agent can tag trades properly
+    // Determine provider and verify we have a key for it
+    const provider = getProvider(resolvedModel);
+
+    // If the determined provider has no key but OpenRouter does, fall back to OpenRouter
+    const effectiveProvider =
+      keys[provider] ? provider : keys["openrouter"] ? "openrouter" : provider;
+
+    // For non-Anthropic providers, ensure the model has the right prefix for OpenRouter
+    let finalModel = resolvedModel;
+    if (effectiveProvider === "openrouter" && provider !== "openrouter") {
+      // e.g. "claude-sonnet-4-6" → "anthropic/claude-sonnet-4-6"
+      if (provider === "anthropic" && !resolvedModel.includes("/")) {
+        finalModel = `anthropic/${resolvedModel}`;
+      } else if (provider === "google" && !resolvedModel.includes("/")) {
+        finalModel = `google/${resolvedModel}`;
+      } else if (provider === "openai" && !resolvedModel.includes("/")) {
+        finalModel = `openai/${resolvedModel}`;
+      }
+    }
+
+    if (!keys[effectiveProvider]) {
+      throw new Error(
+        "No AI API key configured. Add an OpenRouter, OpenAI, Anthropic, or Google key in Settings."
+      );
+    }
+
+    // Build strategy context
     let strategyBlock = "";
     if (strategies && strategies.length > 0) {
       strategyBlock =
@@ -122,7 +424,8 @@ serve(async (req) => {
         const sid = s.id || s.name;
         strategyBlock += `### [${sid}] ${s.name}\n${s.instructions}\n\n`;
       }
-      strategyBlock += "When executing trades, set strategyId to the strategy's ID (e.g. 'S-001') and strategy to the strategy name.\n";
+      strategyBlock +=
+        "When executing trades, set strategyId to the strategy's ID (e.g. 'S-001') and strategy to the strategy name.\n";
     }
 
     const mode = tradingMode || "paper";
@@ -131,7 +434,6 @@ serve(async (req) => {
         ? "\n\n--- TRADING MODE: PAPER. All trades are simulated. No real money is at risk."
         : "\n\n--- TRADING MODE: LIVE. Trades execute on Kalshi with real money. Apply strict risk management.";
 
-    // Fetch current risk settings for context
     const { data: riskSettings } = await supabase.from("risk_settings").select("*").single();
     let riskContext = "";
     if (riskSettings) {
@@ -177,92 +479,106 @@ Important Kalshi-specific notes:
 
 Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
 
-    // Legacy short aliases → full OpenRouter model IDs
-    const modelMap: Record<string, string> = {
-      "gemini-flash": "google/gemini-flash-1.5",
-      "gemini-pro": "google/gemini-pro-1.5",
-      "gpt5": "openai/gpt-4o",
-      "gpt5-mini": "openai/gpt-4o-mini",
-    };
-
-    // If model is a known short alias, map it; if it already looks like a full ID (contains "/"), use as-is;
-    // otherwise fall back to the saved model_agent preference from DB, then a sensible default.
-    let resolvedModel = modelMap[model] || (model?.includes("/") ? model : null);
-    if (!resolvedModel) {
-      const { data: savedModel } = await supabase
-        .from("api_keys")
-        .select("key_id")
-        .eq("provider", "model_agent")
-        .single();
-      resolvedModel = savedModel?.key_id || "google/gemini-flash-1.5";
-    }
-
+    const allTools = [TRADE_TOOL, FETCH_MARKETS_TOOL, CANCEL_ORDER_TOOL, CHECK_PORTFOLIO_TOOL];
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 5;
 
     while (maxIterations > 0) {
       maxIterations--;
 
-      const response = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${AI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: resolvedModel,
-          messages: aiMessages,
-          tools: [TRADE_TOOL, FETCH_MARKETS_TOOL, CANCEL_ORDER_TOOL, CHECK_PORTFOLIO_TOOL],
-          temperature: temperature ?? 0.3,
-          stream: false,
-        }),
-      });
+      let result: any;
 
-      if (!response.ok) {
-        const status = response.status;
-        if (status === 429) {
-          return new Response(JSON.stringify({ error: "Rate limit exceeded. Please wait and try again." }), {
-            status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-        if (status === 402) {
-          return new Response(JSON.stringify({ error: "Usage credits depleted. Please add credits." }), {
-            status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-        const t = await response.text();
-        console.error("AI error:", status, t);
-        return new Response(JSON.stringify({ error: "AI service error" }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
+      if (effectiveProvider === "anthropic") {
+        result = await callAnthropicNonStream(
+          finalModel,
+          keys["anthropic"],
+          aiMessages,
+          allTools,
+          temperature ?? 0.3
+        );
+      } else {
+        const cfg = getOpenAICompatConfig(effectiveProvider, keys);
+        if (!cfg) throw new Error(`No API key for provider: ${effectiveProvider}`);
 
-      const result = await response.json();
-      const choice = result.choices?.[0];
-
-      if (!choice) {
-        return new Response(JSON.stringify({ error: "No response from AI" }), {
-          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      // If no tool calls, stream the final response
-      if (choice.finish_reason !== "tool_calls" || !choice.message?.tool_calls?.length) {
-        const streamResponse = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
+        const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${AI_API_KEY}`,
+            Authorization: `Bearer ${cfg.apiKey}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: resolvedModel,
+            model: finalModel,
+            messages: aiMessages,
+            tools: allTools,
+            temperature: temperature ?? 0.3,
+            stream: false,
+          }),
+        });
+
+        if (!resp.ok) {
+          const status = resp.status;
+          if (status === 429) {
+            return new Response(
+              JSON.stringify({ error: "Rate limit exceeded. Please wait and try again." }),
+              { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          if (status === 402) {
+            return new Response(
+              JSON.stringify({ error: "Usage credits depleted. Please add credits." }),
+              { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            );
+          }
+          const t = await resp.text();
+          console.error("AI error:", status, t);
+          return new Response(JSON.stringify({ error: "AI service error" }), {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        result = await resp.json();
+      }
+
+      const choice = result.choices?.[0];
+      if (!choice) {
+        return new Response(JSON.stringify({ error: "No response from AI" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // No tool calls — stream the final response
+      if (
+        choice.finish_reason !== "tool_calls" ||
+        !choice.message?.tool_calls?.length
+      ) {
+        if (effectiveProvider === "anthropic") {
+          return await streamAnthropicAsSSE(
+            finalModel,
+            keys["anthropic"],
+            aiMessages,
+            temperature ?? 0.3
+          );
+        }
+
+        // OpenAI-compatible streaming
+        const cfg = getOpenAICompatConfig(effectiveProvider, keys)!;
+        const streamResp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${cfg.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: finalModel,
             messages: aiMessages,
             temperature: temperature ?? 0.3,
             stream: true,
           }),
         });
 
-        return new Response(streamResponse.body, {
+        return new Response(streamResp.body, {
           headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
         });
       }
@@ -306,12 +622,11 @@ Always be transparent about your reasoning and risk assessment. Format responses
               spread: ((m.yes_ask || 0) - (m.yes_bid || 0)).toFixed(2),
             }));
             toolResult = JSON.stringify({ markets: markets.slice(0, limit) });
-          } catch (e) {
+          } catch (e: any) {
             toolResult = JSON.stringify({ error: "Failed to fetch Kalshi markets: " + e.message });
           }
         } else if (fnName === "execute_trade") {
           try {
-            // Call our execute-trade function internally
             const tradePayload = {
               ticker: args.ticker,
               marketId: args.ticker,
@@ -326,16 +641,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
               notes: `Agent trade: ${args.reasoning}`,
             };
 
-            // Execute via internal function call
-            const tradeData = {
-              ...tradePayload,
-              market_id: args.ticker,
-              market_question: args.marketQuestion,
-            };
-
-            // Insert trade record
-            const tradeMode = mode;
-            if (tradeMode === "paper") {
+            if (mode === "paper") {
               const { data: trade, error: insertError } = await supabase
                 .from("trades")
                 .insert({
@@ -362,7 +668,6 @@ Always be transparent about your reasoning and risk assessment. Format responses
 
               if (insertError) throw insertError;
 
-              // Log compliance
               await supabase.from("compliance_log").insert({
                 trade_id: trade.id,
                 event_type: "order_filled",
@@ -377,7 +682,6 @@ Always be transparent about your reasoning and risk assessment. Format responses
                 message: `PAPER trade: ${args.action.toUpperCase()} ${args.side.toUpperCase()} ${args.ticker} @ ${args.price}c for $${args.amount}`,
               });
             } else {
-              // For live mode, call the execute-trade edge function
               const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
               const execResp = await fetch(execUrl, {
                 method: "POST",
@@ -390,12 +694,14 @@ Always be transparent about your reasoning and risk assessment. Format responses
               const execResult = await execResp.json();
               toolResult = JSON.stringify(execResult);
             }
-          } catch (e) {
-            toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
+          } catch (e: any) {
+            toolResult = JSON.stringify({
+              success: false,
+              error: "Trade execution failed: " + e.message,
+            });
           }
         } else if (fnName === "cancel_order") {
           try {
-            // Update trade status in DB
             const { data: trades } = await supabase
               .from("trades")
               .update({
@@ -406,10 +712,8 @@ Always be transparent about your reasoning and risk assessment. Format responses
               .eq("order_id", args.orderId)
               .select();
 
-            // If live mode, cancel on Kalshi too
             if (mode === "live") {
               const kalshiBase = getKalshiBaseUrl();
-              // Note: In production, this would use authenticated headers
               await fetch(`${kalshiBase}/portfolio/orders/${args.orderId}`, {
                 method: "DELETE",
               });
@@ -427,19 +731,17 @@ Always be transparent about your reasoning and risk assessment. Format responses
               success: true,
               message: `Order ${args.orderId} cancelled: ${args.reason}`,
             });
-          } catch (e) {
+          } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Cancel failed: " + e.message });
           }
         } else if (fnName === "check_portfolio") {
           try {
-            // Get recent trades
             const { data: recentTrades } = await supabase
               .from("trades")
               .select("*")
               .order("created_at", { ascending: false })
               .limit(10);
 
-            // Get open positions
             const { data: openPositions } = await supabase
               .from("trades")
               .select("*")
@@ -447,7 +749,6 @@ Always be transparent about your reasoning and risk assessment. Format responses
               .eq("action", "buy")
               .order("created_at", { ascending: false });
 
-            // Get today's risk state
             const today = new Date().toISOString().split("T")[0];
             const { data: riskState } = await supabase
               .from("risk_state")
@@ -460,8 +761,10 @@ Always be transparent about your reasoning and risk assessment. Format responses
               positions: openPositions || [],
               risk_state: riskState || { daily_pnl: 0, daily_trades: 0 },
             });
-          } catch (e) {
-            toolResult = JSON.stringify({ error: "Failed to fetch portfolio: " + e.message });
+          } catch (e: any) {
+            toolResult = JSON.stringify({
+              error: "Failed to fetch portfolio: " + e.message,
+            });
           }
         } else {
           toolResult = JSON.stringify({ error: "Unknown tool" });
@@ -475,15 +778,25 @@ Always be transparent about your reasoning and risk assessment. Format responses
       }
     }
 
-    // Exhausted iterations, final stream
-    const streamResponse = await fetch(`${AI_BASE_URL}/v1/chat/completions`, {
+    // Exhausted iterations — final stream
+    if (effectiveProvider === "anthropic") {
+      return await streamAnthropicAsSSE(
+        finalModel,
+        keys["anthropic"],
+        aiMessages,
+        temperature ?? 0.3
+      );
+    }
+
+    const cfg = getOpenAICompatConfig(effectiveProvider, keys)!;
+    const streamResponse = await fetch(`${cfg.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${AI_API_KEY}`,
+        Authorization: `Bearer ${cfg.apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: resolvedModel,
+        model: finalModel,
         messages: aiMessages,
         temperature: temperature ?? 0.3,
         stream: true,
@@ -495,9 +808,12 @@ Always be transparent about your reasoning and risk assessment. Format responses
     });
   } catch (e) {
     console.error("trading-agent error:", e);
-    return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
   }
 });
