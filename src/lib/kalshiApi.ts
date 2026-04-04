@@ -186,6 +186,13 @@ export async function fetchKalshiMarkets(
   const markets: KalshiMarket[] = data.markets || [];
 
   return markets.map((m) => {
+    // Skip markets with no real price data (unstarted/illiquid MVE parlays)
+    const hasPrice =
+      Number(m.yes_ask_dollars ?? m.yes_ask) > 0 ||
+      Number(m.yes_bid_dollars ?? m.yes_bid) > 0 ||
+      (Number(m.no_bid_dollars ?? m.no_bid) > 0 && Number(m.no_bid_dollars ?? m.no_bid) < 0.999) ||
+      Number(m.last_price_dollars ?? m.last_price) > 0;
+    if (!hasPrice) return null;
     const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
     const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
     const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
@@ -216,7 +223,7 @@ export async function fetchKalshiMarkets(
     active: m.status === "open",
     spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
   });
-  });
+  }).filter((m): m is ParsedMarket => m !== null);
 }
 
 export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | null> {
