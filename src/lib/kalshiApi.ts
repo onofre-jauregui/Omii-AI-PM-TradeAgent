@@ -106,14 +106,17 @@ function formatDate(dateStr: string): string {
  *  - Derives from the opposite side when own prices are absent */
 function resolvePrice(bid: number, ask: number, oppositeBid: number, oppositeAsk: number, last: number): { yes: number; no: number } {
   // YES: use mid when bid > 0, otherwise fall back to ask price
-  const yesMid = bid > 0 && ask > 0
-    ? Math.round((bid + ask) / 2 * 100)
-    : ask > 0 ? Math.round(ask * 100) : 0;
+  // YES: treat ask<0.5¢ or ≥100c as non-quote (ceiling/sub-cent placeholder)
+  const realAsk = ask >= 0.005 && ask < 0.999 ? ask : 0;
+  const yesMid = bid > 0 && realAsk > 0
+    ? Math.round((bid + realAsk) / 2 * 100)
+    : realAsk > 0 ? Math.round(realAsk * 100) : 0;
 
-  // NO: prefer bid; only use mid when ask isn't at the 1.0 ceiling placeholder
-  const noMid = oppositeBid > 0 && oppositeAsk > 0 && oppositeAsk < 0.999
-    ? Math.round((oppositeBid + oppositeAsk) / 2 * 100)
-    : oppositeBid > 0 ? Math.round(oppositeBid * 100) : 0;
+  // NO: filter out ceiling placeholders on bid side too (no_bid = 1.0 is not a real quote)
+  const realNoBid = oppositeBid >= 0.005 && oppositeBid < 0.999 ? oppositeBid : 0;
+  const noMid = realNoBid > 0 && oppositeAsk > 0 && oppositeAsk < 0.999
+    ? Math.round((realNoBid + oppositeAsk) / 2 * 100)
+    : realNoBid > 0 ? Math.round(realNoBid * 100) : 0;
 
   const lastCents = last > 0 ? Math.round(last * 100) : 0;
 
@@ -187,11 +190,16 @@ export async function fetchKalshiMarkets(
 
   return markets.map((m) => {
     // Skip markets with no real price data (unstarted/illiquid MVE parlays)
-    const hasPrice =
-      Number(m.yes_ask_dollars ?? m.yes_ask) > 0 ||
-      Number(m.yes_bid_dollars ?? m.yes_bid) > 0 ||
-      (Number(m.no_bid_dollars ?? m.no_bid) > 0 && Number(m.no_bid_dollars ?? m.no_bid) < 0.999) ||
-      Number(m.last_price_dollars ?? m.last_price) > 0;
+    const _ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+    const _yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+    const _nb = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
+    const _last = Number(m.last_price_dollars ?? m.last_price) || 0;
+    // Minimum 0.5¢ threshold so sub-cent values don't round to 0c display
+    const hasRealYes  = (_ya >= 0.005 && _ya < 0.999) || _yb >= 0.005;
+    const hasRealNo   = _nb >= 0.005 && _nb < 0.995;
+    const hasRealLast = _last >= 0.005 && _last < 0.995;
+    // Require at least a real YES quote OR last price; don't show markets with ONLY a near-100c NO bid
+    const hasPrice = hasRealYes || hasRealLast || (hasRealNo && _nb < 0.97);
     if (!hasPrice) return null;
     const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
     const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
