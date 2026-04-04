@@ -42,7 +42,17 @@ export function MarketsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchKalshiMarkets(100);
+      // When a horizon is selected, pass max_close_ts to the Kalshi API so we
+      // get markets that actually close within that window (not just filter client-side)
+      const extraParams: Record<string, string> = {};
+      const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
+      if (horizonDef?.hours) {
+        const maxTs = Math.floor((Date.now() + horizonDef.hours * 3600 * 1000) / 1000);
+        extraParams.max_close_ts = String(maxTs);
+        // Also set min_close_ts to now so we don't get already-closed markets
+        extraParams.min_close_ts = String(Math.floor(Date.now() / 1000));
+      }
+      const data = await fetchKalshiMarkets(100, undefined, extraParams);
       setMarkets(data);
       setLastUpdated(new Date());
     } catch (err) {
@@ -51,12 +61,12 @@ export function MarketsPanel() {
       setMarkets(MOCK_MARKETS.map(m => ({
         ...m, ticker: m.id, description: "", volume24hr: 0, liquidity: 0,
         openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0,
-        yesAsk: 0, noBid: 0, noAsk: 0,
+        yesAsk: 0, noBid: 0, noAsk: 0, closeTime: "",
       })));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [horizon]);
 
   useEffect(() => {
     loadMarkets();
@@ -83,17 +93,6 @@ export function MarketsPanel() {
       list = list.filter(m => m.question.toLowerCase().includes(q) || m.ticker.toLowerCase().includes(q));
     }
 
-    // Time horizon filter using raw closeTime ISO string
-    const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
-    if (horizonDef?.hours !== null && horizonDef?.hours !== undefined) {
-      const cutoff = Date.now() + horizonDef.hours * 60 * 60 * 1000;
-      list = list.filter(m => {
-        if (!m.closeTime) return false;
-        const closeMs = new Date(m.closeTime).getTime();
-        return closeMs > Date.now() && closeMs <= cutoff;
-      });
-    }
-
     list = [...list].sort((a, b) => {
       switch (sortBy) {
         case "volume": return b.volume - a.volume;
@@ -110,7 +109,7 @@ export function MarketsPanel() {
     });
 
     return list;
-  }, [markets, activeCategory, search, sortBy, horizon]);
+  }, [markets, activeCategory, search, sortBy]);
 
   return (
     <div className="space-y-5 apple-reveal">
