@@ -4,7 +4,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle, Info, Cpu, RefreshCw } from "lucide-react";
+import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle, Cpu, RefreshCw } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -17,11 +17,16 @@ interface AIModel {
 
 const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-ai-models`;
 
-// Status dot for each key
-function KeyStatus({ saved }: { saved: boolean }) {
-  return saved
-    ? <CheckCircle className="h-3.5 w-3.5 text-profit shrink-0" />
-    : <Circle className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />;
+function StatusBadge({ saved }: { saved: boolean }) {
+  return saved ? (
+    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-profit bg-profit/10 px-2.5 py-1 rounded-full">
+      <CheckCircle className="h-3 w-3" /> Configured
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground bg-secondary px-2.5 py-1 rounded-full">
+      <Circle className="h-3 w-3" /> Not configured
+    </span>
+  );
 }
 
 export function SettingsPanel() {
@@ -212,105 +217,138 @@ export function SettingsPanel() {
         <p className="text-sm text-muted-foreground mt-1">API keys are stored in your database and used by the trading engine automatically.</p>
       </div>
 
-      {/* ── Kalshi Live Trading ─────────────────────────────────── */}
-      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Key className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
-            <KeyStatus saved={savedProviders.has("kalshi_live")} />
-          </div>
-          <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Real money only</span>
+      {/* ── API Keys ────────────────────────────────────────────── */}
+      <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+        <div className="px-6 py-4 border-b border-border flex items-center gap-2">
+          <Key className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium">API Keys</h3>
         </div>
 
-        <div className="rounded-xl bg-secondary/50 px-4 py-3 flex gap-2">
-          <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            <strong className="text-foreground">Paper trading works without these keys</strong> — real live market prices are fetched from Kalshi's public API automatically.
-            Only add these when you're ready to trade with real money. Fund your account at kalshi.com first.
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label className="text-sm text-muted-foreground">API Key ID</Label>
-          <Input
-            type="password"
-            value={kalshiLive.key_id}
-            onChange={(e) => setKalshiLive(prev => ({ ...prev, key_id: e.target.value }))}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            className="rounded-xl border-0 bg-secondary text-sm font-mono"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-sm text-muted-foreground">RSA Private Key</Label>
-          <textarea
-            value={kalshiLive.private_key}
-            onChange={(e) => setKalshiLive(prev => ({ ...prev, private_key: e.target.value }))}
-            placeholder={"-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"}
-            className="w-full rounded-xl border-0 bg-secondary text-xs font-mono p-3 min-h-[100px] resize-y text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
-          />
-          <p className="text-[10px] text-muted-foreground">
-            Generated at kalshi.com → Account → API Keys. The private key signs each request — it never leaves your server.
-          </p>
-        </div>
-      </div>
-
-      {/* ── AI Provider Keys ────────────────────────────────────── */}
-      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Key className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">AI Model Keys</h3>
-            <KeyStatus saved={savedProviders.has("openrouter") || savedProviders.has("openai") || savedProviders.has("anthropic")} />
-          </div>
-          <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Required for agent</span>
-        </div>
-
-        <div className="rounded-xl bg-secondary/50 px-4 py-3 flex gap-2">
-          <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            <strong className="text-foreground">OpenRouter is recommended</strong> — one key gives you access to GPT-4, Gemini, Claude, and more.
-            Get one at openrouter.ai for ~$5. Or use a direct provider key below.
-          </p>
-        </div>
-
-        {[
-          { key: "openrouter" as const, label: "OpenRouter API Key", placeholder: "sk-or-v1-...", recommended: true },
-          { key: "openai" as const, label: "OpenAI API Key", placeholder: "sk-proj-...", recommended: false },
-          { key: "anthropic" as const, label: "Anthropic API Key", placeholder: "sk-ant-api03-...", recommended: false },
-          { key: "google" as const, label: "Google AI API Key", placeholder: "AIzaSy...", recommended: false },
-        ].map((item) => (
-          <div key={item.key} className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Label className="text-sm text-muted-foreground">{item.label}</Label>
-              <KeyStatus saved={savedProviders.has(item.key)} />
-              {item.recommended && (
-                <span className="text-[9px] text-primary bg-primary/10 px-1.5 py-0.5 rounded-full">Recommended</span>
-              )}
+        {/* Kalshi Live */}
+        <div className="px-6 py-5 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">Kalshi — Live Trading</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Required only for real-money trading. Paper trading works without this.
+              </p>
             </div>
+            <StatusBadge saved={savedProviders.has("kalshi_live")} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
             <Input
               type="password"
-              value={aiKeys[item.key]}
-              onChange={(e) => setAiKeys(prev => ({ ...prev, [item.key]: e.target.value }))}
-              placeholder={item.placeholder}
-              className="rounded-xl border-0 bg-secondary text-sm font-mono"
+              value={kalshiLive.key_id}
+              onChange={(e) => setKalshiLive(prev => ({ ...prev, key_id: e.target.value }))}
+              placeholder="API Key ID"
+              className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+            />
+            <Input
+              type="password"
+              value={kalshiLive.private_key}
+              onChange={(e) => setKalshiLive(prev => ({ ...prev, private_key: e.target.value }))}
+              placeholder="RSA Private Key"
+              className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
             />
           </div>
-        ))}
+          <p className="text-[10px] text-muted-foreground">
+            Generate at kalshi.com → Account → API Keys. Your private key never leaves your server.
+          </p>
+        </div>
 
-        <Button
-          className="w-full rounded-full gap-2 text-sm mt-2"
-          onClick={handleSaveApiKeys}
-          disabled={saving}
-        >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> :
-           saveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
-           saveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
-           <Save className="h-4 w-4" />}
-          {saveStatus === "success" ? "Saved — engine will use these keys" :
-           saveStatus === "error" ? "Save failed — try again" :
-           "Save API Keys"}
-        </Button>
+        {/* OpenRouter */}
+        <div className="px-6 py-5 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium">OpenRouter</p>
+                <span className="text-[10px] text-primary bg-primary/10 px-2 py-0.5 rounded-full font-medium">Recommended</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                One key gives access to GPT-4, Gemini, Claude, Llama, and 200+ models.
+              </p>
+            </div>
+            <StatusBadge saved={savedProviders.has("openrouter")} />
+          </div>
+          <Input
+            type="password"
+            value={aiKeys.openrouter}
+            onChange={(e) => setAiKeys(prev => ({ ...prev, openrouter: e.target.value }))}
+            placeholder="sk-or-v1-..."
+            className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+          />
+        </div>
+
+        {/* OpenAI */}
+        <div className="px-6 py-5 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">OpenAI</p>
+              <p className="text-xs text-muted-foreground mt-0.5">GPT-4o, o1, o3, and other OpenAI models directly.</p>
+            </div>
+            <StatusBadge saved={savedProviders.has("openai")} />
+          </div>
+          <Input
+            type="password"
+            value={aiKeys.openai}
+            onChange={(e) => setAiKeys(prev => ({ ...prev, openai: e.target.value }))}
+            placeholder="sk-proj-..."
+            className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+          />
+        </div>
+
+        {/* Anthropic */}
+        <div className="px-6 py-5 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">Anthropic</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Claude Opus, Sonnet, and Haiku models directly.</p>
+            </div>
+            <StatusBadge saved={savedProviders.has("anthropic")} />
+          </div>
+          <Input
+            type="password"
+            value={aiKeys.anthropic}
+            onChange={(e) => setAiKeys(prev => ({ ...prev, anthropic: e.target.value }))}
+            placeholder="sk-ant-api03-..."
+            className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+          />
+        </div>
+
+        {/* Google AI */}
+        <div className="px-6 py-5 border-b border-border space-y-3">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">Google AI</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Gemini 2.5 Pro, Flash, and other Gemini models directly.</p>
+            </div>
+            <StatusBadge saved={savedProviders.has("google")} />
+          </div>
+          <Input
+            type="password"
+            value={aiKeys.google}
+            onChange={(e) => setAiKeys(prev => ({ ...prev, google: e.target.value }))}
+            placeholder="AIzaSy..."
+            className="rounded-xl border border-border bg-secondary/50 text-sm font-mono placeholder:font-sans"
+          />
+        </div>
+
+        {/* Save button */}
+        <div className="px-6 py-4">
+          <Button
+            className="w-full rounded-full gap-2 text-sm"
+            onClick={handleSaveApiKeys}
+            disabled={saving}
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+             saveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+             saveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+             <Save className="h-4 w-4" />}
+            {saveStatus === "success" ? "Saved — engine will use these keys" :
+             saveStatus === "error" ? "Save failed — try again" :
+             "Save API Keys"}
+          </Button>
+        </div>
       </div>
 
       {/* ── Model Preferences ───────────────────────────────────── */}
