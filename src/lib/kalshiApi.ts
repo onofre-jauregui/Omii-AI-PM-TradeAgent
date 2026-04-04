@@ -100,6 +100,28 @@ function formatDate(dateStr: string): string {
   }
 }
 
+/** Compute a display price in cents (0-99) from Kalshi bid/ask/last dollar values.
+ *  - Uses midpoint when both sides exist and ask < ceiling (1.0)
+ *  - Falls back to ask (for YES) or bid (for NO) when the other side is missing
+ *  - Derives from the opposite side when own prices are absent */
+function resolvePrice(bid: number, ask: number, oppositeBid: number, oppositeAsk: number, last: number): { yes: number; no: number } {
+  // YES: use mid when bid > 0, otherwise fall back to ask price
+  const yesMid = bid > 0 && ask > 0
+    ? Math.round((bid + ask) / 2 * 100)
+    : ask > 0 ? Math.round(ask * 100) : 0;
+
+  // NO: prefer bid; only use mid when ask isn't at the 1.0 ceiling placeholder
+  const noMid = oppositeBid > 0 && oppositeAsk > 0 && oppositeAsk < 0.999
+    ? Math.round((oppositeBid + oppositeAsk) / 2 * 100)
+    : oppositeBid > 0 ? Math.round(oppositeBid * 100) : 0;
+
+  const lastCents = last > 0 ? Math.round(last * 100) : 0;
+
+  const yes = yesMid || (noMid > 0 ? 100 - noMid : 0) || lastCents;
+  const no  = noMid  || (yesMid > 0 ? 100 - yesMid : 0) || (lastCents > 0 ? 100 - lastCents : 0);
+  return { yes, no };
+}
+
 function formatVolume(vol: number | string): string {
   const v = Number(vol) || 0;
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
@@ -170,10 +192,7 @@ export async function fetchKalshiMarkets(
     const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
     const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
 
-    const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
-    const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
-    const yesPrice = yesMid || (last > 0 ? Math.round(last * 100) : 0);
-    const noPrice  = noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0);
+    const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
 
     return ({
     id: m.ticker,
@@ -209,15 +228,14 @@ export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | 
   const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
   const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
   const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
-  const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
-  const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
+  const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
   return {
     id: m.ticker,
     ticker: m.ticker,
     question: m.title || m.subtitle,
     description: m.subtitle || "",
-    yesPrice: yesMid || (last > 0 ? Math.round(last * 100) : 0),
-    noPrice:  noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0),
+    yesPrice,
+    noPrice,
     yesBid: Math.round(yesBid * 100),
     yesAsk: Math.round(yesAsk * 100),
     noBid:  Math.round(noBid  * 100),
@@ -249,15 +267,14 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
         const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
         const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
         const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
-        const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
-        const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
+        const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
         allMarkets.push({
           id: m.ticker,
           ticker: m.ticker,
           question: m.title || event.title,
           description: m.subtitle || event.sub_title || "",
-          yesPrice: yesMid || (last > 0 ? Math.round(last * 100) : 0),
-          noPrice:  noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0),
+          yesPrice,
+          noPrice,
           yesBid: Math.round(yesBid * 100),
           yesAsk: Math.round(yesAsk * 100),
           noBid:  Math.round(noBid  * 100),
