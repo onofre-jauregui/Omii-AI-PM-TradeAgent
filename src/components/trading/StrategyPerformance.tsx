@@ -22,22 +22,27 @@ interface PerStrategyPoint {
   [strategyId: string]: number | string;
 }
 
-export function StrategyPerformance() {
+export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const { strategies, strategyStats } = useStrategies();
   const [chartData, setChartData] = useState<PerStrategyPoint[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const activeStrategies = strategies.filter(s => s.active || (strategyStats[s.id]?.totalTrades ?? 0) > 0);
+  const activeStrategies = strategies.filter(s =>
+    (s.active || (strategyStats[s.id]?.totalTrades ?? 0) > 0) &&
+    (!mode || s.mode === mode)
+  );
 
   const buildChartData = useCallback(async () => {
     setLoading(true);
 
     // Fetch all filled trades with strategy info
-    const { data: trades } = await supabase
+    let q = supabase
       .from("trades")
-      .select("strategy, strategy_id, pnl, amount, action, created_at, status")
+      .select("strategy, strategy_id, pnl, amount, action, created_at, status, mode")
       .eq("status", "filled")
       .order("created_at", { ascending: true });
+    if (mode) q = q.eq("mode", mode);
+    const { data: trades } = await q;
 
     if (!trades || trades.length === 0) {
       setChartData([]);

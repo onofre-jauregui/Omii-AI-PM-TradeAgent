@@ -146,8 +146,12 @@ async function kalshiProxyDelete(endpoint: string): Promise<any> {
 
 // ─── Market Data ─────────────────────────────────────────────
 
-export async function fetchKalshiMarkets(limit = 20, cursor?: string): Promise<ParsedMarket[]> {
-  const params: Record<string, string> = { limit: String(limit), status: "open" };
+export async function fetchKalshiMarkets(
+  limit = 50,
+  cursor?: string,
+  extraParams: Record<string, string> = {}
+): Promise<ParsedMarket[]> {
+  const params: Record<string, string> = { limit: String(limit), status: "open", ...extraParams };
   if (cursor) params.cursor = cursor;
 
   const data = await kalshiProxyGet("markets", params);

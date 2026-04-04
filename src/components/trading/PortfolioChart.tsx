@@ -16,33 +16,46 @@ const chartConfig = {
   },
 };
 
-export function PortfolioChart() {
+interface PortfolioChartProps {
+  mode?: "paper" | "live";
+  startingBalance?: number;
+  strategyFilter?: string | null; // strategy name to narrow by
+  label?: string;
+}
+
+export function PortfolioChart({
+  mode,
+  startingBalance = 5000,
+  strategyFilter,
+  label = "Portfolio Value",
+}: PortfolioChartProps) {
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadChartData = useCallback(async () => {
     setLoading(true);
 
-    // Fetch all filled trades ordered by date to build a cumulative P&L chart
-    const { data: trades } = await supabase
+    let q = supabase
       .from("trades")
-      .select("created_at, amount, pnl, action, status")
+      .select("created_at, amount, pnl, action, status, mode, strategy")
       .eq("status", "filled")
       .order("created_at", { ascending: true });
 
+    if (mode) q = q.eq("mode", mode);
+    if (strategyFilter) q = q.eq("strategy", strategyFilter);
+
+    const { data: trades } = await q;
+
     if (trades && trades.length > 0) {
-      const startingBalance = 5000; // Assumed starting balance
       let cumulativeValue = startingBalance;
       const points: ChartPoint[] = [{ date: "Start", value: startingBalance }];
 
       for (const trade of trades) {
         const pnl = trade.pnl || 0;
-        cumulativeValue += pnl;
-        // Subtract cost for buys, add for sells
         if (trade.action === "buy") {
-          cumulativeValue -= trade.amount;
+          cumulativeValue = cumulativeValue - trade.amount + pnl;
         } else {
-          cumulativeValue += trade.amount;
+          cumulativeValue = cumulativeValue + trade.amount + pnl;
         }
         points.push({
           date: new Date(trade.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
@@ -52,15 +65,14 @@ export function PortfolioChart() {
 
       setChartData(points);
     } else {
-      // No trades yet, show flat line at starting balance
       setChartData([
-        { date: "Start", value: 5000 },
-        { date: "Now", value: 5000 },
+        { date: "Start", value: startingBalance },
+        { date: "Now", value: startingBalance },
       ]);
     }
 
     setLoading(false);
-  }, []);
+  }, [mode, startingBalance, strategyFilter]);
 
   useEffect(() => {
     loadChartData();
@@ -74,16 +86,15 @@ export function PortfolioChart() {
     );
   }
 
-  const currentValue = chartData.length > 0 ? chartData[chartData.length - 1].value : 0;
-  const startValue = chartData.length > 0 ? chartData[0].value : 0;
-  const totalReturn = startValue > 0 ? (((currentValue - startValue) / startValue) * 100).toFixed(1) : "0.0";
-  const isPositive = currentValue >= startValue;
+  const currentValue = chartData.length > 0 ? chartData[chartData.length - 1].value : startingBalance;
+  const totalReturn = startingBalance > 0 ? (((currentValue - startingBalance) / startingBalance) * 100).toFixed(1) : "0.0";
+  const isPositive = currentValue >= startingBalance;
 
   return (
     <div className="space-y-6">
       <div className="flex items-end justify-between">
         <div>
-          <p className="text-muted-foreground text-sm mb-1">Portfolio Value</p>
+          <p className="text-muted-foreground text-sm mb-1">{label}</p>
           <h1 className="text-5xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.03em' }}>
             ${currentValue.toLocaleString()}
           </h1>
@@ -99,7 +110,7 @@ export function PortfolioChart() {
         <ChartContainer config={chartConfig} className="h-[200px] w-full">
           <AreaChart data={chartData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
             <defs>
-              <linearGradient id="portfolioGradient" x1="0" y1="0" x2="0" y2="1">
+              <linearGradient id={`portfolioGradient-${mode ?? "all"}`} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.15} />
                 <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
               </linearGradient>
@@ -123,7 +134,7 @@ export function PortfolioChart() {
               dataKey="value"
               stroke="hsl(var(--primary))"
               strokeWidth={2}
-              fill="url(#portfolioGradient)"
+              fill={`url(#portfolioGradient-${mode ?? "all"})`}
             />
           </AreaChart>
         </ChartContainer>

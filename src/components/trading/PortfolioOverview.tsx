@@ -28,7 +28,14 @@ interface Stats {
 
 // ─── Stat cards ───────────────────────────────────────────────────────────────
 // mode: 'paper' | 'live' | undefined (all)
-export function PortfolioStats({ mode }: { mode?: "paper" | "live" }) {
+export function PortfolioStats({
+  mode,
+  startingBalance: startingBalanceProp,
+}: {
+  mode?: "paper" | "live";
+  startingBalance?: number;
+}) {
+  const effectiveStartingBalance = startingBalanceProp ?? PAPER_STARTING_BALANCE;
   const [stats, setStats] = useState<Stats>({
     portfolioValue: 0, cashAvailable: 0, totalPnl: 0,
     winRate: 0, openPositionCount: 0, totalTrades: 0,
@@ -68,9 +75,9 @@ export function PortfolioStats({ mode }: { mode?: "paper" | "live" }) {
 
     if (mode === "paper") {
       // Paper balance = starting capital + all realized P&L
-      portfolioValue = PAPER_STARTING_BALANCE + totalPnl;
+      portfolioValue = effectiveStartingBalance + totalPnl;
       // Cash not currently tied up in open positions
-      cashAvailable = PAPER_STARTING_BALANCE - totalBuyAmount + totalSellAmount + totalPnl;
+      cashAvailable = effectiveStartingBalance - totalBuyAmount + totalSellAmount + totalPnl;
       cashAvailable = Math.max(0, cashAvailable);
     } else {
       // Live: sum of invested amounts (real portfolio balance requires Kalshi API call)
@@ -99,7 +106,7 @@ export function PortfolioStats({ mode }: { mode?: "paper" | "live" }) {
   }, [load, mode]);
 
   const pnlPercent = mode === "paper"
-    ? ((stats.totalPnl / PAPER_STARTING_BALANCE) * 100).toFixed(1)
+    ? ((stats.totalPnl / effectiveStartingBalance) * 100).toFixed(1)
     : stats.portfolioValue > 0
       ? ((stats.totalPnl / stats.portfolioValue) * 100).toFixed(1)
       : "0.0";
@@ -119,7 +126,7 @@ export function PortfolioStats({ mode }: { mode?: "paper" | "live" }) {
           icon={Wallet}
           label="Paper Balance"
           value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-          sub={`Started at $${PAPER_STARTING_BALANCE.toLocaleString()}`}
+          sub={`Started at $${effectiveStartingBalance.toLocaleString()}`}
         />
         <StatCard
           icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
