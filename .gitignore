@@ -1,3 +1,7 @@
+# Environment variables — never commit secrets
+.env
+.env.production
+
 # Logs
 logs
 *.log
@@ -22,3 +26,4 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.vercel
