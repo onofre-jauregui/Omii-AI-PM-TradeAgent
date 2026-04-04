@@ -10,6 +10,7 @@ import { MOCK_MARKETS } from "@/lib/mockData";
 import { cn } from "@/lib/utils";
 
 type SortKey = "volume" | "volume24h" | "yesPrice" | "noPrice" | "endDate";
+type Horizon = "any" | "today" | "week" | "month";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "volume", label: "Total Volume" },
@@ -17,6 +18,13 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "yesPrice", label: "Yes Price" },
   { value: "noPrice", label: "No Price" },
   { value: "endDate", label: "Closing Soon" },
+];
+
+const HORIZON_OPTIONS: { value: Horizon; label: string; hours: number | null }[] = [
+  { value: "any", label: "Any close date", hours: null },
+  { value: "today", label: "Closing today", hours: 24 },
+  { value: "week", label: "Closing this week", hours: 24 * 7 },
+  { value: "month", label: "Closing this month", hours: 24 * 30 },
 ];
 
 export function MarketsPanel() {
@@ -28,6 +36,7 @@ export function MarketsPanel() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("All");
   const [sortBy, setSortBy] = useState<SortKey>("volume");
+  const [horizon, setHorizon] = useState<Horizon>("any");
 
   const loadMarkets = useCallback(async () => {
     setLoading(true);
@@ -74,19 +83,34 @@ export function MarketsPanel() {
       list = list.filter(m => m.question.toLowerCase().includes(q) || m.ticker.toLowerCase().includes(q));
     }
 
+    // Time horizon filter using raw closeTime ISO string
+    const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
+    if (horizonDef?.hours !== null && horizonDef?.hours !== undefined) {
+      const cutoff = Date.now() + horizonDef.hours * 60 * 60 * 1000;
+      list = list.filter(m => {
+        if (!m.closeTime) return false;
+        const closeMs = new Date(m.closeTime).getTime();
+        return closeMs > Date.now() && closeMs <= cutoff;
+      });
+    }
+
     list = [...list].sort((a, b) => {
       switch (sortBy) {
         case "volume": return b.volume - a.volume;
         case "volume24h": return b.volume24hr - a.volume24hr;
         case "yesPrice": return b.yesPrice - a.yesPrice;
         case "noPrice": return b.noPrice - a.noPrice;
-        case "endDate": return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
+        case "endDate": {
+          const at = a.closeTime ? new Date(a.closeTime).getTime() : Infinity;
+          const bt = b.closeTime ? new Date(b.closeTime).getTime() : Infinity;
+          return at - bt;
+        }
         default: return 0;
       }
     });
 
     return list;
-  }, [markets, activeCategory, search, sortBy]);
+  }, [markets, activeCategory, search, sortBy, horizon]);
 
   return (
     <div className="space-y-5 apple-reveal">
@@ -94,16 +118,15 @@ export function MarketsPanel() {
       <div className="flex items-start gap-2.5 rounded-2xl bg-secondary/60 px-5 py-3.5">
         <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
         <p className="text-xs text-muted-foreground leading-relaxed">
-          <span className="font-medium text-foreground">Data source:</span> Kalshi public REST API
-          {" "}(<code className="text-[10px] bg-background/70 px-1 py-0.5 rounded">GET /trade-api/v2/markets</code>).
-          {" "}Returns up to 100 open markets sorted by Kalshi's default relevance ranking.
-          Categories, sort, and search filter locally. 10-second auto-refresh.
+          <span className="font-medium text-foreground">Data source:</span> Kalshi public API — up to 100 open markets, 10-second auto-refresh.
+          {" "}<span className="font-medium text-foreground">24h Volume</span> = contracts traded in the last 24 hours (higher = more active, better fills).
+          {" "}Use <span className="font-medium text-foreground">Close date</span> to filter to markets resolving today, this week, or this month — shorter horizons are better for short-term trading.
         </p>
       </div>
 
-      {/* Search + sort row */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1">
+      {/* Search + filters row */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search markets or tickers..."
@@ -112,8 +135,19 @@ export function MarketsPanel() {
             className="pl-11 rounded-xl bg-card border-0 apple-shadow h-11 text-sm"
           />
         </div>
+        <Select value={horizon} onValueChange={(v) => setHorizon(v as Horizon)}>
+          <SelectTrigger className="h-11 w-48 rounded-xl border-0 bg-card apple-shadow text-sm">
+            <Clock className="h-3.5 w-3.5 text-muted-foreground mr-1" />
+            <SelectValue placeholder="Close date" />
+          </SelectTrigger>
+          <SelectContent>
+            {HORIZON_OPTIONS.map(o => (
+              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
-          <SelectTrigger className="h-11 w-44 rounded-xl border-0 bg-card apple-shadow text-sm">
+          <SelectTrigger className="h-11 w-40 rounded-xl border-0 bg-card apple-shadow text-sm">
             <SelectValue placeholder="Sort by" />
           </SelectTrigger>
           <SelectContent>
@@ -166,6 +200,7 @@ export function MarketsPanel() {
           <span>
             · {lastUpdated.toLocaleTimeString()} · {filtered.length} of {markets.length} markets
             {activeCategory !== "All" && ` · ${activeCategory}`}
+            {horizon !== "any" && ` · ${HORIZON_OPTIONS.find(h => h.value === horizon)?.label}`}
           </span>
         </div>
       )}
@@ -177,10 +212,20 @@ export function MarketsPanel() {
           <span className="ml-3 text-sm text-muted-foreground">Loading Kalshi markets...</span>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="flex items-center justify-center py-16">
+        <div className="flex flex-col items-center justify-center py-16 gap-2">
           <span className="text-sm text-muted-foreground">
-            No markets match "{search}"{activeCategory !== "All" ? ` in ${activeCategory}` : ""}.
+            {horizon !== "any"
+              ? `No markets closing ${HORIZON_OPTIONS.find(h => h.value === horizon)?.label.toLowerCase().replace("closing ", "")}${activeCategory !== "All" ? ` in ${activeCategory}` : ""}.`
+              : `No markets match "${search}"${activeCategory !== "All" ? ` in ${activeCategory}` : ""}.`}
           </span>
+          {horizon !== "any" && (
+            <button
+              onClick={() => setHorizon("any")}
+              className="text-xs text-primary hover:opacity-70 transition-opacity"
+            >
+              Show all close dates →
+            </button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">

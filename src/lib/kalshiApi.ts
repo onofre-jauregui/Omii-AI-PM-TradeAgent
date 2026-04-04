@@ -46,7 +46,8 @@ export interface ParsedMarket {
   volume24hr: number;
   liquidity: number;
   openInterest: number;
-  endDate: string;
+  endDate: string;     // formatted display string e.g. "Jul 1, 2026"
+  closeTime: string;   // raw ISO timestamp for filtering
   category: string;
   slug: string;
   active: boolean;
@@ -173,6 +174,7 @@ export async function fetchKalshiMarkets(
     liquidity: m.liquidity || m.open_interest || 0,
     openInterest: m.open_interest || 0,
     endDate: formatDate(m.close_time || m.expiration_time),
+    closeTime: m.close_time || m.expiration_time || "",
     category: m.category || "Event",
     slug: m.ticker,
     active: m.status === "open",
@@ -200,6 +202,7 @@ export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | 
     liquidity: m.liquidity || m.open_interest || 0,
     openInterest: m.open_interest || 0,
     endDate: formatDate(m.close_time || m.expiration_time),
+    closeTime: m.close_time || m.expiration_time || "",
     category: m.category || "Event",
     slug: m.ticker,
     active: m.status === "open",
@@ -232,6 +235,7 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
           liquidity: m.liquidity || m.open_interest || 0,
           openInterest: m.open_interest || 0,
           endDate: formatDate(m.close_time || m.expiration_time),
+          closeTime: m.close_time || m.expiration_time || "",
           category: m.category || event.category || "Event",
           slug: m.ticker,
           active: m.status === "open",
