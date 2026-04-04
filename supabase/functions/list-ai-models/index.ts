@@ -16,6 +16,52 @@ export interface AIModel {
   pricing?: { prompt: string; completion: string };
 }
 
+/** Test whether a model's provider is allowed by the account's data policy.
+ *  Uses max_tokens:1 — the "no allowed providers" error fires at the routing
+ *  layer before any tokens are generated, so blocked models cost $0. */
+async function isProviderAvailable(
+  modelId: string,
+  apiKey: string
+): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
+  try {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: "." }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) return true;
+
+    const body = await res.json().catch(() => ({}));
+    const msg: string = body?.error?.message || "";
+    // These errors mean the account's data policy blocks the providers for this model
+    if (
+      msg.includes("No allowed providers") ||
+      msg.includes("No endpoints available matching your guardrail") ||
+      msg.includes("No endpoints found")
+    ) {
+      return false;
+    }
+    // Any other error (rate limit, bad request, etc.) means the provider exists
+    return true;
+  } catch {
+    clearTimeout(timeout);
+    return true; // network/timeout — assume available
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
@@ -38,6 +84,7 @@ serve(async (req) => {
 
     const allModels: AIModel[] = [];
     const errors: Record<string, string> = {};
+    let blockedProviders: string[] = [];
 
     // ── OpenRouter ─────────────────────────────────────────────
     const orKey = keyMap["openrouter"] || Deno.env.get("OPENROUTER_API_KEY");
@@ -50,11 +97,8 @@ serve(async (req) => {
           const data = await res.json();
           const models: AIModel[] = (data.data || [])
             .filter((m: any) => (m.context_length || 0) >= 32768)
-            .sort((a: any, b: any) => {
-              // Sort by name for readability
-              return (a.name || a.id).localeCompare(b.name || b.id);
-            })
-            .slice(0, 100)
+            .sort((a: any, b: any) => (a.name || a.id).localeCompare(b.name || b.id))
+            .slice(0, 200)
             .map((m: any) => ({
               id: m.id,
               name: m.name || m.id,
@@ -62,7 +106,38 @@ serve(async (req) => {
               contextLength: m.context_length,
               pricing: m.pricing,
             }));
-          allModels.push(...models);
+
+          // Group by provider prefix (e.g., "openai", "google", "anthropic", "meta-llama")
+          const prefixGroups = new Map<string, AIModel[]>();
+          for (const m of models) {
+            const prefix = m.id.split("/")[0];
+            if (!prefixGroups.has(prefix)) prefixGroups.set(prefix, []);
+            prefixGroups.get(prefix)!.push(m);
+          }
+
+          // Test one model per prefix in parallel
+          const checks = await Promise.allSettled(
+            Array.from(prefixGroups.entries()).map(async ([prefix, group]) => {
+              const available = await isProviderAvailable(group[0].id, orKey);
+              return { prefix, available };
+            })
+          );
+
+          const blocked = new Set<string>();
+          for (const r of checks) {
+            if (r.status === "fulfilled" && !r.value.available) {
+              blocked.add(r.value.prefix);
+            }
+          }
+          blockedProviders = Array.from(blocked);
+
+          // Filter to only available providers
+          const filtered = models.filter((m) => {
+            const prefix = m.id.split("/")[0];
+            return !blocked.has(prefix);
+          });
+
+          allModels.push(...filtered);
         } else {
           errors["openrouter"] = `HTTP ${res.status}`;
         }
@@ -137,19 +212,24 @@ serve(async (req) => {
     }
 
     if (allModels.length === 0) {
+      const hint = blockedProviders.length > 0
+        ? ` Your OpenRouter data policy blocks these providers: ${blockedProviders.join(", ")}. Update at https://openrouter.ai/settings/privacy`
+        : "";
       return new Response(
         JSON.stringify({
           models: [],
-          error: "No AI provider keys found. Save an API key in Settings first.",
+          error: `No available AI models.${hint}`,
+          blockedProviders,
           errors,
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    return new Response(JSON.stringify({ models: allModels, errors }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ models: allModels, blockedProviders, errors }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   } catch (e: any) {
     console.error("list-ai-models error:", e);
     return new Response(JSON.stringify({ error: e.message }), {
