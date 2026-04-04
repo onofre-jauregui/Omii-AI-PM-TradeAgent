@@ -35,7 +35,6 @@ const TRADE_TOOL = {
         reasoning: { type: "string", description: "Brief explanation of why this trade is being made" },
       },
       required: ["ticker", "marketQuestion", "side", "action", "price", "amount", "reasoning"],
-      additionalProperties: false,
     },
   },
 };
@@ -52,7 +51,6 @@ const FETCH_MARKETS_TOOL = {
         limit: { type: "number", description: "Number of markets to fetch (default 10)" },
         category: { type: "string", description: "Filter by category (e.g. 'economics', 'politics', 'crypto')" },
       },
-      additionalProperties: false,
     },
   },
 };
@@ -69,7 +67,6 @@ const CANCEL_ORDER_TOOL = {
         reason: { type: "string", description: "Reason for cancellation" },
       },
       required: ["orderId", "reason"],
-      additionalProperties: false,
     },
   },
 };
@@ -82,7 +79,6 @@ const CHECK_PORTFOLIO_TOOL = {
     parameters: {
       type: "object",
       properties: {},
-      additionalProperties: false,
     },
   },
 };
