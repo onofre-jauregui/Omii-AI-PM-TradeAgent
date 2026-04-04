@@ -96,7 +96,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
         fetch(LIST_MODELS_URL, {
           headers: { Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}` },
         }),
-        supabase.from("api_keys").select("key_id").eq("provider", "model_agent").single(),
+        supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
       ]);
       const data = await modelsRes.json();
       if (data.models?.length > 0) {
