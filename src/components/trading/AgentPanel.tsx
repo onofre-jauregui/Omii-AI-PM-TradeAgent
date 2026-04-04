@@ -6,17 +6,23 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Cpu, Send, MessageSquare, Loader2, BookOpen, AlertTriangle } from "lucide-react";
+import { Cpu, Send, MessageSquare, Loader2, BookOpen, AlertTriangle, RefreshCw } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
+import { supabase } from "@/integrations/supabase/client";
 
-const MODELS = [
-  { value: "gemini-flash", label: "Gemini 3 Flash", provider: "Google" },
-  { value: "gemini-pro", label: "Gemini 2.5 Pro", provider: "Google" },
-  { value: "gpt5", label: "GPT-5", provider: "OpenAI" },
-  { value: "gpt5-mini", label: "GPT-5 Mini", provider: "OpenAI" },
+const FALLBACK_MODELS = [
+  { id: "google/gemini-flash-1.5", name: "Gemini Flash 1.5", provider: "Google" },
+  { id: "google/gemini-pro-1.5", name: "Gemini Pro 1.5", provider: "Google" },
+  { id: "openai/gpt-4o", name: "GPT-4o", provider: "OpenAI" },
+  { id: "openai/gpt-4o-mini", name: "GPT-4o Mini", provider: "OpenAI" },
+  { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic" },
 ];
+
+interface AIModel { id: string; name: string; provider: string; }
+
+const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-ai-models`;
 
 type Msg = { role: "user" | "assistant"; content: string };
 
@@ -66,7 +72,9 @@ async function streamChat({
 
 export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolean }) {
   const { getActiveStrategies } = useStrategies();
-  const [selectedModel, setSelectedModel] = useState("gemini-flash");
+  const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
   const [temperature, setTemperature] = useState([0.3]);
   const [tradingMode, setTradingMode] = useState<"paper" | "live">(forcePaperMode ? "paper" : "paper");
   const [systemPrompt, setSystemPrompt] = useState(
@@ -80,6 +88,39 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
 
+  // Load dynamic model list + saved preference on mount
+  const loadModels = async () => {
+    setLoadingModels(true);
+    try {
+      const [modelsRes, prefRow] = await Promise.all([
+        fetch(LIST_MODELS_URL, {
+          headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
+        }),
+        supabase.from("api_keys").select("key_id").eq("provider", "model_agent").single(),
+      ]);
+      const data = await modelsRes.json();
+      if (data.models?.length > 0) {
+        setModels(data.models);
+        // Apply saved preference if it exists in the fetched list, otherwise use first model
+        const savedId = prefRow.data?.key_id;
+        if (savedId && data.models.find((m: AIModel) => m.id === savedId)) {
+          setSelectedModel(savedId);
+        } else if (data.models[0]) {
+          setSelectedModel(data.models[0].id);
+        }
+      } else {
+        // No models from server — apply saved preference against fallback list
+        const savedId = prefRow.data?.key_id;
+        if (savedId) setSelectedModel(savedId);
+      }
+    } catch {
+      // Silently fall back to FALLBACK_MODELS
+    } finally {
+      setLoadingModels(false);
+    }
+  };
+
+  useEffect(() => { loadModels(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
 
   const handleSend = async () => {
@@ -116,18 +157,33 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
         <div className="rounded-2xl bg-card p-5 apple-shadow space-y-5">
           <h3 className="text-sm font-medium text-muted-foreground">Model Configuration</h3>
           <div className="space-y-2">
-            <Label className="text-sm text-muted-foreground">AI Model</Label>
+            <div className="flex items-center justify-between">
+              <Label className="text-sm text-muted-foreground">AI Model</Label>
+              <button
+                onClick={loadModels}
+                disabled={loadingModels}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+                title="Refresh model list"
+              >
+                {loadingModels
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                  : <RefreshCw className="h-3 w-3" />}
+              </button>
+            </div>
             <Select value={selectedModel} onValueChange={setSelectedModel}>
               <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
-                {MODELS.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    <span className="flex items-center gap-2">
-                      <Cpu className="h-3 w-3" /> {m.label}
-                      <span className="text-muted-foreground text-[10px]">({m.provider})</span>
-                    </span>
+              <SelectContent className="max-h-72">
+                {models.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    <div className="flex flex-col gap-0.5 py-0.5">
+                      <span className="flex items-center gap-1.5">
+                        <Cpu className="h-3 w-3 shrink-0" />
+                        <span>{m.name}</span>
+                      </span>
+                      <span className="text-[10px] text-muted-foreground font-mono pl-4">{m.id}</span>
+                    </div>
                   </SelectItem>
                 ))}
               </SelectContent>

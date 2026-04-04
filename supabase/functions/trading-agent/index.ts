@@ -177,13 +177,25 @@ Important Kalshi-specific notes:
 
 Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
 
+    // Legacy short aliases → full OpenRouter model IDs
     const modelMap: Record<string, string> = {
-      "gemini-flash": "google/gemini-3-flash-preview",
-      "gemini-pro": "google/gemini-2.5-pro",
-      "gpt5": "openai/gpt-5",
-      "gpt5-mini": "openai/gpt-5-mini",
+      "gemini-flash": "google/gemini-flash-1.5",
+      "gemini-pro": "google/gemini-pro-1.5",
+      "gpt5": "openai/gpt-4o",
+      "gpt5-mini": "openai/gpt-4o-mini",
     };
-    const resolvedModel = modelMap[model] || "google/gemini-3-flash-preview";
+
+    // If model is a known short alias, map it; if it already looks like a full ID (contains "/"), use as-is;
+    // otherwise fall back to the saved model_agent preference from DB, then a sensible default.
+    let resolvedModel = modelMap[model] || (model?.includes("/") ? model : null);
+    if (!resolvedModel) {
+      const { data: savedModel } = await supabase
+        .from("api_keys")
+        .select("key_id")
+        .eq("provider", "model_agent")
+        .single();
+      resolvedModel = savedModel?.key_id || "google/gemini-flash-1.5";
+    }
 
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 5;

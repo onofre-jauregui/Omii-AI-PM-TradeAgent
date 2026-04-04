@@ -4,9 +4,18 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle, Info } from "lucide-react";
+import { Key, Bell, Shield, Save, Loader2, CheckCircle, AlertCircle, Circle, Info, Cpu, RefreshCw } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+
+interface AIModel {
+  id: string;
+  name: string;
+  provider: string;
+  contextLength?: number;
+}
+
+const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-ai-models`;
 
 // Status dot for each key
 function KeyStatus({ saved }: { saved: boolean }) {
@@ -24,6 +33,15 @@ export function SettingsPanel() {
   const [savedProviders, setSavedProviders] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
+
+  // Model preferences
+  const [availableModels, setAvailableModels] = useState<AIModel[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
+  const [agentModel, setAgentModel] = useState("");
+  const [tradingModel, setTradingModel] = useState("");
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelSaveStatus, setModelSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   const [notifications, setNotifications] = useState({
     tradeExecuted: true, positionClosed: true, stopLossHit: true, dailySummary: false, agentAlerts: true,
@@ -44,6 +62,62 @@ export function SettingsPanel() {
     }
   }, []);
 
+  const loadModelPreferences = useCallback(async () => {
+    const { data } = await supabase
+      .from("api_keys")
+      .select("provider, key_id")
+      .in("provider", ["model_agent", "model_trading"]);
+    if (data) {
+      const agent = data.find(r => r.provider === "model_agent");
+      const trading = data.find(r => r.provider === "model_trading");
+      if (agent?.key_id) setAgentModel(agent.key_id);
+      if (trading?.key_id) setTradingModel(trading.key_id);
+    }
+  }, []);
+
+  const fetchAvailableModels = useCallback(async () => {
+    setFetchingModels(true);
+    setFetchModelsError(null);
+    try {
+      const res = await fetch(LIST_MODELS_URL, {
+        headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
+      });
+      const data = await res.json();
+      if (data.models?.length > 0) {
+        setAvailableModels(data.models);
+      } else {
+        setFetchModelsError(data.error || "No models returned. Make sure you have saved an AI API key.");
+      }
+    } catch (e: any) {
+      setFetchModelsError("Failed to reach the model list service.");
+    } finally {
+      setFetchingModels(false);
+    }
+  }, []);
+
+  const saveModelPreferences = async () => {
+    setModelSaving(true);
+    setModelSaveStatus("idle");
+    try {
+      const prefs = [
+        agentModel ? { provider: "model_agent", key_id: agentModel, encrypted_secret: agentModel } : null,
+        tradingModel ? { provider: "model_trading", key_id: tradingModel, encrypted_secret: tradingModel } : null,
+      ].filter(Boolean) as { provider: string; key_id: string; encrypted_secret: string }[];
+      for (const pref of prefs) {
+        await supabase.from("api_keys").upsert(
+          { ...pref, updated_at: new Date().toISOString() },
+          { onConflict: "provider" }
+        );
+      }
+      setModelSaveStatus("success");
+      setTimeout(() => setModelSaveStatus("idle"), 3000);
+    } catch {
+      setModelSaveStatus("error");
+    } finally {
+      setModelSaving(false);
+    }
+  };
+
   const loadRiskSettings = useCallback(async () => {
     const { data } = await supabase.from("risk_settings").select("*").single();
     if (data) {
@@ -62,7 +136,8 @@ export function SettingsPanel() {
   useEffect(() => {
     loadSavedKeys();
     loadRiskSettings();
-  }, [loadSavedKeys, loadRiskSettings]);
+    loadModelPreferences();
+  }, [loadSavedKeys, loadRiskSettings, loadModelPreferences]);
 
   const handleSaveApiKeys = async () => {
     setSaving(true);
@@ -236,6 +311,101 @@ export function SettingsPanel() {
            saveStatus === "error" ? "Save failed — try again" :
            "Save API Keys"}
         </Button>
+      </div>
+
+      {/* ── Model Preferences ───────────────────────────────────── */}
+      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium">Model Preferences</h3>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={fetchAvailableModels}
+            disabled={fetchingModels}
+            className="rounded-full text-xs gap-1.5 h-7 px-3"
+          >
+            {fetchingModels
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <RefreshCw className="h-3 w-3" />}
+            {fetchingModels ? "Fetching…" : availableModels.length > 0 ? "Refresh Models" : "Fetch Available Models"}
+          </Button>
+        </div>
+
+        {fetchModelsError && (
+          <div className="flex items-start gap-2 rounded-xl bg-loss/10 px-4 py-3">
+            <AlertCircle className="h-3.5 w-3.5 text-loss shrink-0 mt-0.5" />
+            <p className="text-xs text-loss">{fetchModelsError}</p>
+          </div>
+        )}
+
+        {availableModels.length === 0 && !fetchModelsError ? (
+          <p className="text-xs text-muted-foreground">
+            Save an API key above, then click <span className="font-medium text-foreground">Fetch Available Models</span> to see all models you have access to.
+          </p>
+        ) : availableModels.length > 0 && (
+          <>
+            <p className="text-xs text-muted-foreground">
+              {availableModels.length} models available from your saved provider keys.
+            </p>
+
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Agent Chat Model</Label>
+              <Select value={agentModel} onValueChange={setAgentModel}>
+                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
+                  <SelectValue placeholder="Select a model…" />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  {availableModels.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      <div className="flex flex-col gap-0.5 py-0.5">
+                        <span className="text-sm">{m.name}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">{m.id}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">Used in the Agent tab when you chat interactively.</p>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Auto-Trading Model</Label>
+              <Select value={tradingModel} onValueChange={setTradingModel}>
+                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
+                  <SelectValue placeholder="Select a model…" />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  {availableModels.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      <div className="flex flex-col gap-0.5 py-0.5">
+                        <span className="text-sm">{m.name}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">{m.id}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[10px] text-muted-foreground">Used when strategies run autonomously. Pick a fast, cost-effective model.</p>
+            </div>
+
+            <Button
+              className="w-full rounded-full gap-2 text-sm"
+              onClick={saveModelPreferences}
+              disabled={modelSaving || (!agentModel && !tradingModel)}
+            >
+              {modelSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+               modelSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+               modelSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+               <Save className="h-4 w-4" />}
+              {modelSaveStatus === "success" ? "Model preferences saved" :
+               modelSaveStatus === "error" ? "Save failed — try again" :
+               "Save Model Preferences"}
+            </Button>
+          </>
+        )}
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
