@@ -158,17 +158,29 @@ export async function fetchKalshiMarkets(
   const data = await kalshiProxyGet("markets", params);
   const markets: KalshiMarket[] = data.markets || [];
 
-  return markets.map((m) => ({
+  return markets.map((m) => {
+    const yesBid = Number(m.yes_bid) || 0;
+    const yesAsk = Number(m.yes_ask) || 0;
+    const noBid  = Number(m.no_bid)  || 0;
+    const noAsk  = Number(m.no_ask)  || 0;
+    const last   = Number(m.last_price) || 0;
+
+    const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
+    const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
+    const yesPrice = yesMid || (last > 0 ? Math.round(last * 100) : 0);
+    const noPrice  = noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0);
+
+    return ({
     id: m.ticker,
     ticker: m.ticker,
     question: m.title || m.subtitle,
     description: m.subtitle || "",
-    yesPrice: Math.round((m.yes_bid + m.yes_ask) / 2 * 100) || Math.round(m.last_price * 100),
-    noPrice: Math.round((m.no_bid + m.no_ask) / 2 * 100) || (100 - Math.round(m.last_price * 100)),
-    yesBid: Math.round(m.yes_bid * 100),
-    yesAsk: Math.round(m.yes_ask * 100),
-    noBid: Math.round(m.no_bid * 100),
-    noAsk: Math.round(m.no_ask * 100),
+    yesPrice,
+    noPrice,
+    yesBid: Math.round(yesBid * 100),
+    yesAsk: Math.round(yesAsk * 100),
+    noBid:  Math.round(noBid  * 100),
+    noAsk:  Math.round(noAsk  * 100),
     volume: m.volume || 0,
     volume24hr: m.volume_24h || 0,
     liquidity: m.liquidity || m.open_interest || 0,
@@ -178,25 +190,33 @@ export async function fetchKalshiMarkets(
     category: m.category || "Event",
     slug: m.ticker,
     active: m.status === "open",
-    spread: Math.round((m.yes_ask - m.yes_bid) * 100),
-  }));
+    spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
+  });
+  });
 }
 
 export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | null> {
   const data = await kalshiProxyGet(`markets/${ticker}`);
   const m = data.market;
   if (!m) return null;
+  const yesBid = Number(m.yes_bid) || 0;
+  const yesAsk = Number(m.yes_ask) || 0;
+  const noBid  = Number(m.no_bid)  || 0;
+  const noAsk  = Number(m.no_ask)  || 0;
+  const last   = Number(m.last_price) || 0;
+  const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
+  const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
   return {
     id: m.ticker,
     ticker: m.ticker,
     question: m.title || m.subtitle,
     description: m.subtitle || "",
-    yesPrice: Math.round((m.yes_bid + m.yes_ask) / 2 * 100),
-    noPrice: Math.round((m.no_bid + m.no_ask) / 2 * 100),
-    yesBid: Math.round(m.yes_bid * 100),
-    yesAsk: Math.round(m.yes_ask * 100),
-    noBid: Math.round(m.no_bid * 100),
-    noAsk: Math.round(m.no_ask * 100),
+    yesPrice: yesMid || (last > 0 ? Math.round(last * 100) : 0),
+    noPrice:  noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0),
+    yesBid: Math.round(yesBid * 100),
+    yesAsk: Math.round(yesAsk * 100),
+    noBid:  Math.round(noBid  * 100),
+    noAsk:  Math.round(noAsk  * 100),
     volume: m.volume || 0,
     volume24hr: m.volume_24h || 0,
     liquidity: m.liquidity || m.open_interest || 0,
@@ -206,7 +226,7 @@ export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | 
     category: m.category || "Event",
     slug: m.ticker,
     active: m.status === "open",
-    spread: Math.round((m.yes_ask - m.yes_bid) * 100),
+    spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
   };
 }
 
@@ -219,17 +239,24 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
   for (const event of events) {
     if (event.markets) {
       for (const m of event.markets) {
+        const yesBid = Number(m.yes_bid) || 0;
+        const yesAsk = Number(m.yes_ask) || 0;
+        const noBid  = Number(m.no_bid)  || 0;
+        const noAsk  = Number(m.no_ask)  || 0;
+        const last   = Number(m.last_price) || 0;
+        const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
+        const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
         allMarkets.push({
           id: m.ticker,
           ticker: m.ticker,
           question: m.title || event.title,
           description: m.subtitle || event.sub_title || "",
-          yesPrice: Math.round((m.yes_bid + m.yes_ask) / 2 * 100),
-          noPrice: Math.round((m.no_bid + m.no_ask) / 2 * 100),
-          yesBid: Math.round(m.yes_bid * 100),
-          yesAsk: Math.round(m.yes_ask * 100),
-          noBid: Math.round(m.no_bid * 100),
-          noAsk: Math.round(m.no_ask * 100),
+          yesPrice: yesMid || (last > 0 ? Math.round(last * 100) : 0),
+          noPrice:  noMid  || (last > 0 ? 100 - Math.round(last * 100) : 0),
+          yesBid: Math.round(yesBid * 100),
+          yesAsk: Math.round(yesAsk * 100),
+          noBid:  Math.round(noBid  * 100),
+          noAsk:  Math.round(noAsk  * 100),
           volume: m.volume || 0,
           volume24hr: m.volume_24h || 0,
           liquidity: m.liquidity || m.open_interest || 0,
