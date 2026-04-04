@@ -15,11 +15,16 @@ export interface KalshiMarket {
   event_ticker: string;
   title: string;
   subtitle: string;
-  yes_bid: number;
-  yes_ask: number;
-  no_bid: number;
-  no_ask: number;
-  last_price: number;
+  yes_bid?: number;
+  yes_ask?: number;
+  no_bid?: number;
+  no_ask?: number;
+  last_price?: number;
+  yes_bid_dollars?: string | number;
+  yes_ask_dollars?: string | number;
+  no_bid_dollars?: string | number;
+  no_ask_dollars?: string | number;
+  last_price_dollars?: string | number;
   volume: number;
   volume_24h: number;
   open_interest: number;
@@ -159,11 +164,11 @@ export async function fetchKalshiMarkets(
   const markets: KalshiMarket[] = data.markets || [];
 
   return markets.map((m) => {
-    const yesBid = Number(m.yes_bid) || 0;
-    const yesAsk = Number(m.yes_ask) || 0;
-    const noBid  = Number(m.no_bid)  || 0;
-    const noAsk  = Number(m.no_ask)  || 0;
-    const last   = Number(m.last_price) || 0;
+    const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+    const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+    const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
+    const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
+    const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
 
     const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
     const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
@@ -199,11 +204,11 @@ export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | 
   const data = await kalshiProxyGet(`markets/${ticker}`);
   const m = data.market;
   if (!m) return null;
-  const yesBid = Number(m.yes_bid) || 0;
-  const yesAsk = Number(m.yes_ask) || 0;
-  const noBid  = Number(m.no_bid)  || 0;
-  const noAsk  = Number(m.no_ask)  || 0;
-  const last   = Number(m.last_price) || 0;
+  const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+  const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+  const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
+  const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
+  const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
   const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
   const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
   return {
@@ -239,11 +244,11 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
   for (const event of events) {
     if (event.markets) {
       for (const m of event.markets) {
-        const yesBid = Number(m.yes_bid) || 0;
-        const yesAsk = Number(m.yes_ask) || 0;
-        const noBid  = Number(m.no_bid)  || 0;
-        const noAsk  = Number(m.no_ask)  || 0;
-        const last   = Number(m.last_price) || 0;
+        const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+        const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+        const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
+        const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
+        const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
         const yesMid = yesBid > 0 && yesAsk > 0 ? Math.round((yesBid + yesAsk) / 2 * 100) : 0;
         const noMid  = noBid  > 0 && noAsk  > 0 ? Math.round((noBid  + noAsk)  / 2 * 100) : 0;
         allMarkets.push({
@@ -266,7 +271,7 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
           category: m.category || event.category || "Event",
           slug: m.ticker,
           active: m.status === "open",
-          spread: Math.round((m.yes_ask - m.yes_bid) * 100),
+          spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
         });
       }
     }
