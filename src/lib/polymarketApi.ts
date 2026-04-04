@@ -78,7 +78,7 @@ export async function fetchPolymarketEvents(limit = 20, tag?: string): Promise<P
 
   const response = await fetch(url.toString(), {
     headers: {
-      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+      Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}`,
     },
   });
 

@@ -35,7 +35,7 @@ async function streamChat({
 }) {
   const resp = await fetch(AGENT_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}` },
     body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt, tradingMode }),
   });
   if (!resp.ok) { const err = await resp.json().catch(() => ({ error: "Unknown error" })); onError(err.error || `Error ${resp.status}`); return; }
@@ -94,7 +94,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
     try {
       const [modelsRes, prefRow] = await Promise.all([
         fetch(LIST_MODELS_URL, {
-          headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}` },
+          headers: { Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}` },
         }),
         supabase.from("api_keys").select("key_id").eq("provider", "model_agent").single(),
       ]);

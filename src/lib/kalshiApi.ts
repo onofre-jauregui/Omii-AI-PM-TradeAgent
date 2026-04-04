@@ -104,7 +104,7 @@ function formatVolume(vol: number | string): string {
 
 const proxyUrl = () => `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-proxy`;
 const authHeader = () => ({
-  Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+  Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}`,
   "Content-Type": "application/json",
 });
 

@@ -531,7 +531,12 @@ Always be transparent about your reasoning and risk assessment. Format responses
           }
           const t = await resp.text();
           console.error("AI error:", status, t);
-          return new Response(JSON.stringify({ error: "AI service error" }), {
+          let errMsg = `AI provider error (HTTP ${status})`;
+          try {
+            const parsed = JSON.parse(t);
+            errMsg = parsed?.error?.message || parsed?.message || parsed?.error || errMsg;
+          } catch { /* ignore */ }
+          return new Response(JSON.stringify({ error: errMsg }), {
             status: 500,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
