@@ -42,17 +42,8 @@ export function MarketsPanel() {
     setLoading(true);
     setError(null);
     try {
-      // When a horizon is selected, pass max_close_ts to the Kalshi API so we
-      // get markets that actually close within that window (not just filter client-side)
-      const extraParams: Record<string, string> = {};
-      const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
-      if (horizonDef?.hours) {
-        const maxTs = Math.floor((Date.now() + horizonDef.hours * 3600 * 1000) / 1000);
-        extraParams.max_close_ts = String(maxTs);
-        // Also set min_close_ts to now so we don't get already-closed markets
-        extraParams.min_close_ts = String(Math.floor(Date.now() / 1000));
-      }
-      const data = await fetchKalshiMarkets(100, undefined, extraParams);
+      // Fetch 200 markets — Kalshi ignores timestamp query params so we filter client-side
+      const data = await fetchKalshiMarkets(200);
       setMarkets(data);
       setLastUpdated(new Date());
     } catch (err) {
@@ -66,7 +57,7 @@ export function MarketsPanel() {
     } finally {
       setLoading(false);
     }
-  }, [horizon]);
+  }, []);
 
   useEffect(() => {
     loadMarkets();
@@ -93,8 +84,25 @@ export function MarketsPanel() {
       list = list.filter(m => m.question.toLowerCase().includes(q) || m.ticker.toLowerCase().includes(q));
     }
 
+    // Client-side horizon filter — Kalshi API ignores timestamp query params
+    if (horizon !== "any") {
+      const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
+      if (horizonDef?.hours) {
+        const now = Date.now();
+        const cutoff = now + horizonDef.hours * 3600 * 1000;
+        list = list.filter(m => {
+          if (!m.closeTime) return false;
+          const t = new Date(m.closeTime).getTime();
+          return t > now && t <= cutoff;
+        });
+      }
+    }
+
+    // When a horizon is active, default to "Closing Soon" sort so nearest markets surface first
+    const effectiveSort = horizon !== "any" && sortBy === "volume" ? "endDate" : sortBy;
+
     list = [...list].sort((a, b) => {
-      switch (sortBy) {
+      switch (effectiveSort) {
         case "volume": return b.volume - a.volume;
         case "volume24h": return b.volume24hr - a.volume24hr;
         case "yesPrice": return b.yesPrice - a.yesPrice;
@@ -109,7 +117,7 @@ export function MarketsPanel() {
     });
 
     return list;
-  }, [markets, activeCategory, search, sortBy]);
+  }, [markets, activeCategory, search, sortBy, horizon]);
 
   return (
     <div className="space-y-5 apple-reveal">
@@ -117,7 +125,7 @@ export function MarketsPanel() {
       <div className="flex items-start gap-2.5 rounded-2xl bg-secondary/60 px-5 py-3.5">
         <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
         <p className="text-xs text-muted-foreground leading-relaxed">
-          <span className="font-medium text-foreground">Data source:</span> Kalshi public API — up to 100 open markets, 10-second auto-refresh.
+          <span className="font-medium text-foreground">Data source:</span> Kalshi public API — up to 200 open markets, 10-second auto-refresh.
           {" "}<span className="font-medium text-foreground">24h Volume</span> = contracts traded in the last 24 hours (higher = more active, better fills).
           {" "}Use <span className="font-medium text-foreground">Close date</span> to filter to markets resolving today, this week, or this month — shorter horizons are better for short-term trading.
         </p>
