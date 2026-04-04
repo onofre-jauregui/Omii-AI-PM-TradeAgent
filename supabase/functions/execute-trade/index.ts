@@ -1,6 +1,19 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { hmac } from "https://deno.land/x/hmac@v2.0.1/mod.ts";
+
+// HMAC-SHA256 using built-in Web Crypto (no external imports needed)
+async function hmacSHA256Base64(key: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
+  return btoa(String.fromCharCode(...new Uint8Array(sig)));
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -29,18 +42,18 @@ async function getKalshiCredentials(supabase: any): Promise<{ keyId: string | nu
   };
 }
 
-function generateAuthHeaders(
+async function generateAuthHeaders(
   apiKeyId: string,
   privateKey: string,
   method: string,
   path: string,
   timestamp: number
-): Record<string, string> {
+): Promise<Record<string, string>> {
   const message = `${timestamp}${method.toUpperCase()}${path}`;
-  const signature = hmac("sha256", privateKey, message, "utf8", "base64");
+  const signature = await hmacSHA256Base64(privateKey, message);
   return {
     "KALSHI-ACCESS-KEY": apiKeyId,
-    "KALSHI-ACCESS-SIGNATURE": signature as string,
+    "KALSHI-ACCESS-SIGNATURE": signature,
     "KALSHI-ACCESS-TIMESTAMP": String(timestamp),
     "Content-Type": "application/json",
   };
@@ -421,7 +434,7 @@ serve(async (req) => {
     const kalshiBase = getKalshiBaseUrl();
     const orderPath = "/trade-api/v2/portfolio/orders";
     const timestamp = Math.floor(Date.now() / 1000);
-    const authHeaders = generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "POST", orderPath, timestamp);
+    const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "POST", orderPath, timestamp);
 
     const kalshiResponse = await fetch(`${kalshiBase}/portfolio/orders`, {
       method: "POST",
