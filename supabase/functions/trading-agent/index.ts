@@ -381,8 +381,8 @@ serve(async (req) => {
         .from("api_keys")
         .select("key_id")
         .eq("provider", "model_agent")
-        .single();
-      resolvedModel = savedModel?.key_id || "google/gemini-flash-1.5";
+        .maybeSingle();
+      resolvedModel = savedModel?.key_id || "openai/gpt-4o-mini";
     }
 
     // Determine provider and verify we have a key for it
@@ -430,7 +430,7 @@ serve(async (req) => {
         ? "\n\n--- TRADING MODE: PAPER. All trades are simulated. No real money is at risk."
         : "\n\n--- TRADING MODE: LIVE. Trades execute on Kalshi with real money. Apply strict risk management.";
 
-    const { data: riskSettings } = await supabase.from("risk_settings").select("*").single();
+    const { data: riskSettings } = await supabase.from("risk_settings").select("*").maybeSingle();
     let riskContext = "";
     if (riskSettings) {
       riskContext = `\n\n## Risk Limits (Enforced)
@@ -755,7 +755,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
               .from("risk_state")
               .select("*")
               .eq("date", today)
-              .single();
+              .maybeSingle();
 
             toolResult = JSON.stringify({
               recent_trades: recentTrades || [],

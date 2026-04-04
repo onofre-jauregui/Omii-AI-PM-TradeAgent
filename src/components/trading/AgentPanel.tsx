@@ -13,11 +13,11 @@ import { useStrategies } from "@/lib/strategiesContext";
 import { supabase } from "@/integrations/supabase/client";
 
 const FALLBACK_MODELS = [
-  { id: "google/gemini-flash-1.5", name: "Gemini Flash 1.5", provider: "Google" },
-  { id: "google/gemini-pro-1.5", name: "Gemini Pro 1.5", provider: "Google" },
-  { id: "openai/gpt-4o", name: "GPT-4o", provider: "OpenAI" },
   { id: "openai/gpt-4o-mini", name: "GPT-4o Mini", provider: "OpenAI" },
+  { id: "openai/gpt-4o", name: "GPT-4o", provider: "OpenAI" },
   { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic" },
+  { id: "google/gemini-2.0-flash-001", name: "Gemini 2.0 Flash", provider: "Google" },
+  { id: "meta-llama/llama-3.1-70b-instruct", name: "Llama 3.1 70B", provider: "Meta" },
 ];
 
 interface AIModel { id: string; name: string; provider: string; }
