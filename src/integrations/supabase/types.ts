@@ -107,6 +107,39 @@ export type Database = {
         }
         Relationships: []
       }
+      strategies: {
+        Row: {
+          active: boolean
+          created_at: string
+          description: string
+          id: string
+          instructions: string
+          mode: string
+          name: string
+          starting_balance: number
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          description?: string
+          id: string
+          instructions?: string
+          mode?: string
+          name: string
+          starting_balance?: number
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          description?: string
+          id?: string
+          instructions?: string
+          mode?: string
+          name?: string
+          starting_balance?: number
+        }
+        Relationships: []
+      }
       trades: {
         Row: {
           action: string
@@ -118,12 +151,15 @@ export type Database = {
           market_question: string
           mode: string
           notes: string | null
+          order_id: string | null
+          order_type: string | null
           pnl: number | null
           price: number
           side: string
           status: string
           strategy: string | null
           strategy_id: string | null
+          ticker: string | null
         }
         Insert: {
           action: string
@@ -135,12 +171,15 @@ export type Database = {
           market_question: string
           mode?: string
           notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
           pnl?: number | null
           price: number
           side: string
           status?: string
           strategy?: string | null
           strategy_id?: string | null
+          ticker?: string | null
         }
         Update: {
           action?: string
@@ -152,12 +191,15 @@ export type Database = {
           market_question?: string
           mode?: string
           notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
           pnl?: number | null
           price?: number
           side?: string
           status?: string
           strategy?: string | null
           strategy_id?: string | null
+          ticker?: string | null
         }
         Relationships: []
       }
