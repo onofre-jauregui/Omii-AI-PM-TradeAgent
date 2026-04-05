@@ -14,11 +14,105 @@ export type Database = {
   }
   public: {
     Tables: {
+      api_keys: {
+        Row: {
+          created_at: string
+          encrypted_secret: string
+          id: string
+          key_id: string
+          provider: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          encrypted_secret?: string
+          id?: string
+          key_id?: string
+          provider: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          encrypted_secret?: string
+          id?: string
+          key_id?: string
+          provider?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      compliance_log: {
+        Row: {
+          created_at: string
+          event_type: string
+          id: string
+          message: string
+          metadata: Json | null
+          severity: string
+          trade_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          event_type?: string
+          id?: string
+          message?: string
+          metadata?: Json | null
+          severity?: string
+          trade_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          event_type?: string
+          id?: string
+          message?: string
+          metadata?: Json | null
+          severity?: string
+          trade_id?: string | null
+        }
+        Relationships: []
+      }
+      risk_settings: {
+        Row: {
+          auto_stop_loss: boolean
+          default_order_type: string
+          id: string
+          max_daily_loss: number
+          max_drawdown_pct: number
+          max_open_positions: number
+          max_position_size: number
+          stop_loss_pct: number
+          updated_at: string
+        }
+        Insert: {
+          auto_stop_loss?: boolean
+          default_order_type?: string
+          id?: string
+          max_daily_loss?: number
+          max_drawdown_pct?: number
+          max_open_positions?: number
+          max_position_size?: number
+          stop_loss_pct?: number
+          updated_at?: string
+        }
+        Update: {
+          auto_stop_loss?: boolean
+          default_order_type?: string
+          id?: string
+          max_daily_loss?: number
+          max_drawdown_pct?: number
+          max_open_positions?: number
+          max_position_size?: number
+          stop_loss_pct?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       trades: {
         Row: {
           action: string
           amount: number
           created_at: string
+          filled_price: number | null
           id: string
           market_id: string
           market_question: string
@@ -29,11 +123,13 @@ export type Database = {
           side: string
           status: string
           strategy: string | null
+          strategy_id: string | null
         }
         Insert: {
           action: string
           amount: number
           created_at?: string
+          filled_price?: number | null
           id?: string
           market_id: string
           market_question: string
@@ -44,11 +140,13 @@ export type Database = {
           side: string
           status?: string
           strategy?: string | null
+          strategy_id?: string | null
         }
         Update: {
           action?: string
           amount?: number
           created_at?: string
+          filled_price?: number | null
           id?: string
           market_id?: string
           market_question?: string
@@ -59,6 +157,7 @@ export type Database = {
           side?: string
           status?: string
           strategy?: string | null
+          strategy_id?: string | null
         }
         Relationships: []
       }
