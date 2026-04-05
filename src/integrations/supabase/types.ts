@@ -7,315 +7,199 @@ export type Json =
   | Json[]
 
 export type Database = {
+  // Allows to automatically instantiate createClient with right options
+  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "14.4"
   }
   public: {
     Tables: {
-      strategies: {
+      api_keys: {
         Row: {
-          id: string
-          name: string
-          description: string
-          instructions: string
-          active: boolean
-          mode: string
-          starting_balance: number
           created_at: string
+          encrypted_secret: string
+          id: string
+          key_id: string
+          provider: string
           updated_at: string
         }
         Insert: {
-          id: string
-          name: string
-          description?: string
-          instructions?: string
-          active?: boolean
-          mode?: string
-          starting_balance?: number
           created_at?: string
+          encrypted_secret?: string
+          id?: string
+          key_id?: string
+          provider: string
           updated_at?: string
         }
         Update: {
-          id?: string
-          name?: string
-          description?: string
-          instructions?: string
-          active?: boolean
-          mode?: string
-          starting_balance?: number
           created_at?: string
+          encrypted_secret?: string
+          id?: string
+          key_id?: string
+          provider?: string
           updated_at?: string
-        }
-        Relationships: []
-      }
-      strategy_snapshots: {
-        Row: {
-          id: string
-          strategy_id: string
-          balance: number
-          total_pnl: number
-          total_trades: number
-          winning_trades: number
-          losing_trades: number
-          open_positions: number
-          recorded_at: string
-        }
-        Insert: {
-          id?: string
-          strategy_id: string
-          balance: number
-          total_pnl?: number
-          total_trades?: number
-          winning_trades?: number
-          losing_trades?: number
-          open_positions?: number
-          recorded_at?: string
-        }
-        Update: {
-          id?: string
-          strategy_id?: string
-          balance?: number
-          total_pnl?: number
-          total_trades?: number
-          winning_trades?: number
-          losing_trades?: number
-          open_positions?: number
-          recorded_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "strategy_snapshots_strategy_id_fkey"
-            columns: ["strategy_id"]
-            isOneToOne: false
-            referencedRelation: "strategies"
-            referencedColumns: ["id"]
-          }
-        ]
-      }
-      trades: {
-        Row: {
-          id: string
-          ticker: string | null
-          market_id: string
-          market_question: string
-          side: string
-          action: string
-          price: number
-          amount: number
-          strategy: string | null
-          strategy_id: string | null
-          mode: string
-          status: string
-          pnl: number | null
-          notes: string | null
-          order_id: string | null
-          order_type: string | null
-          time_in_force: string | null
-          expiration_ts: string | null
-          filled_price: number | null
-          filled_at: string | null
-          cancelled_at: string | null
-          exchange: string | null
-          created_at: string
-        }
-        Insert: {
-          id?: string
-          ticker?: string | null
-          market_id: string
-          market_question: string
-          side: string
-          action: string
-          price: number
-          amount: number
-          strategy?: string | null
-          strategy_id?: string | null
-          mode?: string
-          status?: string
-          pnl?: number | null
-          notes?: string | null
-          order_id?: string | null
-          order_type?: string | null
-          time_in_force?: string | null
-          expiration_ts?: string | null
-          filled_price?: number | null
-          filled_at?: string | null
-          cancelled_at?: string | null
-          exchange?: string | null
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          ticker?: string | null
-          market_id?: string
-          market_question?: string
-          side?: string
-          action?: string
-          price?: number
-          amount?: number
-          strategy?: string | null
-          strategy_id?: string | null
-          mode?: string
-          status?: string
-          pnl?: number | null
-          notes?: string | null
-          order_id?: string | null
-          order_type?: string | null
-          time_in_force?: string | null
-          expiration_ts?: string | null
-          filled_price?: number | null
-          filled_at?: string | null
-          cancelled_at?: string | null
-          exchange?: string | null
-          created_at?: string
         }
         Relationships: []
       }
       compliance_log: {
         Row: {
-          id: string
-          trade_id: string | null
-          event_type: string
-          severity: string
-          message: string
-          metadata: Json
           created_at: string
-        }
-        Insert: {
-          id?: string
-          trade_id?: string | null
           event_type: string
-          severity?: string
-          message: string
-          metadata?: Json
-          created_at?: string
-        }
-        Update: {
-          id?: string
-          trade_id?: string | null
-          event_type?: string
-          severity?: string
-          message?: string
-          metadata?: Json
-          created_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "compliance_log_trade_id_fkey"
-            columns: ["trade_id"]
-            isOneToOne: false
-            referencedRelation: "trades"
-            referencedColumns: ["id"]
-          }
-        ]
-      }
-      risk_state: {
-        Row: {
           id: string
-          date: string
-          daily_pnl: number
-          daily_trades: number
-          open_position_count: number
-          open_position_value: number
-          max_drawdown_today: number
-          peak_portfolio_value: number
-          is_trading_halted: boolean
-          halt_reason: string | null
-          updated_at: string
+          message: string
+          metadata: Json | null
+          severity: string
+          trade_id: string | null
         }
         Insert: {
+          created_at?: string
+          event_type?: string
           id?: string
-          date?: string
-          daily_pnl?: number
-          daily_trades?: number
-          open_position_count?: number
-          open_position_value?: number
-          max_drawdown_today?: number
-          peak_portfolio_value?: number
-          is_trading_halted?: boolean
-          halt_reason?: string | null
-          updated_at?: string
+          message?: string
+          metadata?: Json | null
+          severity?: string
+          trade_id?: string | null
         }
         Update: {
+          created_at?: string
+          event_type?: string
           id?: string
-          date?: string
-          daily_pnl?: number
-          daily_trades?: number
-          open_position_count?: number
-          open_position_value?: number
-          max_drawdown_today?: number
-          peak_portfolio_value?: number
-          is_trading_halted?: boolean
-          halt_reason?: string | null
-          updated_at?: string
+          message?: string
+          metadata?: Json | null
+          severity?: string
+          trade_id?: string | null
         }
         Relationships: []
       }
       risk_settings: {
         Row: {
+          auto_stop_loss: boolean
+          default_order_type: string
           id: string
           max_daily_loss: number
           max_drawdown_pct: number
-          max_position_size: number
           max_open_positions: number
-          auto_stop_loss: boolean
+          max_position_size: number
           stop_loss_pct: number
-          default_order_type: string
           updated_at: string
         }
         Insert: {
+          auto_stop_loss?: boolean
+          default_order_type?: string
           id?: string
           max_daily_loss?: number
           max_drawdown_pct?: number
-          max_position_size?: number
           max_open_positions?: number
-          auto_stop_loss?: boolean
+          max_position_size?: number
           stop_loss_pct?: number
-          default_order_type?: string
           updated_at?: string
         }
         Update: {
+          auto_stop_loss?: boolean
+          default_order_type?: string
           id?: string
           max_daily_loss?: number
           max_drawdown_pct?: number
-          max_position_size?: number
           max_open_positions?: number
-          auto_stop_loss?: boolean
+          max_position_size?: number
           stop_loss_pct?: number
-          default_order_type?: string
           updated_at?: string
         }
         Relationships: []
       }
-      api_keys: {
+      strategies: {
         Row: {
-          id: string
-          provider: string
-          key_id: string
-          encrypted_secret: string
-          is_valid: boolean | null
-          last_validated_at: string | null
+          active: boolean
           created_at: string
-          updated_at: string
+          description: string
+          id: string
+          instructions: string
+          mode: string
+          name: string
+          starting_balance: number
         }
         Insert: {
-          id?: string
-          provider: string
-          key_id: string
-          encrypted_secret: string
-          is_valid?: boolean | null
-          last_validated_at?: string | null
+          active?: boolean
           created_at?: string
-          updated_at?: string
+          description?: string
+          id: string
+          instructions?: string
+          mode?: string
+          name: string
+          starting_balance?: number
         }
         Update: {
-          id?: string
-          provider?: string
-          key_id?: string
-          encrypted_secret?: string
-          is_valid?: boolean | null
-          last_validated_at?: string | null
+          active?: boolean
           created_at?: string
-          updated_at?: string
+          description?: string
+          id?: string
+          instructions?: string
+          mode?: string
+          name?: string
+          starting_balance?: number
+        }
+        Relationships: []
+      }
+      trades: {
+        Row: {
+          action: string
+          amount: number
+          created_at: string
+          filled_price: number | null
+          id: string
+          market_id: string
+          market_question: string
+          mode: string
+          notes: string | null
+          order_id: string | null
+          order_type: string | null
+          pnl: number | null
+          price: number
+          side: string
+          status: string
+          strategy: string | null
+          strategy_id: string | null
+          ticker: string | null
+        }
+        Insert: {
+          action: string
+          amount: number
+          created_at?: string
+          filled_price?: number | null
+          id?: string
+          market_id: string
+          market_question: string
+          mode?: string
+          notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
+          pnl?: number | null
+          price: number
+          side: string
+          status?: string
+          strategy?: string | null
+          strategy_id?: string | null
+          ticker?: string | null
+        }
+        Update: {
+          action?: string
+          amount?: number
+          created_at?: string
+          filled_price?: number | null
+          id?: string
+          market_id?: string
+          market_question?: string
+          mode?: string
+          notes?: string | null
+          order_id?: string | null
+          order_type?: string | null
+          pnl?: number | null
+          price?: number
+          side?: string
+          status?: string
+          strategy?: string | null
+          strategy_id?: string | null
+          ticker?: string | null
         }
         Relationships: []
       }
