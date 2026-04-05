@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Strategy {
@@ -128,19 +128,28 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     }
   }, [strategies, refreshStats]);
 
-  // Real-time updates
+  // Debounced real-time updates to prevent race conditions on rapid changes
+  const strategiesDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tradesDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     const channel = supabase
       .channel("strategies-realtime")
       .on("postgres_changes", { event: "*", schema: "public", table: "strategies" }, () => {
-        loadStrategies();
+        if (strategiesDebounce.current) clearTimeout(strategiesDebounce.current);
+        strategiesDebounce.current = setTimeout(loadStrategies, 500);
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
-        refreshStats();
+        if (tradesDebounce.current) clearTimeout(tradesDebounce.current);
+        tradesDebounce.current = setTimeout(refreshStats, 500);
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      supabase.removeChannel(channel);
+      if (strategiesDebounce.current) clearTimeout(strategiesDebounce.current);
+      if (tradesDebounce.current) clearTimeout(tradesDebounce.current);
+    };
   }, [loadStrategies, refreshStats]);
 
   const updateStrategy = useCallback(async (id: string, updates: Partial<Strategy>) => {

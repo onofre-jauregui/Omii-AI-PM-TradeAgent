@@ -1,62 +1,16 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
-// HMAC-SHA256 using built-in Web Crypto (no external imports needed)
-async function hmacSHA256Base64(key: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
-
+const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-// Always use production Kalshi API for live data — paper trades are simulated locally
-const KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
-
 function getKalshiBaseUrl(): string {
   return KALSHI_BASE_URL;
-}
-
-// Read Kalshi live credentials: DB api_keys table first, env var fallback
-async function getKalshiCredentials(supabase: any): Promise<{ keyId: string | null; privateKey: string | null }> {
-  const { data } = await supabase
-    .from("api_keys")
-    .select("key_id, encrypted_secret")
-    .eq("provider", "kalshi_live")
-    .single();
-
-  return {
-    keyId: data?.key_id || Deno.env.get("KALSHI_API_KEY_ID") || null,
-    privateKey: data?.encrypted_secret || Deno.env.get("KALSHI_API_PRIVATE_KEY") || null,
-  };
-}
-
-async function generateAuthHeaders(
-  apiKeyId: string,
-  privateKey: string,
-  method: string,
-  path: string,
-  timestamp: number
-): Promise<Record<string, string>> {
-  const message = `${timestamp}${method.toUpperCase()}${path}`;
-  const signature = await hmacSHA256Base64(privateKey, message);
-  return {
-    "KALSHI-ACCESS-KEY": apiKeyId,
-    "KALSHI-ACCESS-SIGNATURE": signature,
-    "KALSHI-ACCESS-TIMESTAMP": String(timestamp),
-    "Content-Type": "application/json",
-  };
 }
 
 // ─── Risk Management Checks ──────────────────────────────────
@@ -237,16 +191,20 @@ async function checkLiquidity(
     }
 
     // Check if there's enough depth at our price
+    // Kalshi orderbook levels have { price (in cents), quantity (number of contracts) }
     let availableContracts = 0;
+    const priceCents = price; // price is already in cents (1-99)
     for (const level of book) {
-      if (action === "buy" && level.price <= price / 100) {
-        availableContracts += level.count;
-      } else if (action === "sell" && level.price >= price / 100) {
-        availableContracts += level.count;
+      const levelPriceCents = level.price < 1 ? Math.round(level.price * 100) : level.price;
+      if (action === "buy" && levelPriceCents <= priceCents) {
+        availableContracts += (level.quantity ?? level.count ?? 0);
+      } else if (action === "sell" && levelPriceCents >= priceCents) {
+        availableContracts += (level.quantity ?? level.count ?? 0);
       }
     }
 
-    const contractsNeeded = Math.ceil(amount / (price / 100));
+    const priceInDollars = price / 100;
+    const contractsNeeded = Math.ceil(amount / priceInDollars);
     if (availableContracts < contractsNeeded) {
       await logCompliance(supabase, null, "liquidity_fallback", "warning",
         `Insufficient liquidity for ${contractsNeeded} contracts on ${ticker}. Available: ${availableContracts}. Splitting order.`,
@@ -261,6 +219,7 @@ async function checkLiquidity(
 
     return { sufficient: true };
   } catch (e) {
+    console.error("Liquidity check failed:", e instanceof Error ? e.message : e);
     return { sufficient: false, fallbackAction: "limit_order_at_price" };
   }
 }
@@ -300,10 +259,15 @@ serve(async (req) => {
       );
     }
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!supabaseUrl || !supabaseKey) {
+      return new Response(
+        JSON.stringify({ error: "Server configuration error: missing Supabase credentials" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey);
 
     const tradeMode = mode || "paper";
 
@@ -549,6 +513,13 @@ serve(async (req) => {
 async function updateRiskState(supabase: any, pnlChange: number) {
   const today = new Date().toISOString().split("T")[0];
 
+  // Count current open positions for accurate tracking
+  const { count: openPositionCount } = await supabase
+    .from("trades")
+    .select("*", { count: "exact", head: true })
+    .in("status", ["filled", "open", "partial"])
+    .eq("action", "buy");
+
   // Get current risk state
   const { data: current } = await supabase
     .from("risk_state")
@@ -557,10 +528,13 @@ async function updateRiskState(supabase: any, pnlChange: number) {
     .single();
 
   if (current) {
+    const newPnl = current.daily_pnl + pnlChange;
     await supabase.from("risk_state").update({
-      daily_pnl: current.daily_pnl + pnlChange,
+      daily_pnl: newPnl,
       daily_trades: current.daily_trades + 1,
-      max_drawdown_today: Math.min(current.max_drawdown_today, current.daily_pnl + pnlChange),
+      open_position_count: openPositionCount || 0,
+      max_drawdown_today: Math.min(current.max_drawdown_today, newPnl),
+      peak_portfolio_value: Math.max(current.peak_portfolio_value || 0, newPnl > 0 ? newPnl : current.peak_portfolio_value || 0),
       updated_at: new Date().toISOString(),
     }).eq("date", today);
   } else {
@@ -568,6 +542,7 @@ async function updateRiskState(supabase: any, pnlChange: number) {
       date: today,
       daily_pnl: pnlChange,
       daily_trades: 1,
+      open_position_count: openPositionCount || 0,
       max_drawdown_today: Math.min(0, pnlChange),
     });
   }

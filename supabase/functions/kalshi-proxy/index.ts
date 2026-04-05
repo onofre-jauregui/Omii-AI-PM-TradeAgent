@@ -1,45 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
+const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
 };
-
-const KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
-
-// HMAC-SHA256 using built-in Web Crypto (no external imports needed)
-async function hmacSHA256Base64(key: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
-
-async function generateAuthHeaders(
-  apiKeyId: string,
-  privateKey: string,
-  method: string,
-  path: string,
-  timestamp: number
-): Promise<Record<string, string>> {
-  const message = `${timestamp}${method.toUpperCase()}${path}`;
-  const signature = await hmacSHA256Base64(privateKey, message);
-  return {
-    "KALSHI-ACCESS-KEY": apiKeyId,
-    "KALSHI-ACCESS-SIGNATURE": signature,
-    "KALSHI-ACCESS-TIMESTAMP": String(timestamp),
-    "Content-Type": "application/json",
-  };
-}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -118,7 +87,7 @@ serve(async (req) => {
     });
   } catch (error) {
     console.error("kalshi-proxy error:", error);
-    return new Response(JSON.stringify({ error: (error as Error).message }), {
+    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : "Internal proxy error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

@@ -38,6 +38,7 @@ export function SettingsPanel() {
     maxOpenPositions: [10], autoStopLoss: true, stopLossPct: [15], defaultOrderType: "limit",
   });
   const [riskSaving, setRiskSaving] = useState(false);
+  const [riskSaveStatus, setRiskSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   const loadSavedKeys = useCallback(async () => {
     const { data } = await supabase.from("api_keys").select("provider, key_id");
@@ -116,6 +117,7 @@ export function SettingsPanel() {
 
   const handleSaveRiskSettings = async () => {
     setRiskSaving(true);
+    setRiskSaveStatus("idle");
     try {
       const payload = {
         max_daily_loss: riskSettings.maxDailyLoss[0],
@@ -133,8 +135,12 @@ export function SettingsPanel() {
       } else {
         await supabase.from("risk_settings").insert(payload);
       }
+      setRiskSaveStatus("success");
+      setTimeout(() => setRiskSaveStatus("idle"), 3000);
     } catch (e) {
       console.error("Failed to save risk settings:", e);
+      setRiskSaveStatus("error");
+      setTimeout(() => setRiskSaveStatus("idle"), 3000);
     } finally {
       setRiskSaving(false);
     }
@@ -390,8 +396,13 @@ export function SettingsPanel() {
             </Select>
           </div>
           <Button className="w-full rounded-full gap-2 text-sm" onClick={handleSaveRiskSettings} disabled={riskSaving}>
-            {riskSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Save Risk Settings
+            {riskSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+             riskSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+             riskSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+             <Save className="h-4 w-4" />}
+            {riskSaveStatus === "success" ? "Risk settings saved" :
+             riskSaveStatus === "error" ? "Save failed — try again" :
+             "Save Risk Settings"}
           </Button>
           <p className="text-[10px] text-muted-foreground">Enforced server-side on every trade execution.</p>
         </div>
