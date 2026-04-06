@@ -209,11 +209,34 @@ serve(async (req) => {
 
     results.unreflected_trades = unreflectedCount;
 
-    // ── 4. Log this run ──────────────────────────────────────────
+    // ── 4. Memory Compaction ─────────────────────────────────────
+    // Call compact-memory to summarize and merge related memories
+    let compactionResult: any = null;
+    try {
+      const compactResp = await fetch(
+        `${supabaseUrl}/functions/v1/compact-memory`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${supabaseKey}`,
+            "Content-Type": "application/json",
+          },
+          body: "{}",
+        }
+      );
+      if (compactResp.ok) {
+        compactionResult = await compactResp.json();
+      }
+    } catch (e) {
+      console.error("Compaction call failed:", e);
+    }
+    results.compaction = compactionResult;
+
+    // ── 5. Log this run ──────────────────────────────────────────
     await supabase.from("compliance_log").insert({
       event_type: "auto_reflect_run",
       severity: "info",
-      message: `Auto-reflect completed: ${memoriesConfirmed} confirmed, ${memoriesContradicted} contradicted, ${memoriesDeactivated} deactivated, ${strategiesDisabled} strategies disabled, ${unreflectedCount} unreflected trades`,
+      message: `Auto-reflect completed: ${memoriesConfirmed} confirmed, ${memoriesContradicted} contradicted, ${memoriesDeactivated} deactivated, ${strategiesDisabled} strategies disabled, ${unreflectedCount} unreflected trades, compaction: ${compactionResult?.summarized || 0} summarized / ${compactionResult?.merged || 0} merged`,
       metadata: results,
     });
 

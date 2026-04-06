@@ -491,22 +491,31 @@ serve(async (req) => {
       riskContext = `\n\n## Risk Limits (Enforced)\n- Max position size: $${riskSettings.max_position_size}\n- Max daily loss: $${riskSettings.max_daily_loss}\n- Max drawdown: ${riskSettings.max_drawdown_pct}%\n- Max open positions: ${riskSettings.max_open_positions}\n- Auto stop-loss: ${riskSettings.auto_stop_loss ? "Enabled" : "Disabled"} at ${riskSettings.stop_loss_pct}%\nThese limits are enforced server-side. Orders exceeding limits will be rejected.`;
     }
 
-    // ── Load persistent memory (top lessons injected into system prompt) ──
+    // ── Load persistent memory (compact summaries with token budget) ──
+    const MEMORY_TOKEN_BUDGET = 1500; // max ~1500 tokens for memory block
     const { data: topMemories } = await supabase
       .from("agent_memory")
-      .select("id, memory_type, title, content, tags, confidence, strategy_id, created_at")
+      .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
       .eq("is_active", true)
       .order("confidence", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(15);
+      .limit(30); // fetch more, then trim to budget
 
     let memoryBlock = "";
     if (topMemories && topMemories.length > 0) {
-      memoryBlock = "\n\n## Your Trading Memory (Persistent Lessons)\nThese are insights you've learned from past trading sessions. Use them to make better decisions. If new evidence contradicts a lesson, use the update_memory tool to adjust it.\n\n";
+      memoryBlock = "\n\n## Your Trading Memory (Persistent Lessons)\nThese are insights you've learned from past trading sessions. Use them to make better decisions. If new evidence contradicts a lesson, use the update_memory tool to adjust it. Use `recall_lessons` to retrieve full details on any memory.\n\n";
+      let tokenCount = 0;
       for (const mem of topMemories) {
         const tags = (mem.tags || []).length > 0 ? ` [${mem.tags.join(", ")}]` : "";
-        const conf = `(confidence: ${(mem.confidence * 100).toFixed(0)}%)`;
-        memoryBlock += `- **[${mem.memory_type.toUpperCase()}]** ${mem.title} ${conf}${tags}\n  ${mem.content}\n\n`;
+        const conf = `(${(mem.confidence * 100).toFixed(0)}%)`;
+        const merged = (mem.child_count || 0) > 1 ? ` (merged from ${mem.child_count} insights)` : "";
+        // Use summary if available, fall back to content
+        const displayText = mem.summary || mem.content;
+        const line = `- **[${mem.memory_type.toUpperCase()}]** ${mem.title} ${conf}${merged}${tags}: ${displayText}\n`;
+        const lineTokens = Math.ceil(line.length / 4);
+        if (tokenCount + lineTokens > MEMORY_TOKEN_BUDGET) break;
+        memoryBlock += line;
+        tokenCount += lineTokens;
       }
     }
 
