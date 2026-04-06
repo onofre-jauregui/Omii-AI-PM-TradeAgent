@@ -76,7 +76,21 @@ export function PortfolioChart({
 
   useEffect(() => {
     loadChartData();
-  }, [loadChartData]);
+
+    // Refresh chart when any trade is inserted or updated
+    const channel = supabase
+      .channel(`portfolio-chart-rt-${mode ?? "all"}-${strategyFilter ?? "none"}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, loadChartData)
+      .subscribe();
+
+    // Also poll every 30s as a fallback (pnl updates won't always fire realtime)
+    const interval = setInterval(loadChartData, 30_000);
+
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(interval);
+    };
+  }, [loadChartData, mode, strategyFilter]);
 
   if (loading) {
     return (

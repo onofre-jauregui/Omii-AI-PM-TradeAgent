@@ -74,11 +74,11 @@ export function PortfolioStats({
     let cashAvailable: number;
 
     if (mode === "paper") {
-      // Paper balance = starting capital + all realized P&L
-      portfolioValue = effectiveStartingBalance + totalPnl;
-      // Cash not currently tied up in open positions
-      cashAvailable = effectiveStartingBalance - totalBuyAmount + totalSellAmount + totalPnl;
-      cashAvailable = Math.max(0, cashAvailable);
+      // Paper balance = starting capital - capital tied up in open positions + realized P&L
+      // This drops immediately when a trade is placed, rises when markets resolve in your favour
+      const netInvested = Math.max(0, totalBuyAmount - totalSellAmount);
+      portfolioValue = effectiveStartingBalance - netInvested + totalPnl;
+      cashAvailable = portfolioValue; // for paper, portfolio value IS the cash balance
     } else {
       // Live: sum of invested amounts (real portfolio balance requires Kalshi API call)
       portfolioValue = totalBuyAmount - totalSellAmount + totalPnl;
