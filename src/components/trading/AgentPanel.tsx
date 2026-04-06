@@ -85,6 +85,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   );
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
 
   // Aliases for cleaner code below
@@ -124,7 +125,12 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   };
 
   useEffect(() => { loadModels(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
+  // Scroll only within the chat box — never move the page
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
 
   const handleSend = async () => {
     if (!chatInput.trim() || isLoading) return;
@@ -266,7 +272,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
             {tradingMode === "live" ? "Live" : "Paper"}
           </Badge>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+        <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {chatMessages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
