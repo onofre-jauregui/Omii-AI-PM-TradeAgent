@@ -731,26 +731,44 @@ Always be transparent about your reasoning and risk assessment. Format responses
           try {
             const limit = args.limit || 10;
             const kalshiBase = getKalshiBaseUrl();
-            let url = `${kalshiBase}/markets?limit=${limit}&status=open`;
+            // Fetch extra to compensate for filtering out illiquid MVE parlays
+            const fetchLimit = Math.min(limit * 5, 200);
+            let url = `${kalshiBase}/markets?limit=${fetchLimit}&status=open`;
             if (args.category) url += `&series_ticker=${args.category}`;
             const marketsRes = await fetch(url);
             const marketsData = await marketsRes.json();
-            const markets = (marketsData.markets || []).map((m: any) => ({
-              ticker: m.ticker,
-              title: m.title,
-              subtitle: m.subtitle,
-              yes_bid: m.yes_bid_dollars ?? m.yes_bid,
-              yes_ask: m.yes_ask_dollars ?? m.yes_ask,
-              no_bid: m.no_bid_dollars ?? m.no_bid,
-              no_ask: m.no_ask_dollars ?? m.no_ask,
-              last_price: m.last_price_dollars ?? m.last_price,
-              volume: m.volume,
-              volume_24h: m.volume_24h,
-              open_interest: m.open_interest,
-              close_time: m.close_time,
-              spread: (((m.yes_ask_dollars ?? m.yes_ask) || 0) - ((m.yes_bid_dollars ?? m.yes_bid) || 0)).toFixed(2),
-            }));
-            toolResult = JSON.stringify({ markets: markets.slice(0, limit) });
+            const markets = (marketsData.markets || [])
+              // Filter out MVE parlay markets (multi-leg exotics with no real liquidity)
+              .filter((m: any) => {
+                const ticker = m.ticker || "";
+                if (ticker.startsWith("KXMVE")) return false;
+                // Also filter markets with no price data at all
+                const ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+                const yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+                const last = Number(m.last_price_dollars ?? m.last_price) || 0;
+                return ya > 0.005 || yb > 0.005 || last > 0.005;
+              })
+              .slice(0, limit)
+              .map((m: any) => ({
+                ticker: m.ticker,
+                title: m.title,
+                subtitle: m.subtitle,
+                yes_bid: m.yes_bid_dollars ?? m.yes_bid,
+                yes_ask: m.yes_ask_dollars ?? m.yes_ask,
+                no_bid: m.no_bid_dollars ?? m.no_bid,
+                no_ask: m.no_ask_dollars ?? m.no_ask,
+                last_price: m.last_price_dollars ?? m.last_price,
+                volume: m.volume,
+                volume_24h: m.volume_24h,
+                open_interest: m.open_interest,
+                close_time: m.close_time,
+                spread: (((m.yes_ask_dollars ?? m.yes_ask) || 0) - ((m.yes_bid_dollars ?? m.yes_bid) || 0)).toFixed(2),
+              }));
+            if (markets.length === 0) {
+              toolResult = JSON.stringify({ markets: [], note: "No liquid markets found in the current batch. Try fetching more with a higher limit, or check specific categories like 'economics', 'politics', or 'crypto'." });
+            } else {
+              toolResult = JSON.stringify({ markets });
+            }
           } catch (e: any) {
             toolResult = JSON.stringify({ error: "Failed to fetch Kalshi markets: " + e.message });
           }
