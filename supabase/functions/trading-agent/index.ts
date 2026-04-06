@@ -731,43 +731,86 @@ Always be transparent about your reasoning and risk assessment. Format responses
           try {
             const limit = args.limit || 10;
             const kalshiBase = getKalshiBaseUrl();
-            // Fetch extra to compensate for filtering out illiquid MVE parlays
-            const fetchLimit = Math.min(limit * 5, 200);
-            let url = `${kalshiBase}/markets?limit=${fetchLimit}&status=open`;
-            if (args.category) url += `&series_ticker=${args.category}`;
-            const marketsRes = await fetch(url);
-            const marketsData = await marketsRes.json();
-            const markets = (marketsData.markets || [])
-              // Filter out MVE parlay markets (multi-leg exotics with no real liquidity)
-              .filter((m: any) => {
-                const ticker = m.ticker || "";
-                if (ticker.startsWith("KXMVE")) return false;
-                // Also filter markets with no price data at all
-                const ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-                const yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-                const last = Number(m.last_price_dollars ?? m.last_price) || 0;
-                return ya > 0.005 || yb > 0.005 || last > 0.005;
-              })
-              .slice(0, limit)
-              .map((m: any) => ({
-                ticker: m.ticker,
-                title: m.title,
-                subtitle: m.subtitle,
-                yes_bid: m.yes_bid_dollars ?? m.yes_bid,
-                yes_ask: m.yes_ask_dollars ?? m.yes_ask,
-                no_bid: m.no_bid_dollars ?? m.no_bid,
-                no_ask: m.no_ask_dollars ?? m.no_ask,
-                last_price: m.last_price_dollars ?? m.last_price,
-                volume: m.volume,
-                volume_24h: m.volume_24h,
-                open_interest: m.open_interest,
-                close_time: m.close_time,
-                spread: (((m.yes_ask_dollars ?? m.yes_ask) || 0) - ((m.yes_bid_dollars ?? m.yes_bid) || 0)).toFixed(2),
-              }));
-            if (markets.length === 0) {
-              toolResult = JSON.stringify({ markets: [], note: "No liquid markets found in the current batch. Try fetching more with a higher limit, or check specific categories like 'economics', 'politics', or 'crypto'." });
+
+            // Helper: parse a market into a compact object
+            const parseMarket = (m: any) => ({
+              ticker: m.ticker,
+              title: m.title || m.subtitle,
+              yes_bid: m.yes_bid_dollars ?? m.yes_bid,
+              yes_ask: m.yes_ask_dollars ?? m.yes_ask,
+              no_bid: m.no_bid_dollars ?? m.no_bid,
+              no_ask: m.no_ask_dollars ?? m.no_ask,
+              last_price: m.last_price_dollars ?? m.last_price,
+              volume: m.volume,
+              volume_24h: m.volume_24h,
+              open_interest: m.open_interest,
+              close_time: m.close_time,
+              spread: (((m.yes_ask_dollars ?? m.yes_ask) || 0) - ((m.yes_bid_dollars ?? m.yes_bid) || 0)).toFixed(2),
+            });
+
+            // Helper: is this a real tradeable market?
+            const isLiquid = (m: any): boolean => {
+              if ((m.ticker || "").startsWith("KXMVE")) return false;
+              const ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+              const yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+              const last = Number(m.last_price_dollars ?? m.last_price) || 0;
+              return ya > 0.005 || yb > 0.005 || last > 0.005;
+            };
+
+            let allMarkets: any[] = [];
+
+            if (args.category) {
+              // Category-specific fetch (series_ticker)
+              const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 200)}&status=open&series_ticker=${args.category}`;
+              const res = await fetch(url);
+              const data = await res.json();
+              allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
-              toolResult = JSON.stringify({ markets });
+              // Parallel fetch from known liquid series + events endpoint
+              // The default /markets endpoint is flooded with MVE parlays,
+              // so we fetch real markets from specific series and events.
+              const series = ["KXBTC", "KXETH", "KXINX", "KXECON", "KXFED", "KXGDP", "KXCPI", "KXTRUMP", "KXPOPE"];
+              const fetches = [
+                // Events endpoint returns real markets grouped by event
+                fetch(`${kalshiBase}/events?limit=20&status=open`).then(r => r.json()).catch(() => ({ events: [] })),
+                // Parallel series fetches for known liquid categories
+                ...series.map(s =>
+                  fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
+                    .then(r => r.json()).catch(() => ({ markets: [] }))
+                ),
+              ];
+
+              const results = await Promise.all(fetches);
+
+              // Parse events (first result)
+              const eventsData = results[0];
+              for (const event of (eventsData.events || [])) {
+                for (const m of (event.markets || [])) {
+                  if (isLiquid(m)) allMarkets.push(parseMarket(m));
+                }
+              }
+
+              // Parse series results
+              for (let i = 1; i < results.length; i++) {
+                for (const m of (results[i].markets || [])) {
+                  if (isLiquid(m)) allMarkets.push(parseMarket(m));
+                }
+              }
+
+              // Deduplicate by ticker
+              const seen = new Set<string>();
+              allMarkets = allMarkets.filter(m => {
+                if (seen.has(m.ticker)) return false;
+                seen.add(m.ticker);
+                return true;
+              });
+            }
+
+            const finalMarkets = allMarkets.slice(0, limit);
+            if (finalMarkets.length === 0) {
+              toolResult = JSON.stringify({ markets: [], note: "No liquid markets found. Kalshi may have limited activity right now. Try again later or specify a category like 'KXBTC' for Bitcoin or 'KXINX' for S&P 500." });
+            } else {
+              toolResult = JSON.stringify({ markets: finalMarkets, total_found: allMarkets.length });
             }
           } catch (e: any) {
             toolResult = JSON.stringify({ error: "Failed to fetch Kalshi markets: " + e.message });
