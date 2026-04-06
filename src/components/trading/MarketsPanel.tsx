@@ -243,7 +243,7 @@ export function MarketsPanel() {
               onClick={() => setSelectedMarket(market)}
             >
               <div className="flex items-start justify-between gap-6">
-                <div className="flex-1 space-y-2">
+                <div className="flex-1 space-y-1.5">
                   <h3 className="text-sm font-medium leading-snug text-foreground">{market.question}</h3>
                   <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
                     <span className="flex items-center gap-1">

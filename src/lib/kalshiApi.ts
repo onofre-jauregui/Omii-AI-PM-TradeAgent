@@ -216,12 +216,20 @@ function parseKalshiMarket(m: KalshiMarket): ParsedMarket | null {
   const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
   const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
 
+  // Combine title + subtitle so strike-price markets are distinguishable
+  // e.g. "Ethereum price at Apr 6 at 3pm EDT? — $2,740 or above"
+  const titleStr = m.title || "";
+  const subtitleStr = m.subtitle || "";
+  const question = titleStr && subtitleStr && subtitleStr !== titleStr
+    ? `${titleStr} — ${subtitleStr}`
+    : titleStr || subtitleStr;
+
   return {
     id: m.ticker,
     ticker: m.ticker,
     eventTicker: m.event_ticker || m.ticker,
-    question: m.title || m.subtitle,
-    description: m.subtitle || "",
+    question,
+    description: subtitleStr,
     yesPrice,
     noPrice,
     yesBid: Math.round(yesBid * 100),
