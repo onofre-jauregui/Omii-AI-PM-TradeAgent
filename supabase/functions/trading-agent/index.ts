@@ -590,6 +590,15 @@ Important Kalshi-specific notes:
 - Always check the bid-ask spread before trading. Wide spreads mean low liquidity.
 - Never exceed position size limits.
 
+### Conversation Memory
+When the user tells you something important — preferences, risk tolerance, market interests, instructions about how to trade, corrections to your behavior, or any directive that should persist — use **save_insight** to remember it. Use memoryType "lesson" for trading preferences, "market_note" for market interests, or "strategy_insight" for strategy-specific guidance. Tag with "user_preference" so you can recall these later. This way you remember what the user told you across sessions.
+
+Examples of things to save:
+- "I only want to trade crypto markets" → save as market_note with tags ["user_preference", "crypto"]
+- "Never risk more than $20 per trade" → save as lesson with tags ["user_preference", "risk"]
+- "I like contrarian plays" → save as lesson with tags ["user_preference", "style"]
+- "Stop trading momentum, it's not working" → save as strategy_insight
+
 Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
 
     // ── All tools including memory tools ──

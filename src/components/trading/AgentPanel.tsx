@@ -10,6 +10,7 @@ import { Cpu, Send, MessageSquare, Loader2, BookOpen, AlertTriangle, RefreshCw }
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
+import { useChat } from "@/lib/chatContext";
 import { supabase } from "@/integrations/supabase/client";
 
 const FALLBACK_MODELS = [
@@ -72,6 +73,8 @@ async function streamChat({
 
 export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolean }) {
   const { getActiveStrategies } = useStrategies();
+  const chatChannel = forcePaperMode ? "demo" : "agent";
+  const chat = useChat(chatChannel);
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
   const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
@@ -80,13 +83,13 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   const [systemPrompt, setSystemPrompt] = useState(
     `You are an expert algorithmic trading agent for Kalshi event contracts. Analyze market data, news sentiment, probability shifts, and order book depth to identify profitable trading opportunities. Use limit orders for better execution. Provide clear trade signals with entry/exit prices and confidence levels.`
   );
-  const [chatMessages, setChatMessages] = useState<Msg[]>([
-    { role: "assistant", content: "Agent ready. I can analyze Kalshi event contracts, execute limit orders, check your portfolio, and cancel open orders. Active strategies are loaded automatically.\n\nTry: **\"Go trade\"** or **\"Analyze the top markets\"** or **\"Check my portfolio\"**" },
-  ]);
   const [chatInput, setChatInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
+
+  // Aliases for cleaner code below
+  const chatMessages = chat.messages;
+  const isLoading = chat.isLoading;
 
   // Load dynamic model list + saved preference on mount
   const loadModels = async () => {
@@ -125,28 +128,24 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
 
   const handleSend = async () => {
     if (!chatInput.trim() || isLoading) return;
-    const userMsg: Msg = { role: "user", content: chatInput };
-    const newMessages = [...chatMessages, userMsg];
-    setChatMessages(newMessages);
+    chat.addUserMessage(chatInput);
+    const messagesForApi = [...chatMessages, { role: "user" as const, content: chatInput }];
     setChatInput("");
-    setIsLoading(true);
+    chat.setLoading(true);
     let assistantSoFar = "";
-    const upsertAssistant = (chunk: string) => {
-      assistantSoFar += chunk;
-      setChatMessages(prev => {
-        const last = prev[prev.length - 1];
-        if (last?.role === "assistant" && prev.length > newMessages.length)
-          return prev.map((m, i) => i === prev.length - 1 ? { ...m, content: assistantSoFar } : m);
-        return [...prev, { role: "assistant", content: assistantSoFar }];
-      });
-    };
     await streamChat({
-      messages: newMessages.slice(1),
+      messages: messagesForApi.slice(1), // skip initial assistant greeting
       strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
       model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode,
-      onDelta: upsertAssistant,
-      onDone: () => setIsLoading(false),
-      onError: (err) => { setChatMessages(prev => [...prev, { role: "assistant", content: `Error: ${err}` }]); setIsLoading(false); },
+      onDelta: (chunk) => {
+        assistantSoFar += chunk;
+        chat.upsertAssistant(assistantSoFar);
+      },
+      onDone: () => chat.setLoading(false),
+      onError: (err) => {
+        chat.upsertAssistant(`Error: ${err}`);
+        chat.setLoading(false);
+      },
     });
   };
 
