@@ -761,38 +761,39 @@ Always be transparent about your reasoning and risk assessment. Format responses
 
             if (args.category) {
               // Category-specific fetch (series_ticker)
-              const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 200)}&status=open&series_ticker=${args.category}`;
+              const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 60)}&status=open&series_ticker=${args.category}`;
               const res = await fetch(url);
               const data = await res.json();
               allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
-              // Parallel fetch from known liquid series + events endpoint
-              // The default /markets endpoint is flooded with MVE parlays,
-              // so we fetch real markets from specific series and events.
-              const series = ["KXBTC", "KXETH", "KXINX", "KXECON", "KXFED", "KXGDP", "KXCPI", "KXTRUMP", "KXPOPE"];
-              const fetches = [
-                // Events endpoint returns real markets grouped by event
-                fetch(`${kalshiBase}/events?limit=20&status=open`).then(r => r.json()).catch(() => ({ events: [] })),
-                // Parallel series fetches for known liquid categories
-                ...series.map(s =>
-                  fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
-                    .then(r => r.json()).catch(() => ({ markets: [] }))
-                ),
+              // Parallel fetch from known active Kalshi series.
+              // The default /markets endpoint returns only MVE multi-leg parlay
+              // markets with zero liquidity, so we target specific series where
+              // real event contracts trade. The /events endpoint does NOT return
+              // inline markets, so it is NOT used here.
+              const series = [
+                "KXFED",       // Federal Reserve rate decisions (most liquid ~50¢)
+                "KXGDP",       // US GDP growth (~50¢)
+                "KXPAYROLLS",  // Monthly jobs report
+                "KXCPI",       // CPI inflation
+                "KXINX",       // S&P 500 price range
+                "KXBTC",       // Bitcoin price range
+                "KXETH",       // Ethereum price range
+                "KXNHL",       // NHL hockey
+                "KXNBA",       // NBA basketball
+                "KXMLB",       // MLB baseball
+                "KXCHCUTS",    // Challenger job cuts
               ];
+
+              const fetches = series.map(s =>
+                fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
+                  .then(r => r.json()).catch(() => ({ markets: [] }))
+              );
 
               const results = await Promise.all(fetches);
 
-              // Parse events (first result)
-              const eventsData = results[0];
-              for (const event of (eventsData.events || [])) {
-                for (const m of (event.markets || [])) {
-                  if (isLiquid(m)) allMarkets.push(parseMarket(m));
-                }
-              }
-
-              // Parse series results
-              for (let i = 1; i < results.length; i++) {
-                for (const m of (results[i].markets || [])) {
+              for (const result of results) {
+                for (const m of (result.markets || [])) {
                   if (isLiquid(m)) allMarkets.push(parseMarket(m));
                 }
               }
@@ -804,6 +805,9 @@ Always be transparent about your reasoning and risk assessment. Format responses
                 seen.add(m.ticker);
                 return true;
               });
+
+              // Sort by volume descending so most-traded markets surface first
+              allMarkets.sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
             }
 
             const finalMarkets = allMarkets.slice(0, limit);

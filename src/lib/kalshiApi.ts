@@ -12,7 +12,7 @@ export interface KalshiEvent {
 
 export interface KalshiMarket {
   ticker: string;
-  event_ticker: string;
+  event_ticker?: string;
   title: string;
   subtitle: string;
   yes_bid?: number;
@@ -39,6 +39,7 @@ export interface KalshiMarket {
 export interface ParsedMarket {
   id: string;
   ticker: string;
+  eventTicker: string;  // e.g. "KXFED-27APR" — used for Kalshi website URL
   question: string;
   description: string;
   yesPrice: number;
@@ -177,76 +178,48 @@ async function kalshiProxyDelete(endpoint: string): Promise<any> {
 
 // ─── Market Data ─────────────────────────────────────────────
 
-export async function fetchKalshiMarkets(
-  limit = 50,
-  cursor?: string,
-  extraParams: Record<string, string> = {}
-): Promise<ParsedMarket[]> {
-  const params: Record<string, string> = { limit: String(limit), status: "open", ...extraParams };
-  if (cursor) params.cursor = cursor;
+// Known active Kalshi series — these return real event-contract markets
+// (not MVE parlays). The default /markets endpoint is 100% MVE parlays.
+const KALSHI_ACTIVE_SERIES = [
+  "KXFED",       // Federal Reserve rate decisions (most liquid ~50¢)
+  "KXGDP",       // US GDP growth (very liquid ~50¢)
+  "KXPAYROLLS",  // Monthly jobs report
+  "KXCPI",       // CPI inflation data
+  "KXINX",       // S&P 500 price range
+  "KXBTC",       // Bitcoin price range
+  "KXETH",       // Ethereum price range
+  "KXNHL",       // NHL hockey
+  "KXNBA",       // NBA basketball
+  "KXMLB",       // MLB baseball
+  "KXCHCUTS",    // Challenger job cuts
+];
 
-  const data = await kalshiProxyGet("markets", params);
-  const markets: KalshiMarket[] = data.markets || [];
+function parseKalshiMarket(m: KalshiMarket): ParsedMarket | null {
+  // Explicitly skip MVE multi-leg parlay markets
+  if ((m.ticker || "").startsWith("KXMVE")) return null;
 
-  return markets.map((m) => {
-    // Skip markets with no real price data (unstarted/illiquid MVE parlays)
-    const _ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-    const _yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-    const _nb = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
-    const _last = Number(m.last_price_dollars ?? m.last_price) || 0;
-    // Minimum 0.5¢ threshold so sub-cent values don't round to 0c display
-    const hasRealYes  = (_ya >= 0.005 && _ya < 0.999) || _yb >= 0.005;
-    const hasRealNo   = _nb >= 0.005 && _nb < 0.995;
-    const hasRealLast = _last >= 0.005 && _last < 0.995;
-    // Require at least a real YES quote OR last price; don't show markets with ONLY a near-100c NO bid
-    const hasPrice = hasRealYes || hasRealLast || (hasRealNo && _nb < 0.97);
-    if (!hasPrice) return null;
-    const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-    const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-    const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
-    const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
-    const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
+  const _ya   = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
+  const _yb   = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
+  const _nb   = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
+  const _last = Number(m.last_price_dollars ?? m.last_price) || 0;
 
-    const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
+  // Require at least a real YES quote or last price (0.5¢ threshold)
+  const hasRealYes  = (_ya >= 0.005 && _ya < 0.999) || _yb >= 0.005;
+  const hasRealLast = _last >= 0.005 && _last < 0.995;
+  const hasRealNo   = _nb >= 0.005 && _nb < 0.97;
+  if (!hasRealYes && !hasRealLast && !hasRealNo) return null;
 
-    return ({
-    id: m.ticker,
-    ticker: m.ticker,
-    question: m.title || m.subtitle,
-    description: m.subtitle || "",
-    yesPrice,
-    noPrice,
-    yesBid: Math.round(yesBid * 100),
-    yesAsk: Math.round(yesAsk * 100),
-    noBid:  Math.round(noBid  * 100),
-    noAsk:  Math.round(noAsk  * 100),
-    volume: m.volume || 0,
-    volume24hr: m.volume_24h || 0,
-    liquidity: m.liquidity || m.open_interest || 0,
-    openInterest: m.open_interest || 0,
-    endDate: formatDate(m.close_time || m.expiration_time),
-    closeTime: m.close_time || m.expiration_time || "",
-    category: m.category || "Event",
-    slug: m.ticker,
-    active: m.status === "open",
-    spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
-  });
-  }).filter((m): m is ParsedMarket => m !== null);
-}
-
-export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | null> {
-  const data = await kalshiProxyGet(`markets/${ticker}`);
-  const m = data.market;
-  if (!m) return null;
   const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
   const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
   const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
   const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
   const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
   const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
+
   return {
     id: m.ticker,
     ticker: m.ticker,
+    eventTicker: m.event_ticker || m.ticker,
     question: m.title || m.subtitle,
     description: m.subtitle || "",
     yesPrice,
@@ -268,47 +241,61 @@ export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | 
   };
 }
 
-export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
-  const params: Record<string, string> = { limit: String(limit), status: "open" };
-  const data = await kalshiProxyGet("events", params);
-  const events: KalshiEvent[] = data.events || [];
+/**
+ * Fetch markets from known active Kalshi series in parallel.
+ * The default /markets endpoint returns only MVE parlay markets, so we
+ * target specific series where real event contracts trade.
+ */
+export async function fetchKalshiMarkets(
+  _limit = 50,
+  _cursor?: string,
+  extraParams: Record<string, string> = {}
+): Promise<ParsedMarket[]> {
+  const seriesTicker = extraParams.series_ticker;
 
+  if (seriesTicker) {
+    // Single-series fetch (used by category filter)
+    const data = await kalshiProxyGet("markets", { limit: "50", status: "open", ...extraParams });
+    return (data.markets || []).map(parseKalshiMarket).filter((m): m is ParsedMarket => m !== null);
+  }
+
+  // Parallel fetch across all known active series
+  const results = await Promise.allSettled(
+    KALSHI_ACTIVE_SERIES.map(s =>
+      kalshiProxyGet("markets", { limit: "20", status: "open", series_ticker: s })
+        .then(d => (d.markets || []) as KalshiMarket[])
+        .catch(() => [] as KalshiMarket[])
+    )
+  );
+
+  const seen = new Set<string>();
   const allMarkets: ParsedMarket[] = [];
-  for (const event of events) {
-    if (event.markets) {
-      for (const m of event.markets) {
-        const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-        const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-        const noBid  = Number(m.no_bid_dollars  ?? m.no_bid)  || 0;
-        const noAsk  = Number(m.no_ask_dollars  ?? m.no_ask)  || 0;
-        const last   = Number(m.last_price_dollars ?? m.last_price) || 0;
-        const { yes: yesPrice, no: noPrice } = resolvePrice(yesBid, yesAsk, noBid, noAsk, last);
-        allMarkets.push({
-          id: m.ticker,
-          ticker: m.ticker,
-          question: m.title || event.title,
-          description: m.subtitle || event.sub_title || "",
-          yesPrice,
-          noPrice,
-          yesBid: Math.round(yesBid * 100),
-          yesAsk: Math.round(yesAsk * 100),
-          noBid:  Math.round(noBid  * 100),
-          noAsk:  Math.round(noAsk  * 100),
-          volume: m.volume || 0,
-          volume24hr: m.volume_24h || 0,
-          liquidity: m.liquidity || m.open_interest || 0,
-          openInterest: m.open_interest || 0,
-          endDate: formatDate(m.close_time || m.expiration_time),
-          closeTime: m.close_time || m.expiration_time || "",
-          category: m.category || event.category || "Event",
-          slug: m.ticker,
-          active: m.status === "open",
-          spread: yesAsk > 0 && yesBid > 0 ? Math.round((yesAsk - yesBid) * 100) : 0,
-        });
-      }
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const raw of result.value) {
+      if (seen.has(raw.ticker)) continue;
+      seen.add(raw.ticker);
+      const parsed = parseKalshiMarket(raw);
+      if (parsed) allMarkets.push(parsed);
     }
   }
-  return allMarkets;
+
+  // Sort by volume descending so most-liquid markets come first
+  return allMarkets.sort((a, b) => b.volume - a.volume);
+}
+
+export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | null> {
+  const data = await kalshiProxyGet(`markets/${ticker}`);
+  const m = data.market;
+  if (!m) return null;
+  return parseKalshiMarket(m);
+}
+
+export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
+  // Note: Kalshi /events endpoint does NOT return nested markets.
+  // Use fetchKalshiMarkets() instead, which fetches from active series.
+  return fetchKalshiMarkets(limit);
 }
 
 // ─── Portfolio & Orders ──────────────────────────────────────

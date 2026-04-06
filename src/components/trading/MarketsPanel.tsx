@@ -50,7 +50,7 @@ export function MarketsPanel() {
       console.error("Failed to fetch live markets, using mock data:", err);
       setError("Using cached data — live feed unavailable");
       setMarkets(MOCK_MARKETS.map(m => ({
-        ...m, ticker: m.id, description: "", volume24hr: 0, liquidity: 0,
+        ...m, ticker: m.id, eventTicker: m.id, description: "", volume24hr: 0, liquidity: 0,
         openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0,
         yesAsk: 0, noBid: 0, noAsk: 0, closeTime: "",
       })));
@@ -356,9 +356,9 @@ export function MarketsPanel() {
                 </Button>
               </div>
 
-              {selectedMarket.ticker && (
+              {selectedMarket.eventTicker && (
                 <a
-                  href={`https://kalshi.com/markets/${selectedMarket.ticker}`}
+                  href={`https://kalshi.com/markets/${selectedMarket.eventTicker.toLowerCase()}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center gap-1.5 text-xs text-primary hover:opacity-80 transition-opacity duration-300"
