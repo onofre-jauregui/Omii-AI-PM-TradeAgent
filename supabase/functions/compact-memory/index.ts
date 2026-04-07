@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { corsHeaders, preflight } from "../_shared/cors.ts";
 
 /**
  * compact-memory: Compresses the agent's memory to save tokens.
@@ -15,11 +16,6 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
  * Called by auto-reflect hourly, or manually.
  */
 
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 // Rough token estimate: ~4 chars per token for English
 function estimateTokens(text: string): number {
@@ -27,7 +23,7 @@ function estimateTokens(text: string): number {
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight();
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");

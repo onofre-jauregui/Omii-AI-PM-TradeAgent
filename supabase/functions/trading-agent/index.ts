@@ -1,17 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
-
-const KALSHI_PROD_URL = "https://api.elections.kalshi.com/trade-api/v2";
-function getKalshiBaseUrl(): string {
-  return KALSHI_PROD_URL;
-}
+import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
@@ -184,6 +174,76 @@ const UPDATE_MEMORY_TOOL = {
         reason: { type: "string", description: "Why you're updating this memory" },
       },
       required: ["memoryId", "action"],
+    },
+  },
+};
+
+// ─── Basket Execution Tool ──────────────────────────────────────────────────
+
+const EXECUTE_BASKET_TOOL = {
+  type: "function",
+  function: {
+    name: "execute_basket",
+    description:
+      "Execute a multi-leg basket trade for surface arbitrage opportunities. Use this when scan_surface returns a monotonicity_violation or bracket_sum_violation — these require two coordinated legs to be profitable. The basket engine executes legs in order, re-checks edge after each fill, and automatically flattens any filled legs if the basket can't complete (preventing naked directional exposure). Never use execute_trade for arb — use this instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        alert_id: { type: "string", description: "The surface_alerts.id that triggered this basket" },
+        legs: {
+          type: "array",
+          description: "Ordered array of legs. Most fragile / thinnest market first.",
+          items: {
+            type: "object",
+            properties: {
+              ticker: { type: "string" },
+              market_question: { type: "string" },
+              side: { type: "string", enum: ["yes", "no"] },
+              action: { type: "string", enum: ["buy", "sell"] },
+              price: { type: "number", description: "Limit price in cents (1-99)" },
+              amount: { type: "number", description: "Dollar amount" },
+              order_type: { type: "string", enum: ["limit", "market"] },
+            },
+            required: ["ticker", "side", "action", "price", "amount"],
+          },
+        },
+        expected_edge_cents: { type: "number", description: "Total expected edge in cents if all legs fill" },
+        reasoning: { type: "string", description: "Why this basket is being executed" },
+      },
+      required: ["legs", "expected_edge_cents", "reasoning"],
+    },
+  },
+};
+
+// ─── Signal + Surface Tools ─────────────────────────────────────────────────
+
+const FETCH_SIGNALS_TOOL = {
+  type: "function",
+  function: {
+    name: "fetch_signals",
+    description:
+      "Run the systematic signal generator to score and rank all live Kalshi markets before making trading decisions. Returns markets scored across liquidity, edge, time-value, and volume dimensions with direction recommendations (buy_yes / buy_no / skip). Call this BEFORE fetch_live_markets when you want a pre-ranked shortlist of opportunities rather than raw market data.",
+    parameters: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max signals to return (default 20)" },
+        category: { type: "string", description: "Filter to a specific series (e.g. 'KXBTC', 'KXINX', 'KXFED')" },
+      },
+    },
+  },
+};
+
+const SCAN_SURFACE_TOOL = {
+  type: "function",
+  function: {
+    name: "scan_surface",
+    description:
+      "Scan for cross-market inconsistencies and arbitrage opportunities across all live Kalshi event series. Detects: (1) monotonicity violations — related threshold markets where a lower threshold is priced cheaper than a higher one (riskless arb); (2) bracket sum violations — MECE discrete-outcome markets where YES prices don't sum to ~100; (3) spread anomalies — markets with abnormally wide spreads vs. peers. Returns ranked alerts with specific trade actions. Call this when looking for structural edge beyond individual market analysis.",
+    parameters: {
+      type: "object",
+      properties: {
+        min_edge_cents: { type: "number", description: "Minimum expected edge in cents to include an alert (default 3)" },
+      },
     },
   },
 };
@@ -390,7 +450,7 @@ async function streamAnthropicAsSSE(
 // ─── Main handler ───────────────────────────────────────────────────────────
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight("extended");
 
   try {
     let body: any;
@@ -566,32 +626,46 @@ serve(async (req) => {
 
 You have access to these tools:
 
-### Trading Tools
-1. **fetch_live_markets** - Call this FIRST to get current Kalshi market data before making any trading decisions.
-2. **execute_trade** - Place limit orders on Kalshi. Always explain your reasoning. Price is in cents (1-99). Include expectedOutcome and confidenceLevel when possible — these are stored for later reflection.
-3. **cancel_order** - Cancel an open limit order by order ID.
-4. **check_portfolio** - Check current positions, balance, and recent trades.
+### Signal & Surface Tools (use these FIRST)
+1. **fetch_signals** — pre-scored market shortlist with direction (buy_yes / buy_no / skip) and composite_score. Start every session here.
+2. **scan_surface** — finds cross-market inconsistencies: monotonicity violations (arb), bracket sum violations (collective mispricing), spread anomalies. Run at least once per session.
+
+### Execution Tools
+3. **execute_basket** — for multi-leg arb trades from scan_surface alerts. Executes legs in order, re-checks edge after each fill, auto-flattens if basket can't complete. Use this for monotonicity_violation and bracket_sum_violation alerts — NEVER use execute_trade for arb.
+4. **execute_trade** — single-leg limit orders. Use for Resolution Fade, Economic Consensus, and Liquidity Provision strategies.
+5. **cancel_order** — cancel an open limit order by order ID.
+6. **check_portfolio** — current positions, balance, and P&L.
+7. **fetch_live_markets** — raw market data for deep-dive on specific tickers.
 
 ### Memory & Learning Tools
-5. **recall_lessons** - Search your persistent memory for relevant past insights BEFORE making decisions. Always check your memory when analyzing markets or strategies you've traded before.
-6. **reflect_on_trades** - Analyze recent completed trades to learn from outcomes. Call this when asked to learn, review performance, or periodically to improve.
-7. **save_insight** - Save a new lesson, pattern, or insight to persistent memory. Use this when you discover something important.
-8. **update_memory** - Confirm, contradict, or deactivate existing memories based on new evidence.
+8. **recall_lessons** — search persistent memory before making decisions.
+9. **reflect_on_trades** — analyze recent completed trades to learn from outcomes.
+10. **save_insight** — save a lesson, pattern, or insight to persistent memory.
+11. **update_memory** — confirm, contradict, or deactivate existing memories.
 
-### Your Learning Workflow
-When trading:
-1. **Recall** relevant lessons before analyzing markets
-2. **Fetch** live market data
-3. **Check** portfolio for current exposure
-4. **Analyze** using strategies + your memory
-5. **Execute** trades with reasoning, expected outcome, and confidence
-6. **Report** back with reasoning
+### Optimal Trading Workflow
+1. recall_lessons — what do you already know?
+2. fetch_signals — get the scored shortlist
+3. scan_surface — find structural edge / arb
+4. check_portfolio — current exposure
+5. For arb alerts: execute_basket (2+ legs, auto-flatten protection)
+6. For single-leg signals: execute_trade (with reasoning + expectedOutcome + confidenceLevel)
+7. save_insight / reflect_on_trades — learn from the session
 
-When reflecting:
-1. Call **reflect_on_trades** to review recent outcomes
-2. Compare expectations vs. reality
-3. **Save insights** from patterns you notice
-4. **Update memories** — confirm what proved true, contradict what didn't hold
+### Critical Rule: execute_basket vs execute_trade
+- Surface arb (monotonicity_violation, bracket_sum_violation) → **execute_basket**
+- Everything else → **execute_trade**
+- Never use execute_trade for a 2-leg arb — if leg 2 fails you have naked exposure
+
+### Signal Interpretation
+- composite_score ≥ 0.65 = strong, prioritize
+- direction "buy_yes" = YES underpriced, direction "buy_no" = NO underpriced
+- direction "skip" = insufficient edge or liquidity
+
+### Surface Alert Interpretation
+- monotonicity_violation = near-riskless arb → execute_basket immediately
+- bracket_sum_violation = collective mispricing → execute_basket on top 2 liquid markets
+- spread_anomaly = wide spread → execute_trade with limit at mid
 
 Important Kalshi-specific notes:
 - Prices are in cents (1-99). YES price + NO price = 100.
@@ -610,8 +684,11 @@ Examples of things to save:
 
 Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
 
-    // ── All tools including memory tools ──
+    // ── All tools ──
     const allTools = [
+      FETCH_SIGNALS_TOOL,
+      SCAN_SURFACE_TOOL,
+      EXECUTE_BASKET_TOOL,
       TRADE_TOOL,
       FETCH_MARKETS_TOOL,
       CANCEL_ORDER_TOOL,
@@ -623,7 +700,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
     ];
 
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
-    let maxIterations = 8; // Increased to allow memory + trading tool chains
+    let maxIterations = 12; // Supports: recall → fetch_signals → scan_surface → portfolio → fetch_markets → trade chains
 
     while (maxIterations > 0) {
       maxIterations--;
@@ -730,7 +807,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
         if (fnName === "fetch_live_markets") {
           try {
             const limit = args.limit || 10;
-            const kalshiBase = getKalshiBaseUrl();
+            const kalshiBase = KALSHI_BASE_URL;
 
             // Helper: parse a market into a compact object
             const parseMarket = (m: any) => ({
@@ -822,83 +899,36 @@ Always be transparent about your reasoning and risk assessment. Format responses
         }
 
         // ── execute_trade ──
+        // All modes (paper + live) go through execute-trade for consistent
+        // risk checks, reflection creation, and risk state updates.
         else if (fnName === "execute_trade") {
           try {
-            if (mode === "paper") {
-              const { data: trade, error: insertError } = await supabase
-                .from("trades")
-                .insert({
-                  ticker: args.ticker,
-                  market_id: args.ticker,
-                  market_question: args.marketQuestion,
-                  side: args.side,
-                  action: args.action,
-                  price: args.price,
-                  amount: args.amount,
-                  strategy: args.strategy || null,
-                  strategy_id: args.strategyId || null,
-                  mode: "paper",
-                  status: "filled",
-                  filled_price: args.price,
-                  filled_at: new Date().toISOString(),
-                  exchange: "paper",
-                  order_type: args.orderType || "limit",
-                  pnl: 0,
-                  notes: `Agent trade: ${args.reasoning}`,
-                })
-                .select()
-                .single();
-
-              if (insertError) throw insertError;
-
-              // Auto-create a trade reflection with the expected outcome
-              if (args.expectedOutcome) {
-                await supabase.from("trade_reflections").insert({
-                  trade_id: trade.id,
-                  expected_outcome: args.expectedOutcome,
-                  expected_confidence: args.confidenceLevel || null,
-                  decision_quality: "unknown",
-                });
-              }
-
-              await supabase.from("compliance_log").insert({
-                trade_id: trade.id,
-                event_type: "order_filled",
-                severity: "info",
-                message: `Paper trade filled: ${args.action} ${args.side} ${args.ticker} @ ${args.price}c for $${args.amount}`,
-                metadata: { mode: "paper", reasoning: args.reasoning, confidence: args.confidenceLevel },
-              });
-
-              toolResult = JSON.stringify({
-                success: true,
-                trade,
-                message: `PAPER trade: ${args.action.toUpperCase()} ${args.side.toUpperCase()} ${args.ticker} @ ${args.price}c for $${args.amount}`,
-              });
-            } else {
-              const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
-              const execResp = await fetch(execUrl, {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  ticker: args.ticker,
-                  marketId: args.ticker,
-                  marketQuestion: args.marketQuestion,
-                  side: args.side,
-                  action: args.action,
-                  price: args.price,
-                  amount: args.amount,
-                  strategy: args.strategy || null,
-                  orderType: args.orderType || "limit",
-                  mode: mode,
-                  notes: `Agent trade: ${args.reasoning}`,
-                }),
-              });
-              const execResult = await execResp.json();
-              toolResult = JSON.stringify(execResult);
-            }
+            const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
+            const execResp = await fetch(execUrl, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                ticker: args.ticker,
+                marketId: args.ticker,
+                marketQuestion: args.marketQuestion,
+                side: args.side,
+                action: args.action,
+                price: args.price,
+                amount: args.amount,
+                strategy: args.strategy || null,
+                strategyId: args.strategyId || null,
+                orderType: args.orderType || "limit",
+                mode,
+                notes: `Agent trade: ${args.reasoning}`,
+                expectedOutcome: args.expectedOutcome || null,
+                confidenceLevel: args.confidenceLevel || null,
+              }),
+            });
+            const execResult = await execResp.json();
+            toolResult = JSON.stringify(execResult);
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
           }
@@ -918,7 +948,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
               .select();
 
             if (mode === "live") {
-              await fetch(`${getKalshiBaseUrl()}/portfolio/orders/${args.orderId}`, { method: "DELETE" });
+              await fetch(`${KALSHI_BASE_URL}/portfolio/orders/${args.orderId}`, { method: "DELETE" });
             }
 
             await supabase.from("compliance_log").insert({
@@ -1146,6 +1176,97 @@ Always be transparent about your reasoning and risk assessment. Format responses
             });
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Update failed: " + e.message });
+          }
+        }
+
+        // ── execute_basket ──
+        else if (fnName === "execute_basket") {
+          try {
+            const basketUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-basket`;
+            const basketResp = await fetch(basketUrl, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                strategy_id: args.strategyId || null,
+                strategy_name: args.strategy || null,
+                alert_id: args.alert_id || null,
+                legs: args.legs,
+                mode,
+                expected_edge_cents: args.expected_edge_cents || 0,
+                reasoning: args.reasoning || "",
+              }),
+            });
+            const basketResult = await basketResp.json();
+            toolResult = JSON.stringify({
+              ...basketResult,
+              instruction: basketResult.success
+                ? `Basket completed. All ${basketResult.legs_filled} legs filled.`
+                : `Basket ${basketResult.status}: ${basketResult.abort_reason || "see leg_results"}. ${basketResult.flatten_results?.length ? `${basketResult.flatten_results.length} legs flattened to prevent exposure.` : ""}`,
+            });
+          } catch (e: any) {
+            toolResult = JSON.stringify({ success: false, error: "Basket execution failed: " + e.message });
+          }
+        }
+
+        // ── fetch_signals ──
+        else if (fnName === "fetch_signals") {
+          try {
+            const sigUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/signal-generator`;
+            const sigResp = await fetch(sigUrl, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                limit: args.limit || 20,
+                category: args.category || undefined,
+              }),
+            });
+            if (!sigResp.ok) {
+              const errText = await sigResp.text();
+              toolResult = JSON.stringify({ error: `signal-generator error: ${errText}` });
+            } else {
+              const sigData = await sigResp.json();
+              toolResult = JSON.stringify({
+                ...sigData,
+                instruction: "These signals are pre-scored. Focus on 'strong' signals with direction != 'skip'. Use fetch_live_markets for deeper orderbook data on specific tickers before trading.",
+              });
+            }
+          } catch (e: any) {
+            toolResult = JSON.stringify({ error: "Signal fetch failed: " + e.message });
+          }
+        }
+
+        // ── scan_surface ──
+        else if (fnName === "scan_surface") {
+          try {
+            const scanUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/surface-scanner`;
+            const scanResp = await fetch(scanUrl, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                min_edge_cents: args.min_edge_cents || 3,
+              }),
+            });
+            if (!scanResp.ok) {
+              const errText = await scanResp.text();
+              toolResult = JSON.stringify({ error: `surface-scanner error: ${errText}` });
+            } else {
+              const scanData = await scanResp.json();
+              toolResult = JSON.stringify({
+                ...scanData,
+                instruction: "Prioritize monotonicity_violations (near-riskless arb) and high-confidence bracket_sum_violations. Each alert includes a specific 'action' field describing what trade to make.",
+              });
+            }
+          } catch (e: any) {
+            toolResult = JSON.stringify({ error: "Surface scan failed: " + e.message });
           }
         }
 

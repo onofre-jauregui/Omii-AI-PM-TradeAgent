@@ -72,10 +72,26 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     } else {
       // Fallback defaults if DB not ready
       setStrategies([
-        { id: "S-001", name: "Momentum", description: "Buy when price trends upward with volume confirmation", instructions: "When analyzing markets, look for sustained directional price movement over the last 24-48 hours. Confirm with increasing volume. Enter positions when momentum is strong and exit when volume starts declining. Use a 5% trailing stop-loss. Favor markets with >$100K daily volume.", active: true, mode: "paper", starting_balance: 1000 },
-        { id: "S-002", name: "Mean Reversion", description: "Trade against extreme price moves expecting reversion", instructions: "Identify markets where the YES/NO price has moved more than 15% in 24 hours without a clear fundamental catalyst. Take contrarian positions expecting prices to revert to the mean. Set take-profit at 50% of the deviation and stop-loss at 1.5x the deviation. Avoid markets near resolution dates.", active: false, mode: "paper", starting_balance: 1000 },
-        { id: "S-003", name: "Cross-Market Arb", description: "Exploit price differences across correlated markets", instructions: "Look for correlated prediction markets where the combined probabilities create an arbitrage opportunity.", active: true, mode: "paper", starting_balance: 1000 },
-        { id: "S-004", name: "AI Sentiment", description: "Use AI to analyze news & social sentiment for signals", instructions: "Analyze recent news headlines, social media sentiment, and expert opinions related to each market's underlying question. Score sentiment from -1 (very bearish) to +1 (very bullish). Trade when sentiment diverges from current market price by more than 20%.", active: false, mode: "paper", starting_balance: 1000 },
+        {
+          id: "S-001", name: "Surface Arbitrage", mode: "paper", starting_balance: 1000, active: true,
+          description: "Exploit structural price inconsistencies between related Kalshi markets — monotonicity violations, bracket sum gaps, and spread anomalies detected by the surface scanner.",
+          instructions: "Always start by calling scan_surface. Prioritize monotonicity violations (lower threshold priced cheaper than higher threshold — near-riskless arb). Then bracket sum violations where sum of YES < 85¢. Then spread anomalies — post limit orders at the mid. Size $15–$50 depending on alert type. Do not trade alerts with confidence < 0.3.",
+        },
+        {
+          id: "S-002", name: "Resolution Fade", mode: "paper", starting_balance: 1000, active: true,
+          description: "Fade overreaction price moves in markets 2–7 days from resolution. Prediction market participants systematically overreact to recent news near expiry.",
+          instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. For each candidate, judge: was the price move caused by a confirmed fundamental (skip) or sentiment/rumor (fade)? Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range. Hard stop if price moves 10¢ further against you.",
+        },
+        {
+          id: "S-003", name: "Economic Consensus", mode: "paper", starting_balance: 1000, active: true,
+          description: "Trade KXFED, KXCPI, KXPAYROLLS, KXGDP toward analyst consensus when Kalshi prices diverge from professional forecasts by more than 15¢.",
+          instructions: "Focus on KXFED, KXCPI, KXPAYROLLS, KXGDP, KXCHCUTS series. For each market, reason from your training data and saved memories about the current professional consensus forecast. When Kalshi mid price diverges from consensus-implied probability by >= 15¢, trade toward consensus. Size $30–$75. Never hold through the data release unless conviction is high.",
+        },
+        {
+          id: "S-004", name: "Liquidity Provision", mode: "paper", starting_balance: 1000, active: false,
+          description: "Post limit orders near the mid on liquid, range-bound markets to passively collect the bid-ask spread. Low directional risk.",
+          instructions: "Use fetch_signals to find markets with liquidity_score >= 0.5, spread >= 6¢, mid between 30¢–70¢, and no catalyst within 48h. Post YES and NO limit orders at mid±1¢ simultaneously. Size $10–$20 per order. Cancel if price moves > 8¢ from entry mid or if one side fills but not the other within 4 hours. Max 5 open LP positions at once.",
+        },
       ]);
     }
     setLoading(false);
@@ -93,9 +109,11 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     const statsMap: Record<string, StrategyStats> = {};
 
     for (const strat of strategies) {
-      // Match trades by strategy_id or by strategy name (backward compat)
-      const stratTrades = trades.filter(
-        t => t.strategy_id === strat.id || t.strategy === strat.name || t.strategy === strat.id
+      // Primary: match by strategy_id. Fallback: match by strategy name/id only for
+      // old trades that were recorded before strategy_id was a required field.
+      const stratTrades = trades.filter(t =>
+        t.strategy_id === strat.id ||
+        (!t.strategy_id && (t.strategy === strat.name || t.strategy === strat.id))
       );
 
       const totalPnl = stratTrades.reduce((s, t) => s + (t.pnl || 0), 0);

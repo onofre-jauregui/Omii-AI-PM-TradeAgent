@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { corsHeaders, preflight } from "../_shared/cors.ts";
 
 /**
  * auto-reflect: Automated learning loop that runs on a schedule.
@@ -12,15 +13,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
  * Can also be called manually via POST.
  */
 
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight();
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -209,7 +204,74 @@ serve(async (req) => {
 
     results.unreflected_trades = unreflectedCount;
 
-    // ── 4. Memory Compaction ─────────────────────────────────────
+    // ── 4. Signal Quality Feedback ───────────────────────────────
+    // Match recent acted-on signals to their trade outcomes.
+    // Updates signal rows with outcome_pnl and outcome_correct,
+    // so signal scoring can be validated and improved over time.
+
+    let signalsEvaluated = 0;
+    let signalsCorrect = 0;
+    let signalsWrong = 0;
+
+    try {
+      // Find signals from the last 7 days that haven't been evaluated yet
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { data: unevaluatedSignals } = await supabase
+        .from("signals")
+        .select("id, ticker, direction, mid_price, created_at")
+        .eq("was_acted_on", false)
+        .neq("direction", "skip")
+        .gte("created_at", sevenDaysAgo);
+
+      for (const signal of unevaluatedSignals || []) {
+        // Look for a trade on the same ticker placed within 2 hours of the signal
+        const signalTime = new Date(signal.created_at).getTime();
+        const windowStart = new Date(signalTime - 2 * 60 * 60 * 1000).toISOString();
+        const windowEnd = new Date(signalTime + 2 * 60 * 60 * 1000).toISOString();
+
+        const { data: matchedTrades } = await supabase
+          .from("trades")
+          .select("id, pnl, side, action, status")
+          .eq("ticker", signal.ticker)
+          .eq("status", "filled")
+          .gte("created_at", windowStart)
+          .lte("created_at", windowEnd)
+          .limit(1);
+
+        if (!matchedTrades || matchedTrades.length === 0) continue;
+
+        const trade = matchedTrades[0];
+        const pnl = Number(trade.pnl) || 0;
+
+        // Determine if signal direction matched trade and was profitable
+        const signalSide = signal.direction === "buy_yes" ? "yes" : "no";
+        const directionMatch = trade.side === signalSide && trade.action === "buy";
+        const wasCorrect = directionMatch && pnl > 0;
+
+        await supabase.from("signals").update({
+          was_acted_on: true,
+          outcome_pnl: pnl,
+          outcome_correct: wasCorrect,
+        }).eq("id", signal.id);
+
+        signalsEvaluated++;
+        if (wasCorrect) signalsCorrect++;
+        else signalsWrong++;
+      }
+    } catch (signalErr) {
+      console.error("Signal quality tracking error:", signalErr);
+    }
+
+    results.signal_quality = {
+      evaluated: signalsEvaluated,
+      correct: signalsCorrect,
+      wrong: signalsWrong,
+      accuracy: signalsEvaluated > 0
+        ? `${((signalsCorrect / signalsEvaluated) * 100).toFixed(0)}%`
+        : "n/a",
+    };
+
+    // ── 5. Memory Compaction ─────────────────────────────────────
     // Call compact-memory to summarize and merge related memories
     let compactionResult: any = null;
     try {
@@ -232,11 +294,11 @@ serve(async (req) => {
     }
     results.compaction = compactionResult;
 
-    // ── 5. Log this run ──────────────────────────────────────────
+    // ── 6. Log this run ──────────────────────────────────────────
     await supabase.from("compliance_log").insert({
       event_type: "auto_reflect_run",
       severity: "info",
-      message: `Auto-reflect completed: ${memoriesConfirmed} confirmed, ${memoriesContradicted} contradicted, ${memoriesDeactivated} deactivated, ${strategiesDisabled} strategies disabled, ${unreflectedCount} unreflected trades, compaction: ${compactionResult?.summarized || 0} summarized / ${compactionResult?.merged || 0} merged`,
+      message: `Auto-reflect completed: ${memoriesConfirmed} confirmed, ${memoriesContradicted} contradicted, ${memoriesDeactivated} deactivated, ${strategiesDisabled} strategies disabled, ${unreflectedCount} unreflected trades, signals evaluated: ${signalsEvaluated} (${signalsCorrect} correct), compaction: ${compactionResult?.summarized || 0} summarized / ${compactionResult?.merged || 0} merged`,
       metadata: results,
     });
 

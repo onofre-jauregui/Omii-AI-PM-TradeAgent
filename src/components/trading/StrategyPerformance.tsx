@@ -76,9 +76,10 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
     // Process each day
     for (const [day, dayTrades] of dayMap) {
       for (const t of dayTrades) {
-        // Find which strategy this trade belongs to
-        const matchedStrat = strategies.find(
-          s => t.strategy_id === s.id || t.strategy === s.name || t.strategy === s.id
+        // Primary: match by strategy_id. Fallback: name/id match for old trades without strategy_id.
+        const matchedStrat = strategies.find(s =>
+          t.strategy_id === s.id ||
+          (!t.strategy_id && (t.strategy === s.name || t.strategy === s.id))
         );
         if (matchedStrat) {
           const pnl = t.pnl || 0;

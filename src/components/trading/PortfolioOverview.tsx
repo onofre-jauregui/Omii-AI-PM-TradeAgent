@@ -2,6 +2,25 @@ import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string)?.trim();
+const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim();
+
+async function fetchKalshiBalance(): Promise<number | null> {
+  try {
+    const resp = await fetch(
+      `${SUPABASE_URL}/functions/v1/kalshi-proxy?endpoint=portfolio/balance`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    // Kalshi returns balance in cents
+    if (typeof data?.balance === "number") return data.balance / 100;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Starting paper capital — paper trades are simulated against this balance
 const PAPER_STARTING_BALANCE = 10_000;
 
@@ -75,14 +94,19 @@ export function PortfolioStats({
 
     if (mode === "paper") {
       // Paper balance = starting capital - capital tied up in open positions + realized P&L
-      // This drops immediately when a trade is placed, rises when markets resolve in your favour
       const netInvested = Math.max(0, totalBuyAmount - totalSellAmount);
       portfolioValue = effectiveStartingBalance - netInvested + totalPnl;
-      cashAvailable = portfolioValue; // for paper, portfolio value IS the cash balance
+      cashAvailable = portfolioValue;
     } else {
-      // Live: sum of invested amounts (real portfolio balance requires Kalshi API call)
-      portfolioValue = totalBuyAmount - totalSellAmount + totalPnl;
-      cashAvailable = 0; // Would need Kalshi balance API
+      // Live: fetch real balance from Kalshi; fall back to trade math if API unavailable
+      const kalshiBalance = await fetchKalshiBalance();
+      if (kalshiBalance !== null) {
+        cashAvailable = kalshiBalance;
+        portfolioValue = kalshiBalance + totalPnl;
+      } else {
+        portfolioValue = totalBuyAmount - totalSellAmount + totalPnl;
+        cashAvailable = portfolioValue;
+      }
     }
 
     setStats({
@@ -149,7 +173,12 @@ export function PortfolioStats({
   // Live / all-mode stat cards
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <StatCard icon={DollarSign} label="Portfolio Value" value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} />
+      <StatCard
+        icon={Wallet}
+        label="Cash Balance"
+        value={`$${stats.cashAvailable.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+        sub="Kalshi account"
+      />
       <StatCard
         icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
         label="Total P&L"

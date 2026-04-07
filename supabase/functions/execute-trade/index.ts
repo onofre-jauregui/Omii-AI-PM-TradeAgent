@@ -1,17 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
-
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
-const corsHeaders = {
-  "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
-
-function getKalshiBaseUrl(): string {
-  return KALSHI_BASE_URL;
-}
+import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 
 // ─── Risk Management Checks ──────────────────────────────────
 
@@ -103,20 +93,42 @@ async function performRiskChecks(
       };
     }
 
-    // Check drawdown
-    if (riskState.peak_portfolio_value > 0) {
-      const drawdownPct = ((riskState.peak_portfolio_value - (riskState.peak_portfolio_value + riskState.daily_pnl)) / riskState.peak_portfolio_value) * 100;
+    // Check drawdown — current portfolio value = peak + cumulative daily P&L
+    if (riskState.peak_portfolio_value > 0 && riskState.daily_pnl < 0) {
+      const currentValue = riskState.peak_portfolio_value + riskState.daily_pnl;
+      const drawdownPct = ((riskState.peak_portfolio_value - currentValue) / riskState.peak_portfolio_value) * 100;
       if (drawdownPct >= settings.max_drawdown_pct) {
         await supabase.from("risk_state").upsert({
           date: today,
           is_trading_halted: true,
-          halt_reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded`,
+          halt_reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded (current drawdown: ${drawdownPct.toFixed(1)}%)`,
           updated_at: new Date().toISOString(),
         }, { onConflict: "date" });
 
+        await logCompliance(supabase, null, "drawdown_limit_hit", "critical",
+          `Max drawdown ${settings.max_drawdown_pct}% exceeded (actual: ${drawdownPct.toFixed(1)}%). Trading halted.`,
+          { peak: riskState.peak_portfolio_value, current: currentValue, drawdown_pct: drawdownPct }
+        );
+
         return {
           passed: false,
-          reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded. Trading halted.`,
+          reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded (current: ${drawdownPct.toFixed(1)}%). Trading halted.`,
+          riskSettings: settings,
+        };
+      }
+    }
+
+    // Check single-order concentration: no trade > 25% of peak portfolio value
+    if (riskState.peak_portfolio_value > 0) {
+      const concentrationPct = (amount / riskState.peak_portfolio_value) * 100;
+      if (concentrationPct > 25) {
+        await logCompliance(supabase, null, "concentration_limit_hit", "warning",
+          `Order amount $${amount} is ${concentrationPct.toFixed(1)}% of peak portfolio $${riskState.peak_portfolio_value} — exceeds 25% concentration limit`,
+          { amount, peak_portfolio: riskState.peak_portfolio_value, pct: concentrationPct }
+        );
+        return {
+          passed: false,
+          reason: `Order amount $${amount} exceeds 25% portfolio concentration limit (portfolio: $${riskState.peak_portfolio_value}).`,
           riskSettings: settings,
         };
       }
@@ -227,12 +239,13 @@ async function checkLiquidity(
 // ─── Main Handler ────────────────────────────────────────────
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  if (req.method === "OPTIONS") return preflight("extended");
 
   try {
     const {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
+      expectedOutcome, confidenceLevel,
     } = await req.json();
 
     const resolvedTicker = ticker || marketId;
@@ -318,9 +331,19 @@ serve(async (req) => {
 
       if (insertError) throw insertError;
 
+      // Create trade reflection if agent provided expected outcome
+      if (expectedOutcome) {
+        await supabase.from("trade_reflections").insert({
+          trade_id: trade.id,
+          expected_outcome: expectedOutcome,
+          expected_confidence: confidenceLevel || null,
+          decision_quality: "unknown",
+        });
+      }
+
       await logCompliance(supabase, trade.id, "order_filled", "info",
         `Paper trade filled: ${action} ${side} ${resolvedTicker} @ ${price}c for $${amount}`,
-        { trade_id: trade.id, mode: "paper" }
+        { trade_id: trade.id, mode: "paper", reasoning: notes }
       );
 
       // Update daily risk state
@@ -529,12 +552,15 @@ async function updateRiskState(supabase: any, pnlChange: number) {
 
   if (current) {
     const newPnl = current.daily_pnl + pnlChange;
+    const currentPeak = current.peak_portfolio_value || 0;
+    // Peak grows whenever running P&L improves, never shrinks
+    const newPeak = newPnl > currentPeak ? newPnl : currentPeak;
     await supabase.from("risk_state").update({
       daily_pnl: newPnl,
       daily_trades: current.daily_trades + 1,
       open_position_count: openPositionCount || 0,
-      max_drawdown_today: Math.min(current.max_drawdown_today, newPnl),
-      peak_portfolio_value: Math.max(current.peak_portfolio_value || 0, newPnl > 0 ? newPnl : current.peak_portfolio_value || 0),
+      max_drawdown_today: Math.min(current.max_drawdown_today || 0, newPnl),
+      peak_portfolio_value: newPeak,
       updated_at: new Date().toISOString(),
     }).eq("date", today);
   } else {
