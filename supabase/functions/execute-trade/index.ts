@@ -2,151 +2,18 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
+import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
 
-// ─── Risk Management Checks ──────────────────────────────────
-
-interface RiskCheckResult {
-  passed: boolean;
-  reason?: string;
-  riskSettings?: any;
-}
-
-async function performRiskChecks(
-  supabase: any,
-  amount: number,
-  mode: string
-): Promise<RiskCheckResult> {
-  // Paper mode bypasses risk checks
-  if (mode === "paper") return { passed: true };
-
-  // Fetch risk settings
-  const { data: settings } = await supabase
-    .from("risk_settings")
-    .select("*")
-    .single();
-
-  if (!settings) return { passed: true }; // No settings = no limits
-
-  // Check position size limit
-  if (amount > settings.max_position_size) {
-    await logCompliance(supabase, null, "risk_check_failed", "warning",
-      `Order amount $${amount} exceeds max position size $${settings.max_position_size}`,
-      { amount, limit: settings.max_position_size }
-    );
-    return {
-      passed: false,
-      reason: `Order amount $${amount} exceeds max position size $${settings.max_position_size}`,
-      riskSettings: settings,
-    };
-  }
-
-  // Get today's risk state
-  const today = new Date().toISOString().split("T")[0];
-  const { data: riskState } = await supabase
-    .from("risk_state")
-    .select("*")
-    .eq("date", today)
-    .single();
-
-  if (riskState) {
-    // Check if trading is halted
-    if (riskState.is_trading_halted) {
-      return {
-        passed: false,
-        reason: `Trading halted: ${riskState.halt_reason || "daily limits exceeded"}`,
-        riskSettings: settings,
-      };
-    }
-
-    // Check daily loss limit
-    if (Math.abs(riskState.daily_pnl) >= settings.max_daily_loss && riskState.daily_pnl < 0) {
-      // Halt trading
-      await supabase.from("risk_state").upsert({
-        date: today,
-        is_trading_halted: true,
-        halt_reason: `Daily loss limit of $${settings.max_daily_loss} reached`,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "date" });
-
-      await logCompliance(supabase, null, "daily_loss_limit_hit", "critical",
-        `Daily loss limit of $${settings.max_daily_loss} reached. Trading halted.`,
-        { daily_pnl: riskState.daily_pnl, limit: settings.max_daily_loss }
-      );
-
-      return {
-        passed: false,
-        reason: `Daily loss limit of $${settings.max_daily_loss} reached. Trading halted for today.`,
-        riskSettings: settings,
-      };
-    }
-
-    // Check max open positions
-    if (riskState.open_position_count >= settings.max_open_positions) {
-      await logCompliance(supabase, null, "position_limit_hit", "warning",
-        `Max open positions (${settings.max_open_positions}) reached`,
-        { current: riskState.open_position_count, limit: settings.max_open_positions }
-      );
-      return {
-        passed: false,
-        reason: `Maximum open positions (${settings.max_open_positions}) reached. Close a position first.`,
-        riskSettings: settings,
-      };
-    }
-
-    // Check drawdown — current portfolio value = peak + cumulative daily P&L
-    if (riskState.peak_portfolio_value > 0 && riskState.daily_pnl < 0) {
-      const currentValue = riskState.peak_portfolio_value + riskState.daily_pnl;
-      const drawdownPct = ((riskState.peak_portfolio_value - currentValue) / riskState.peak_portfolio_value) * 100;
-      if (drawdownPct >= settings.max_drawdown_pct) {
-        await supabase.from("risk_state").upsert({
-          date: today,
-          is_trading_halted: true,
-          halt_reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded (current drawdown: ${drawdownPct.toFixed(1)}%)`,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "date" });
-
-        await logCompliance(supabase, null, "drawdown_limit_hit", "critical",
-          `Max drawdown ${settings.max_drawdown_pct}% exceeded (actual: ${drawdownPct.toFixed(1)}%). Trading halted.`,
-          { peak: riskState.peak_portfolio_value, current: currentValue, drawdown_pct: drawdownPct }
-        );
-
-        return {
-          passed: false,
-          reason: `Max drawdown of ${settings.max_drawdown_pct}% exceeded (current: ${drawdownPct.toFixed(1)}%). Trading halted.`,
-          riskSettings: settings,
-        };
-      }
-    }
-
-    // Check single-order concentration: no trade > 25% of peak portfolio value
-    if (riskState.peak_portfolio_value > 0) {
-      const concentrationPct = (amount / riskState.peak_portfolio_value) * 100;
-      if (concentrationPct > 25) {
-        await logCompliance(supabase, null, "concentration_limit_hit", "warning",
-          `Order amount $${amount} is ${concentrationPct.toFixed(1)}% of peak portfolio $${riskState.peak_portfolio_value} — exceeds 25% concentration limit`,
-          { amount, peak_portfolio: riskState.peak_portfolio_value, pct: concentrationPct }
-        );
-        return {
-          passed: false,
-          reason: `Order amount $${amount} exceeds 25% portfolio concentration limit (portfolio: $${riskState.peak_portfolio_value}).`,
-          riskSettings: settings,
-        };
-      }
-    }
-  }
-
-  await logCompliance(supabase, null, "risk_check_passed", "info",
-    `Risk checks passed for $${amount} order`,
-    { amount, settings_id: settings.id }
-  );
-
-  return { passed: true, riskSettings: settings };
+function getKalshiBaseUrl(): string {
+  return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
 }
 
 // ─── Compliance Logging ──────────────────────────────────────
 
 async function logCompliance(
   supabase: any,
+  userId: string | null,
   tradeId: string | null,
   eventType: string,
   severity: string,
@@ -154,6 +21,7 @@ async function logCompliance(
   metadata: any = {}
 ) {
   await supabase.from("compliance_log").insert({
+    user_id: userId,
     trade_id: tradeId,
     event_type: eventType,
     severity,
@@ -282,12 +150,39 @@ serve(async (req) => {
     }
     const supabase = createClient(supabaseUrl, supabaseKey);
 
+    // ── Tenant Resolution (multi-tenancy) ──
+    const { userId, authenticated } = await resolveTenant(req, supabase);
+
     const tradeMode = mode || "paper";
 
-    // ── Risk Management ──
-    const riskCheck = await performRiskChecks(supabase, amount, tradeMode);
+    // ── Risk Management (tenant-scoped) ──
+    const settings = await getRiskSettings(supabase, userId);
+    const riskState = await getRiskStateToday(supabase, userId);
+    const riskCheck = evaluateRisk(
+      amount,
+      tradeMode as "paper" | "live",
+      settings as RiskSettings | null,
+      riskState as RiskState | null
+    );
+
+    // If the evaluator says we should set a new halt reason, persist it.
+    if (riskCheck.newHaltReason) {
+      const today = new Date().toISOString().split("T")[0];
+      await supabase.from("risk_state").upsert(
+        {
+          user_id: userId,
+          date: today,
+          is_trading_halted: true,
+          halt_reason: riskCheck.newHaltReason,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: userId ? "user_id,date" : "date" }
+      );
+    }
+
     if (!riskCheck.passed) {
       const { data: failedTrade } = await supabase.from("trades").insert({
+        user_id: userId,
         ticker: resolvedTicker,
         market_id: resolvedTicker,
         market_question: marketQuestion || resolvedTicker,
@@ -297,11 +192,11 @@ serve(async (req) => {
         mode: tradeMode,
         status: "failed",
         exchange: tradeMode === "paper" ? "paper" : "kalshi",
-        notes: `Risk check failed: ${riskCheck.reason}`,
+        notes: `Risk check failed (${riskCheck.code || "unknown"}): ${riskCheck.reason}`,
       }).select().single();
 
-      await logCompliance(supabase, failedTrade?.id, "risk_check_failed", "warning",
-        riskCheck.reason!, { amount, price, side, action });
+      await logCompliance(supabase, userId, failedTrade?.id, "risk_check_failed", "warning",
+        riskCheck.reason!, { amount, price, side, action, code: riskCheck.code });
 
       return new Response(JSON.stringify({
         success: false,
@@ -313,6 +208,7 @@ serve(async (req) => {
     // ── Paper Trading ──
     if (tradeMode === "paper") {
       const { data: trade, error: insertError } = await supabase.from("trades").insert({
+        user_id: userId,
         ticker: resolvedTicker,
         market_id: resolvedTicker,
         market_question: marketQuestion || resolvedTicker,
@@ -341,13 +237,13 @@ serve(async (req) => {
         });
       }
 
-      await logCompliance(supabase, trade.id, "order_filled", "info",
+      await logCompliance(supabase, userId, trade.id, "order_filled", "info",
         `Paper trade filled: ${action} ${side} ${resolvedTicker} @ ${price}c for $${amount}`,
-        { trade_id: trade.id, mode: "paper", reasoning: notes }
+        { trade_id: trade.id, mode: "paper", reasoning: notes, authenticated }
       );
 
-      // Update daily risk state
-      await updateRiskState(supabase, 0);
+      // Update daily risk state for this tenant
+      await updateRiskState(supabase, userId, 0);
 
       return new Response(JSON.stringify({
         success: true, trade,
@@ -356,10 +252,12 @@ serve(async (req) => {
     }
 
     // ── Live Trading on Kalshi ──
-    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase);
+    // Pull credentials for THIS user, decrypted via the encryption helper.
+    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase, userId);
 
     if (!kalshiKeyId || !kalshiPrivateKey) {
       const { data: failedTrade } = await supabase.from("trades").insert({
+        user_id: userId,
         ticker: resolvedTicker,
         market_id: resolvedTicker,
         market_question: marketQuestion || resolvedTicker,
@@ -372,7 +270,7 @@ serve(async (req) => {
         notes: "Kalshi API credentials not configured.",
       }).select().single();
 
-      await logCompliance(supabase, failedTrade?.id, "order_failed", "error",
+      await logCompliance(supabase, userId, failedTrade?.id, "order_failed", "error",
         "Live trade failed: Kalshi API credentials not configured",
         { ticker: resolvedTicker });
 
@@ -412,7 +310,7 @@ serve(async (req) => {
     kalshiOrderPayload.time_in_force = timeInForce || "gtc";
 
     // Log order submission
-    await logCompliance(supabase, null, "order_submitted", "info",
+    await logCompliance(supabase, userId, null, "order_submitted", "info",
       `Submitting ${resolvedOrderType} order: ${action} ${contractCount}x ${side} ${resolvedTicker} @ ${price}c`,
       { payload: kalshiOrderPayload, liquidity_check: liquidityCheck }
     );
@@ -434,6 +332,7 @@ serve(async (req) => {
     if (!kalshiResponse.ok) {
       // Order rejected by Kalshi
       const { data: failedTrade } = await supabase.from("trades").insert({
+        user_id: userId,
         ticker: resolvedTicker,
         market_id: resolvedTicker,
         market_question: marketQuestion || resolvedTicker,
@@ -447,14 +346,14 @@ serve(async (req) => {
         notes: `Kalshi rejected: ${kalshiResult.message || kalshiResult.error || JSON.stringify(kalshiResult)}`,
       }).select().single();
 
-      await logCompliance(supabase, failedTrade?.id, "order_failed", "error",
+      await logCompliance(supabase, userId, failedTrade?.id, "order_failed", "error",
         `Kalshi order rejected: ${kalshiResult.message || "Unknown error"}`,
         { kalshi_response: kalshiResult, payload: kalshiOrderPayload }
       );
 
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
       if (liquidityCheck.fallbackAction && !liquidityCheck.sufficient) {
-        await logCompliance(supabase, failedTrade?.id, "liquidity_fallback", "warning",
+        await logCompliance(supabase, userId, failedTrade?.id, "liquidity_fallback", "warning",
           `Attempting liquidity fallback: ${liquidityCheck.fallbackAction}`,
           { original_price: price, ticker: resolvedTicker }
         );
@@ -473,12 +372,13 @@ serve(async (req) => {
                         kalshiOrder.remaining_count < contractCount ? "partial" : "open";
 
     const { data: trade, error: insertError } = await supabase.from("trades").insert({
+      user_id: userId,
       ticker: resolvedTicker,
       market_id: resolvedTicker,
       market_question: marketQuestion || resolvedTicker,
       side, action, price, amount,
       strategy: strategy || null,
-        strategy_id: strategyId || null,
+      strategy_id: strategyId || null,
       mode: "live",
       status: orderStatus,
       exchange: "kalshi",
@@ -494,13 +394,13 @@ serve(async (req) => {
     if (insertError) throw insertError;
 
     const eventType = orderStatus === "filled" ? "order_filled" : "order_submitted";
-    await logCompliance(supabase, trade.id, eventType, "info",
+    await logCompliance(supabase, userId, trade.id, eventType, "info",
       `Kalshi order ${kalshiOrder.order_id}: ${orderStatus} - ${action} ${contractCount}x ${side} ${resolvedTicker} @ ${price}c`,
       { order_id: kalshiOrder.order_id, kalshi_status: kalshiOrder.status, remaining: kalshiOrder.remaining_count }
     );
 
-    // Update risk state
-    await updateRiskState(supabase, 0);
+    // Update risk state for this tenant
+    await updateRiskState(supabase, userId, 0);
 
     return new Response(JSON.stringify({
       success: true,
@@ -518,7 +418,7 @@ serve(async (req) => {
         Deno.env.get("SUPABASE_URL")!,
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
       );
-      await logCompliance(supabase, null, "system_event", "error",
+      await logCompliance(supabase, null, null, "system_event", "error",
         `Trade execution error: ${e instanceof Error ? e.message : "Unknown error"}`,
         { stack: e instanceof Error ? e.stack : undefined }
       );
@@ -533,29 +433,35 @@ serve(async (req) => {
 
 // ─── Risk State Updates ──────────────────────────────────────
 
-async function updateRiskState(supabase: any, pnlChange: number) {
+async function updateRiskState(
+  supabase: any,
+  userId: string | null,
+  pnlChange: number
+) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count current open positions for accurate tracking
-  const { count: openPositionCount } = await supabase
+  // Count current open positions for accurate tracking, scoped to tenant
+  const positionQuery = supabase
     .from("trades")
     .select("*", { count: "exact", head: true })
     .in("status", ["filled", "open", "partial"])
     .eq("action", "buy");
+  const { count: openPositionCount } = userId
+    ? await positionQuery.eq("user_id", userId)
+    : await positionQuery.is("user_id", null);
 
-  // Get current risk state
-  const { data: current } = await supabase
-    .from("risk_state")
-    .select("*")
-    .eq("date", today)
-    .single();
+  // Get current risk state for this tenant
+  const stateQuery = supabase.from("risk_state").select("*").eq("date", today);
+  const { data: current } = userId
+    ? await stateQuery.eq("user_id", userId).maybeSingle()
+    : await stateQuery.is("user_id", null).maybeSingle();
 
   if (current) {
     const newPnl = current.daily_pnl + pnlChange;
     const currentPeak = current.peak_portfolio_value || 0;
     // Peak grows whenever running P&L improves, never shrinks
     const newPeak = newPnl > currentPeak ? newPnl : currentPeak;
-    await supabase.from("risk_state").update({
+    const updateQuery = supabase.from("risk_state").update({
       daily_pnl: newPnl,
       daily_trades: current.daily_trades + 1,
       open_position_count: openPositionCount || 0,
@@ -563,8 +469,14 @@ async function updateRiskState(supabase: any, pnlChange: number) {
       peak_portfolio_value: newPeak,
       updated_at: new Date().toISOString(),
     }).eq("date", today);
+    if (userId) {
+      await updateQuery.eq("user_id", userId);
+    } else {
+      await updateQuery.is("user_id", null);
+    }
   } else {
     await supabase.from("risk_state").insert({
+      user_id: userId,
       date: today,
       daily_pnl: pnlChange,
       daily_trades: 1,

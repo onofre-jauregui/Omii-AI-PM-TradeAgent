@@ -1,0 +1,132 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+/**
+ * Multi-tenancy helpers for edge functions.
+ *
+ * Edge functions run as service role and bypass RLS. To enforce per-tenant
+ * isolation we must manually filter every query by user_id. This module
+ * centralizes that pattern so individual functions can't forget.
+ *
+ * Resolution order for user_id, in order of precedence:
+ *  1. Verified Supabase Auth JWT in the Authorization header
+ *  2. Explicit user_id field in the request body (admin/service callers only)
+ *  3. NULL — legacy single-tenant mode
+ *
+ * Until the auth gate is fully enforced in production, NULL is a valid
+ * resolution and the queries fall back to the "default tenant" rows.
+ */
+
+export interface TenantContext {
+  /** The resolved user_id, or null for the default/legacy tenant */
+  userId: string | null;
+  /** True if the user_id came from a verified JWT (vs request body or null) */
+  authenticated: boolean;
+}
+
+/**
+ * Resolve the tenant context from an incoming request. Verifies any JWT
+ * present in the Authorization header against Supabase Auth.
+ *
+ * The supabase client passed in MUST be a service-role client so it can
+ * call auth.getUser(jwt) for verification.
+ */
+export async function resolveTenant(
+  req: Request,
+  supabase: ReturnType<typeof createClient>
+): Promise<TenantContext> {
+  // 1. Try to extract and verify a JWT from the Authorization header
+  const authHeader = req.headers.get("Authorization") || req.headers.get("authorization");
+  if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+    const jwt = authHeader.slice(7).trim();
+    // Skip if this is just the service role key (used for cron / system calls)
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (jwt && jwt !== serviceKey) {
+      try {
+        const { data, error } = await supabase.auth.getUser(jwt);
+        if (!error && data?.user?.id) {
+          return { userId: data.user.id, authenticated: true };
+        }
+      } catch (e) {
+        // Verification failed — fall through to other resolution paths
+        console.warn("resolveTenant: jwt verification failed:", e instanceof Error ? e.message : e);
+      }
+    }
+  }
+
+  // 2. Try an explicit user_id in the request body (service-role / admin path)
+  // Note: the caller must clone the request before calling this, since reading
+  // body consumes it. We try only if the request method has a body.
+  if (req.method === "POST" || req.method === "PUT") {
+    try {
+      const cloned = req.clone();
+      const body = await cloned.json();
+      if (body && typeof body.user_id === "string" && body.user_id.length > 0) {
+        return { userId: body.user_id, authenticated: false };
+      }
+    } catch {
+      // Body wasn't json or was empty — continue
+    }
+  }
+
+  // 3. Legacy / default tenant
+  return { userId: null, authenticated: false };
+}
+
+/**
+ * Load the risk_settings row for a tenant. Returns null if no row exists,
+ * which the caller should interpret as "no limits configured".
+ */
+export async function getRiskSettings(
+  supabase: ReturnType<typeof createClient>,
+  userId: string | null
+): Promise<any | null> {
+  const query = supabase.from("risk_settings").select("*");
+  const { data } = userId
+    ? await query.eq("user_id", userId).maybeSingle()
+    : await query.is("user_id", null).maybeSingle();
+  return data || null;
+}
+
+/**
+ * Load today's risk_state row for a tenant. Returns null if no row exists
+ * (i.e. no trades yet today).
+ */
+export async function getRiskStateToday(
+  supabase: ReturnType<typeof createClient>,
+  userId: string | null
+): Promise<any | null> {
+  const today = new Date().toISOString().split("T")[0];
+  const query = supabase.from("risk_state").select("*").eq("date", today);
+  const { data } = userId
+    ? await query.eq("user_id", userId).maybeSingle()
+    : await query.is("user_id", null).maybeSingle();
+  return data || null;
+}
+
+/**
+ * Apply the user_id filter to a Supabase query builder. Use this in edge
+ * functions to ensure every query is tenant-scoped.
+ *
+ * Example:
+ *   const query = supabase.from("trades").select("*");
+ *   const { data } = await applyTenantFilter(query, userId);
+ */
+export function applyTenantFilter<T>(query: T, userId: string | null): T {
+  // The query builder is fluent — we cast through unknown for type-narrowing
+  if (userId) {
+    return (query as any).eq("user_id", userId);
+  }
+  return (query as any).is("user_id", null);
+}
+
+/**
+ * Return an object suitable for spreading into an insert payload to scope
+ * the row to the current tenant. Use it in inserts to ensure user_id is
+ * always populated.
+ *
+ * Example:
+ *   await supabase.from("trades").insert({ ...tenantInsertFields(userId), ticker: "..." });
+ */
+export function tenantInsertFields(userId: string | null): { user_id: string | null } {
+  return { user_id: userId };
+}

@@ -34,8 +34,15 @@ function AppRoutes() {
   // Still loading — show nothing (avoids flash)
   if (session === undefined) return null;
 
-  // Auth disabled for development — uncomment to re-enable:
-  // if (!session) return <AuthPage />;
+  // Auth gate: every user must sign in before reaching the trading UI.
+  // This is the multi-tenancy enforcement point — once past this gate,
+  // every request includes a verified Supabase Auth JWT that edge functions
+  // resolve to a user_id via the _shared/tenant helper.
+  //
+  // Set VITE_DISABLE_AUTH=true in .env.local for solo-developer mode that
+  // bypasses this gate and operates as the legacy NULL-tenant.
+  const authDisabled = import.meta.env.VITE_DISABLE_AUTH === "true";
+  if (!authDisabled && !session) return <AuthPage />;
 
   return (
     <StrategiesProvider>

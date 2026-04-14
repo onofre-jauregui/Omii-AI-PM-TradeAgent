@@ -4,6 +4,22 @@ This project is building toward a specific financial goal. The user wants
 reality, not encouragement. All global truth rules in `~/.claude/CLAUDE.md`
 apply here as well.
 
+## Stated goal
+
+- **Target: $10M personal net worth in 5 years** (recalibrated from $50M
+  during this session). $10M is roughly the top 1% household net worth
+  threshold in the US per Federal Reserve SCF data.
+  `[verified earlier in conversation]`
+- Plan optimizes for the highest-probability path to $10M while preserving
+  optionality for higher outcomes. Bootstrapped paths are now on the table
+  (no venture exit required at this target). The fund-side path opens up at
+  smaller AUM ($25M–$50M) than it did at the $50M target.
+- Do not repeat the $50M framing. Do not soften the $10M target with
+  motivational language about how easy it is. It is not easy. It is rare
+  but achievable for someone with technical ability, focus, family-capital
+  access, and good execution. The plan is built to maximize probability,
+  not predict the median.
+
 ## Project context
 
 - **Product:** AI trading agent for **Kalshi prediction markets only**.

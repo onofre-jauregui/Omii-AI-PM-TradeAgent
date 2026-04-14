@@ -189,9 +189,22 @@ serve(async (req) => {
         } else if (strategy.id === "S-002") {
           result = await runS002ResolutionFade(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
         } else if (strategy.id === "S-003") {
-          result = await runS003EconomicConsensus(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
+          // S-003 is disabled by 20260414_security_and_billing.sql migration
+          // per Federal Reserve research showing Kalshi macro markets are
+          // efficient. The strategies row is set to active=false and this
+          // branch is a defensive guard in case it gets re-enabled without
+          // a named edge thesis.
+          result = {
+            strategy_id: strategy.id,
+            strategy_name: strategy.name,
+            mode: strategy.mode,
+            status: "halted",
+            details: "S-003 is disabled per Fed paper evidence. See 20260414 migration for re-enable instructions.",
+          };
         } else if (strategy.id === "S-004") {
           result = await runS004LiquidityProvision(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
+        } else if (strategy.id === "S-005") {
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
         } else {
           // Unknown strategy — use generic signal-based handler
           result = await runGenericSignalStrategy(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
@@ -724,6 +737,137 @@ async function runS004LiquidityProvision(
     action: tradeResult.success ? "trade_executed" : "no_setup",
     details: tradeResult.success
       ? `Provided liquidity: ${amount} yes @ ${bidPrice}¢ on ${best.ticker} (spread: ${spread}¢)`
+      : `Trade failed: ${tradeResult.error}`,
+  };
+}
+
+// ─── Strategy S-005: Weather Edge ────────────────────────────────────────────
+// Reads signals produced by the weather-signal edge function (which compares
+// NWS forecast distributions to Kalshi weather market prices) and executes
+// trades when edge >= threshold and the model agrees with itself.
+//
+// Backed by the only Tier 1 strategy in the academic research that doesn't
+// require LLM directional reasoning. The LLM still gates each trade as a
+// safety check, but the edge comes from the weather model, not the LLM.
+
+async function runS005WeatherEdge(
+  supabase: any,
+  strategy: any,
+  config: StrategyConfig | undefined,
+  aiConfig: AiConfig,
+  supabaseUrl: string,
+  supabaseKey: string,
+): Promise<StrategyResult> {
+  const mode = strategy.mode || "paper";
+  const minEdge = config?.min_edge_cents ?? 8;
+  const maxPositionUsd = config?.max_position_usd ?? 30;
+
+  // 1. Read fresh weather signals (last 30 minutes only — they go stale fast)
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const { data: signals } = await supabase
+    .from("signals")
+    .select("*")
+    .eq("source", "weather_signal_s005")
+    .gte("created_at", thirtyMinAgo)
+    .gte("edge_cents", minEdge)
+    .not("direction", "is", null)
+    .order("edge_cents", { ascending: false })
+    .limit(5);
+
+  if (!signals || signals.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `No fresh weather signals with edge >= ${minEdge}c (run weather-signal first)`,
+    };
+  }
+
+  const { openCount } = await checkPortfolioExposure(supabase);
+  if (openCount >= 6) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `Portfolio full: ${openCount} open positions`,
+    };
+  }
+
+  const best = signals[0];
+
+  // 2. LLM gate: strategy is mostly quantitative, but use LLM as a safety net
+  // to catch obvious gotchas like "this market resolved already" or "the
+  // ticker doesn't match the forecast city".
+  const qualifyPrompt = buildQualifyPrompt("S-005 Weather Edge", {
+    ticker: best.ticker,
+    market_question: best.market_question,
+    direction: best.direction,
+    edge_cents: best.edge_cents,
+    true_probability: best.true_probability,
+    implied_probability: best.implied_probability,
+    yes_bid: best.yes_bid,
+    yes_ask: best.yes_ask,
+    forecast_expected_high: best.metadata?.forecast_expected_high,
+    forecast_std_dev: best.metadata?.forecast_std_dev,
+    location: best.metadata?.location,
+    note: "Weather Edge: model probability comes from NWS forecast distribution. Edge is in cents. Quantitative strategy — qualify unless something is obviously broken (resolved market, wrong city, missing data).",
+  });
+
+  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
+
+  if (!qualified) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `LLM safety gate rejected: ${reason}`,
+    };
+  }
+
+  const side = best.direction === "buy_yes" ? "yes" : "no";
+  const price = best.direction === "buy_yes"
+    ? best.yes_ask
+    : 100 - (best.yes_bid || 50);
+  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / (price || 50)));
+
+  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
+  const tradeResp = await fetch(executeUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ticker: best.ticker,
+      marketId: best.ticker,
+      marketQuestion: best.market_question || best.ticker,
+      side,
+      action: "buy",
+      price: Math.round(price),
+      amount,
+      strategy: strategy.name,
+      strategyId: strategy.id,
+      orderType: "limit",
+      mode,
+      notes: `S-005 auto-trade: edge=${best.edge_cents}c, true_p=${best.true_probability}, ${reason}`,
+      expectedOutcome: `Model expects ${best.direction} based on NWS forecast (true_p=${best.true_probability}, implied_p=${best.implied_probability})`,
+      confidenceLevel: best.true_probability,
+    }),
+  });
+
+  const tradeResult = await tradeResp.json();
+
+  return {
+    strategy_id: strategy.id,
+    strategy_name: strategy.name,
+    mode,
+    status: "completed",
+    action: tradeResult.success ? "trade_executed" : "no_setup",
+    details: tradeResult.success
+      ? `Weather edge: ${amount}x ${side} @ ${Math.round(price)}c on ${best.ticker} (edge=${best.edge_cents}c)`
       : `Trade failed: ${tradeResult.error}`,
   };
 }
