@@ -6,17 +6,40 @@ apply here as well.
 
 ## Project context
 
-- **Product:** AI trading agent for Kalshi prediction markets (and Polymarket
-  via proxy). A second agent for options markets exists in a separate repo
-  (`onofre-jauregui/omii-trade-agent`) but is out of scope for my GitHub tools.
+- **Product:** AI trading agent for **Kalshi prediction markets only**.
+  Kalshi-only is an explicit, locked-in scope decision (April 2026) based on
+  three verified facts:
+  (1) Polymarket's Terms of Service prohibit US persons from trading via UI,
+  API, or AI agents, and the user is in California;
+  (2) Polymarket is significantly more bot-saturated (30%+ of wallets use AI
+  agents, 14 of top 20 most profitable wallets are bots) — verified via
+  Finance Magnates and LayerHub data, April 2026;
+  (3) Kalshi posted $13.07B notional volume in March 2026 (up 25% MoM) and
+  $23.8B in 2025 (1,100% YoY growth) — verified via Cryptopolitan and DeFi
+  Rate, April 2026. The TAM is no longer the constraint.
+- A second agent for options markets exists in a separate repo
+  (`onofre-jauregui/omii-trade-agent`) but is out of scope for my GitHub tools
+  and out of scope for the current product. It is shelved, not killed —
+  re-evaluate as a capacity-expansion vehicle once Kalshi has a real track
+  record.
 - **Stack:** React/Vite/TS frontend, Supabase (Postgres + edge functions +
   pg_cron) backend, multi-provider LLM (OpenRouter, OpenAI, Anthropic, Google),
-  Kalshi REST v2.
+  Kalshi REST v2 with HMAC-SHA256 auth.
 - **Current state (as of this session):** Code is built. Agent has NOT been
   tested — no backtest, no paper trading, no live trading. Multi-tenancy
-  migration exists. $100 MRR comes from an unrelated client website, not
-  from this product.
+  migration exists but the edge functions ignore `user_id` and `encrypted_secret`
+  is plaintext — both are SaaS blockers. $100 MRR comes from an unrelated
+  client website, not from this product.
 - **Development branch:** `claude/financial-freedom-planning-xucYQ`.
+
+## Polymarket code: do not extend
+
+- `supabase/functions/polymarket-proxy/index.ts` and `src/lib/polymarketApi.ts`
+  exist but are unreferenced from the rest of the codebase.
+- Do **not** add new Polymarket features, fix Polymarket bugs, or write tests
+  against Polymarket code paths.
+- Pending user decision on whether to delete these files outright. Until then,
+  treat them as dead code.
 
 ## Rules specific to this project
 
