@@ -1,13 +1,104 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import {
   computeBucketProbabilities,
   computeEdge,
-  fetchNwsForecast,
+  fetchForecast,
   type WeatherForecast,
   WEATHER_LOCATIONS,
 } from "../_shared/weather.ts";
+
+// ─── Weather market cache sync ────────────────────────────────────────────────
+
+/**
+ * Parse temperature bucket bounds from a Kalshi market.
+ * Tries ticker suffix first (T65 → 65°F threshold), then title text patterns.
+ * Returns null if no temperature range can be derived.
+ */
+function parseTempBucket(ticker: string, title: string): { low: number; high: number } | null {
+  // Ticker suffix: KXHIGHNY-26APR15-T65 → threshold at 65°F
+  const thresholdMatch = ticker.match(/-T(\d+)$/i);
+  if (thresholdMatch) {
+    const threshold = Number(thresholdMatch[1]);
+    return { low: threshold, high: threshold + 5 };
+  }
+
+  const t = title.toLowerCase();
+
+  // "between X and Y" / "X to Y degrees" / "X–Y°F" (range markets)
+  let m = t.match(/between\s+(\d+)\s+and\s+(\d+)/i)
+    || t.match(/(\d+)\s+to\s+(\d+)\s+(?:degrees|°|f\b)/i)
+    || t.match(/(\d+)[–\-](\d+)\s*(?:degrees|°|f\b)/i);
+  if (m) return { low: Number(m[1]), high: Number(m[2]) };
+
+  // "above X" / "at least X" / "over X" (open-ended upper threshold)
+  m = t.match(/(?:above|at least|over|>=)\s+(\d+)/i);
+  if (m) { const lo = Number(m[1]); return { low: lo, high: lo + 10 }; }
+
+  // "below X" / "under X" / "less than X" (open-ended lower threshold)
+  m = t.match(/(?:below|under|less than|<)\s+(\d+)/i);
+  if (m) { const hi = Number(m[1]); return { low: hi - 10, high: hi }; }
+
+  return null;
+}
+
+/**
+ * Fetch Kalshi weather markets for a location and upsert into
+ * weather_markets_cache. Called when the cache is empty for today.
+ * Returns the number of rows successfully synced.
+ */
+async function syncWeatherMarkets(
+  supabase: ReturnType<typeof createClient>,
+  loc: (typeof WEATHER_LOCATIONS)[number],
+  forecastDate: string,
+): Promise<number> {
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `${KALSHI_BASE_URL}/markets?limit=50&status=open&series_ticker=${loc.kalshiSeries}`,
+    );
+  } catch {
+    return 0;
+  }
+  if (!resp.ok) return 0;
+
+  const data = await resp.json().catch(() => ({}));
+  const markets: any[] = data.markets || [];
+
+  let synced = 0;
+  for (const m of markets) {
+    const title = m.title || m.subtitle || "";
+    const bucket = parseTempBucket(m.ticker, title);
+    if (!bucket) continue; // can't determine range — skip
+
+    // Kalshi prices may come as dollars (0.65) or cents (65) depending on API version
+    const toCents = (v: any) => {
+      if (v == null) return null;
+      const n = Number(v);
+      return n > 1 ? Math.round(n) : Math.round(n * 100);
+    };
+
+    const { error } = await supabase.from("weather_markets_cache").upsert(
+      {
+        ticker: m.ticker,
+        location: loc.code,
+        forecast_date: forecastDate,
+        bucket_low: bucket.low,
+        bucket_high: bucket.high,
+        yes_bid: toCents(m.yes_bid_dollars ?? m.yes_bid),
+        yes_ask: toCents(m.yes_ask_dollars ?? m.yes_ask),
+        last_price: toCents(m.last_price_dollars ?? m.last_price),
+        market_question: title || m.ticker,
+        fetched_at: new Date().toISOString(),
+      },
+      { onConflict: "ticker" },
+    );
+    if (!error) synced++;
+  }
+  return synced;
+}
 
 /**
  * weather-signal: Strategy S-005 signal generator.
@@ -33,7 +124,12 @@ import {
  */
 
 const MIN_EDGE_TO_SIGNAL_CENTS = 5;
-const MIN_LIQUIDITY_SCORE = 0.2;
+
+function signalStrength(edgeCents: number): "strong" | "moderate" | "weak" {
+  if (edgeCents >= 15) return "strong";
+  if (edgeCents >= 8) return "moderate";
+  return "weak";
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight("extended");
@@ -58,7 +154,7 @@ serve(async (req) => {
       const locResult: any = { location: loc.code, status: "pending" };
 
       try {
-        const forecast = await fetchNwsForecast(loc);
+        const forecast = await fetchForecast(loc);
 
         // Cache the forecast for downstream backtests / debugging
         const { error: insertErr } = await supabase.from("weather_forecasts").insert({
@@ -78,8 +174,10 @@ serve(async (req) => {
         locResult.expected_high = forecast.expectedHigh;
         locResult.std_dev = forecast.stdDev;
 
-        // 2. Read cached Kalshi weather markets for this location/date
-        const { data: markets } = await supabase
+        // 2. Read cached Kalshi weather markets for this location/date.
+        //    If the cache is empty, sync from Kalshi first — weather-signal
+        //    is self-contained and does not require a separate market sync step.
+        let { data: markets } = await supabase
           .from("weather_markets_cache")
           .select("*")
           .eq("location", loc.code)
@@ -87,8 +185,29 @@ serve(async (req) => {
           .order("bucket_low");
 
         if (!markets || markets.length === 0) {
+          const synced = await syncWeatherMarkets(supabase, loc, forecast.forecastDate);
+          locResult.market_sync = synced;
+
+          if (synced === 0) {
+            locResult.status = "no_markets";
+            locResult.note = `Kalshi has no open weather markets for ${loc.code} on ${forecast.forecastDate}`;
+            results.push(locResult);
+            continue;
+          }
+
+          // Re-read after sync
+          const refetch = await supabase
+            .from("weather_markets_cache")
+            .select("*")
+            .eq("location", loc.code)
+            .eq("forecast_date", forecast.forecastDate)
+            .order("bucket_low");
+          markets = refetch.data;
+        }
+
+        if (!markets || markets.length === 0) {
           locResult.status = "no_markets";
-          locResult.note = "No cached weather markets for this date — run market sync first";
+          locResult.note = "No weather markets available after sync attempt";
           results.push(locResult);
           continue;
         }
@@ -104,14 +223,16 @@ serve(async (req) => {
           const edge = computeEdge(m, trueProb);
           if (Math.abs(edge.edgeCents) < MIN_EDGE_TO_SIGNAL_CENTS) continue;
 
+          const edgeCentsAbs = Math.abs(edge.edgeCents);
           signals.push({
             ticker: m.ticker,
             market_question: m.market_question || `${loc.name} high temp ${m.bucket_low}-${m.bucket_high}°F`,
             direction: edge.direction,
+            signal_strength: signalStrength(edgeCentsAbs),
             yes_bid: m.yes_bid,
             yes_ask: m.yes_ask,
             mid_price: m.yes_bid && m.yes_ask ? (m.yes_bid + m.yes_ask) / 2 : null,
-            edge_cents: Math.abs(edge.edgeCents),
+            edge_cents: edgeCentsAbs,
             true_probability: trueProb,
             implied_probability: edge.impliedProb,
             liquidity_score: m.yes_bid && m.yes_ask ? Math.min(1, (100 - (m.yes_ask - m.yes_bid)) / 100) : 0,

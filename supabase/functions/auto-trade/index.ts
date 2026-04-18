@@ -272,10 +272,6 @@ serve(async (req) => {
         });
       }
 
-      // Brief pause between strategies
-      if (strategies.indexOf(strategy) < strategies.length - 1) {
-        await sleep(1500);
-      }
     }
 
     // ── Log overall run ───────────────────────────────────────────────────────
@@ -346,9 +342,9 @@ async function runS001SurfaceArb(
     .from("surface_alerts")
     .select("*")
     .eq("is_exploited", false)
-    .gte("edge_cents", minEdge)
+    .gte("expected_edge_cents", minEdge)
     .gte("created_at", fiveMinAgo)
-    .order("edge_cents", { ascending: false })
+    .order("expected_edge_cents", { ascending: false })
     .limit(5);
 
   if (!alerts || alerts.length === 0) {
@@ -366,11 +362,11 @@ async function runS001SurfaceArb(
   const bestAlert = alerts[0];
   const qualifyPrompt = buildQualifyPrompt("S-001 Surface Arbitrage", {
     alert_type: bestAlert.alert_type,
-    ticker_a: bestAlert.ticker_a || bestAlert.markets?.[0],
-    ticker_b: bestAlert.ticker_b || bestAlert.markets?.[1],
-    edge_cents: bestAlert.edge_cents,
-    mid_a: bestAlert.mid_a,
-    mid_b: bestAlert.mid_b,
+    ticker_a: bestAlert.ticker_a,
+    ticker_b: bestAlert.ticker_b,
+    edge_cents: bestAlert.expected_edge_cents,
+    price_a_cents: bestAlert.price_a_cents,
+    price_b_cents: bestAlert.price_b_cents,
     description: bestAlert.description,
     open_positions: openCount,
     portfolio_usd: totalUsd,
@@ -390,7 +386,7 @@ async function runS001SurfaceArb(
   );
 
   const legs = buildArbLegs(bestAlert, contractSize);
-  if (!legs || legs.length < 2) {
+  if (!legs || legs.length < 1) {
     return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "Could not construct basket legs from alert" };
   }
 
@@ -404,7 +400,7 @@ async function runS001SurfaceArb(
       alert_id: bestAlert.id,
       legs,
       mode,
-      expected_edge_cents: bestAlert.edge_cents,
+      expected_edge_cents: bestAlert.expected_edge_cents,
       reasoning: `S-001 auto-trade: ${reason}`,
     }),
   });
@@ -486,7 +482,7 @@ async function runS002ResolutionFade(
 
   const side = best.direction === "buy_yes" ? "yes" : "no";
   const price = best.direction === "buy_yes" ? best.yes_ask : best.no_ask || (100 - best.yes_bid);
-  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / (price || 50)));
+  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const tradeResp = await fetch(executeUrl, {
@@ -505,6 +501,8 @@ async function runS002ResolutionFade(
       orderType: "limit",
       mode,
       notes: `S-002 auto-trade: ${reason}`,
+      expectedOutcome: `Resolution Fade: ${best.direction} at mid ${best.mid_price}c, time_value ${best.time_value_score}, expected mean-reversion to base rate before resolution`,
+      confidenceLevel: best.composite_score,
     }),
   });
 
@@ -596,7 +594,7 @@ async function runS003EconomicConsensus(
 
   const side = best.direction === "buy_yes" ? "yes" : "no";
   const price = best.direction === "buy_yes" ? best.yes_ask : best.no_ask || (100 - best.yes_bid);
-  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / (price || 50)));
+  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const tradeResp = await fetch(executeUrl, {
@@ -615,6 +613,8 @@ async function runS003EconomicConsensus(
       orderType: "limit",
       mode,
       notes: `S-003 auto-trade: ${reason}`,
+      expectedOutcome: `Economic Consensus: ${best.direction} toward analyst consensus on ${best.ticker}`,
+      confidenceLevel: best.composite_score,
     }),
   });
 
@@ -705,7 +705,7 @@ async function runS004LiquidityProvision(
 
   // Place a single YES buy at bid+1¢ to earn part of the spread
   const bidPrice = Math.min((best.yes_bid || 0) + 1, (best.yes_ask || 99) - 1);
-  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / bidPrice));
+  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const tradeResp = await fetch(executeUrl, {
@@ -724,6 +724,8 @@ async function runS004LiquidityProvision(
       orderType: "limit",
       mode,
       notes: `S-004 auto-trade: provide liquidity at bid+1¢. ${reason}`,
+      expectedOutcome: `Liquidity Provision: capture bid-ask spread on ${best.ticker}, target take-profit when spread compresses`,
+      confidenceLevel: best.liquidity_score,
     }),
   });
 
@@ -746,9 +748,8 @@ async function runS004LiquidityProvision(
 // NWS forecast distributions to Kalshi weather market prices) and executes
 // trades when edge >= threshold and the model agrees with itself.
 //
-// Backed by the only Tier 1 strategy in the academic research that doesn't
-// require LLM directional reasoning. The LLM still gates each trade as a
-// safety check, but the edge comes from the weather model, not the LLM.
+// Parallelized: all qualifying signals are LLM-gated simultaneously, so
+// a 5-city run takes ~2s (one LLM round-trip) instead of 5 × 2s = 10s.
 
 async function runS005WeatherEdge(
   supabase: any,
@@ -761,6 +762,7 @@ async function runS005WeatherEdge(
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 8;
   const maxPositionUsd = config?.max_position_usd ?? 30;
+  const MAX_PARALLEL_SIGNALS = 5; // one per city
 
   // 1. Read fresh weather signals (last 30 minutes only — they go stale fast)
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
@@ -772,7 +774,7 @@ async function runS005WeatherEdge(
     .gte("edge_cents", minEdge)
     .not("direction", "is", null)
     .order("edge_cents", { ascending: false })
-    .limit(5);
+    .limit(MAX_PARALLEL_SIGNALS);
 
   if (!signals || signals.length === 0) {
     return {
@@ -786,7 +788,8 @@ async function runS005WeatherEdge(
   }
 
   const { openCount } = await checkPortfolioExposure(supabase);
-  if (openCount >= 6) {
+  const slotsAvailable = Math.max(0, 6 - openCount);
+  if (slotsAvailable === 0) {
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
@@ -797,78 +800,98 @@ async function runS005WeatherEdge(
     };
   }
 
-  const best = signals[0];
+  // 2. LLM-gate all signals in parallel — each city is independent,
+  //    no reason to wait for one before starting the next.
+  const candidates = signals.slice(0, slotsAvailable);
+  const qualifyResults = await Promise.all(
+    candidates.map(async (sig: any) => {
+      const prompt = buildQualifyPrompt("S-005 Weather Edge", {
+        ticker: sig.ticker,
+        market_question: sig.market_question,
+        direction: sig.direction,
+        edge_cents: sig.edge_cents,
+        true_probability: sig.true_probability,
+        implied_probability: sig.implied_probability,
+        yes_bid: sig.yes_bid,
+        yes_ask: sig.yes_ask,
+        forecast_expected_high: sig.metadata?.forecast_expected_high,
+        forecast_std_dev: sig.metadata?.forecast_std_dev,
+        location: sig.metadata?.location,
+        note: "Weather Edge: model probability from NWS forecast. Quantitative strategy — qualify unless market is resolved, city mismatches ticker, or data is clearly missing.",
+      });
+      const { qualified, reason } = await qualifySetup(aiConfig, prompt);
+      return { sig, qualified, reason };
+    })
+  );
 
-  // 2. LLM gate: strategy is mostly quantitative, but use LLM as a safety net
-  // to catch obvious gotchas like "this market resolved already" or "the
-  // ticker doesn't match the forecast city".
-  const qualifyPrompt = buildQualifyPrompt("S-005 Weather Edge", {
-    ticker: best.ticker,
-    market_question: best.market_question,
-    direction: best.direction,
-    edge_cents: best.edge_cents,
-    true_probability: best.true_probability,
-    implied_probability: best.implied_probability,
-    yes_bid: best.yes_bid,
-    yes_ask: best.yes_ask,
-    forecast_expected_high: best.metadata?.forecast_expected_high,
-    forecast_std_dev: best.metadata?.forecast_std_dev,
-    location: best.metadata?.location,
-    note: "Weather Edge: model probability comes from NWS forecast distribution. Edge is in cents. Quantitative strategy — qualify unless something is obviously broken (resolved market, wrong city, missing data).",
-  });
-
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
-
-  if (!qualified) {
+  const qualifiedList = qualifyResults.filter(r => r.qualified);
+  if (qualifiedList.length === 0) {
+    const reasons = qualifyResults.map(r => `${r.sig.ticker}: ${r.reason}`).join("; ");
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
       mode,
       status: "completed",
       action: "no_setup",
-      details: `LLM safety gate rejected: ${reason}`,
+      details: `All signals rejected by LLM safety gate. ${reasons}`,
     };
   }
 
-  const side = best.direction === "buy_yes" ? "yes" : "no";
-  const price = best.direction === "buy_yes"
-    ? best.yes_ask
-    : 100 - (best.yes_bid || 50);
-  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / (price || 50)));
-
+  // 3. Execute all qualified trades in parallel
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const tradeResp = await fetch(executeUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticker: best.ticker,
-      marketId: best.ticker,
-      marketQuestion: best.market_question || best.ticker,
-      side,
-      action: "buy",
-      price: Math.round(price),
-      amount,
-      strategy: strategy.name,
-      strategyId: strategy.id,
-      orderType: "limit",
-      mode,
-      notes: `S-005 auto-trade: edge=${best.edge_cents}c, true_p=${best.true_probability}, ${reason}`,
-      expectedOutcome: `Model expects ${best.direction} based on NWS forecast (true_p=${best.true_probability}, implied_p=${best.implied_probability})`,
-      confidenceLevel: best.true_probability,
-    }),
-  });
+  const execResults = await Promise.all(
+    qualifiedList.map(async ({ sig, reason }) => {
+      const side = sig.direction === "buy_yes" ? "yes" : "no";
+      const price = sig.direction === "buy_yes"
+        ? sig.yes_ask
+        : 100 - (sig.yes_bid || 50);
+      // Pass dollar amount — execute-trade handles the cents→contract conversion.
+      const amount = maxPositionUsd;
 
-  const tradeResult = await tradeResp.json();
+      const tradeResp = await fetch(executeUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: sig.ticker,
+          marketId: sig.ticker,
+          marketQuestion: sig.market_question || sig.ticker,
+          side,
+          action: "buy",
+          price: Math.round(price),
+          amount,
+          strategy: strategy.name,
+          strategyId: strategy.id,
+          orderType: "limit",
+          mode,
+          notes: `S-005 auto-trade: edge=${sig.edge_cents}c, true_p=${sig.true_probability}, ${reason}`,
+          expectedOutcome: `NWS model: ${sig.direction} (true_p=${sig.true_probability}, implied_p=${sig.implied_probability})`,
+          confidenceLevel: sig.true_probability,
+        }),
+      });
+      const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
+      return { sig, side, price, amount, result };
+    })
+  );
+
+  const filled = execResults.filter(r => r.result.success);
+  const failed = execResults.filter(r => !r.result.success);
+
+  const detailParts = [
+    filled.length > 0
+      ? `Executed ${filled.length} trade(s): ${filled.map(r => `${r.sig.ticker} ${r.sig.edge_cents}c edge`).join(", ")}`
+      : null,
+    failed.length > 0
+      ? `${failed.length} failed: ${failed.map(r => r.result.error).join(", ")}`
+      : null,
+  ].filter(Boolean).join(". ");
 
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
     mode,
     status: "completed",
-    action: tradeResult.success ? "trade_executed" : "no_setup",
-    details: tradeResult.success
-      ? `Weather edge: ${amount}x ${side} @ ${Math.round(price)}c on ${best.ticker} (edge=${best.edge_cents}c)`
-      : `Trade failed: ${tradeResult.error}`,
+    action: filled.length > 0 ? "trade_executed" : "no_setup",
+    details: detailParts || "No trades executed",
   };
 }
 
@@ -918,7 +941,10 @@ async function runGenericSignalStrategy(
 
   const side = best.direction === "buy_yes" ? "yes" : "no";
   const price = best.direction === "buy_yes" ? best.yes_ask : (100 - (best.yes_bid || 50));
-  const amount = Math.max(1, Math.floor((maxPositionUsd * 100) / (price || 50)));
+  // Pass dollar amount — execute-trade handles the cents→contract conversion.
+  // Old formula (maxPositionUsd * 100 / price) produced contract count, not dollars,
+  // causing a double-conversion that inflated positions by ~100x at low prices.
+  const amount = maxPositionUsd;
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const tradeResp = await fetch(executeUrl, {
@@ -937,6 +963,8 @@ async function runGenericSignalStrategy(
       orderType: "limit",
       mode,
       notes: `${strategy.id} auto-trade: ${reason}`,
+      expectedOutcome: `${strategy.name}: ${best.direction} on ${best.ticker} at ${best.mid_price}c`,
+      confidenceLevel: best.composite_score,
     }),
   });
 
@@ -1113,36 +1141,47 @@ async function resolveAiConfig(supabase: any): Promise<AiConfig | null> {
  * Handles monotonicity and bracket sum violation structures.
  */
 function buildArbLegs(alert: any, contractSize: number): any[] | null {
-  // Alert should have ticker_a / ticker_b with their respective sides
-  // The alert stores the direction to exploit the mispricing
-  if (!alert.ticker_a || !alert.ticker_b) return null;
+  // Monotonicity violation: ticker_a = lower threshold (YES underpriced → buy YES),
+  //                         ticker_b = higher threshold (YES overpriced → buy NO).
+  // Bracket sum / spread anomaly: only ticker_a is set; ticker_b is null.
+  if (!alert.ticker_a) return null;
 
-  // For a monotonicity violation: lower threshold is overpriced vs higher threshold
-  // Buy the one that should be MORE likely (higher threshold = more likely to NOT happen)
-  // Exact sides depend on alert type — default to buying the underpriced side
-  const legs = [
+  // Prices come from price_a_cents / price_b_cents (surface-scanner column names).
+  const priceA = alert.price_a_cents || 50;
+  const priceB = alert.price_b_cents || 50;
+
+  // Sides: for monotonicity, buy the cheap YES (A) and the cheap NO (B).
+  // For all other types, both are YES buys.
+  const sideA: string = "yes";
+  const sideB: string = alert.alert_type === "monotonicity_violation" ? "no" : "yes";
+
+  const legs: any[] = [
     {
       ticker: alert.ticker_a,
-      side: alert.side_a || "yes",
+      side: sideA,
       action: "buy",
-      price: alert.price_a || alert.mid_a,
-      amount: Math.max(1, Math.floor((contractSize * 100) / (alert.price_a || alert.mid_a || 50))),
+      price: priceA,
+      amount: Math.max(1, Math.floor((contractSize * 100) / priceA)),
       market_question: alert.ticker_a,
-      order_type: "limit",
-    },
-    {
-      ticker: alert.ticker_b,
-      side: alert.side_b || "no",
-      action: "buy",
-      price: alert.price_b || alert.mid_b,
-      amount: Math.max(1, Math.floor((contractSize * 100) / (alert.price_b || alert.mid_b || 50))),
-      market_question: alert.ticker_b,
       order_type: "limit",
     },
   ];
 
+  // Only add the second leg when ticker_b exists (monotonicity violations have both).
+  if (alert.ticker_b) {
+    legs.push({
+      ticker: alert.ticker_b,
+      side: sideB,
+      action: "buy",
+      price: priceB,
+      amount: Math.max(1, Math.floor((contractSize * 100) / priceB)),
+      market_question: alert.ticker_b,
+      order_type: "limit",
+    });
+  }
+
   // Validate prices are in valid Kalshi range (1–99¢)
-  if (legs.some(l => !l.price || l.price < 1 || l.price > 99)) return null;
+  if (legs.some(l => l.price < 1 || l.price > 99)) return null;
 
   return legs;
 }

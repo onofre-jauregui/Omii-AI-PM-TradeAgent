@@ -110,11 +110,14 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return preflight("extended");
 
   try {
+    // Parse the body ONCE so we can forward the parsed object to
+    // resolveTenant (req.clone().json() fails after the first read).
+    const parsedBody = await req.json();
     const {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
       expectedOutcome, confidenceLevel,
-    } = await req.json();
+    } = parsedBody;
 
     const resolvedTicker = ticker || marketId;
 
@@ -151,7 +154,7 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     // ── Tenant Resolution (multi-tenancy) ──
-    const { userId, authenticated } = await resolveTenant(req, supabase);
+    const { userId, authenticated } = await resolveTenant(req, supabase, parsedBody);
 
     const tradeMode = mode || "paper";
 

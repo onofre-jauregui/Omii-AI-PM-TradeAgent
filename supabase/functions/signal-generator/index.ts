@@ -23,10 +23,23 @@ import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
 
 // ─── Market Series to Score ───────────────────────────────────────────────────
+// Mix of long-horizon (macro, sports) and short-horizon (daily weather, daily
+// BTC/ETH price ranges) series so the agent has candidates at all time-value
+// buckets. Short-horizon series are the ones that qualify for S-002 Resolution
+// Fade (which needs time_value_score >= 0.65, i.e. <= ~2 weeks).
 const SERIES = [
+  // Long-horizon macro / sports (months+)
   "KXFED", "KXGDP", "KXPAYROLLS", "KXCPI",
   "KXINX", "KXBTC", "KXETH", "KXNHL", "KXNBA",
   "KXMLB", "KXCHCUTS",
+  // Short-horizon daily markets (hours–days to resolution)
+  "KXBTCD",     // daily BTC price ranges
+  "KXETHD",     // daily ETH price ranges
+  "KXHIGHNY",   // daily NYC high temp
+  "KXHIGHCHI",  // daily Chicago high temp
+  "KXHIGHMIA",  // daily Miami high temp
+  "KXHIGHLAX",  // daily LA high temp
+  "KXHIGHAUS",  // daily Austin high temp
 ];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -90,14 +103,25 @@ function scoreLiquidity(spreadCents: number, volume: number): number {
 }
 
 /**
- * Edge score: how far the mid-price is from the "boring" 50¢ midpoint.
- * Extremes (< 10¢ or > 90¢) suggest strong conviction or mispricing.
- * We reward distance from 50 — higher = more extreme = more interesting.
+ * Edge score: MICROSTRUCTURE edge — how far recent trade prints have moved
+ * away from the current orderbook mid. If last_price != mid, somebody
+ * traded above/below the spread recently, which is real information.
+ *
+ * Previous implementation scored `|mid - 50|` which rewarded lottery-priced
+ * markets regardless of whether they were actually mispriced. That was a
+ * design flaw (2026-04-15 session): we bought cheap contracts because they
+ * were cheap, not because we had a probability model.
+ *
+ * Honest rule: without a real probability model, the edge score is a
+ * *microstructure* metric, not a value metric. For strategy-bearing signals
+ * with a real model (e.g. weather-signal / NWS forecasts), the strategy
+ * producer populates edge_cents directly and overrides this.
  */
-function scoreEdge(midCents: number): number {
-  const distFrom50 = Math.abs(midCents - 50);
-  // 0 distance = 0 edge, 50 distance = 1.0 edge
-  return clamp(distFrom50 / 50);
+function scoreEdge(midCents: number, lastPriceCents: number): number {
+  if (lastPriceCents <= 0) return 0;
+  const divergence = Math.abs(lastPriceCents - midCents);
+  // Max meaningful divergence is ~10c; clamp to [0, 1]
+  return clamp(divergence / 10);
 }
 
 /**
@@ -140,42 +164,48 @@ function compositeScore(s: ScoredSignal): number {
 }
 
 /**
- * Determine signal direction from mid-price.
- * Cheap YES (< 25¢): potential buy YES if liquidity allows (mean-reversion or value).
- * Expensive YES (> 75¢): potential buy NO (equivalent of shorting YES).
- * Mid-range: skip unless very liquid and close to resolution.
+ * Determine signal direction.
+ *
+ * Without a real probability model, we default to "skip". The LLM layer
+ * (auto-trade strategy functions) gets all the raw data and can decide.
+ * We ONLY emit a direction when there's a concrete microstructure signal:
+ *   - last_price above mid by >= 3c → recent buyers crossed the spread up,
+ *     momentum favors YES (buy_yes)
+ *   - last_price below mid by >= 3c → recent sellers crossed the spread down,
+ *     momentum favors NO (buy_no)
+ * Everything else returns skip + reasoning explaining what we see.
  */
 function deriveDirection(
   midCents: number,
+  lastPriceCents: number,
   liquidity: number,
-  edge: number,
   timeValue: number
 ): { direction: ScoredSignal["direction"]; reasoning: string } {
-  const cheap = midCents < 25;
-  const expensive = midCents > 75;
-  const actionable = liquidity > 0.3 && (edge > 0.3 || timeValue > 0.7);
-
-  if (cheap && actionable) {
+  if (lastPriceCents <= 0) {
     return {
-      direction: "buy_yes",
-      reasoning: `YES trading at ${midCents.toFixed(0)}¢ — potential value if event resolves YES. Liquidity score ${(liquidity * 100).toFixed(0)}%.`,
+      direction: "skip",
+      reasoning: `No last-price data — skip. mid=${midCents.toFixed(0)}c, liquidity=${(liquidity*100).toFixed(0)}%.`,
     };
   }
-  if (expensive && actionable) {
+  const divergence = lastPriceCents - midCents;
+  const actionableLiquidity = liquidity > 0.3;
+  const significantDivergence = Math.abs(divergence) >= 3;
+
+  if (significantDivergence && actionableLiquidity && divergence > 0) {
+    return {
+      direction: "buy_yes",
+      reasoning: `Microstructure: last_price ${lastPriceCents.toFixed(0)}c is ${divergence.toFixed(0)}c above mid ${midCents.toFixed(0)}c — recent buyers crossed up. tv=${timeValue.toFixed(2)}.`,
+    };
+  }
+  if (significantDivergence && actionableLiquidity && divergence < 0) {
     return {
       direction: "buy_no",
-      reasoning: `YES at ${midCents.toFixed(0)}¢ → equivalent NO at ${(100 - midCents).toFixed(0)}¢. Potential value on NO side. Liquidity score ${(liquidity * 100).toFixed(0)}%.`,
-    };
-  }
-  if (Math.abs(midCents - 50) < 5 && timeValue > 0.8 && liquidity > 0.5) {
-    return {
-      direction: "buy_yes",
-      reasoning: `Near 50¢ with ${timeValue > 0.9 ? "imminent" : "near-term"} resolution — coin-flip with momentum potential. High liquidity.`,
+      reasoning: `Microstructure: last_price ${lastPriceCents.toFixed(0)}c is ${Math.abs(divergence).toFixed(0)}c below mid ${midCents.toFixed(0)}c — recent sellers crossed down. tv=${timeValue.toFixed(2)}.`,
     };
   }
   return {
     direction: "skip",
-    reasoning: `Mid-range price (${midCents.toFixed(0)}¢) with insufficient edge or liquidity to act. Monitor.`,
+    reasoning: `No microstructure edge: last_price ${lastPriceCents.toFixed(0)}c vs mid ${midCents.toFixed(0)}c (div=${divergence.toFixed(0)}c). Skip without a real model.`,
   };
 }
 
@@ -274,9 +304,10 @@ serve(async (req) => {
       }
 
       const liquidityScore = scoreLiquidity(spreadCents, volume);
-      const edgeScore = scoreEdge(midCents);
+      const lastPriceCents = Math.round((lastPrice || 0) * 100);
+      const edgeScore = scoreEdge(midCents, lastPriceCents);
       const timeValueScore = scoreTimeValue(daysToClose);
-      const { direction, reasoning } = deriveDirection(midCents, liquidityScore, edgeScore, timeValueScore);
+      const { direction, reasoning } = deriveDirection(midCents, lastPriceCents, liquidityScore, timeValueScore);
 
       const signal: ScoredSignal = {
         ticker: m.ticker,
@@ -319,30 +350,50 @@ serve(async (req) => {
 
     const topSignals = signals.slice(0, limit);
 
-    // ── Persist to signals table (non-blocking) ───────────────────────────────
+    // ── Persist to signals table ──────────────────────────────────────────────
+    // Note: we await the insert now (was fire-and-forget previously, which
+    // silently swallowed schema mismatches). edge_cents is derived from the
+    // distance of mid_price from 50c so downstream strategy filters work.
     if (supabase && topSignals.length > 0) {
       const rows = topSignals.map((s) => ({
         ticker: s.ticker,
         market_question: s.title,
         event_ticker: s.event_ticker,
         direction: s.direction,
+        yes_bid: s.yes_bid,
+        yes_ask: s.yes_ask,
+        no_bid: Math.max(0, 100 - s.yes_ask),
+        no_ask: Math.max(0, 100 - s.yes_bid),
         mid_price: s.mid_price,
         spread: s.spread,
         volume: s.volume,
         composite_score: s.composite_score,
         liquidity_score: s.liquidity_score,
         edge_score: s.edge_score,
+        // edge_cents = microstructure divergence (last_price vs mid).
+        // If zero (no recent trades OR mid == last), we write 0 so S-002's
+        // `gte edge_cents 5` filter correctly excludes model-less markets.
+        edge_cents: s.edge_score > 0 ? Math.round(s.edge_score * 10) : 0,
         time_value_score: s.time_value_score,
         volume_rank_score: s.volume_rank_score,
         signal_strength: s.signal_strength,
         reasoning: s.reasoning,
         days_to_close: s.days_to_close,
         expires_at: s.close_time,
+        source: "signal_generator",
       }));
 
-      supabase.from("signals").insert(rows).then().catch((e: Error) => {
-        console.error("Failed to persist signals:", e.message);
-      });
+      const { error: insertErr } = await supabase.from("signals").insert(rows);
+      if (insertErr) {
+        console.error("Failed to persist signals:", insertErr.message);
+        // Also log to compliance_log so we notice in prod
+        await supabase.from("compliance_log").insert({
+          event_type: "signal_persist_error",
+          severity: "error",
+          message: `signal-generator persist failed: ${insertErr.message}`,
+          metadata: { row_count: rows.length, first_ticker: rows[0]?.ticker },
+        });
+      }
     }
 
     // ── Summary stats ─────────────────────────────────────────────────────────

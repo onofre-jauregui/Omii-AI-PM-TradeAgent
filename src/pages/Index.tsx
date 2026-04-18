@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Sidebar } from "@/components/trading/Sidebar";
 import { PortfolioChart } from "@/components/trading/PortfolioChart";
@@ -28,6 +29,7 @@ const TAB_LABELS: Record<string, string> = {
 const Index = () => {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [userEmail, setUserEmail] = useState<string | undefined>();
+  const navigate = useNavigate();
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -35,9 +37,17 @@ const Index = () => {
     });
   }, []);
 
+  function handleNavigate(tab: string) {
+    if (tab === "performance") {
+      navigate("/performance");
+      return;
+    }
+    setActiveTab(tab);
+  }
+
   return (
     <div className="flex min-h-screen bg-background">
-      <Sidebar activeTab={activeTab} onNavigate={setActiveTab} userEmail={userEmail} />
+      <Sidebar activeTab={activeTab} onNavigate={handleNavigate} userEmail={userEmail} />
 
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top header — active page name centered */}
