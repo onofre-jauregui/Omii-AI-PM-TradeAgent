@@ -22,7 +22,9 @@ function parseTempBucket(ticker: string, title: string): { low: number; high: nu
   const thresholdMatch = ticker.match(/-T(\d+)$/i);
   if (thresholdMatch) {
     const threshold = Number(thresholdMatch[1]);
-    return { low: threshold, high: threshold + 5 };
+    // Open upper bound: "YES if high >= threshold°F". Use 9999 so bucketProbability
+    // computes P(X >= threshold) = 1 - normalCdf(threshold), not a 5°F slice.
+    return { low: threshold, high: 9999 };
   }
 
   const t = title.toLowerCase();
@@ -126,7 +128,7 @@ async function syncWeatherMarkets(
 // Backtest (weather_replay, ERA5 ground truth) showed 15¢ threshold hits 48.9%
 // win rate vs 38.1% at 5¢. Profitable at all thresholds due to asymmetric
 // payouts, but 15¢ maximizes risk-adjusted edge.
-const MIN_EDGE_TO_SIGNAL_CENTS = 15;
+const MIN_EDGE_TO_SIGNAL_CENTS = 3;
 
 // AUS and CHI show 22-23% win rates vs LAX 45%, NYC/MIA ~38%.
 // GFS underperforms on continental convective weather — exclude until
@@ -308,13 +310,6 @@ serve(async (req) => {
 
           const trueProb = bucketProbs.get(m.ticker);
           if (trueProb === undefined) continue;
-
-          // Skip when calibrated expected_high is within 2× stdDev of a bucket boundary.
-          // GFS has 3-5°F typical error; trading near a boundary captures noise not edge.
-          const distToLow = Math.abs(calibratedForecast.expectedHigh - m.bucket_low);
-          const distToHigh = Math.abs(calibratedForecast.expectedHigh - m.bucket_high);
-          const minBucketDist = Math.min(distToLow, distToHigh);
-          if (minBucketDist < 2 * calibratedForecast.stdDev) continue;
 
           const edge = computeEdge(m, trueProb);
           const rawEdgeCents = Math.abs(edge.edgeCents);

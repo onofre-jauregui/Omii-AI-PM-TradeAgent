@@ -324,7 +324,7 @@ async function runS001FedWatchOracle(
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 12;
   const maxPositionUsd = config?.max_position_usd ?? 50;
-  const MAX_S001_POSITIONS = 3;
+  const MAX_S001_POSITIONS = 20;
 
   const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
@@ -423,8 +423,8 @@ async function runS001FedWatchOracle(
       true_probability: sig.true_probability,
       implied_probability: sig.implied_probability,
       days_to_close: sig.days_to_close,
-      fedwatch_meeting_date: sig.metadata?.fedwatch_meeting_date,
-      note: `FedWatch Oracle: CME FedWatch implied probability diverges from Kalshi price by ${edgeCents}¢. QUALIFY only if the market question unambiguously describes a Fed rate outcome for the same meeting date. REJECT if meeting date is ambiguous, market is near expiry (<12h), or divergence seems like stale data.`,
+      meeting_date_from_question: `Extracted from market_question: ${sig.market_question || sig.ticker}`,
+      note: `FedWatch Oracle: Yahoo Finance ZQ futures imply a different rate probability than Kalshi, creating ${edgeCents}¢ edge. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY. QUALIFY whenever edge_cents >= 10 and the market_question contains a specific meeting date. The market_question above contains the meeting date." : "require unambiguous meeting date match."}. REJECT only if: market expires in < 12h, market_question has no meeting date at all, or prices are null.`,
     });
 
     const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode);
@@ -488,7 +488,7 @@ async function runS002LongshotBias(
   supabaseKey: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const MAX_S002_POSITIONS = 5;
+  const MAX_S002_POSITIONS = 20;
   const AMOUNT_PER_TRADE = 20; // small, diversified — $20 per position
 
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
@@ -685,7 +685,7 @@ async function runS005WeatherEdge(
   }
 
   const { openCount } = await checkPortfolioExposure(supabase);
-  const slotsAvailable = Math.max(0, 6 - openCount);
+  const slotsAvailable = Math.max(0, 20 - openCount);
   if (slotsAvailable === 0) {
     return {
       strategy_id: strategy.id,
@@ -796,7 +796,7 @@ async function runS005WeatherEdge(
         location: sig.metadata?.location,
         city_history: cityHistoryNote,
         ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
-        note: "Weather Edge: GFS model vs Kalshi price. REJECT if market is near expiry, city mismatches ticker, data is stale, or city has prior losses. Edge must be substantial (≥15¢) to be real.",
+        note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
       });
       const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode);
       return { sig, qualified, reason };

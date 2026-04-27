@@ -334,7 +334,7 @@ serve(async (req) => {
 
     const yesBid = toCents(market.yes_bid_dollars ?? market.yes_bid);
     const yesAsk = toCents(market.yes_ask_dollars ?? market.yes_ask);
-    const volume = Number(market.volume || market.volume_24h || 0);
+    const volume = parseFloat(market.volume_fp || market.volume_24h_fp || market.volume || market.volume_24h || "0") || 0;
     const title: string = market.title || market.subtitle || ticker;
 
     if (yesBid === null || yesAsk === null) {
