@@ -12,6 +12,9 @@ import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import { AuthPage } from "./pages/AuthPage.tsx";
 import PerformancePage from "./pages/PerformancePage.tsx";
+import SignupPage from "./pages/SignupPage.tsx";
+import OnboardingPage from "./pages/OnboardingPage.tsx";
+import WaitlistPage from "./pages/admin/WaitlistPage.tsx";
 
 const queryClient = new QueryClient();
 
@@ -56,7 +59,11 @@ function AppRoutes() {
     <BrowserRouter>
       <Routes>
         {/* Public — no auth required */}
+        <Route path="/signup" element={<SignupPage />} />
         <Route path="/performance" element={<PerformancePage />} />
+        {/* Auth-protected — admin + onboarding */}
+        <Route path="/admin/waitlist" element={<WaitlistPage />} />
+        <Route path="/onboarding" element={<OnboardingPage />} />
         {/* Everything else goes through the auth gate */}
         <Route path="*" element={<ProtectedApp session={session} />} />
       </Routes>
