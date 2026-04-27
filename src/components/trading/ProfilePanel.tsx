@@ -2,14 +2,17 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { User, Trophy, Calendar, BarChart3, TrendingUp, Activity, Wallet, Loader2 } from "lucide-react";
+import { User, Trophy, Calendar, BarChart3, TrendingUp, Activity, Wallet, Loader2, Zap } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 
 export function ProfilePanel() {
+  const navigate = useNavigate();
   const [profile, setProfile] = useState({
     displayName: "Anon Trader", email: "", walletAddress: "",
   });
+  const [subscription, setSubscription] = useState<{ tier: string; status: string } | null>(null);
 
   const [stats, setStats] = useState({
     totalTrades: 0, winRate: 0, totalPnl: 0, avgReturn: 0,
@@ -54,12 +57,31 @@ export function ProfilePanel() {
       });
     }
 
+    // Load subscription tier
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: sub } = await supabase
+        .from("subscriptions")
+        .select("tier, status")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      setSubscription(sub ?? { tier: "free", status: "inactive" });
+
+      // Pre-fill email from auth
+      setProfile(prev => ({ ...prev, email: user.email ?? "" }));
+    }
+
     setLoading(false);
   }, []);
 
   useEffect(() => {
     loadStats();
   }, [loadStats]);
+
+  const tierLabel = (tier: string) => {
+    const labels: Record<string, string> = { free: "Free Trial", starter: "Starter", pro: "Pro", prop: "Prop" };
+    return labels[tier] ?? tier;
+  };
 
   return (
     <div className="space-y-8 apple-reveal">
@@ -97,6 +119,31 @@ export function ProfilePanel() {
             <Button className="w-full rounded-full gap-2 text-sm">
               <Wallet className="h-4 w-4" /> Save Profile
             </Button>
+          </div>
+
+          {/* Subscription tier */}
+          <div className="border-t border-border pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-muted-foreground">Plan</span>
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                subscription?.tier === "prop" ? "bg-amber-500/10 text-amber-500" :
+                subscription?.tier === "pro"  ? "bg-primary/10 text-primary" :
+                subscription?.tier === "starter" ? "bg-emerald-500/10 text-emerald-500" :
+                "bg-secondary text-muted-foreground"
+              }`}>
+                {tierLabel(subscription?.tier ?? "free")}
+              </span>
+            </div>
+            {(!subscription || subscription.tier === "free" || subscription.status !== "active") && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full rounded-full gap-1.5 text-xs mt-1"
+                onClick={() => navigate("/billing")}
+              >
+                <Zap className="h-3 w-3" /> Upgrade plan
+              </Button>
+            )}
           </div>
         </div>
 

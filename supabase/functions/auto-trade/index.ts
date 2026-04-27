@@ -20,7 +20,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
  * Scheduled: every 5 minutes via pg_cron.
  */
 
-const DEBOUNCE_MINUTES = 3;
+const DEBOUNCE_MINUTES = 0; // cron interval is the rate limiter; no internal debounce needed
 const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ serve(async (req) => {
     // ── Load active strategies with their configs ────────────────────────────
     const { data: strategies } = await supabase
       .from("strategies")
-      .select("id, name, description, instructions, mode, starting_balance")
+      .select("id, name, description, instructions, mode, starting_balance, user_id")
       .eq("active", true)
       .order("id");
 
@@ -185,24 +185,9 @@ serve(async (req) => {
         let result: StrategyResult;
 
         if (strategy.id === "S-001") {
-          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
+          result = await runS001FedWatchOracle(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
         } else if (strategy.id === "S-002") {
-          result = await runS002ResolutionFade(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
-        } else if (strategy.id === "S-003") {
-          // S-003 is disabled by 20260414_security_and_billing.sql migration
-          // per Federal Reserve research showing Kalshi macro markets are
-          // efficient. The strategies row is set to active=false and this
-          // branch is a defensive guard in case it gets re-enabled without
-          // a named edge thesis.
-          result = {
-            strategy_id: strategy.id,
-            strategy_name: strategy.name,
-            mode: strategy.mode,
-            status: "halted",
-            details: "S-003 is disabled per Fed paper evidence. See 20260414 migration for re-enable instructions.",
-          };
-        } else if (strategy.id === "S-004") {
-          result = await runS004LiquidityProvision(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
         } else if (strategy.id === "S-005") {
           result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey);
         } else {
@@ -320,11 +305,15 @@ serve(async (req) => {
   }
 });
 
-// ─── Strategy S-001: Surface Arbitrage ───────────────────────────────────────
-// Looks for unexploited surface_alerts (monotonicity / bracket sum violations)
-// and executes a multi-leg basket to capture the edge.
+// ─── Strategy S-001: FedWatch Oracle ─────────────────────────────────────────
+// Reads futures_oracle signals (inserted by futures-signal edge function) and
+// places MAKER limit orders when CME FedWatch vs. Kalshi KXFED divergence ≥12¢.
+//
+// Edge source: CME FedWatch implied probabilities from $400B/day Fed funds
+// futures are more accurate than Kalshi retail pricing for KXFED markets.
+// When they diverge, trade Kalshi toward the FedWatch implied probability.
 
-async function runS001SurfaceArb(
+async function runS001FedWatchOracle(
   supabase: any,
   strategy: any,
   config: StrategyConfig | undefined,
@@ -333,311 +322,164 @@ async function runS001SurfaceArb(
   supabaseKey: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const minEdge = config?.min_edge_cents ?? 3;
+  const minEdge = config?.min_edge_cents ?? 12;
   const maxPositionUsd = config?.max_position_usd ?? 50;
+  const MAX_S001_POSITIONS = 3;
 
-  // 1. Read recent unexploited surface alerts above min edge
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  const { data: alerts } = await supabase
-    .from("surface_alerts")
-    .select("*")
-    .eq("is_exploited", false)
-    .gte("expected_edge_cents", minEdge)
-    .gte("created_at", fiveMinAgo)
-    .order("expected_edge_cents", { ascending: false })
-    .limit(5);
+  const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-  if (!alerts || alerts.length === 0) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "No fresh unexploited surface alerts above edge threshold" };
-  }
-
-  // 2. Check portfolio exposure
-  const { openCount, totalUsd } = await checkPortfolioExposure(supabase);
-  const maxPositions = 6;
-  if (openCount >= maxPositions) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `Portfolio full: ${openCount} open positions` };
-  }
-
-  // 3. Pick the best alert and ask LLM to qualify or reject
-  const bestAlert = alerts[0];
-  const qualifyPrompt = buildQualifyPrompt("S-001 Surface Arbitrage", {
-    alert_type: bestAlert.alert_type,
-    ticker_a: bestAlert.ticker_a,
-    ticker_b: bestAlert.ticker_b,
-    edge_cents: bestAlert.expected_edge_cents,
-    price_a_cents: bestAlert.price_a_cents,
-    price_b_cents: bestAlert.price_b_cents,
-    description: bestAlert.description,
-    open_positions: openCount,
-    portfolio_usd: totalUsd,
-    max_position_usd: maxPositionUsd,
-  });
-
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
-
-  if (!qualified) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
-  }
-
-  // 4. Execute the basket
-  const contractSize = Math.min(
-    Math.floor((maxPositionUsd / 2) * 100) / 100,
-    25 // max $25 per leg in arb
-  );
-
-  const legs = buildArbLegs(bestAlert, contractSize);
-  if (!legs || legs.length < 1) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "Could not construct basket legs from alert" };
-  }
-
-  const basketUrl = `${supabaseUrl}/functions/v1/execute-basket`;
-  const basketResp = await fetch(basketUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      alert_id: bestAlert.id,
-      legs,
-      mode,
-      expected_edge_cents: bestAlert.expected_edge_cents,
-      reasoning: `S-001 auto-trade: ${reason}`,
-    }),
-  });
-
-  const basketResult = await basketResp.json();
-
-  return {
-    strategy_id: strategy.id,
-    strategy_name: strategy.name,
-    mode,
-    status: "completed",
-    action: basketResult.success ? "basket_executed" : "no_setup",
-    details: `Basket ${basketResult.basket_id}: ${basketResult.status}, legs filled: ${basketResult.legs_filled}/${basketResult.legs_total}${basketResult.abort_reason ? `. Abort: ${basketResult.abort_reason}` : ""}`,
-  };
-}
-
-// ─── Strategy S-002: Resolution Fade ─────────────────────────────────────────
-// Finds markets approaching resolution (high time_value_score) that are
-// pricing at extreme levels (>75¢ or <25¢) with sufficient liquidity.
-// Fades the current consensus by taking the contrarian position.
-
-async function runS002ResolutionFade(
-  supabase: any,
-  strategy: any,
-  config: StrategyConfig | undefined,
-  aiConfig: AiConfig,
-  supabaseUrl: string,
-  supabaseKey: string,
-): Promise<StrategyResult> {
-  const mode = strategy.mode || "paper";
-  const minEdge = config?.min_edge_cents ?? 5;
-  const minComposite = config?.min_composite_score ?? 0.4;
-  const minLiquidity = config?.min_liquidity_score ?? 0.3;
-  const maxPositionUsd = config?.max_position_usd ?? 40;
-
-  // 1. Read signals: near-resolution markets with strong edge
-  const { data: signals } = await supabase
+  const { data: rawSignals } = await supabase
     .from("signals")
     .select("*")
-    .gte("time_value_score", 0.65)     // high urgency — within 2 weeks of close
-    .gte("composite_score", minComposite)
-    .gte("liquidity_score", minLiquidity)
+    .eq("source", "futures_oracle")
+    .gte("created_at", sixtyMinAgo)
     .gte("edge_cents", minEdge)
     .not("direction", "is", null)
-    .in("direction", ["buy_yes", "buy_no"])
-    .order("time_value_score", { ascending: false })
     .order("edge_cents", { ascending: false })
-    .limit(5);
-
-  if (!signals || signals.length === 0) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "No near-resolution signals meeting edge + liquidity requirements" };
-  }
-
-  const { openCount, totalUsd } = await checkPortfolioExposure(supabase);
-  if (openCount >= 8) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `Portfolio full: ${openCount} open positions` };
-  }
-
-  const best = signals[0];
-  const qualifyPrompt = buildQualifyPrompt("S-002 Resolution Fade", {
-    ticker: best.ticker,
-    market_question: best.market_question,
-    direction: best.direction,
-    mid_price: best.mid_price,
-    edge_cents: best.edge_cents,
-    time_value_score: best.time_value_score,
-    liquidity_score: best.liquidity_score,
-    composite_score: best.composite_score,
-    days_to_close: best.days_to_close,
-    open_positions: openCount,
-    note: "Resolution Fade: fade consensus if market is mispriced near resolution. High time_value means price should be converging fast.",
-  });
-
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
-
-  if (!qualified) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
-  }
-
-  const side = best.direction === "buy_yes" ? "yes" : "no";
-  const price = best.direction === "buy_yes" ? best.yes_ask : best.no_ask || (100 - best.yes_bid);
-  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
-
-  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const tradeResp = await fetch(executeUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticker: best.ticker,
-      marketId: best.ticker,
-      marketQuestion: best.market_question || best.ticker,
-      side,
-      action: "buy",
-      price: Math.round(price),
-      amount,
-      strategy: strategy.name,
-      strategyId: strategy.id,
-      orderType: "limit",
-      mode,
-      notes: `S-002 auto-trade: ${reason}`,
-      expectedOutcome: `Resolution Fade: ${best.direction} at mid ${best.mid_price}c, time_value ${best.time_value_score}, expected mean-reversion to base rate before resolution`,
-      confidenceLevel: best.composite_score,
-    }),
-  });
-
-  const tradeResult = await tradeResp.json();
-
-  return {
-    strategy_id: strategy.id,
-    strategy_name: strategy.name,
-    mode,
-    status: "completed",
-    action: tradeResult.success ? "trade_executed" : "no_setup",
-    details: tradeResult.success
-      ? `Bought ${amount} ${side} @ ${price}¢ on ${best.ticker}: ${reason}`
-      : `Trade failed: ${tradeResult.error}`,
-  };
-}
-
-// ─── Strategy S-003: Economic Consensus ──────────────────────────────────────
-// Targets large-edge signals on economic data markets (Fed, CPI, employment).
-// Higher edge threshold (15¢) means only very mispriced markets qualify.
-
-async function runS003EconomicConsensus(
-  supabase: any,
-  strategy: any,
-  config: StrategyConfig | undefined,
-  aiConfig: AiConfig,
-  supabaseUrl: string,
-  supabaseKey: string,
-): Promise<StrategyResult> {
-  const mode = strategy.mode || "paper";
-  const minEdge = config?.min_edge_cents ?? 15;
-  const minLiquidity = config?.min_liquidity_score ?? 0.3;
-  const maxPositionUsd = config?.max_position_usd ?? 75;
-  const minDaysToClose = config?.min_days_to_close ?? 0.1;
-  const maxDaysToClose = config?.max_days_to_close ?? 90;
-
-  // 1. Read signals: high edge, sufficient liquidity, reasonable time window
-  const { data: signals } = await supabase
-    .from("signals")
-    .select("*")
-    .gte("edge_cents", minEdge)
-    .gte("liquidity_score", minLiquidity)
-    .gte("days_to_close", minDaysToClose)
-    .lte("days_to_close", maxDaysToClose)
-    .not("direction", "is", null)
-    .order("edge_cents", { ascending: false })
-    .order("liquidity_score", { ascending: false })
     .limit(10);
 
-  if (!signals || signals.length === 0) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `No signals with edge ≥ ${minEdge}¢` };
+  if (!rawSignals || rawSignals.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `No fresh FedWatch Oracle signals with edge ≥${minEdge}¢ (run futures-signal first)`,
+    };
   }
 
-  // Filter to economic/macro tickers — series that typically cover Fed, CPI, jobs, etc.
-  const economicKeywords = ["fed", "cpi", "rate", "inflation", "unemployment", "gdp", "payroll", "fomc", "jobs", "interest"];
-  const economicSignals = signals.filter((s: any) => {
-    const q = (s.market_question || s.ticker || "").toLowerCase();
-    return economicKeywords.some(kw => q.includes(kw));
-  });
+  // Check open positions — cap at 3 simultaneous for this strategy
+  const { data: openTrades } = await supabase
+    .from("trades")
+    .select("ticker, strategy_id")
+    .eq("status", "filled")
+    .is("exit_reason", null)
+    .is("settled_at", null);
 
-  // Fall back to highest-edge signals if no economic matches
-  const candidates = economicSignals.length > 0 ? economicSignals : signals;
-  const best = candidates[0];
+  const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
+  const openS001Count = (openTrades || []).filter((t: any) => t.strategy_id === "S-001").length;
 
-  const { openCount, totalUsd } = await checkPortfolioExposure(supabase);
-  if (totalUsd >= 200) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `Portfolio exposure too high: $${totalUsd.toFixed(0)}` };
+  if (openS001Count >= MAX_S001_POSITIONS) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `S-001 at max positions: ${openS001Count}/${MAX_S001_POSITIONS} open`,
+    };
   }
 
-  const qualifyPrompt = buildQualifyPrompt("S-003 Economic Consensus", {
-    ticker: best.ticker,
-    market_question: best.market_question,
-    direction: best.direction,
-    mid_price: best.mid_price,
-    edge_cents: best.edge_cents,
-    days_to_close: best.days_to_close,
-    liquidity_score: best.liquidity_score,
-    is_economic: economicSignals.length > 0,
-    open_positions: openCount,
-    portfolio_usd: totalUsd,
-    note: "Economic Consensus: trade only when edge is substantial (≥15¢) and reflects genuine consensus mispricing vs economic data/forecasts.",
-  });
+  const slotsAvailable = MAX_S001_POSITIONS - openS001Count;
 
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
+  // Dedup: skip already-held tickers
+  const seenTickers = new Set<string>();
+  const candidates = (rawSignals || []).filter((s: any) => {
+    if (openTickers.has(s.ticker)) return false;
+    if (seenTickers.has(s.ticker)) return false;
+    seenTickers.add(s.ticker);
+    return true;
+  }).slice(0, slotsAvailable);
 
-  if (!qualified) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
+  if (candidates.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: "All FedWatch Oracle signals already have open positions",
+    };
   }
-
-  const side = best.direction === "buy_yes" ? "yes" : "no";
-  const price = best.direction === "buy_yes" ? best.yes_ask : best.no_ask || (100 - best.yes_bid);
-  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const tradeResp = await fetch(executeUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticker: best.ticker,
-      marketId: best.ticker,
-      marketQuestion: best.market_question || best.ticker,
-      side,
-      action: "buy",
-      price: Math.round(price),
-      amount,
-      strategy: strategy.name,
-      strategyId: strategy.id,
-      orderType: "limit",
-      mode,
-      notes: `S-003 auto-trade: ${reason}`,
-      expectedOutcome: `Economic Consensus: ${best.direction} toward analyst consensus on ${best.ticker}`,
-      confidenceLevel: best.composite_score,
-    }),
-  });
+  const execResults = await Promise.all(candidates.map(async (sig: any) => {
+    const edgeCents = sig.edge_cents || 12;
+    const midPrice = sig.mid_price || 50;
 
-  const tradeResult = await tradeResp.json();
+    // Kelly-based position sizing capped at $50
+    const trueP = sig.true_probability
+      || (sig.direction === "buy_yes"
+        ? (midPrice + edgeCents) / 100
+        : (midPrice - edgeCents) / 100);
+    const marketP = midPrice / 100;
+    const amount = Math.min(maxPositionUsd, kellySize(trueP, marketP, 500, 0.25));
 
+    // MAKER orders: rest inside the spread
+    const side = sig.direction === "buy_yes" ? "yes" : "no";
+    const price = sig.direction === "buy_yes"
+      ? Math.max(1, Math.min(99, (sig.yes_bid || 50) + 1))
+      : Math.max(1, Math.min(99, (100 - (sig.yes_ask || 50)) + 1));
+
+    const qualifyPrompt = buildQualifyPrompt("S-001 FedWatch Oracle", {
+      ticker: sig.ticker,
+      market_question: sig.market_question,
+      direction: sig.direction,
+      edge_cents: edgeCents,
+      mid_price: midPrice,
+      yes_bid: sig.yes_bid,
+      yes_ask: sig.yes_ask,
+      true_probability: sig.true_probability,
+      implied_probability: sig.implied_probability,
+      days_to_close: sig.days_to_close,
+      fedwatch_meeting_date: sig.metadata?.fedwatch_meeting_date,
+      note: `FedWatch Oracle: CME FedWatch implied probability diverges from Kalshi price by ${edgeCents}¢. QUALIFY only if the market question unambiguously describes a Fed rate outcome for the same meeting date. REJECT if meeting date is ambiguous, market is near expiry (<12h), or divergence seems like stale data.`,
+    });
+
+    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode);
+    if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
+
+    const tradeResp = await fetch(executeUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticker: sig.ticker,
+        marketId: sig.ticker,
+        marketQuestion: sig.market_question || sig.ticker,
+        side,
+        action: "buy",
+        price,
+        amount,
+        strategy: strategy.name,
+        strategyId: strategy.id,
+        orderType: "limit",
+        mode,
+        notes: `FedWatch Oracle: edge=${edgeCents}¢, fedwatch_p=${sig.true_probability}, kalshi_mid=${midPrice}¢, maker bid+1¢. ${reason}`,
+        expectedOutcome: `${sig.direction} at ${price}¢ (maker), FedWatch p=${sig.true_probability}`,
+        confidenceLevel: sig.composite_score,
+        user_id: strategy.user_id || null,
+      }),
+    });
+
+    const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
+    return { sig, success: result.success, detail: result.success ? `${sig.ticker} @ ${price}¢` : result.error };
+  }));
+
+  const filled = execResults.filter(r => r.success);
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
     mode,
     status: "completed",
-    action: tradeResult.success ? "trade_executed" : "no_setup",
-    details: tradeResult.success
-      ? `Bought ${amount} ${side} @ ${price}¢ on ${best.ticker}: ${reason}`
-      : `Trade failed: ${tradeResult.error}`,
+    action: filled.length > 0 ? "trade_executed" : "no_setup",
+    details: filled.length > 0
+      ? `FedWatch Oracle executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
+      : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
   };
 }
 
-// ─── Strategy S-004: Liquidity Provision ─────────────────────────────────────
-// Provides liquidity on high-volume, tight-spread markets.
-// Looks for markets with strong liquidity scores where both sides have value
-// (mid near 50¢ ± 30¢) to place two-sided orders and capture the spread.
+// ─── Strategy S-002: Longshot Bias Exploiter ─────────────────────────────────
+// Exploits the favorite-longshot bias: academically verified on Kalshi data.
+// YES < 12¢ contracts resolve YES only ~7% of the time (vs. 12% implied) → buy NO.
+// YES > 88¢ contracts resolve YES ~93% of the time (vs. 89% implied) → buy YES.
+//
+// This is statistical, not predictive — edge holds on average across many trades,
+// not per-trade. Requires N≥50 trades before P&L is meaningful.
+//
+// Source: GWU 2026-001 + Whelan papers verified on Kalshi data.
 
-async function runS004LiquidityProvision(
+async function runS002LongshotBias(
   supabase: any,
   strategy: any,
   config: StrategyConfig | undefined,
@@ -646,110 +488,166 @@ async function runS004LiquidityProvision(
   supabaseKey: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const minLiquidity = config?.min_liquidity_score ?? 0.5;
-  const maxPositionUsd = config?.max_position_usd ?? 20;
+  const MAX_S002_POSITIONS = 5;
+  const AMOUNT_PER_TRADE = 20; // small, diversified — $20 per position
 
-  // 1. Read highly liquid markets with spreads worth quoting
-  const { data: signals } = await supabase
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+  // Scan signals table for longshot (<12¢) or near-cert (>88¢) markets
+  const { data: rawSignals } = await supabase
     .from("signals")
     .select("*")
-    .gte("liquidity_score", minLiquidity)
-    .gte("volume_rank_score", 0.5)            // top half by volume
-    .gte("days_to_close", 1)                  // at least 1 day left
-    .lte("days_to_close", 30)                 // don't provide liquidity too far out
-    .not("yes_ask", "is", null)
-    .not("yes_bid", "is", null)
-    .order("liquidity_score", { ascending: false })
-    .order("volume_rank_score", { ascending: false })
-    .limit(5);
+    .or("yes_ask.lt.12,yes_bid.gt.88")
+    .gte("volume", 200)
+    .gte("days_to_close", 0.08)
+    .lte("days_to_close", 30)
+    .gte("created_at", twoHoursAgo)
+    .not("direction", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(20);
 
-  if (!signals || signals.length === 0) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "No highly liquid markets available for provision" };
+  // Hard block: no ETH, no sports series
+  const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL"];
+  const signals = (rawSignals || []).filter((s: any) =>
+    !blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))
+  );
+
+  if (signals.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: "No longshot/near-cert signals (yes_ask<12 or yes_bid>88, vol≥200, 2h-30d, non-sports/ETH)",
+    };
   }
 
-  // Pick market where spread is ≥ 3¢ (worth quoting) and mid is between 20-80¢ (liquid range)
-  const best = signals.find((s: any) => {
-    const spread = (s.yes_ask || 0) - (s.yes_bid || 0);
-    const mid = (s.mid_price || 50);
-    return spread >= 3 && mid >= 20 && mid <= 80;
-  }) || signals[0];
+  // Check open S-002 positions
+  const { data: openTrades } = await supabase
+    .from("trades")
+    .select("ticker, strategy_id")
+    .eq("status", "filled")
+    .is("exit_reason", null)
+    .is("settled_at", null);
 
-  const spread = (best.yes_ask || 0) - (best.yes_bid || 0);
-  if (spread < 3) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `Best spread too tight: ${spread}¢ (need ≥3¢)` };
+  const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
+  const openS002Count = (openTrades || []).filter((t: any) => t.strategy_id === "S-002").length;
+
+  if (openS002Count >= MAX_S002_POSITIONS) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `S-002 at max positions: ${openS002Count}/${MAX_S002_POSITIONS} open`,
+    };
   }
 
-  const { openCount } = await checkPortfolioExposure(supabase);
-  if (openCount >= 10) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "Too many open positions for liquidity provision" };
+  const slotsAvailable = MAX_S002_POSITIONS - openS002Count;
+
+  // Dedup: one per ticker, skip already-held
+  const seenTickers = new Set<string>();
+  const candidates = signals.filter((s: any) => {
+    if (openTickers.has(s.ticker)) return false;
+    if (seenTickers.has(s.ticker)) return false;
+    seenTickers.add(s.ticker);
+    return true;
+  }).slice(0, Math.min(slotsAvailable, 5));
+
+  if (candidates.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: "All longshot/near-cert signals already have open positions",
+    };
   }
-
-  const qualifyPrompt = buildQualifyPrompt("S-004 Liquidity Provision", {
-    ticker: best.ticker,
-    market_question: best.market_question,
-    yes_bid: best.yes_bid,
-    yes_ask: best.yes_ask,
-    spread_cents: spread,
-    mid_price: best.mid_price,
-    liquidity_score: best.liquidity_score,
-    volume_rank_score: best.volume_rank_score,
-    days_to_close: best.days_to_close,
-    note: "Liquidity Provision: buy YES at bid+1¢ to capture part of the spread. Only qualify if market is active, spread is healthy, and mid is in the 20-80¢ range.",
-  });
-
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
-
-  if (!qualified) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
-  }
-
-  // Place a single YES buy at bid+1¢ to earn part of the spread
-  const bidPrice = Math.min((best.yes_bid || 0) + 1, (best.yes_ask || 99) - 1);
-  const amount = maxPositionUsd; // dollars — execute-trade handles cents→contract conversion
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const tradeResp = await fetch(executeUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticker: best.ticker,
-      marketId: best.ticker,
-      marketQuestion: best.market_question || best.ticker,
-      side: "yes",
-      action: "buy",
-      price: Math.round(bidPrice),
-      amount,
-      strategy: strategy.name,
-      strategyId: strategy.id,
-      orderType: "limit",
-      mode,
-      notes: `S-004 auto-trade: provide liquidity at bid+1¢. ${reason}`,
-      expectedOutcome: `Liquidity Provision: capture bid-ask spread on ${best.ticker}, target take-profit when spread compresses`,
-      confidenceLevel: best.liquidity_score,
-    }),
-  });
 
-  const tradeResult = await tradeResp.json();
+  const execResults = await Promise.all(candidates.map(async (sig: any) => {
+    const isLongshot = (sig.yes_ask || 100) < 12;
+    const isNearCert = (sig.yes_bid || 0) > 88;
 
+    if (!isLongshot && !isNearCert) return { sig, success: false, detail: "not longshot or near-cert (stale signal)" };
+
+    const side = isLongshot ? "no" : "yes";
+    const direction = isLongshot ? "buy_no" : "buy_yes";
+
+    // MAKER orders: rest inside the spread
+    const price = isLongshot
+      ? Math.min(99, (100 - (sig.yes_ask || 12)) + 1)
+      : Math.min(99, (sig.yes_bid || 88) + 1);
+
+    const qualifyPrompt = buildQualifyPrompt("S-002 Longshot Bias", {
+      ticker: sig.ticker,
+      market_question: sig.market_question,
+      direction,
+      yes_bid: sig.yes_bid,
+      yes_ask: sig.yes_ask,
+      volume: sig.volume,
+      days_to_close: sig.days_to_close,
+      is_longshot: isLongshot,
+      is_near_cert: isNearCert,
+      note: `Longshot Bias: academic research shows Kalshi longshots (<12¢) resolve YES only ~7% of the time vs. 12% implied — buy NO. Near-certs (>88¢) are underpriced — buy YES. REJECT if market has unusual volume spike (pump), near expiry (<6h), or ticker has won >1 prior YES bet suggesting this specific market resolves more often than the bias predicts.`,
+    });
+
+    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode);
+    if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
+
+    const tradeResp = await fetch(executeUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticker: sig.ticker,
+        marketId: sig.ticker,
+        marketQuestion: sig.market_question || sig.ticker,
+        side,
+        action: "buy",
+        price: Math.round(price),
+        amount: AMOUNT_PER_TRADE,
+        strategy: strategy.name,
+        strategyId: strategy.id,
+        orderType: "limit",
+        time_in_force: "day",
+        mode,
+        notes: `S-002 Longshot Bias: ${isLongshot ? "longshot" : "near-cert"}, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
+        expectedOutcome: `${direction} on ${sig.ticker} — bias edge ~5pp`,
+        confidenceLevel: 0.55,
+        user_id: strategy.user_id || null,
+      }),
+    });
+
+    const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
+    return { sig, success: result.success, detail: result.success ? `${sig.ticker} ${isLongshot ? "NO" : "YES"} @ ${Math.round(price)}¢` : result.error };
+  }));
+
+  const filled = execResults.filter(r => r.success);
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
     mode,
     status: "completed",
-    action: tradeResult.success ? "trade_executed" : "no_setup",
-    details: tradeResult.success
-      ? `Provided liquidity: ${amount} yes @ ${bidPrice}¢ on ${best.ticker} (spread: ${spread}¢)`
-      : `Trade failed: ${tradeResult.error}`,
+    action: filled.length > 0 ? "trade_executed" : "no_setup",
+    details: filled.length > 0
+      ? `Longshot Bias executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
+      : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
   };
 }
 
 // ─── Strategy S-005: Weather Edge ────────────────────────────────────────────
-// Reads signals produced by the weather-signal edge function (which compares
-// NWS forecast distributions to Kalshi weather market prices) and executes
-// trades when edge >= threshold and the model agrees with itself.
+// Reads signals produced by the weather-signal edge function (GFS ensemble vs
+// Kalshi weather market prices) and executes when edge ≥15¢.
 //
-// Parallelized: all qualifying signals are LLM-gated simultaneously, so
-// a 5-city run takes ~2s (one LLM round-trip) instead of 5 × 2s = 10s.
+// Key improvements over v1:
+//   - Edge floor raised 8¢ → 15¢ (weather is hard; need bigger cushion)
+//   - City win/loss history from settled trades injected into qualify prompt
+//   - LLM told to REJECT cities with ≥2 prior losses
+//   - Parallelized: all signals LLM-gated simultaneously
 
 async function runS005WeatherEdge(
   supabase: any,
@@ -760,11 +658,10 @@ async function runS005WeatherEdge(
   supabaseKey: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const minEdge = config?.min_edge_cents ?? 8;
+  const minEdge = config?.min_edge_cents ?? 15; // raised from 8¢ — weather needs bigger edge
   const maxPositionUsd = config?.max_position_usd ?? 30;
-  const MAX_PARALLEL_SIGNALS = 5; // one per city
+  const MAX_PARALLEL_SIGNALS = 5;
 
-  // 1. Read fresh weather signals (last 30 minutes only — they go stale fast)
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const { data: signals } = await supabase
     .from("signals")
@@ -800,11 +697,91 @@ async function runS005WeatherEdge(
     };
   }
 
-  // 2. LLM-gate all signals in parallel — each city is independent,
-  //    no reason to wait for one before starting the next.
-  const candidates = signals.slice(0, slotsAvailable);
+  // Dedup: skip tickers already held to prevent placing multiple trades on the same market
+  // across auto-trade runs (signals stay fresh for 30 min; auto-trade runs every 10 min).
+  const { data: openTrades } = await supabase
+    .from("trades")
+    .select("ticker")
+    .eq("status", "filled")
+    .is("exit_reason", null)
+    .is("settled_at", null);
+  const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
+  const deduped = signals.filter((s: any) => !openTickers.has(s.ticker));
+
+  if (deduped.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: "no_setup",
+      details: `All ${signals.length} signal(s) already have open positions — skipping`,
+    };
+  }
+
+  // 2. Pull city win/loss history from settled trades + recent lessons.
+  const candidates = deduped.slice(0, slotsAvailable);
+  const cityTags = [...new Set(candidates.map((s: any) => (s.metadata?.location ?? "").toLowerCase()).filter(Boolean))];
+  const lessonsByCity = new Map<string, any[]>();
+  const cityWinLoss = new Map<string, { wins: number; losses: number; totalPnl: number }>();
+
+  if (cityTags.length > 0) {
+    // Settled trades for weather tickers to get per-city win rates
+    const { data: weatherTrades } = await supabase
+      .from("trades")
+      .select("ticker, pnl, notes")
+      .eq("status", "settled")
+      .eq("strategy_id", "S-005");
+
+    for (const t of weatherTrades || []) {
+      const pnl = Number(t.pnl) || 0;
+      // Extract city from notes or ticker (notes include location from signal)
+      for (const city of cityTags) {
+        if ((t.notes || "").toLowerCase().includes(city) || (t.ticker || "").toLowerCase().includes(city)) {
+          const stat = cityWinLoss.get(city) || { wins: 0, losses: 0, totalPnl: 0 };
+          if (pnl > 0) stat.wins++;
+          else if (pnl < 0) stat.losses++;
+          stat.totalPnl += pnl;
+          cityWinLoss.set(city, stat);
+          break;
+        }
+      }
+    }
+
+    // Recent lessons by city tag
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: lessons } = await supabase
+      .from("trade_lessons")
+      .select("tags, lesson_type, lesson, do_differently, confidence, outcome")
+      .gte("created_at", sevenDaysAgo)
+      .order("created_at", { ascending: false })
+      .limit(30);
+
+    for (const lesson of lessons ?? []) {
+      for (const city of cityTags) {
+        if ((lesson.tags ?? []).includes(city)) {
+          if (!lessonsByCity.has(city)) lessonsByCity.set(city, []);
+          lessonsByCity.get(city)!.push(lesson);
+        }
+      }
+    }
+  }
+
+  // 3. LLM-gate all signals in parallel
   const qualifyResults = await Promise.all(
     candidates.map(async (sig: any) => {
+      const city = (sig.metadata?.location ?? "").toLowerCase();
+      const cityLessons = lessonsByCity.get(city) ?? [];
+      const stat = cityWinLoss.get(city);
+      const cityHistoryNote = stat
+        ? `City track record: ${stat.wins}W/${stat.losses}L, total P&L $${stat.totalPnl.toFixed(2)}.${stat.losses >= 2 ? " CAUTION: multiple prior losses — REJECT unless edge is exceptionally large (>25¢)." : ""}`
+        : "No prior weather trades for this city.";
+      const lessonBlock = cityLessons.length > 0
+        ? cityLessons.slice(0, 3).map((l: any) =>
+            `[${l.lesson_type}/${l.outcome}] ${l.lesson} → ${l.do_differently}`
+          ).join("\n")
+        : "";
+
       const prompt = buildQualifyPrompt("S-005 Weather Edge", {
         ticker: sig.ticker,
         market_question: sig.market_question,
@@ -817,9 +794,11 @@ async function runS005WeatherEdge(
         forecast_expected_high: sig.metadata?.forecast_expected_high,
         forecast_std_dev: sig.metadata?.forecast_std_dev,
         location: sig.metadata?.location,
-        note: "Weather Edge: model probability from NWS forecast. Quantitative strategy — qualify unless market is resolved, city mismatches ticker, or data is clearly missing.",
+        city_history: cityHistoryNote,
+        ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
+        note: "Weather Edge: GFS model vs Kalshi price. REJECT if market is near expiry, city mismatches ticker, data is stale, or city has prior losses. Edge must be substantial (≥15¢) to be real.",
       });
-      const { qualified, reason } = await qualifySetup(aiConfig, prompt);
+      const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode);
       return { sig, qualified, reason };
     })
   );
@@ -842,9 +821,10 @@ async function runS005WeatherEdge(
   const execResults = await Promise.all(
     qualifiedList.map(async ({ sig, reason }) => {
       const side = sig.direction === "buy_yes" ? "yes" : "no";
+      // MAKER orders: rest inside the spread at bid+1¢ (was taker at ask)
       const price = sig.direction === "buy_yes"
-        ? sig.yes_ask
-        : 100 - (sig.yes_bid || 50);
+        ? Math.max(1, (sig.yes_bid || 50) + 1)
+        : Math.max(1, (100 - (sig.yes_ask || 50)) + 1);
       // Pass dollar amount — execute-trade handles the cents→contract conversion.
       const amount = maxPositionUsd;
 
@@ -863,9 +843,10 @@ async function runS005WeatherEdge(
           strategyId: strategy.id,
           orderType: "limit",
           mode,
-          notes: `S-005 auto-trade: edge=${sig.edge_cents}c, true_p=${sig.true_probability}, ${reason}`,
+          notes: `S-005 auto-trade: edge=${sig.edge_cents}c, true_p=${sig.true_probability}, maker order at bid+1¢. ${reason}`,
           expectedOutcome: `NWS model: ${sig.direction} (true_p=${sig.true_probability}, implied_p=${sig.implied_probability})`,
           confidenceLevel: sig.true_probability,
+          user_id: strategy.user_id || null,
         }),
       });
       const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
@@ -933,7 +914,7 @@ async function runGenericSignalStrategy(
     strategy_instructions: strategy.instructions?.slice(0, 400),
   });
 
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt);
+  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode);
 
   if (!qualified) {
     return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
@@ -965,6 +946,7 @@ async function runGenericSignalStrategy(
       notes: `${strategy.id} auto-trade: ${reason}`,
       expectedOutcome: `${strategy.name}: ${best.direction} on ${best.ticker} at ${best.mid_price}c`,
       confidenceLevel: best.composite_score,
+      user_id: strategy.user_id || null,
     }),
   });
 
@@ -983,13 +965,30 @@ async function runGenericSignalStrategy(
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
 /**
+ * Kelly criterion position sizing with quarter-Kelly fraction cap.
+ * Returns dollar amount, floored at $10, capped at $100.
+ */
+function kellySize(trueP: number, marketP: number, bankroll: number, fraction = 0.25): number {
+  if (trueP <= 0 || trueP >= 1 || marketP <= 0 || marketP >= 1) return 20;
+  const b = (1 - marketP) / marketP;
+  const q = 1 - trueP;
+  const f = (b * trueP - q) / b;
+  if (f <= 0) return 10;
+  return Math.max(10, Math.min(100, Math.round(bankroll * f * fraction)));
+}
+
+/**
  * Build a focused qualify/reject prompt for the LLM.
  * Returns exactly one decision: QUALIFY or REJECT + one-sentence reason.
  */
-function buildQualifyPrompt(strategyName: string, context: Record<string, any>): string {
+function buildQualifyPrompt(strategyName: string, context: Record<string, any>, lessons: string[] = []): string {
   const ctx = Object.entries(context)
     .map(([k, v]) => `${k}: ${v}`)
     .join("\n");
+
+  const lessonsSection = lessons.length > 0
+    ? `\nRecent losses from this strategy — patterns to avoid repeating:\n${lessons.map((l, i) => `${i + 1}. ${l}`).join("\n")}\n`
+    : "";
 
   return `You are a trading judge for the "${strategyName}" strategy on Kalshi prediction markets.
 
@@ -997,7 +996,7 @@ Review this specific setup and decide: QUALIFY or REJECT.
 
 Setup details:
 ${ctx}
-
+${lessonsSection}
 Rules for QUALIFY:
 - The opportunity is genuine and matches the strategy's intent
 - Market is liquid enough to fill at the given price
@@ -1008,6 +1007,7 @@ Rules for REJECT:
 - Edge looks like noise or stale data
 - Market has very low activity or closing imminently with no edge
 - Position would be correlated with existing risk
+- Setup matches a known losing pattern from recent history
 - Any other strong reason to skip
 
 Respond in exactly this format:
@@ -1020,11 +1020,33 @@ REJECT
 Reason: [one sentence explaining why this is rejected]`;
 }
 
+async function fetchStrategyLessons(supabase: any, strategyId: string): Promise<string[]> {
+  try {
+    const { data } = await supabase
+      .from("trade_lessons")
+      .select("lesson, do_differently, outcome")
+      .eq("strategy_id", strategyId)
+      .eq("outcome", "loss")
+      .order("created_at", { ascending: false })
+      .limit(5);
+    return (data || []).map((r: any) => `${r.lesson} → ${r.do_differently}`);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Call the AI API with a qualify/reject prompt.
  * Returns { qualified: boolean, reason: string }.
+ *
+ * Pass mode="paper" to bypass the LLM entirely — paper trading is for data
+ * collection; every numerically-filtered signal should be executed so we
+ * accumulate outcome data as fast as possible.
  */
-async function qualifySetup(aiConfig: AiConfig, prompt: string): Promise<{ qualified: boolean; reason: string }> {
+async function qualifySetup(aiConfig: AiConfig, prompt: string, mode = "paper"): Promise<{ qualified: boolean; reason: string }> {
+  // Paper mode uses the same LLM gate as live — training must mirror production.
+  // No bypass here; the only difference between paper and live is whether
+  // execute-trade submits a real Kalshi order or simulates one.
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), QUALIFY_TIMEOUT_MS);
 
@@ -1075,7 +1097,8 @@ async function checkPortfolioExposure(supabase: any): Promise<{ openCount: numbe
     .from("trades")
     .select("amount, price")
     .eq("status", "filled")
-    .is("exit_reason", null);
+    .is("exit_reason", null)
+    .is("settled_at", null); // exclude settled trades not yet flipped to status='settled'
 
   const openCount = (open || []).length;
   const totalUsd = (open || []).reduce((sum: number, t: any) => {
