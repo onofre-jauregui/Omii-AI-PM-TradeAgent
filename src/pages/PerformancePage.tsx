@@ -52,10 +52,21 @@ interface RecentTrade {
   created_at: string;
 }
 
+interface OpenTrade {
+  id: string;
+  ticker: string;
+  market_question: string | null;
+  side: string;
+  price: number;
+  amount: number;
+  strategy: string | null;
+  filled_at: string;
+}
+
 // ─── Data fetching ────────────────────────────────────────────────────────────
 
 async function fetchAll() {
-  const [tradesRes, settledRes] = await Promise.all([
+  const [tradesRes, settledRes, openRes] = await Promise.all([
     supabase
       .from("trades")
       .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
@@ -70,11 +81,20 @@ async function fetchAll() {
       .not("settled_at", "is", null)
       .order("settled_at", { ascending: false })
       .limit(25),
+    supabase
+      .from("trades")
+      .select("id, ticker, market_question, side, price, amount, strategy, filled_at")
+      .eq("mode", "paper")
+      .eq("status", "filled")
+      .is("settled_at", null)
+      .is("exit_reason", null)
+      .order("filled_at", { ascending: false }),
   ]);
 
   return {
     allTrades: tradesRes.data ?? [],
     recentSettled: settledRes.data ?? [],
+    openTrades: openRes.data ?? [],
   };
 }
 
@@ -95,6 +115,45 @@ function timeAgo(iso: string) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
+}
+
+/**
+ * Parse expected settlement date from a Kalshi ticker.
+ * Weather: KXHIGHAUS-26APR18-T78  → "Apr 18, 2026"
+ * FED:     KXFED-27APR-T3.25      → "Apr 2026 (FOMC)"
+ * Returns null if no date found.
+ */
+function parseSettlementDate(ticker: string): string | null {
+  const MONTHS: Record<string, string> = {
+    JAN: "Jan", FEB: "Feb", MAR: "Mar", APR: "Apr", MAY: "May", JUN: "Jun",
+    JUL: "Jul", AUG: "Aug", SEP: "Sep", OCT: "Oct", NOV: "Nov", DEC: "Dec",
+  };
+  // Weather pattern: -26APR18- (YYMONDD)
+  const wx = ticker.match(/-(\d{2})([A-Z]{3})(\d{2})-/i);
+  if (wx) {
+    const mon = MONTHS[wx[2].toUpperCase()];
+    return mon ? `${mon} ${wx[3]}, 20${wx[1]}` : null;
+  }
+  // FED/event pattern: -27APR- (YYMON, no day)
+  const ev = ticker.match(/-(\d{2})([A-Z]{3})-/i);
+  if (ev) {
+    const mon = MONTHS[ev[2].toUpperCase()];
+    return mon ? `${mon} 20${ev[1]} (FOMC)` : null;
+  }
+  return null;
+}
+
+/** Max potential profit on a trade (win side pays $1/contract). */
+function potentialProfit(price: number, amount: number): number {
+  if (price <= 0) return 0;
+  const priceDollars = price / 100;
+  const contracts = amount / priceDollars;
+  return parseFloat((contracts * (1 - priceDollars)).toFixed(2));
+}
+
+/** Max potential loss = amount at risk. */
+function potentialLoss(amount: number): number {
+  return amount;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -123,15 +182,16 @@ export function PerformancePage() {
   const [strategyRows, setStrategyRows] = useState<StrategyRow[]>([]);
   const [equityData, setEquityData] = useState<EquityPoint[]>([]);
   const [recentTrades, setRecentTrades] = useState<RecentTrade[]>([]);
+  const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const load = useCallback(async () => {
-    const { allTrades, recentSettled } = await fetchAll();
+    const { allTrades, recentSettled, openTrades: openPositions } = await fetchAll();
 
     // ── Overall stats ──
     const settled = allTrades.filter(t => t.settled_at);
-    const open = allTrades.filter(t => !t.settled_at);
+    const openUnsettled = allTrades.filter(t => !t.settled_at);
     const wins = settled.filter(t => (t.pnl ?? 0) > 0);
     const losses = settled.filter(t => (t.pnl ?? 0) < 0);
     const realizedPnl = settled.reduce((s, t) => s + (t.pnl ?? 0), 0);
@@ -144,7 +204,7 @@ export function PerformancePage() {
     setStats({
       totalTrades: allTrades.length,
       settledTrades: settled.length,
-      openTrades: open.length,
+      openTrades: openUnsettled.length,
       realizedPnl,
       wins: wins.length,
       losses: losses.length,
@@ -196,6 +256,7 @@ export function PerformancePage() {
     setEquityData(curve);
 
     setRecentTrades(recentSettled as RecentTrade[]);
+    setOpenTrades(openPositions as OpenTrade[]);
     setLastUpdated(new Date());
     setLoading(false);
   }, []);
@@ -291,6 +352,71 @@ export function PerformancePage() {
                 sub={stats!.firstTradeAt ? `Since ${formatDate(stats!.firstTradeAt)}` : "—"}
               />
             </div>
+
+            {/* Open Positions */}
+            {openTrades.length > 0 && (
+              <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+                <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-muted-foreground" />
+                    <h3 className="text-sm font-medium text-muted-foreground">Open Positions</h3>
+                  </div>
+                  <Badge variant="secondary" className="text-[10px] rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                    Pending settlement
+                  </Badge>
+                </div>
+                <div className="divide-y divide-border">
+                  {openTrades.map((t) => {
+                    const settleDate = parseSettlementDate(t.ticker);
+                    const maxWin = potentialProfit(t.price, t.amount);
+                    const maxLoss = potentialLoss(t.amount);
+                    return (
+                      <div key={t.id} className="flex items-center gap-4 px-6 py-4 hover:bg-secondary/40 transition-colors">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">
+                            {t.market_question ?? t.ticker}
+                          </p>
+                          <p className="text-xs font-mono text-muted-foreground mt-0.5 truncate">{t.ticker}</p>
+                          <div className="flex items-center gap-3 mt-1">
+                            <span className={cn(
+                              "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                              t.side === "yes" ? "bg-profit/10 text-profit" : "bg-loss/10 text-loss"
+                            )}>
+                              {t.side.toUpperCase()}
+                            </span>
+                            <span className="text-xs text-muted-foreground">@ {t.price}¢/contract</span>
+                            {t.strategy && <span className="text-xs text-muted-foreground">· {t.strategy}</span>}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-6 text-right shrink-0">
+                          <div>
+                            <p className="text-[10px] text-muted-foreground">At Risk</p>
+                            <p className="text-sm font-medium tabular-nums">${t.amount.toFixed(0)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-muted-foreground">Max Win</p>
+                            <p className="text-sm font-medium tabular-nums text-profit">+${maxWin.toFixed(2)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-muted-foreground">Settles</p>
+                            <p className="text-xs font-medium tabular-nums text-muted-foreground">
+                              {settleDate ?? "TBD"}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="px-6 py-3 border-t border-border bg-secondary/20 flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">{openTrades.length} position{openTrades.length !== 1 ? "s" : ""}</span>
+                  <span className="text-xs text-muted-foreground">
+                    Total at risk: <span className="font-medium text-foreground">${openTrades.reduce((s, t) => s + t.amount, 0).toFixed(0)}</span>
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* Equity curve */}
             <div className="rounded-2xl bg-card p-6 apple-shadow">

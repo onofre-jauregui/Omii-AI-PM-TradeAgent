@@ -20,33 +20,36 @@ apply here as well.
   access, and good execution. The plan is built to maximize probability,
   not predict the median.
 
+## Product vision
+
+The product is a **community-powered AI trading SaaS** on Kalshi prediction markets.
+
+### How it works
+1. Users create an account and connect their Kalshi API or MCP keys
+2. The agent trades on their behalf using the platform's strategy engine
+3. Every trade generates a lesson — wins and losses are reflected into `agent_memory`
+4. By default, user lessons are **contributed to the platform's shared memory pool**, making the model smarter for everyone
+5. Users can **opt out** of knowledge sharing — but opted-out users stop receiving platform-wide memory updates and trade in isolation
+6. This creates a **community growth flywheel**: more users → more trades → better shared memory → better returns for contributors → more users
+
+This is the moat. Not the code. The compounding collective intelligence that a solo operator or closed-source competitor cannot replicate.
+
+### Knowledge sharing mechanics (to build)
+- `agent_memory` rows need `is_platform_shared` boolean and `user_id` enforcement
+- Platform-level memories owned by `user_id = NULL` (global), injected for all opted-in users
+- High-confidence user lessons (confidence > 0.7, confirmed 3+ times) become candidates for platform promotion
+- Promotion requires a validation step before a user insight becomes global signal
+- Opted-out users: no platform memory injected, no lesson contributions accepted
+
 ## Project context
 
-- **Product:** AI trading agent for **Kalshi prediction markets only**.
-  Kalshi-only is an explicit, locked-in scope decision (April 2026) based on
-  three verified facts:
-  (1) Polymarket's Terms of Service prohibit US persons from trading via UI,
-  API, or AI agents, and the user is in California;
-  (2) Polymarket is significantly more bot-saturated (30%+ of wallets use AI
-  agents, 14 of top 20 most profitable wallets are bots) — verified via
-  Finance Magnates and LayerHub data, April 2026;
-  (3) Kalshi posted $13.07B notional volume in March 2026 (up 25% MoM) and
-  $23.8B in 2025 (1,100% YoY growth) — verified via Cryptopolitan and DeFi
-  Rate, April 2026. The TAM is no longer the constraint.
-- A second agent for options markets exists in a separate repo
-  (`onofre-jauregui/omii-trade-agent`) but is out of scope for my GitHub tools
-  and out of scope for the current product. It is shelved, not killed —
-  re-evaluate as a capacity-expansion vehicle once Kalshi has a real track
-  record.
-- **Stack:** React/Vite/TS frontend, Supabase (Postgres + edge functions +
-  pg_cron) backend, multi-provider LLM (OpenRouter, OpenAI, Anthropic, Google),
-  Kalshi REST v2 with HMAC-SHA256 auth.
-- **Current state (as of this session):** Code is built. Agent has NOT been
-  tested — no backtest, no paper trading, no live trading. Multi-tenancy
-  migration exists but the edge functions ignore `user_id` and `encrypted_secret`
-  is plaintext — both are SaaS blockers. $100 MRR comes from an unrelated
-  client website, not from this product.
-- **Development branch:** `claude/financial-freedom-planning-xucYQ`.
+- **Market:** Kalshi prediction markets only. Locked-in scope (April 2026):
+  (1) Polymarket ToS prohibit US persons — user is in California;
+  (2) Polymarket is 30%+ bot-saturated;
+  (3) Kalshi posted $13.07B notional in March 2026 (up 25% MoM), $23.8B in 2025 (1,100% YoY).
+- **Stack:** React/Vite/TS frontend, Supabase (Postgres + edge functions + pg_cron), multi-provider LLM (OpenRouter, OpenAI, Anthropic, Google), Kalshi REST v2 with HMAC-SHA256 auth.
+- **Current state (April 2026):** Agent has paper traded. Core pipeline built and running. Multi-tenancy schema exists (`user_id` columns, RLS, encryption migration) but edge functions do not yet enforce `user_id` — single-user effectively. Stripe/subscriptions schema written, webhook scaffolded, not wired to billing UI. Community knowledge-sharing layer does not exist yet.
+- **Options agent** (`onofre-jauregui/omii-trade-agent`): shelved. Re-evaluate after Kalshi has a real track record.
 
 ## Polymarket code: do not extend
 
@@ -109,21 +112,36 @@ apply here as well.
 - Don't claim something was built unless you can point at the file.
 - Separate "planned" from "scaffolded" from "implemented" from "tested."
 
-## What I should be doing in this repo
+## Build status & priorities
 
-The prioritized work, in order, is captured in conversation and will live
-in a tracked plan file once we start shipping. The blocker tier for Path 2
-(SaaS) is:
+### Done (verified in code)
+- Trading pipeline: signal generation, surface scanner, basket execution, auto-settle
+- Memory system: agent_memory, auto-reflect hourly loop, compact-memory, confidence feedback
+- Strategy health monitor: consecutive-loss warnings (3/10/15), suspension + auto-resume
+- Multi-tenancy schema: user_id columns, RLS policies written
+- Encryption migration: api_keys ciphertext column, encryption helper module
+- Stripe schema: subscriptions table, stripe_events log, webhook handler scaffolded
+- Auth page exists, Supabase auth wired
 
-1. Code-correctness test scaffolding
-2. Paper trading verification and activation (requires user-provided creds
-   stored as Supabase secrets — I never see them in plaintext)
-3. Public live-updating performance page (the track record artifact)
-4. Stripe billing + subscription tiers
-5. Secure per-user Kalshi key storage (encrypted at rest)
-6. Onboarding flow
-7. Production auth hardening
-8. Landing page with embedded proof page
-9. Legal disclaimers (drafts only; lawyer reviews before launch)
+### In progress / partially done
+- Edge functions: `user_id` column exists in schema but queries don't filter by it yet — single-user in practice
+- Encryption: migration written, `encrypted_secret` plaintext column still present, key management not wired end-to-end
+- Stripe: schema and webhook handler exist, no billing UI, no subscription enforcement in edge functions
+- `suspended_until` column on strategies: used in code but migration not yet written
 
-None of this is done yet. Do not claim otherwise.
+### Not started
+- Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
+- Public performance page (the track record artifact)
+- Onboarding flow (API key entry, strategy selection, paper trade activation)
+- Landing page
+- Legal disclaimers
+
+### Priority order
+1. `suspended_until` migration (unblocks strategy health monitor)
+2. Wire `user_id` into all edge function queries (unblocks true multi-tenancy)
+3. Finish encryption key management end-to-end (security blocker)
+4. Billing UI + subscription enforcement
+5. Community knowledge-sharing layer (the moat — highest strategic value)
+6. Public performance page
+7. Onboarding flow
+8. Landing page + legal

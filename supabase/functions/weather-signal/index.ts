@@ -123,7 +123,15 @@ async function syncWeatherMarkets(
  * decisions go through auto-trade -> execute-trade as usual.
  */
 
-const MIN_EDGE_TO_SIGNAL_CENTS = 5;
+// Backtest (weather_replay, ERA5 ground truth) showed 15¢ threshold hits 48.9%
+// win rate vs 38.1% at 5¢. Profitable at all thresholds due to asymmetric
+// payouts, but 15¢ maximizes risk-adjusted edge.
+const MIN_EDGE_TO_SIGNAL_CENTS = 15;
+
+// AUS and CHI show 22-23% win rates vs LAX 45%, NYC/MIA ~38%.
+// GFS underperforms on continental convective weather — exclude until
+// calibration has ≥30 samples to correct the bias.
+const EXCLUDED_LOCATIONS = new Set(["AUS", "CHI"]);
 
 function signalStrength(edgeCents: number): "strong" | "moderate" | "weak" {
   if (edgeCents >= 15) return "strong";
@@ -149,8 +157,25 @@ serve(async (req) => {
   const results: any[] = [];
 
   try {
+    // 0. Load per-city GFS bias corrections from backtest-weather calibration.
+    //    If table is empty or unavailable, defaults to 0 (no correction).
+    const { data: calibRows } = await supabase
+      .from("weather_calibration")
+      .select("location, bias_fahrenheit, rmse_fahrenheit, sample_count");
+    const calibration = new Map<string, { bias: number; rmse: number; samples: number }>(
+      (calibRows || []).map((r: any) => [r.location, {
+        bias: r.bias_fahrenheit ?? 0,
+        rmse: r.rmse_fahrenheit ?? 0,
+        samples: r.sample_count ?? 0,
+      }])
+    );
+
     // 1. For each Kalshi weather city, fetch the forecast and cache it
     for (const loc of WEATHER_LOCATIONS) {
+      if (EXCLUDED_LOCATIONS.has(loc.code)) {
+        results.push({ location: loc.code, status: "skipped", note: "excluded — low win rate in backtest" });
+        continue;
+      }
       const locResult: any = { location: loc.code, status: "pending" };
 
       try {
@@ -212,18 +237,92 @@ serve(async (req) => {
           continue;
         }
 
-        // 3. Compute bucket probabilities and find edge per market
-        const bucketProbs = computeBucketProbabilities(forecast, markets);
+        // 3. Apply bias calibration and RMSE-based uncertainty widening.
+        //
+        //    GFS ensemble spread (stdDev from member variance) measures internal
+        //    model agreement — NOT forecast accuracy. When all 31 members agree on
+        //    a warm day but a cold front arrives, ensemble spread stays tight while
+        //    the actual error is 5-8°F. Using spread alone produces overconfident
+        //    probability estimates and fabricated edges.
+        //
+        //    effectiveStdDev = max(ensemble_spread, calibration_rmse, 3.5)
+        //      - calibration_rmse: empirical error from backtest-weather vs ERA5
+        //      - 3.5°F floor: typical 24hr GFS RMSE across US cities (conservative prior)
+        //    Requires ≥ 5 samples before trusting calibration RMSE.
+        const cal = calibration.get(loc.code);
+        const biasCorrection = (cal && cal.samples >= 5) ? cal.bias : 0;
+        const calibrationRmse = (cal && cal.samples >= 5) ? cal.rmse : 0;
+        const effectiveStdDev = Math.max(forecast.stdDev, calibrationRmse, 3.5);
+
+        const calibratedExpectedHigh = biasCorrection !== 0
+          ? Math.round((forecast.expectedHigh - biasCorrection) * 10) / 10
+          : forecast.expectedHigh;
+
+        // 3b. Fetch ECMWF via Open-Meteo as a second forecast source.
+        //     ECMWF IFS 0.25° returns a deterministic point estimate — used as
+        //     a consensus check against the GFS ensemble mean.
+        let ecmwfExpectedHighF: number | null = null;
+        try {
+          const ecmwfResp = await fetch(
+            `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&daily=temperature_2m_max&models=ecmwf_ifs025&timezone=auto&forecast_days=3`,
+            { signal: AbortSignal.timeout(8_000) }
+          );
+          if (ecmwfResp.ok) {
+            const ecmwfData = await ecmwfResp.json().catch(() => null);
+            const ecmwfHighC = ecmwfData?.daily?.temperature_2m_max?.[0];
+            if (ecmwfHighC != null && !isNaN(Number(ecmwfHighC))) {
+              ecmwfExpectedHighF = Math.round(((Number(ecmwfHighC) * 9) / 5 + 32) * 10) / 10;
+            }
+          }
+        } catch (ecmwfErr) {
+          console.warn(`ECMWF fetch failed for ${loc.code}:`, ecmwfErr instanceof Error ? ecmwfErr.message : ecmwfErr);
+        }
+
+        // Dual-model consensus: adjust effective edge based on model agreement
+        let confidenceMultiplier = 1.0;
+        const modelAgreementF = ecmwfExpectedHighF !== null
+          ? Math.abs(calibratedExpectedHigh - ecmwfExpectedHighF)
+          : null;
+
+        if (modelAgreementF !== null) {
+          if (modelAgreementF <= 1.5) {
+            confidenceMultiplier = 1.2;
+          } else if (modelAgreementF > 3.0) {
+            confidenceMultiplier = 0.8;
+          }
+        }
+
+        const calibratedForecast = {
+          ...forecast,
+          expectedHigh: calibratedExpectedHigh,
+          stdDev: Math.round(effectiveStdDev * 10) / 10,
+        };
+
+        const bucketProbs = computeBucketProbabilities(calibratedForecast, markets);
 
         const signals: any[] = [];
         for (const m of markets) {
+          // Skip settled markets — yes_bid >= 95 or yes_ask <= 5 means
+          // the contract has already resolved (or is trading as if it has).
+          if ((m.yes_bid ?? 0) >= 95 || (m.yes_ask ?? 100) <= 5) continue;
+
           const trueProb = bucketProbs.get(m.ticker);
           if (trueProb === undefined) continue;
 
-          const edge = computeEdge(m, trueProb);
-          if (Math.abs(edge.edgeCents) < MIN_EDGE_TO_SIGNAL_CENTS) continue;
+          // Skip when calibrated expected_high is within 2× stdDev of a bucket boundary.
+          // GFS has 3-5°F typical error; trading near a boundary captures noise not edge.
+          const distToLow = Math.abs(calibratedForecast.expectedHigh - m.bucket_low);
+          const distToHigh = Math.abs(calibratedForecast.expectedHigh - m.bucket_high);
+          const minBucketDist = Math.min(distToLow, distToHigh);
+          if (minBucketDist < 2 * calibratedForecast.stdDev) continue;
 
-          const edgeCentsAbs = Math.abs(edge.edgeCents);
+          const edge = computeEdge(m, trueProb);
+          const rawEdgeCents = Math.abs(edge.edgeCents);
+          // Apply dual-model confidence multiplier: if models disagree, require larger edge
+          const effectiveEdge = rawEdgeCents * confidenceMultiplier;
+          if (effectiveEdge < MIN_EDGE_TO_SIGNAL_CENTS) continue;
+
+          const edgeCentsAbs = rawEdgeCents;
           signals.push({
             ticker: m.ticker,
             market_question: m.market_question || `${loc.name} high temp ${m.bucket_low}-${m.bucket_high}°F`,
@@ -231,8 +330,8 @@ serve(async (req) => {
             signal_strength: signalStrength(edgeCentsAbs),
             yes_bid: m.yes_bid,
             yes_ask: m.yes_ask,
-            mid_price: m.yes_bid && m.yes_ask ? (m.yes_bid + m.yes_ask) / 2 : null,
-            edge_cents: edgeCentsAbs,
+            mid_price: m.yes_bid && m.yes_ask ? Math.round((m.yes_bid + m.yes_ask) / 2) : null,
+            edge_cents: Math.round(edgeCentsAbs),
             true_probability: trueProb,
             implied_probability: edge.impliedProb,
             liquidity_score: m.yes_bid && m.yes_ask ? Math.min(1, (100 - (m.yes_ask - m.yes_bid)) / 100) : 0,
@@ -246,7 +345,16 @@ serve(async (req) => {
               bucket_low: m.bucket_low,
               bucket_high: m.bucket_high,
               forecast_expected_high: forecast.expectedHigh,
-              forecast_std_dev: forecast.stdDev,
+              calibrated_expected_high: calibratedForecast.expectedHigh,
+              bias_correction_applied: biasCorrection,
+              calibration_rmse: calibrationRmse,
+              ensemble_std_dev: forecast.stdDev,
+              effective_std_dev: calibratedForecast.stdDev,
+              calibration_samples: cal?.samples ?? 0,
+              forecast_std_dev: calibratedForecast.stdDev,
+              ecmwf_expected_high: ecmwfExpectedHighF,
+              model_agreement_f: modelAgreementF,
+              confidence_multiplier: confidenceMultiplier,
               run_id: runId,
             },
           });

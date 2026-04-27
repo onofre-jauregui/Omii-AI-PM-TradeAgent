@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { resolveTenant, tenantInsertFields } from "../_shared/tenant.ts";
 
 /**
  * execute-basket: Multi-leg ordered trade execution with stateful lifecycle.
@@ -42,6 +43,8 @@ serve(async (req) => {
 
   try {
     const body = await req.json();
+    const tenant = await resolveTenant(req, supabase, body);
+
     const {
       strategy_id,
       strategy_name,
@@ -71,6 +74,7 @@ serve(async (req) => {
     const { data: basket, error: basketErr } = await supabase
       .from("baskets")
       .insert({
+        ...tenantInsertFields(tenant.userId),
         strategy_id: strategy_id || null,
         strategy_name: strategy_name || null,
         alert_id: alert_id || null,

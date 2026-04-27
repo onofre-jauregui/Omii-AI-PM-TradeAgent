@@ -42,7 +42,6 @@ serve(async (req) => {
 
     let memoriesConfirmed = 0;
     let memoriesContradicted = 0;
-    let memoriesDeactivated = 0;
 
     for (const mem of activeMemories || []) {
       const tradeIds = mem.related_trade_ids || [];
@@ -81,8 +80,19 @@ serve(async (req) => {
         updates.contradictions = (mem.contradictions || 0) + 1;
         updates.confidence = Math.max(0.05, (mem.confidence || 0.5) - 0.10);
         if (updates.confidence < 0.15) {
-          updates.is_active = false;
-          memoriesDeactivated++;
+          await supabase.from("compliance_log").insert({
+            event_type: "memory_low_confidence",
+            severity: "warning",
+            message: `Memory low confidence: "${mem.title}" — ${(updates.confidence * 100).toFixed(0)}% after unprofitable linked trades (avg P&L: $${avgPnl.toFixed(2)}). Kept active to accumulate platform-wide evidence.`,
+            metadata: {
+              memory_id: mem.id,
+              memory_type: mem.memory_type,
+              current_confidence: updates.confidence,
+              contradictions: updates.contradictions,
+              avg_pnl: avgPnl,
+              related_trade_ids: mem.related_trade_ids,
+            },
+          });
         }
         memoriesContradicted++;
       }
@@ -94,89 +104,165 @@ serve(async (req) => {
       memories_checked: (activeMemories || []).length,
       confirmed: memoriesConfirmed,
       contradicted: memoriesContradicted,
-      deactivated: memoriesDeactivated,
     };
 
-    // ── 2. Strategy Auto-Disable ─────────────────────────────────
-    // Check each active strategy's ROI. If ROI is negative after
-    // a meaningful number of trades, auto-deactivate it.
+    // ── 2. Strategy Health Monitor ───────────────────────────────
+    // Evaluates consecutive losses from the most recent trade backward.
+    // Never hard-disables — uses a suspended_until cooldown instead so
+    // strategies auto-resume and the system stays symmetric.
+    //
+    // Thresholds:
+    //   3  consecutive losses → warning + cautionary memory (correction hint)
+    //   10 consecutive losses → flag underperforming, 24h suspension
+    //   15 consecutive losses → flag critical, 72h suspension
+    //
+    // Auto-re-enable: inactive strategies past their suspended_until are
+    // re-activated here so the system can self-correct.
 
     const { data: strategies } = await supabase
       .from("strategies")
-      .select("id, name, active, starting_balance, mode")
-      .eq("active", true);
+      .select("id, name, active, starting_balance, mode, suspended_until, updated_at");
 
-    let strategiesDisabled = 0;
     const strategyResults: any[] = [];
 
+    // ── 2a. Auto-re-enable strategies past their suspension window ──
+    let strategiesResumed = 0;
+    const now = new Date();
     for (const strat of strategies || []) {
-      const { data: stratTrades } = await supabase
-        .from("trades")
-        .select("pnl, status")
-        .eq("status", "filled")
-        .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`);
+      if (strat.active) continue;
+      if (!strat.suspended_until) continue;
+      if (new Date(strat.suspended_until) > now) continue;
 
-      if (!stratTrades || stratTrades.length < 5) {
-        // Need at least 5 trades to evaluate
-        strategyResults.push({
-          id: strat.id, name: strat.name, trades: stratTrades?.length || 0,
-          action: "skipped", reason: "insufficient trades (need 5+)",
-        });
+      await supabase.from("strategies").update({
+        active: true,
+        suspended_until: null,
+        updated_at: now.toISOString(),
+      }).eq("id", strat.id);
+
+      await supabase.from("compliance_log").insert({
+        event_type: "strategy_resumed",
+        severity: "info",
+        message: `Strategy "${strat.name}" auto-resumed after suspension window ended.`,
+        metadata: { strategy_id: strat.id, suspended_until: strat.suspended_until },
+      });
+
+      strategiesResumed++;
+    }
+
+    // ── 2b. Evaluate active strategies for consecutive losses ──
+    const activeStrategies = (strategies || []).filter((s: any) => s.active);
+
+    for (const strat of activeStrategies) {
+      // Fetch recent trades ordered oldest→newest so we can count from the end
+      const { data: rawTrades } = await supabase
+        .from("trades")
+        .select("pnl, status, created_at")
+        .eq("status", "filled")
+        .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
+        .order("created_at", { ascending: true });
+
+      if (!rawTrades || rawTrades.length === 0) {
+        strategyResults.push({ id: strat.id, name: strat.name, trades: 0, action: "skipped", reason: "no trades yet" });
         continue;
       }
 
-      const totalPnl = stratTrades.reduce((sum: number, t: any) => sum + (Number(t.pnl) || 0), 0);
-      const roi = strat.starting_balance > 0
-        ? (totalPnl / strat.starting_balance) * 100
-        : 0;
-      const winRate = stratTrades.filter((t: any) => (Number(t.pnl) || 0) > 0).length / stratTrades.length;
+      // Count consecutive losses from the most recent trade backward
+      let consecutiveLosses = 0;
+      for (let i = rawTrades.length - 1; i >= 0; i--) {
+        if ((Number(rawTrades[i].pnl) || 0) < 0) consecutiveLosses++;
+        else break;
+      }
 
-      // Auto-disable if: ROI < -10% OR (ROI negative AND win rate < 30%)
-      const shouldDisable = roi < -10 || (roi < 0 && winRate < 0.30);
+      const totalPnl = rawTrades.reduce((s: number, t: any) => s + (Number(t.pnl) || 0), 0);
+      const winRate = rawTrades.filter((t: any) => (Number(t.pnl) || 0) > 0).length / rawTrades.length;
+      const tag = strat.name.toLowerCase().replace(/\s+/g, "_");
 
-      if (shouldDisable) {
+      if (consecutiveLosses >= 15) {
+        // Critical — 72h suspension, flag for human review
+        const suspendUntil = new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString();
         await supabase.from("strategies").update({
           active: false,
-          updated_at: new Date().toISOString(),
+          suspended_until: suspendUntil,
+          updated_at: now.toISOString(),
         }).eq("id", strat.id);
 
-        // Save a memory about why the strategy was disabled
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_suspended_critical",
+          severity: "critical",
+          message: `Strategy "${strat.name}" suspended 72h — ${consecutiveLosses} consecutive losses. Total P&L: $${totalPnl.toFixed(2)}, win rate: ${(winRate * 100).toFixed(0)}%. Human review required.`,
+          metadata: { strategy_id: strat.id, consecutiveLosses, totalPnl, winRate, tradeCount: rawTrades.length, suspended_until: suspendUntil },
+        });
+
         await supabase.from("agent_memory").insert({
           memory_type: "strategy_insight",
-          title: `Strategy "${strat.name}" auto-disabled due to poor performance`,
-          content: `Auto-disabled after ${stratTrades.length} trades. ROI: ${roi.toFixed(1)}%, Win rate: ${(winRate * 100).toFixed(0)}%, Total P&L: $${totalPnl.toFixed(2)}. The strategy needs review before re-enabling.`,
+          title: `"${strat.name}" suspended — ${consecutiveLosses} consecutive losses`,
+          content: `Suspended 72h after ${consecutiveLosses} consecutive losses (${rawTrades.length} total trades, win rate ${(winRate * 100).toFixed(0)}%, P&L $${totalPnl.toFixed(2)}). Auto-resumes after suspension but requires investigation before scaling.`,
           source_type: "reflection",
-          tags: ["auto-disable", "performance", strat.name.toLowerCase().replace(/\s+/g, "_")],
+          tags: ["suspended", "critical", tag],
+          strategy_id: strat.id,
+          confidence: 0.9,
+        });
+
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "suspended_72h" });
+
+      } else if (consecutiveLosses >= 10) {
+        // Underperforming — 24h suspension
+        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+        await supabase.from("strategies").update({
+          active: false,
+          suspended_until: suspendUntil,
+          updated_at: now.toISOString(),
+        }).eq("id", strat.id);
+
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_suspended",
+          severity: "warning",
+          message: `Strategy "${strat.name}" suspended 24h — ${consecutiveLosses} consecutive losses. P&L: $${totalPnl.toFixed(2)}.`,
+          metadata: { strategy_id: strat.id, consecutiveLosses, totalPnl, winRate, tradeCount: rawTrades.length, suspended_until: suspendUntil },
+        });
+
+        await supabase.from("agent_memory").insert({
+          memory_type: "strategy_insight",
+          title: `"${strat.name}" suspended — ${consecutiveLosses} consecutive losses`,
+          content: `Suspended 24h after ${consecutiveLosses} consecutive losses. Win rate ${(winRate * 100).toFixed(0)}%, P&L $${totalPnl.toFixed(2)}. Reduce position size on resume until streak resets.`,
+          source_type: "reflection",
+          tags: ["suspended", "underperforming", tag],
           strategy_id: strat.id,
           confidence: 0.8,
         });
 
-        // Log to compliance
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "suspended_24h" });
+
+      } else if (consecutiveLosses >= 3) {
+        // Warning — stay active, save cautionary memory as correction signal
         await supabase.from("compliance_log").insert({
-          event_type: "strategy_auto_disabled",
+          event_type: "strategy_loss_streak",
           severity: "warning",
-          message: `Strategy "${strat.name}" (${strat.id}) auto-disabled: ROI ${roi.toFixed(1)}%, win rate ${(winRate * 100).toFixed(0)}%`,
-          metadata: { strategy_id: strat.id, roi, winRate, totalPnl, tradeCount: stratTrades.length },
+          message: `Strategy "${strat.name}" — ${consecutiveLosses} consecutive losses. Still active. Monitor closely.`,
+          metadata: { strategy_id: strat.id, consecutiveLosses, totalPnl, winRate, tradeCount: rawTrades.length },
         });
 
-        strategiesDisabled++;
-        strategyResults.push({
-          id: strat.id, name: strat.name, trades: stratTrades.length,
-          roi: `${roi.toFixed(1)}%`, winRate: `${(winRate * 100).toFixed(0)}%`,
-          totalPnl: totalPnl.toFixed(2), action: "disabled",
+        await supabase.from("agent_memory").insert({
+          memory_type: "strategy_insight",
+          title: `"${strat.name}" on ${consecutiveLosses}-loss streak — trade cautiously`,
+          content: `${consecutiveLosses} consecutive losses as of last evaluation. Reduce position size or skip marginal signals until a win resets the streak. Win rate overall: ${(winRate * 100).toFixed(0)}%.`,
+          source_type: "reflection",
+          tags: ["loss_streak", "caution", tag],
+          strategy_id: strat.id,
+          confidence: 0.7,
         });
+
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "warned" });
+
       } else {
-        strategyResults.push({
-          id: strat.id, name: strat.name, trades: stratTrades.length,
-          roi: `${roi.toFixed(1)}%`, winRate: `${(winRate * 100).toFixed(0)}%`,
-          totalPnl: totalPnl.toFixed(2), action: "kept_active",
-        });
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "healthy" });
       }
     }
 
     results.strategy_review = {
       strategies_checked: (strategies || []).length,
-      disabled: strategiesDisabled,
+      active_evaluated: activeStrategies.length,
+      resumed: strategiesResumed,
       details: strategyResults,
     };
 
@@ -205,22 +291,21 @@ serve(async (req) => {
     results.unreflected_trades = unreflectedCount;
 
     // ── 4. Signal Quality Feedback ───────────────────────────────
-    // Match recent acted-on signals to their trade outcomes.
-    // Updates signal rows with outcome_pnl and outcome_correct,
-    // so signal scoring can be validated and improved over time.
+    // Match acted-on signals to their trade outcomes.
+    // Updates signal rows with outcome_pnl and outcome_correct.
 
     let signalsEvaluated = 0;
     let signalsCorrect = 0;
     let signalsWrong = 0;
 
     try {
-      // Find signals from the last 7 days that haven't been evaluated yet
+      // Find signals that WERE acted on but outcome_correct not yet set
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
       const { data: unevaluatedSignals } = await supabase
         .from("signals")
         .select("id, ticker, direction, mid_price, created_at")
-        .eq("was_acted_on", false)
-        .neq("direction", "skip")
+        .eq("was_acted_on", true)
+        .is("outcome_correct", null)
         .gte("created_at", sevenDaysAgo);
 
       for (const signal of unevaluatedSignals || []) {
@@ -271,7 +356,135 @@ serve(async (req) => {
         : "n/a",
     };
 
-    // ── 5. Memory Compaction ─────────────────────────────────────
+    // ── 5. Write Lessons from Recently Settled Trades ────────────
+    // For every trade settled in the last 24h with real PnL and no lesson yet,
+    // classify the outcome and write a trade_lesson + update agent_memory.
+    // Rule-based classification — no LLM needed here.
+
+    let lessonsWritten = 0;
+    try {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+      // Trades settled recently with real PnL
+      const { data: recentSettled } = await supabase
+        .from("trades")
+        .select("id, strategy_id, ticker, side, price, pnl, resolution, notes, created_at, settled_at")
+        .not("settled_at", "is", null)
+        .not("pnl", "is", null)
+        .neq("pnl", 0)
+        .gte("settled_at", oneDayAgo);
+
+      // Find which trade IDs already have lessons
+      const settledIds = (recentSettled || []).map((t: any) => t.id);
+      const existingLessons = settledIds.length > 0
+        ? (await supabase.from("trade_lessons").select("trade_id").in("trade_id", settledIds)).data || []
+        : [];
+      const alreadyLearned = new Set(existingLessons.map((r: any) => r.trade_id));
+
+      for (const trade of (recentSettled || [])) {
+        if (alreadyLearned.has(trade.id)) continue;
+
+        const pnl = Number(trade.pnl);
+        const price = Number(trade.price);
+        const outcome = pnl > 0 ? "win" : "loss";
+        const notes = trade.notes || "";
+
+        let lesson_type = "general";
+        let lesson = "";
+        let do_differently = "";
+
+        if (outcome === "loss") {
+          if (price < 10 || price > 90) {
+            // Extreme price — market had already decided
+            lesson_type = "signal_quality";
+            lesson = `Entered at ${price}¢ on ${trade.ticker}. A price below 10¢ or above 90¢ means the market has already priced the outcome. This is not an edge — it is fighting a resolved market. Lost $${Math.abs(pnl).toFixed(2)}.`;
+            do_differently = "Enforce mid_price 10–90¢ filter at signal creation time, not just in the query.";
+          } else if (notes.includes("true_p=")) {
+            // S-005: extract model vs market divergence from notes
+            const truePMatch = notes.match(/true_p=([\d.]+)/);
+            const trueP = truePMatch ? parseFloat(truePMatch[1]) : null;
+            if (trueP !== null && (trueP > 0.7 || trueP < 0.3)) {
+              const impliedFromPrice = price / 100;
+              const divergence = Math.abs(trueP - impliedFromPrice);
+              if (divergence > 0.5) {
+                lesson_type = "forecast_bias";
+                lesson = `GFS model said ${(trueP * 100).toFixed(0)}%, market priced ${price}¢ (${(impliedFromPrice * 100).toFixed(0)}%). Divergence ${(divergence * 100).toFixed(0)}pp — market was right. Lost $${Math.abs(pnl).toFixed(2)}.`;
+                do_differently = "When model-market divergence exceeds 50pp, the market has more timely NWS/observational data. Skip or wait for next GFS cycle.";
+              }
+            }
+            if (!lesson) {
+              lesson_type = "forecast_bias";
+              lesson = `S-005 loss on ${trade.ticker} at ${price}¢. Model confidence did not match outcome. Lost $${Math.abs(pnl).toFixed(2)}.`;
+              do_differently = "Review GFS calibration for this city and season.";
+            }
+          } else {
+            lesson_type = "market_timing";
+            lesson = `Loss on ${trade.ticker}: bought ${trade.side} at ${price}¢, resolved ${trade.resolution?.toUpperCase()}. Lost $${Math.abs(pnl).toFixed(2)}.`;
+            do_differently = "Review signal source and entry conditions for this market type.";
+          }
+        } else {
+          // Win — record what worked
+          lesson_type = "general";
+          lesson = `Win on ${trade.ticker}: bought ${trade.side} at ${price}¢, resolved ${trade.resolution?.toUpperCase()}. Profit $${pnl.toFixed(2)}.`;
+          do_differently = "Continue this pattern.";
+        }
+
+        // Valid lesson_type values: 'forecast_bias', 'market_timing', 'signal_quality', 'execution', 'market_structure', 'general'
+        const validTypes = ["forecast_bias", "market_timing", "signal_quality", "execution", "market_structure", "general"];
+        if (!validTypes.includes(lesson_type)) lesson_type = "general";
+
+        const { data: insertedLesson } = await supabase
+          .from("trade_lessons")
+          .insert({
+            trade_id: trade.id,
+            ticker: trade.ticker,
+            strategy_id: trade.strategy_id,
+            outcome,
+            lesson_type,
+            lesson,
+            do_differently,
+            confidence: 0.8,
+            tags: [trade.strategy_id?.toLowerCase(), lesson_type, outcome].filter(Boolean),
+            trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200) },
+          })
+          .select("id")
+          .single();
+
+        // Link lesson back to trade_reflections so the loop is closed
+        if (insertedLesson?.id) {
+          await supabase
+            .from("trade_reflections")
+            .update({ lesson_id: insertedLesson.id })
+            .eq("trade_id", trade.id);
+        }
+
+        // Promote losses at extreme prices or high-magnitude PnL to agent_memory
+        const absP = Math.abs(pnl);
+        const shouldPromote = (outcome === "loss" && (price < 10 || price > 85)) || absP >= 50;
+        if (shouldPromote) {
+          await supabase.from("agent_memory").insert({
+            memory_type: "lesson",
+            title: `${outcome === "loss" ? "Loss" : "Win"} on ${trade.ticker} at ${price}¢ — ${lesson_type}`,
+            content: `${lesson} ${do_differently}`,
+            source_type: "trade_outcome",
+            strategy_id: trade.strategy_id,
+            tags: [trade.strategy_id?.toLowerCase(), lesson_type, outcome, trade.ticker.split("-")[0].toLowerCase()].filter(Boolean),
+            confidence: outcome === "loss" ? 0.85 : 0.75,
+            confirmations: 1,
+            is_active: true,
+            summary: lesson.slice(0, 120),
+          });
+        }
+
+        lessonsWritten++;
+      }
+    } catch (lessonErr) {
+      console.error("Lesson writing error:", lessonErr);
+    }
+
+    results.lessons_written = lessonsWritten;
+
+    // ── 6. Memory Compaction ─────────────────────────────────────
     // Call compact-memory to summarize and merge related memories
     let compactionResult: any = null;
     try {
@@ -298,7 +511,7 @@ serve(async (req) => {
     await supabase.from("compliance_log").insert({
       event_type: "auto_reflect_run",
       severity: "info",
-      message: `Auto-reflect completed: ${memoriesConfirmed} confirmed, ${memoriesContradicted} contradicted, ${memoriesDeactivated} deactivated, ${strategiesDisabled} strategies disabled, ${unreflectedCount} unreflected trades, signals evaluated: ${signalsEvaluated} (${signalsCorrect} correct), compaction: ${compactionResult?.summarized || 0} summarized / ${compactionResult?.merged || 0} merged`,
+      message: `Auto-reflect: ${memoriesConfirmed} memories confirmed, ${memoriesContradicted} contradicted, ${strategiesResumed} strategies resumed, ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, signals evaluated: ${signalsEvaluated} (${signalsCorrect} correct), compaction: ${compactionResult?.summarized || 0} summarized`,
       metadata: results,
     });
 

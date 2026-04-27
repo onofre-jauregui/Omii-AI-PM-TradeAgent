@@ -156,7 +156,7 @@ serve(async (req) => {
       // 3. Fetch the actual trade rows so we can compute per-trade pnl
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
-        .select("id, side, action, price, amount")
+        .select("id, side, action, price, amount, created_at")
         .in("id", tradeIds);
 
       if (tradesErr || !trades) {
@@ -178,6 +178,7 @@ serve(async (req) => {
         const { error: updErr } = await supabase
           .from("trades")
           .update({
+            status: "settled",
             settled_at: new Date().toISOString(),
             resolution: resolution === "yes" || resolution === "no" ? resolution : "void",
             pnl: Math.round(pnl * 100) / 100,
@@ -187,6 +188,28 @@ serve(async (req) => {
         if (updErr) {
           console.error(`trade ${t.id} update failed:`, updErr.message);
           continue;
+        }
+
+        // 4b. Write outcome back to the originating signal so param_sweep
+        //     and signal_quality backtest modes have real win-rate data.
+        //     Match: same ticker, signal created before this trade was placed.
+        if (outcome !== "void") {
+          const { data: sig } = await supabase
+            .from("signals")
+            .select("id")
+            .eq("ticker", ticker)
+            .lte("created_at", t.created_at || new Date().toISOString())
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (sig) {
+            await supabase.from("signals").update({
+              outcome_correct: outcome === "win",
+              outcome_pnl: Math.round(pnl * 100) / 100,
+              was_acted_on: true,
+            }).eq("id", sig.id);
+          }
         }
 
         // 5. Update reflection with actual outcome
@@ -218,6 +241,18 @@ serve(async (req) => {
         resolution,
         trades_settled: settledInTicker,
       });
+
+    }
+
+    // 6. Trigger auto-reflect once per settle run (not once per ticker).
+    //    Moved outside the ticker loop to prevent concurrent duplicate runs
+    //    when multiple tickers settle in the same batch.
+    if (totalSettled > 0) {
+      fetch(`${supabaseUrl}/functions/v1/auto-reflect`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+        body: "{}",
+      }).catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e));
     }
 
     // 7. Run-level rollup compliance entry

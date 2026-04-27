@@ -70,9 +70,9 @@ serve(async (req) => {
       .limit(20); // batch 20 at a time to control cost
 
     if (unsummarized && unsummarized.length > 0 && aiKey) {
-      // Batch summarize with a single AI call
+      // Batch summarize with a single AI call; truncate content to keep input small
       const memoriesToSummarize = unsummarized.map(
-        (m, i) => `[${i + 1}] (${m.memory_type}) ${m.title}: ${m.content}`
+        (m, i) => `[${i + 1}] (${m.memory_type}) ${m.title}: ${(m.content || "").slice(0, 300)}`
       ).join("\n\n");
 
       const summaryResp = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -177,12 +177,15 @@ serve(async (req) => {
           }
         }
 
-        // Merge each cluster
+        // Merge each cluster — cap at 3 merges per run to avoid rate limits
+        const MAX_MERGES_PER_RUN = 3;
         for (const cluster of clusters) {
-          if (!aiKey) break; // can't merge without AI
+          if (!aiKey) break;
+          if (results.merged >= MAX_MERGES_PER_RUN * 3) break; // merged counts members, not clusters
 
+          // Use summary when available; truncate content fallback to 200 chars
           const clusterText = cluster.map(
-            (m, i) => `${i + 1}. ${m.title}: ${m.summary || m.content}`
+            (m, i) => `${i + 1}. ${m.title}: ${(m.summary || m.content || "").slice(0, 200)}`
           ).join("\n");
 
           const mergeResp = await fetch(`${aiBaseUrl}/chat/completions`, {
@@ -196,7 +199,7 @@ serve(async (req) => {
               messages: [
                 {
                   role: "system",
-                  content: "You merge multiple trading insights into a single, actionable memory. Output exactly two lines:\nLine 1: A title (max 10 words)\nLine 2: The merged insight (max 50 words, preserving all key details and numbers)",
+                  content: "You merge multiple trading insights into one actionable memory. Output exactly two lines:\nLine 1: A title (max 10 words)\nLine 2: The merged insight (max 150 words). Preserve all specific numbers, thresholds, and edge cases from the originals. Do not generalise away details.",
                 },
                 {
                   role: "user",
@@ -204,7 +207,7 @@ serve(async (req) => {
                 },
               ],
               temperature: 0,
-              max_tokens: 200,
+              max_tokens: 400,
             }),
           });
 
@@ -217,16 +220,21 @@ serve(async (req) => {
 
           const mergedTitle = mergeLines[0].replace(/^(title:\s*)/i, "").trim();
           const mergedContent = mergeLines.slice(1).join(" ").replace(/^(insight|content|merged):\s*/i, "").trim();
-          const mergedSummary = mergedContent.length > 100
-            ? mergedContent.substring(0, 100) + "..."
+          // Summary is a 50-word condensation of content for the context window
+          const words = mergedContent.split(/\s+/);
+          const mergedSummary = words.length > 50
+            ? words.slice(0, 50).join(" ") + "..."
             : mergedContent;
 
           // Compute merged stats
           const allTags = [...new Set(cluster.flatMap(m => m.tags || []))];
           const allTradeIds = [...new Set(cluster.flatMap(m => m.related_trade_ids || []))];
-          const avgConfidence = cluster.reduce((s, m) => s + (m.confidence || 0.5), 0) / cluster.length;
           const totalConfirmations = cluster.reduce((s, m) => s + (m.confirmations || 0), 0);
           const totalContradictions = cluster.reduce((s, m) => s + (m.contradictions || 0), 0);
+          // Weight confidence by confirmations so a well-validated memory dominates
+          const weightedConfidence = totalConfirmations > 0
+            ? cluster.reduce((s, m) => s + (m.confidence || 0.5) * (m.confirmations || 0), 0) / totalConfirmations
+            : cluster.reduce((s, m) => s + (m.confidence || 0.5), 0) / cluster.length;
           const [type, strategyId] = groupKey.split("::");
 
           // Create merged memory
@@ -240,7 +248,7 @@ serve(async (req) => {
               source_type: "reflection",
               tags: allTags,
               strategy_id: strategyId === "global" ? null : strategyId,
-              confidence: Math.min(0.95, avgConfidence + 0.05), // slight boost for validated cluster
+              confidence: Math.min(0.95, weightedConfidence),
               confirmations: totalConfirmations,
               contradictions: totalContradictions,
               related_trade_ids: allTradeIds,
@@ -251,10 +259,11 @@ serve(async (req) => {
             .single();
 
           if (merged) {
-            // Deactivate originals, link to merged
+            // Keep originals active — link them to the merged memory so the
+            // context window query (merged_into IS NULL) excludes them, but
+            // recall_lessons can still retrieve them for deep inspection.
             const clusterIds = cluster.map(m => m.id);
             await supabase.from("agent_memory").update({
-              is_active: false,
               merged_into: merged.id,
               updated_at: new Date().toISOString(),
             }).in("id", clusterIds);
