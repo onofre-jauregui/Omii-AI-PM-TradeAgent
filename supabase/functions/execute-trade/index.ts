@@ -116,7 +116,7 @@ serve(async (req) => {
     const {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
-      expectedOutcome, confidenceLevel,
+      expectedOutcome, confidenceLevel, traceId, expirationTime,
     } = parsedBody;
 
     const resolvedTicker = ticker || marketId;
@@ -195,6 +195,7 @@ serve(async (req) => {
         mode: tradeMode,
         status: "failed",
         exchange: tradeMode === "paper" ? "paper" : "kalshi",
+        expiration_time: expirationTime || null,
         notes: `Risk check failed (${riskCheck.code || "unknown"}): ${riskCheck.reason}`,
       }).select().single();
 
@@ -224,8 +225,10 @@ serve(async (req) => {
         filled_at: new Date().toISOString(),
         exchange: "paper",
         order_type: orderType || "limit",
+        expiration_time: expirationTime || null,
         pnl: 0,
         notes: notes || "Paper trade - simulated execution",
+        trace_id: traceId || null,
       }).select().single();
 
       if (insertError) throw insertError;
@@ -270,6 +273,7 @@ serve(async (req) => {
         mode: "live",
         status: "failed",
         exchange: "kalshi",
+        expiration_time: expirationTime || null,
         notes: "Kalshi API credentials not configured.",
       }).select().single();
 
@@ -346,6 +350,7 @@ serve(async (req) => {
         status: "failed",
         exchange: "kalshi",
         order_type: resolvedOrderType,
+        expiration_time: expirationTime || null,
         notes: `Kalshi rejected: ${kalshiResult.message || kalshiResult.error || JSON.stringify(kalshiResult)}`,
       }).select().single();
 
@@ -388,10 +393,12 @@ serve(async (req) => {
       order_id: kalshiOrder.order_id,
       order_type: resolvedOrderType,
       time_in_force: kalshiOrderPayload.time_in_force,
+      expiration_time: expirationTime || null,
       filled_price: orderStatus === "filled" ? kalshiOrder.avg_price : null,
       filled_at: orderStatus === "filled" ? new Date().toISOString() : null,
       pnl: 0,
       notes: notes || `Live order on Kalshi: ${kalshiOrder.order_id}`,
+      trace_id: traceId || null,
     }).select().single();
 
     if (insertError) throw insertError;
