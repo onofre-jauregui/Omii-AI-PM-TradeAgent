@@ -284,7 +284,7 @@ serve(async (req) => {
       const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
       const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
       const lastPrice = Number(m.last_price_dollars ?? m.last_price) || 0;
-      const volume = parseFloat(m.volume_fp || m.volume_24h_fp || m.volume || m.volume_24h || "0") || 0;
+      const volume = Math.round(parseFloat(m.volume_fp || m.volume_24h_fp || m.volume || m.volume_24h || "0") || 0);
 
       // Compute mid in cents (0–100)
       const midDollars = yesAsk > 0 && yesBid > 0

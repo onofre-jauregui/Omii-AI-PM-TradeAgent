@@ -188,9 +188,35 @@ serve(async (req) => {
     );
   }
 
-  // ── 2. Extract unique meeting months from Kalshi market close_times ──────────
-  // close_time is the meeting decision date. Use it to drive the futures fetch.
+  // ── 2. Build meeting month map from two sources ───────────────────────────────
+  // Source A: Kalshi KXFED market close_times (authoritative when available)
+  // Source B: Hardcoded FOMC calendar (fills gaps for months with no Kalshi market,
+  //           e.g. KXFED-26MAY doesn't exist but the May meeting still happened
+  //           and must be in the chain or June's pre-rate is wrong)
+  //
+  // The rate chain only moves at FOMC meetings. Skipping a meeting with no Kalshi
+  // market causes all subsequent meeting probabilities to be wildly wrong because
+  // the pre-rate carries forward as if no cut happened.
+  const FOMC_CALENDAR: Record<string, number> = {
+    // key: "YYMM", value: decision day of month (UTC)
+    "2601": 29, "2603": 19, "2604": 30, "2605": 7,  "2606": 18,
+    "2607": 30, "2609": 16, "2611": 5,  "2612": 10,
+    "2701": 29, "2703": 18, "2704": 30, "2706": 17,
+  };
+
   const meetingMonthsMap = new Map<string, { year: number; month: number; meetingDay: number }>();
+
+  // Seed from FOMC calendar first (lower priority — Kalshi data overrides)
+  for (const [yyMM, day] of Object.entries(FOMC_CALENDAR)) {
+    const year = 2000 + parseInt(yyMM.slice(0, 2), 10);
+    const month = parseInt(yyMM.slice(2, 4), 10);
+    const daysLeft = (Date.UTC(year, month - 1, day) - Date.now()) / (1000 * 60 * 60 * 24);
+    if (daysLeft >= 2) { // skip past meetings and meetings in <2 days
+      meetingMonthsMap.set(yyMM, { year, month, meetingDay: day });
+    }
+  }
+
+  // Override with actual Kalshi close_times where available (more accurate)
   for (const market of kalshiMarkets) {
     const parsed = parseKXFEDTicker(market.ticker || "");
     if (!parsed) continue;
@@ -199,7 +225,10 @@ serve(async (req) => {
     const closeDate = new Date(closeTime);
     if (isNaN(closeDate.getTime())) continue;
     const daysLeft = (closeDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
-    if (daysLeft < 2) continue; // skip meetings in <2 days
+    if (daysLeft < 2) {
+      meetingMonthsMap.delete(parsed.yyMM); // remove calendar entry too — meeting is imminent
+      continue;
+    }
     meetingMonthsMap.set(parsed.yyMM, {
       year: parsed.year,
       month: parsed.month,
@@ -254,7 +283,18 @@ serve(async (req) => {
   //     → update chain_rate = max(0, post_rate) for next segment
   //   Else (no meeting): chain_rate ≈ implied_avg for that month
   const meetingData = new Map<string, { futuresPrice: number; probs: Map<number, number>; meetingDay: number; preRateBps: number }>();
-  let chainRateBps = CURRENT_RATE_MID_BPS; // start with today's known rate
+
+  // Bootstrap chainRateBps from the nearest available futures price.
+  // CURRENT_RATE_MID_BPS is a stale fallback (last set Dec 2024). The current month's
+  // ZQ contract gives the actual current rate: since most of the month has elapsed at
+  // the current rate and the April meeting is imminent, the April futures price ≈ current rate.
+  const nowYY = String(now.getUTCFullYear()).slice(2);
+  const nowMM = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const nowKey = `${nowYY}${nowMM}`;
+  const bootstrapPrice = allMonthPrices.get(nowKey);
+  let chainRateBps = bootstrapPrice != null
+    ? (100 - bootstrapPrice) * 100  // derive from live futures
+    : CURRENT_RATE_MID_BPS;         // hardcoded fallback if Yahoo failed
 
   const allMonths = monthsToFetch.map(m => m.yyMM).sort();
   for (const yyMM of allMonths) {
@@ -281,9 +321,10 @@ serve(async (req) => {
       // Update chain to post-meeting rate for next segment
       chainRateBps = Math.max(0, clampedPost);
     } else {
-      // No meeting this month — propagate implied average as next month's starting rate
-      // (smooths the rate path between meetings)
-      chainRateBps = Math.max(0, impliedAvgBps);
+      // No meeting this month — chain rate is unchanged. Fed funds rates only change
+      // at FOMC meetings. Using the monthly futures average here was a bug: it would
+      // set chainRateBps to the post-cut implied average, making subsequent meetings
+      // use the wrong pre-rate and producing wildly inflated edge signals.
     }
   }
 
@@ -316,17 +357,19 @@ serve(async (req) => {
       continue;
     }
 
-    // Find the futures-implied probability for this specific upper-bound rate level
-    let futuresProb: number | undefined;
+    // Kalshi KXFED-T{R} question: "Will the upper bound be ABOVE R%?"
+    // = P(post-meeting rate > rateBps) = cumulative sum of all outcome probs above rateBps.
+    // Bug fixed: previously used exact-match mtgData.probs.get(rateBps) which gave P(rate = R),
+    // but Kalshi sells YES on whether the rate EXCEEDS R, not equals R.
+    const futuresProb = [...mtgData.probs.entries()]
+      .filter(([rBps]) => rBps > rateBps)
+      .reduce((sum, [, prob]) => sum + prob, 0);
 
-    // Exact match on upper-bound level (both map uses standard 25bps levels now)
-    futuresProb = mtgData.probs.get(rateBps);
-
-    // If not in the top-two outcomes, probability is effectively 0 — not worth signaling
-    if (futuresProb === undefined) {
+    // Skip if both outcomes are near-certain (no edge possible) or data is degenerate
+    if (futuresProb < 0.005 && (1 - futuresProb) < 0.005) {
       evaluated.push({
         ticker,
-        skip_reason: `prob ~0 for ${rateBps}bps upper bound`,
+        skip_reason: `degenerate prob for above ${rateBps}bps`,
         available_outcomes: [...mtgData.probs.entries()].map(([k, v]) => `${k}bps:${(v*100).toFixed(1)}%`),
       });
       continue;
@@ -334,7 +377,7 @@ serve(async (req) => {
 
     const yesBid = toCents(market.yes_bid_dollars ?? market.yes_bid);
     const yesAsk = toCents(market.yes_ask_dollars ?? market.yes_ask);
-    const volume = parseFloat(market.volume_fp || market.volume_24h_fp || market.volume || market.volume_24h || "0") || 0;
+    const volume = Math.round(parseFloat(market.volume_fp || market.volume_24h_fp || market.volume || market.volume_24h || "0") || 0);
     const title: string = market.title || market.subtitle || ticker;
 
     if (yesBid === null || yesAsk === null) {
