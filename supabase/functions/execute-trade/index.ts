@@ -4,6 +4,7 @@ import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
 import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
+import { captureException, captureMessage } from "../_shared/sentry.ts";
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -117,6 +118,7 @@ serve(async (req) => {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
       expectedOutcome, confidenceLevel, traceId, expirationTime,
+      sourceSignalId, influencedByMemoryIds, systemVersion,
     } = parsedBody;
 
     const resolvedTicker = ticker || marketId;
@@ -184,6 +186,12 @@ serve(async (req) => {
     }
 
     if (!riskCheck.passed) {
+      captureMessage(`execute-trade risk check failed: ${riskCheck.reason}`, "warning", {
+        function: "execute-trade",
+        strategyId: strategyId,
+        mode: tradeMode,
+        extra: { code: riskCheck.code, amount, price, side, ticker: resolvedTicker },
+      });
       const { data: failedTrade } = await supabase.from("trades").insert({
         user_id: userId,
         ticker: resolvedTicker,
@@ -229,9 +237,20 @@ serve(async (req) => {
         pnl: 0,
         notes: notes || "Paper trade - simulated execution",
         trace_id: traceId || null,
+        source_signal_id: sourceSignalId || null,
+        influenced_by_memory_ids: influencedByMemoryIds || [],
+        system_version: systemVersion || 'v1',
       }).select().single();
 
-      if (insertError) throw insertError;
+      if (insertError) {
+        captureException(insertError, {
+          function: "execute-trade",
+          strategyId,
+          mode: "paper",
+          extra: { ticker: resolvedTicker, side, action, price, amount },
+        });
+        throw insertError;
+      }
 
       // Create trade reflection if agent provided expected outcome
       if (expectedOutcome) {
@@ -241,6 +260,15 @@ serve(async (req) => {
           expected_confidence: confidenceLevel || null,
           decision_quality: "unknown",
         });
+      }
+
+      // Write memory attribution rows for every cited memory
+      if (influencedByMemoryIds && influencedByMemoryIds.length > 0) {
+        const attributionRows = influencedByMemoryIds.map((memId: string) => ({
+          trade_id: trade.id,
+          memory_id: memId,
+        }));
+        await supabase.from("memory_attribution").insert(attributionRows);
       }
 
       await logCompliance(supabase, userId, trade.id, "order_filled", "info",
@@ -380,28 +408,40 @@ serve(async (req) => {
                         kalshiOrder.remaining_count < contractCount ? "partial" : "open";
 
     const { data: trade, error: insertError } = await supabase.from("trades").insert({
-      user_id: userId,
-      ticker: resolvedTicker,
-      market_id: resolvedTicker,
-      market_question: marketQuestion || resolvedTicker,
-      side, action, price, amount,
-      strategy: strategy || null,
-      strategy_id: strategyId || null,
-      mode: "live",
-      status: orderStatus,
-      exchange: "kalshi",
-      order_id: kalshiOrder.order_id,
-      order_type: resolvedOrderType,
-      time_in_force: kalshiOrderPayload.time_in_force,
-      expiration_time: expirationTime || null,
-      filled_price: orderStatus === "filled" ? kalshiOrder.avg_price : null,
-      filled_at: orderStatus === "filled" ? new Date().toISOString() : null,
-      pnl: 0,
-      notes: notes || `Live order on Kalshi: ${kalshiOrder.order_id}`,
-      trace_id: traceId || null,
-    }).select().single();
+        user_id: userId,
+        ticker: resolvedTicker,
+        market_id: resolvedTicker,
+        market_question: marketQuestion || resolvedTicker,
+        side, action, price, amount,
+        strategy: strategy || null,
+        strategy_id: strategyId || null,
+        mode: "live",
+        status: orderStatus,
+        exchange: "kalshi",
+        order_id: kalshiOrder.order_id,
+        order_type: resolvedOrderType,
+        time_in_force: kalshiOrderPayload.time_in_force,
+        expiration_time: expirationTime || null,
+        filled_price: orderStatus === "filled" ? kalshiOrder.avg_price : null,
+        filled_at: orderStatus === "filled" ? new Date().toISOString() : null,
+        pnl: 0,
+        notes: notes || `Live order on Kalshi: ${kalshiOrder.order_id}`,
+        trace_id: traceId || null,
+        source_signal_id: sourceSignalId || null,
+        influenced_by_memory_ids: influencedByMemoryIds || [],
+        system_version: systemVersion || 'v1',
+      }).select().single();
 
     if (insertError) throw insertError;
+
+    // Write memory attribution rows for every cited memory
+    if (influencedByMemoryIds && influencedByMemoryIds.length > 0) {
+      const attributionRows = influencedByMemoryIds.map((memId: string) => ({
+        trade_id: trade.id,
+        memory_id: memId,
+      }));
+      await supabase.from("memory_attribution").insert(attributionRows);
+    }
 
     const eventType = orderStatus === "filled" ? "order_filled" : "order_submitted";
     await logCompliance(supabase, userId, trade.id, eventType, "info",
@@ -420,7 +460,21 @@ serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   } catch (e) {
-    console.error("execute-trade error:", e);
+    // Handle Error objects, plain objects (e.g. Supabase errors), and anything else
+    let errorMsg: string;
+    let errorDetail: any = e;
+    if (e instanceof Error) {
+      errorMsg = e.message;
+    } else if (typeof e === "object" && e !== null) {
+      errorMsg = (e as any).message || (e as any).error || JSON.stringify(e);
+    } else {
+      errorMsg = String(e);
+    }
+    const errorStack = e instanceof Error ? e.stack : undefined;
+    console.error("execute-trade error:", errorMsg);
+    if (errorStack) console.error("stack:", errorStack);
+
+    captureException(e instanceof Error ? e : new Error(errorMsg), { function: "execute-trade" });
 
     // Log system error
     try {
@@ -429,13 +483,13 @@ serve(async (req) => {
         Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
       );
       await logCompliance(supabase, null, null, "system_event", "error",
-        `Trade execution error: ${e instanceof Error ? e.message : "Unknown error"}`,
-        { stack: e instanceof Error ? e.stack : undefined }
+        `Trade execution error: ${errorMsg}`,
+        { raw_error: errorDetail, stack: errorStack }
       );
     } catch {}
 
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
+      JSON.stringify({ error: errorMsg }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

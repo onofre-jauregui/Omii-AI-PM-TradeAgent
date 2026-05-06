@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { langfuseIngest, scoreEvent } from "../_shared/langfuse.ts";
+import { captureException, captureMessage } from "../_shared/sentry.ts";
 
 /**
  * auto-settle: Resolve paper trades against real Kalshi market outcomes.
@@ -156,7 +158,7 @@ serve(async (req) => {
       // 3. Fetch the actual trade rows so we can compute per-trade pnl
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
-        .select("id, side, action, price, amount, created_at")
+        .select("id, side, action, price, amount, created_at, trace_id")
         .in("id", tradeIds);
 
       if (tradesErr || !trades) {
@@ -187,7 +189,21 @@ serve(async (req) => {
 
         if (updErr) {
           console.error(`trade ${t.id} update failed:`, updErr.message);
+          captureMessage(`auto-settle: trade update failed for ${t.id}`, "error", {
+            function: "auto-settle",
+            extra: { trade_id: t.id, ticker, pnl, outcome, error: updErr.message },
+          });
           continue;
+        }
+
+        // Langfuse score: link qualify decision to trade outcome
+        if (t.trace_id && outcome !== "void") {
+          langfuseIngest([scoreEvent(
+            t.trace_id,
+            "trade-pnl-correct",
+            outcome === "win" ? 1 : 0,
+            `pnl: $${(Math.round(pnl * 100) / 100).toFixed(2)} on ${ticker}`,
+          )]);
         }
 
         // 4b. Write outcome back to the originating signal so param_sweep
@@ -277,6 +293,7 @@ serve(async (req) => {
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("auto-settle fatal:", errMsg);
+    captureException(e instanceof Error ? e : new Error(errMsg), { function: "auto-settle" });
     try {
       await supabase.from("compliance_log").insert({
         event_type: "auto_settle_error",

@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent } from "../_shared/langfuse.ts";
+import { captureException, captureMessage } from "../_shared/sentry.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -21,7 +22,7 @@ import { langfuseIngest, traceEvent, generationEvent } from "../_shared/langfuse
  * Scheduled: every 5 minutes via pg_cron.
  */
 
-const DEBOUNCE_MINUTES = 0; // cron interval is the rate limiter; no internal debounce needed
+const LOCK_STALE_MS = 5 * 60 * 1000; // 5 min — auto-release stuck locks (longest strategy loop is ~90s)
 const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -203,6 +204,10 @@ serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  // For function-to-function calls (execute-trade), use the anon key with apikey header.
+  // The service role JWT is rejected by the Supabase runtime when used as Bearer for
+  // edge function invocations — the anon key is what pg_cron uses and what works.
+  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || supabaseKey;
   if (!supabaseUrl || !supabaseKey) {
     return new Response(JSON.stringify({ error: "Missing Supabase credentials" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -214,24 +219,62 @@ serve(async (req) => {
   const runStartedAt = new Date().toISOString();
   langfuseIngest([traceEvent(runId, "auto-trade")]);
 
-  try {
-    // ── Debounce: skip if ran recently ───────────────────────────────────────
-    const { data: recentRun } = await supabase
-      .from("compliance_log")
-      .select("created_at")
-      .eq("event_type", "auto_trade_run")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+  let lockAcquired = false; // function-scoped so finally block can access it
 
-    if (recentRun) {
-      const lastRanMinutes = (Date.now() - new Date(recentRun.created_at).getTime()) / 60_000;
-      if (lastRanMinutes < DEBOUNCE_MINUTES) {
-        return new Response(JSON.stringify({
-          skipped: true,
-          reason: `Last run was ${lastRanMinutes.toFixed(1)} min ago (debounce: ${DEBOUNCE_MINUTES} min)`,
-        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  try {
+    // ── Advisory lock: skip if another run is in progress ───────────────────
+    // Table-based lock (not pg_try_advisory_lock) because Supabase pgbouncer
+    // gives each edge function invocation a different DB session. A table with
+    // single-row upsert is atomic and survives connection pooling.
+    // Graceful fallback: if the lock table doesn't exist yet (migration pending),
+    // proceed without locking — the old debounce behavior.
+
+    try {
+      const { data: existingLock, error: selectError } = await supabase
+        .from("auto_trade_locks")
+        .select("*")
+        .eq("lock_name", "auto_trade")
+        .maybeSingle();
+
+      // If the table doesn't exist yet, fall through to proceed without locking
+      if (selectError && selectError.message.includes("Could not find")) {
+        console.warn("auto_trade_locks table not found — running without advisory lock. Run the v2 migration to enable 30s polling protection.");
+      } else if (selectError) {
+        console.warn("auto_trade_locks select error:", selectError.message);
+      } else if (existingLock) {
+        const lockAgeMs = Date.now() - new Date(existingLock.acquired_at).getTime();
+        if (lockAgeMs < LOCK_STALE_MS) {
+          const ageMin = (lockAgeMs / 60_000).toFixed(1);
+          return new Response(JSON.stringify({
+            skipped: true,
+            reason: `Locked by run ${existingLock.run_id.slice(0, 8)} (${ageMin}m ago)`,
+          }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+        // Stale lock — proceed and overwrite below
       }
+
+      // Atomic lock acquisition via upsert (skip if table doesn't exist)
+      if (!selectError || !selectError.message.includes("Could not find")) {
+        const { error: lockError } = await supabase
+          .from("auto_trade_locks")
+          .upsert({ lock_name: "auto_trade", acquired_at: new Date().toISOString(), run_id: runId }, { onConflict: "lock_name" });
+
+        if (lockError) {
+          // Table might have been created between checks — if it's a "not found" error, proceed
+          if (lockError.message.includes("Could not find")) {
+            console.warn("auto_trade_locks upsert failed (table not found) — running without lock.");
+          } else {
+            return new Response(JSON.stringify({
+              skipped: true,
+              reason: `Lock acquisition failed: ${lockError.message}`,
+            }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+          }
+        } else {
+          lockAcquired = true;
+        }
+      }
+    } catch (lockErr) {
+      console.warn("auto_trade_locks error — running without advisory lock:", lockErr instanceof Error ? lockErr.message : String(lockErr));
     }
 
     // ── Check global risk state ──────────────────────────────────────────────
@@ -321,14 +364,14 @@ serve(async (req) => {
         let result: StrategyResult;
 
         if (strategy.id === "S-001") {
-          result = await runS001FedWatchOracle(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId);
+          result = await runS001FedWatchOracle(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else if (strategy.id === "S-002") {
-          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else if (strategy.id === "S-005") {
-          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId);
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else {
           // Unknown strategy — use generic signal-based handler
-          result = await runGenericSignalStrategy(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId);
+          result = await runGenericSignalStrategy(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         }
 
         result.elapsed_seconds = ((Date.now() - stratStart) / 1000).toFixed(1);
@@ -351,6 +394,14 @@ serve(async (req) => {
       } catch (stratErr) {
         const errMsg = stratErr instanceof Error ? stratErr.message : "Unknown error";
         const elapsed = ((Date.now() - stratStart) / 1000).toFixed(1);
+
+        captureException(stratErr, {
+          function: "auto-trade",
+          strategyId: strategy.id,
+          runId,
+          mode: strategy.mode,
+          extra: { strategy_name: strategy.name, elapsed_seconds: elapsed },
+        });
 
         strategyResults.push({
           strategy_id: strategy.id,
@@ -438,6 +489,11 @@ serve(async (req) => {
     return new Response(JSON.stringify({ error: errMsg }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  } finally {
+    // Release advisory lock — only if we successfully acquired one
+    if (lockAcquired) {
+      await supabase.from("auto_trade_locks").delete().eq("lock_name", "auto_trade");
+    }
   }
 });
 
@@ -461,7 +517,7 @@ async function runS001FedWatchOracle(
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 12;
   const maxPositionUsd = config?.max_position_usd ?? 50;
-  const MAX_S001_POSITIONS = 50;
+  const MAX_S001_POSITIONS = 1000;
 
   const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
@@ -572,7 +628,7 @@ async function runS001FedWatchOracle(
 
     const tradeResp = await fetch(executeUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         ticker: sig.ticker,
         marketId: sig.ticker,
@@ -591,6 +647,8 @@ async function runS001FedWatchOracle(
         confidenceLevel: sig.composite_score,
         user_id: strategy.user_id || null,
         traceId: runId,
+        sourceSignalId: sig.id || null,
+        systemVersion: 'v2',
       }),
     });
 
@@ -631,17 +689,20 @@ async function runS002LongshotBias(
   runId?: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const MAX_S002_POSITIONS = 50;
-  const AMOUNT_PER_TRADE = 20; // small, diversified — $20 per position
-  const PRICE_CAP = 85; // cents — max entry price for longshot/near-cert positions
+  const MAX_S002_POSITIONS = 1000;
+  // 8-11¢ YES range: EV is positive here. Below 8¢, the payout ratio (win ~9¢, lose ~91¢)
+  // requires >91% win rate to break even — the longshot bias (~5pp edge) isn't enough.
+  // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
+  const AMOUNT_PER_TRADE = 20;
 
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
-  // Scan signals table for longshot (<12¢) or near-cert (>88¢) markets
+  // Longshots only: YES ask 8-11¢. We buy NO on these markets.
   const { data: rawSignals } = await supabase
     .from("signals")
     .select("*")
-    .or("yes_ask.lt.12,yes_bid.gt.88")
+    .lt("yes_ask", 12)
+    .gte("yes_ask", 8)
     .gte("volume", 200)
     .gte("days_to_close", 0.08)
     .lte("days_to_close", 30)
@@ -663,7 +724,7 @@ async function runS002LongshotBias(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No longshot/near-cert signals (yes_ask<12 or yes_bid>88, vol≥200, 2h-30d, non-sports/ETH)",
+      details: "No longshot signals (yes_ask 8-11¢, vol≥200, 2h-30d, non-sports/ETH)",
     };
   }
 
@@ -710,30 +771,22 @@ async function runS002LongshotBias(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "All longshot/near-cert signals already have open positions",
+      details: "All longshot signals already have open positions",
     };
   }
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
 
   const execResults = await Promise.all(candidates.map(async (sig: any) => {
-    const isLongshot = (sig.yes_ask || 100) < 12;
-    const isNearCert = (sig.yes_bid || 0) > 88;
+    const yesAsk = sig.yes_ask || 10;
 
-    if (!isLongshot && !isNearCert) return { sig, success: false, detail: "not longshot or near-cert (stale signal)" };
+    // All signals are in the 8-11¢ YES range — we always buy NO.
+    const side = "no";
+    const direction = "buy_no";
 
-    const side = isLongshot ? "no" : "yes";
-    const direction = isLongshot ? "buy_no" : "buy_yes";
-
-    // MAKER orders: rest inside the spread
-    const price = isLongshot
-      ? Math.min(99, (100 - (sig.yes_ask || 12)) + 1)
-      : Math.min(99, (sig.yes_bid || 88) + 1);
-
-    // Price cap: above 75¢ the risk/reward is indefensible.
-    // At 99¢ NO, a 2% surprise wipes out 49 wins. Longshot bias only works
-    // in the 6–12¢ zone where markets measurably overprice low-prob events.
-    if (price > PRICE_CAP) return { sig, success: false, detail: `price ${price}¢ exceeds ${PRICE_CAP}¢ cap — skipped` };
+    // Maker order: set NO price just above NO bid (= 100 - YES ask - 1)
+    // YES ask 8¢ → NO price 93¢; YES ask 11¢ → NO price 90¢
+    const price = Math.min(99, (100 - yesAsk) + 1);
 
     const qualifyPrompt = buildQualifyPrompt("S-002 Longshot Bias", {
       ticker: sig.ticker,
@@ -743,9 +796,7 @@ async function runS002LongshotBias(
       yes_ask: sig.yes_ask,
       volume: sig.volume,
       days_to_close: sig.days_to_close,
-      is_longshot: isLongshot,
-      is_near_cert: isNearCert,
-      note: `Longshot Bias: academic research shows Kalshi longshots (<12¢) resolve YES only ~7% of the time vs. 12% implied — buy NO. Near-certs (>88¢) are underpriced — buy YES. REJECT if market has unusual volume spike (pump), near expiry (<6h), or ticker has won >1 prior YES bet suggesting this specific market resolves more often than the bias predicts.`,
+      note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
     });
 
     const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id);
@@ -753,7 +804,7 @@ async function runS002LongshotBias(
 
     const tradeResp = await fetch(executeUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         ticker: sig.ticker,
         marketId: sig.ticker,
@@ -768,16 +819,25 @@ async function runS002LongshotBias(
         time_in_force: "day",
         mode,
         expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
-        notes: `S-002 Longshot Bias: ${isLongshot ? "longshot" : "near-cert"}, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
+        notes: `S-002 Longshot Bias: longshot NO, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
         expectedOutcome: `${direction} on ${sig.ticker} — bias edge ~5pp`,
         confidenceLevel: 0.55,
         user_id: strategy.user_id || null,
         traceId: runId,
+        sourceSignalId: sig.id || null,
+        systemVersion: 'v2',
       }),
     });
 
     const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
-    return { sig, success: result.success, detail: result.success ? `${sig.ticker} ${isLongshot ? "NO" : "YES"} @ ${Math.round(price)}¢` : result.error };
+    if (!result.success) {
+      const errDetail = result.error || result.message || "unknown error";
+      captureMessage(`S-002 execute-trade failed: ${errDetail}`, "warning", {
+        function: "auto-trade", strategyId: "S-002", runId, mode,
+        extra: { ticker: sig.ticker, price, direction: "buy_no", response: result },
+      });
+    }
+    return { sig, success: result.success, detail: result.success ? `${sig.ticker} NO @ ${Math.round(price)}¢` : (result.error || result.message || "unknown error") };
   }));
 
   const filled = execResults.filter(r => r.success);
@@ -840,7 +900,7 @@ async function runS005WeatherEdge(
   }
 
   const positions = await countOpenPositions(supabase);
-  const slotsAvailable = Math.max(0, 50 - positions.weightedCost);
+  const slotsAvailable = Math.max(0, 1000 - positions.weightedCost);
   if (slotsAvailable === 0) {
     return {
       strategy_id: strategy.id,
@@ -848,7 +908,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `Portfolio full: weighted ${positions.weightedCost.toFixed(1)}/50 (near: ${positions.nearTermCount}, far: ${positions.farTermCount})`,
+      details: `Portfolio full: weighted ${positions.weightedCost.toFixed(1)}/1000 (near: ${positions.nearTermCount}, far: ${positions.farTermCount})`,
     };
   }
 
@@ -985,7 +1045,7 @@ async function runS005WeatherEdge(
 
       const tradeResp = await fetch(executeUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
         body: JSON.stringify({
           ticker: sig.ticker,
           marketId: sig.ticker,
@@ -1004,6 +1064,8 @@ async function runS005WeatherEdge(
           confidenceLevel: sig.true_probability,
           user_id: strategy.user_id || null,
           traceId: runId,
+          sourceSignalId: sig.id || null,
+          systemVersion: 'v2',
         }),
       });
       const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
@@ -1019,7 +1081,7 @@ async function runS005WeatherEdge(
       ? `Executed ${filled.length} trade(s): ${filled.map(r => `${r.sig.ticker} ${r.sig.edge_cents}c edge`).join(", ")}`
       : null,
     failed.length > 0
-      ? `${failed.length} failed: ${failed.map(r => r.result.error).join(", ")}`
+      ? `${failed.length} failed: ${failed.map(r => r.result.error || r.result.message || "unknown").join(", ")}`
       : null,
   ].filter(Boolean).join(". ");
 
@@ -1088,7 +1150,7 @@ async function runGenericSignalStrategy(
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const tradeResp = await fetch(executeUrl, {
     method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
     body: JSON.stringify({
       ticker: best.ticker,
       marketId: best.ticker,
