@@ -14,6 +14,16 @@ export default function OnboardingPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>("welcome");
 
+  async function finishOnboarding(destination: string) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      await supabase
+        .from("profiles")
+        .upsert({ id: user.id, onboarding_completed: true }, { onConflict: "id" });
+    }
+    navigate(destination);
+  }
+
   // Kalshi key fields
   const [keyId, setKeyId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
@@ -180,7 +190,7 @@ export default function OnboardingPage() {
             </p>
             <div className="space-y-3 mb-8">
               <button
-                onClick={() => navigate("/")}
+                onClick={() => finishOnboarding("/")}
                 className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
               >
                 <div className="flex items-center justify-between mb-1">
@@ -192,19 +202,19 @@ export default function OnboardingPage() {
                 </p>
               </button>
               <button
-                onClick={() => navigate("/")}
-                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4 opacity-60"
+                onClick={() => finishOnboarding("/billing")}
+                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm">Live Trading</span>
-                  <span className="text-[10px] bg-secondary text-muted-foreground px-2 py-0.5 rounded-full">Requires Starter plan</span>
+                  <span className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded-full font-medium">Requires Starter plan</span>
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   Real orders placed on your Kalshi account. Requires an active API key and a paid subscription.
                 </p>
               </button>
             </div>
-            <Button className="w-full rounded-full gap-2" onClick={() => navigate("/")}>
+            <Button className="w-full rounded-full gap-2" onClick={() => finishOnboarding("/")}>
               Go to dashboard <ArrowRight className="h-4 w-4" />
             </Button>
           </div>

@@ -5,6 +5,7 @@ import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.t
 import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
 import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
+import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -158,7 +159,33 @@ serve(async (req) => {
     // ── Tenant Resolution (multi-tenancy) ──
     const { userId, authenticated } = await resolveTenant(req, supabase, parsedBody);
 
-    const tradeMode = mode || "paper";
+    const tradeMode = (mode || "paper") as "paper" | "live";
+
+    // ── Subscription Entitlement Check ──
+    // Paper trades are always allowed. Live trades require an active paid subscription.
+    if (tradeMode === "live") {
+      const { data: sub } = await supabase
+        .from("subscriptions")
+        .select("*")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      const entitlement = checkEntitlement({
+        subscription: sub as SubscriptionRow | null,
+        strategy: strategyId,
+        mode: "live",
+        positionUsd: amount,
+      });
+
+      if (!entitlement.allowed) {
+        await logCompliance(supabase, userId, null, "entitlement_blocked", "warning",
+          entitlement.reason!, { strategyId, mode: "live", amount });
+        return new Response(
+          JSON.stringify({ error: entitlement.reason }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
 
     // ── Risk Management (tenant-scoped) ──
     const settings = await getRiskSettings(supabase, userId);

@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle, Loader2, ExternalLink } from "lucide-react";
+import { ArrowLeft, CheckCircle, Loader2, ExternalLink, Settings } from "lucide-react";
 
 const CHECKOUT_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/create-checkout`;
+const MANAGE_BILLING_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/manage-billing`;
 
 interface Plan {
   tier: "starter" | "pro" | "prop";
@@ -65,6 +66,7 @@ export default function BillingPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [upgrading, setUpgrading] = useState<string | null>(null);
+  const [managingBilling, setManagingBilling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const upgraded = searchParams.get("upgraded") === "1";
 
@@ -84,6 +86,28 @@ export default function BillingPage() {
       setLoading(false);
     })();
   }, [navigate]);
+
+  async function handleManageBilling() {
+    setManagingBilling(true);
+    setError(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(MANAGE_BILLING_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      });
+      const data = await resp.json();
+      if (data.url) {
+        window.location.href = data.url;
+      } else {
+        setError(data.error ?? "Could not open billing portal.");
+        setManagingBilling(false);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+      setManagingBilling(false);
+    }
+  }
 
   async function handleUpgrade(tier: string) {
     setUpgrading(tier);
@@ -116,19 +140,36 @@ export default function BillingPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="max-w-4xl mx-auto px-6 py-12">
-        <div className="flex items-center gap-3 mb-10">
-          <button onClick={() => navigate("/")} className="text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">Billing</h1>
-            {!loading && (
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Current plan: <span className="capitalize font-medium text-foreground">{currentTier ?? "Free"}</span>
-                {isActive && <span className="ml-1.5 text-emerald-500">· Active</span>}
-              </p>
-            )}
+        <div className="flex items-center justify-between mb-10">
+          <div className="flex items-center gap-3">
+            <button onClick={() => navigate("/")} className="text-muted-foreground hover:text-foreground">
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+            <div>
+              <h1 className="text-xl font-semibold tracking-tight">Billing</h1>
+              {!loading && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Current plan: <span className="capitalize font-medium text-foreground">{currentTier ?? "Free"}</span>
+                  {isActive && <span className="ml-1.5 text-emerald-500">· Active</span>}
+                </p>
+              )}
+            </div>
           </div>
+          {isActive && currentTier !== "free" && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full gap-2 text-xs"
+              onClick={handleManageBilling}
+              disabled={managingBilling}
+            >
+              {managingBilling ? (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Opening…</>
+              ) : (
+                <><Settings className="h-3.5 w-3.5" /> Manage Subscription</>
+              )}
+            </Button>
+          )}
         </div>
 
         {upgraded && (

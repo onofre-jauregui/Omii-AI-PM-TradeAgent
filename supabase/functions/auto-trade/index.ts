@@ -3,6 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
+import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -141,6 +142,7 @@ async function countOpenPositions(
   supabase: any,
   strategyId?: string,
   thresholdDays: number = 7,
+  userId?: string | null,
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
@@ -154,6 +156,11 @@ async function countOpenPositions(
 
   if (strategyId) {
     query = query.eq("strategy_id", strategyId);
+  }
+
+  // Scope to the correct tenant — null user_id means legacy/system strategies
+  if (userId !== undefined) {
+    query = userId ? query.eq("user_id", userId) : query.is("user_id", null);
   }
 
   const { data: openTrades } = await query;
@@ -298,12 +305,41 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // ── Load active strategies with their configs ────────────────────────────
-    const { data: strategies } = await supabase
+    // ── Load active strategies scoped to eligible users ──────────────────────
+    // System strategies (user_id IS NULL) always run.
+    // User strategies only run if that user has an active/trialing subscription.
+    const { data: activeSubscribers } = await supabase
+      .from("subscriptions")
+      .select("user_id, tier, status, max_trades_per_day, max_open_positions, max_position_usd, max_markets_watched")
+      .in("status", ["active", "trialing"]);
+
+    const activeUserIds: string[] = (activeSubscribers || []).map((s: any) => s.user_id);
+    const subscriptionByUserId = new Map<string, SubscriptionRow>(
+      (activeSubscribers || []).map((s: any) => [s.user_id, s as SubscriptionRow])
+    );
+
+    // Load system strategies (null user_id) + strategies for active subscribers
+    let strategyQuery = supabase
       .from("strategies")
       .select("id, name, description, instructions, mode, starting_balance, user_id")
       .eq("active", true)
       .order("id");
+
+    if (activeUserIds.length > 0) {
+      // Supabase doesn't support OR with IS NULL directly, so we fetch both and merge
+      const [{ data: systemStrategies }, { data: userStrategies }] = await Promise.all([
+        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+          .eq("active", true).is("user_id", null).order("id"),
+        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+          .eq("active", true).in("user_id", activeUserIds).order("id"),
+      ]);
+      var strategies = [...(systemStrategies || []), ...(userStrategies || [])];
+    } else {
+      const { data: systemStrategies } = await supabase
+        .from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+        .eq("active", true).is("user_id", null).order("id");
+      var strategies = systemStrategies || [];
+    }
 
     if (!strategies || strategies.length === 0) {
       return new Response(JSON.stringify({ skipped: true, reason: "No active strategies" }), {
@@ -361,6 +397,28 @@ serve(async (req) => {
       }
 
       try {
+        // ── Per-strategy entitlement check ────────────────────────────────────
+        // System strategies (user_id = null) bypass subscription checks.
+        // User strategies must pass checkEntitlement for their tier.
+        if (strategy.user_id) {
+          const sub = subscriptionByUserId.get(strategy.user_id) ?? null;
+          const entitlement = checkEntitlement({
+            subscription: sub,
+            strategy: strategy.id,
+            mode: strategy.mode as "paper" | "live",
+          });
+          if (!entitlement.allowed) {
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              details: `entitlement blocked: ${entitlement.reason}`,
+            });
+            continue;
+          }
+        }
+
         let result: StrategyResult;
 
         if (strategy.id === "S-001") {
@@ -543,7 +601,7 @@ async function runS001FedWatchOracle(
   }
 
   // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot
-  const positions = await countOpenPositions(supabase, "S-001");
+  const positions = await countOpenPositions(supabase, "S-001", 7, strategy.user_id ?? null);
   const openS001Count = positions.weightedCost;
   const nearTermOnly = positions.nearTermCount;
   const farTermOnly = positions.farTermCount;
@@ -729,7 +787,7 @@ async function runS002LongshotBias(
   }
 
   // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot
-  const positions = await countOpenPositions(supabase, "S-002");
+  const positions = await countOpenPositions(supabase, "S-002", 7, strategy.user_id ?? null);
   const openS002Count = positions.weightedCost;
   const nearTermOnly = positions.nearTermCount;
   const farTermOnly = positions.farTermCount;
@@ -899,7 +957,7 @@ async function runS005WeatherEdge(
     };
   }
 
-  const positions = await countOpenPositions(supabase);
+  const positions = await countOpenPositions(supabase, undefined, 7, strategy.user_id ?? null);
   const slotsAvailable = Math.max(0, 1000 - positions.weightedCost);
   if (slotsAvailable === 0) {
     return {

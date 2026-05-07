@@ -21,6 +21,8 @@ const queryClient = new QueryClient();
 
 /** Protected portion of the app — requires a valid session. */
 function ProtectedApp({ session }: { session: Session | null | undefined }) {
+  const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
+
   // Still loading — show nothing (avoids flash)
   if (session === undefined) return null;
 
@@ -28,6 +30,28 @@ function ProtectedApp({ session }: { session: Session | null | undefined }) {
   // Set VITE_DISABLE_AUTH=true in .env.local for solo-developer / NULL-tenant mode.
   const authDisabled = import.meta.env.VITE_DISABLE_AUTH === "true";
   if (!authDisabled && !session) return <AuthPage />;
+
+  // Check onboarding completion for authenticated users (skip in auth-disabled dev mode)
+  if (session && !authDisabled && onboardingCompleted === null) {
+    supabase
+      .from("profiles")
+      .select("onboarding_completed")
+      .eq("id", session.user.id)
+      .maybeSingle()
+      .then(({ data }) => {
+        setOnboardingCompleted(data?.onboarding_completed ?? false);
+      });
+    return null; // wait for profile check
+  }
+
+  // New user — hasn't completed onboarding yet
+  if (session && !authDisabled && onboardingCompleted === false) {
+    // Use window.location to avoid needing useNavigate outside Router context
+    if (window.location.pathname !== "/onboarding") {
+      window.location.replace("/onboarding");
+    }
+    return null;
+  }
 
   return (
     <StrategiesProvider>
