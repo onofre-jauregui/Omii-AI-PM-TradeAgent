@@ -838,6 +838,12 @@ async function runS002LongshotBias(
   const execResults = await Promise.all(candidates.map(async (sig: any) => {
     const yesAsk = sig.yes_ask || 10;
 
+    // Hard guard: re-validate price at execution time. Signals can be stale —
+    // a market at 10¢ YES when the signal was written may have moved significantly.
+    if (yesAsk < 8 || yesAsk > 11) {
+      return { sig, success: false, detail: `skipped: yes_ask=${yesAsk}¢ out of 8-11¢ range at execution time` };
+    }
+
     // All signals are in the 8-11¢ YES range — we always buy NO.
     const side = "no";
     const direction = "buy_no";
