@@ -211,10 +211,11 @@ serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  // For function-to-function calls (execute-trade), use the anon key with apikey header.
-  // The service role JWT is rejected by the Supabase runtime when used as Bearer for
-  // edge function invocations — the anon key is what pg_cron uses and what works.
-  const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || supabaseKey;
+  // ANON_JWT is the classic JWT-format anon key stored as an explicit secret.
+  // The auto-injected SUPABASE_ANON_KEY may be the new sb_publishable_ format which
+  // is not a valid Bearer JWT and gets rejected by the edge function gateway.
+  // Used exclusively for Authorization: Bearer on function-to-function HTTP calls.
+  const supabaseAnonKey = Deno.env.get("ANON_JWT") || Deno.env.get("SUPABASE_ANON_KEY") || supabaseKey;
   if (!supabaseUrl || !supabaseKey) {
     return new Response(JSON.stringify({ error: "Missing Supabase credentials" }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -628,8 +629,10 @@ async function runS001FedWatchOracle(
     .is("exit_reason", null)
     .is("settled_at", null);
   const openTickers = new Set((s001OpenTrades || []).map((t: any) => t.ticker));
+  // Agent memory (conf=0.99): KXFED markets have zero liquidity — hard reject.
   const seenTickers = new Set<string>();
   const candidates = (rawSignals || []).filter((s: any) => {
+    if ((s.ticker || "").startsWith("KXFED-")) return false;
     if (openTickers.has(s.ticker)) return false;
     if (seenTickers.has(s.ticker)) return false;
     seenTickers.add(s.ticker);
@@ -940,9 +943,10 @@ async function runS005WeatherEdge(
   const minEdge = config?.min_edge_cents ?? 15; // raised from 8¢ — weather needs bigger edge
   const maxPositionUsd = config?.max_position_usd ?? 30;
   const MAX_PARALLEL_SIGNALS = 5;
+  const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  const { data: signals } = await supabase
+  let signalQuery = supabase
     .from("signals")
     .select("*")
     .eq("source", "weather_signal_s005")
@@ -950,7 +954,17 @@ async function runS005WeatherEdge(
     .gte("edge_cents", minEdge)
     .not("direction", "is", null)
     .order("edge_cents", { ascending: false })
-    .limit(MAX_PARALLEL_SIGNALS);
+    .limit(MAX_PARALLEL_SIGNALS + excludedCities.length); // fetch extra, filter below
+
+  const { data: rawSignals } = await signalQuery;
+
+  // Filter out cities where S-005 has persistent forecast_bias losses
+  const signals = excludedCities.length > 0
+    ? (rawSignals || []).filter((s: any) => {
+        const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
+        return !cityMatch || !excludedCities.includes(cityMatch[1]);
+      }).slice(0, MAX_PARALLEL_SIGNALS)
+    : (rawSignals || []).slice(0, MAX_PARALLEL_SIGNALS);
 
   if (!signals || signals.length === 0) {
     return {
