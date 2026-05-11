@@ -1,0 +1,13 @@
+-- health-check pg_cron job — applied manually via management API.
+-- The cron schedule is set with the service role key substituted at apply-time.
+-- See: apply-health-check-cron.sh or apply directly:
+--
+-- SELECT cron.schedule(
+--   'health-check-hourly',
+--   '0 * * * *',
+--   $$ SELECT net.http_post(
+--        url     := 'https://uyfnezxmgwitpzsrnkst.supabase.co/functions/v1/health-check',
+--        headers := jsonb_build_object('Content-Type','application/json','Authorization','Bearer <SERVICE_ROLE_KEY>'),
+--        body    := '{}'::jsonb
+--      ); $$
+-- );
