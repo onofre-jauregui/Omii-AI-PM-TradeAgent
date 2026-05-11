@@ -71,14 +71,13 @@ async function fetchAll() {
       .from("trades")
       .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
       .eq("mode", "paper")
-      .eq("status", "filled")
+      .in("status", ["filled", "settled"])
       .order("created_at", { ascending: true }),
     supabase
       .from("trades")
       .select("ticker, market_question, side, price, amount, pnl, resolution, settled_at, strategy, created_at")
       .eq("mode", "paper")
-      .eq("status", "filled")
-      .not("settled_at", "is", null)
+      .eq("status", "settled")
       .order("settled_at", { ascending: false })
       .limit(25),
     supabase
