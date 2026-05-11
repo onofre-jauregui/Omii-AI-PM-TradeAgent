@@ -188,6 +188,8 @@ const ERA_LABELS: Record<Era, string> = {
   mtd: "MTD (May 1+)",
 };
 
+const OPEN_POSITIONS_DEFAULT_SHOW = 6;
+
 export function PerformancePage() {
   const [stats, setStats] = useState<OverallStats | null>(null);
   const [strategyRows, setStrategyRows] = useState<StrategyRow[]>([]);
@@ -198,6 +200,7 @@ export function PerformancePage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [era, setEra] = useState<Era>("mtd");
   const [allTradesRaw, setAllTradesRaw] = useState<any[]>([]);
+  const [showAllPositions, setShowAllPositions] = useState(false);
 
   const applyEra = useCallback((trades: any[], selectedEra: Era) => {
     const cutoff = ERA_CUTOFFS[selectedEra];
@@ -325,8 +328,8 @@ export function PerformancePage() {
         </div>
       </header>
 
-      <main className="max-w-[900px] mx-auto px-8 py-10 space-y-10 apple-reveal">
-        {/* Title */}
+      <main className="max-w-[900px] mx-auto px-8 py-8 space-y-8 apple-reveal">
+        {/* Title + era selector */}
         <div className="flex items-end justify-between gap-4">
           <div>
             <h1 className="text-3xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
@@ -337,7 +340,6 @@ export function PerformancePage() {
               {stats?.firstTradeAt && ` Running since ${formatDate(stats.firstTradeAt)}.`}
             </p>
           </div>
-          {/* Era selector */}
           <div className="flex items-center gap-1 rounded-xl bg-secondary p-1 shrink-0">
             {(Object.keys(ERA_LABELS) as Era[]).map((e) => (
               <button
@@ -362,7 +364,55 @@ export function PerformancePage() {
           </div>
         ) : (
           <>
-            {/* Stat cards */}
+            {/* ── 1. Equity curve — hero chart ─────────────────────────────── */}
+            <div className="rounded-2xl bg-card p-6 apple-shadow">
+              <div className="flex items-end justify-between mb-6">
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1 uppercase tracking-widest">Cumulative P&L</p>
+                  <p
+                    className={cn("text-5xl font-light tabular-nums", isPositive ? "text-profit" : "text-loss")}
+                    style={{ letterSpacing: "-0.04em" }}
+                  >
+                    {formatPnl(currentPnl)}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Activity className="h-3 w-3" />
+                  <span>{equityData.length - 1} settlements</span>
+                </div>
+              </div>
+
+              {equityData.length > 1 ? (
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={equityData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"} stopOpacity={0.25} />
+                        <stop offset="100%" stopColor={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="date" axisLine={false} tickLine={false}
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }} interval="preserveStartEnd" />
+                    <YAxis axisLine={false} tickLine={false}
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+                      tickFormatter={(v) => `$${v}`} width={48} />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "12px", fontSize: "12px", color: "hsl(var(--foreground))" }}
+                      formatter={(v: number) => [formatPnl(v), "P&L"]}
+                    />
+                    <Area type="monotone" dataKey="pnl"
+                      stroke={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"}
+                      strokeWidth={2} fill="url(#pnlGradient)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-[240px] flex items-center justify-center">
+                  <p className="text-sm text-muted-foreground">No settled trades yet — curve appears once markets resolve.</p>
+                </div>
+              )}
+            </div>
+
+            {/* ── 2. Stat cards ─────────────────────────────────────────────── */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <StatCard
                 icon={stats!.realizedPnl >= 0 ? TrendingUp : TrendingDown}
@@ -392,13 +442,14 @@ export function PerformancePage() {
               />
             </div>
 
-            {/* Open Positions */}
+            {/* ── 3. Open Positions (collapsed to 6, expandable) ────────────── */}
             {openTrades.length > 0 && (
               <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
                 <div className="px-6 py-4 border-b border-border flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Activity className="h-4 w-4 text-muted-foreground" />
                     <h3 className="text-sm font-medium text-muted-foreground">Open Positions</h3>
+                    <Badge variant="secondary" className="text-[10px] rounded-full">{openTrades.length}</Badge>
                   </div>
                   <Badge variant="secondary" className="text-[10px] rounded-full flex items-center gap-1">
                     <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
@@ -406,17 +457,15 @@ export function PerformancePage() {
                   </Badge>
                 </div>
                 <div className="divide-y divide-border">
-                  {openTrades.map((t) => {
+                  {(showAllPositions ? openTrades : openTrades.slice(0, OPEN_POSITIONS_DEFAULT_SHOW)).map((t) => {
                     const settleDate = parseSettlementDate(t.ticker);
                     const maxWin = potentialProfit(t.price, t.amount);
-                    const maxLoss = potentialLoss(t.amount);
                     return (
                       <div key={t.id} className="flex items-center gap-4 px-6 py-4 hover:bg-secondary/40 transition-colors">
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-foreground truncate">
                             {t.market_question ?? t.ticker}
                           </p>
-                          <p className="text-xs font-mono text-muted-foreground mt-0.5 truncate">{t.ticker}</p>
                           <div className="flex items-center gap-3 mt-1">
                             <span className={cn(
                               "text-[10px] font-medium px-1.5 py-0.5 rounded-full",
@@ -424,7 +473,7 @@ export function PerformancePage() {
                             )}>
                               {t.side.toUpperCase()}
                             </span>
-                            <span className="text-xs text-muted-foreground">@ {t.price}¢/contract</span>
+                            <span className="text-xs text-muted-foreground">@ {t.price}¢</span>
                             {t.strategy && <span className="text-xs text-muted-foreground">· {t.strategy}</span>}
                           </div>
                         </div>
@@ -439,9 +488,7 @@ export function PerformancePage() {
                           </div>
                           <div>
                             <p className="text-[10px] text-muted-foreground">Settles</p>
-                            <p className="text-xs font-medium tabular-nums text-muted-foreground">
-                              {settleDate ?? "TBD"}
-                            </p>
+                            <p className="text-xs tabular-nums text-muted-foreground">{settleDate ?? "TBD"}</p>
                           </div>
                         </div>
                       </div>
@@ -449,88 +496,22 @@ export function PerformancePage() {
                   })}
                 </div>
                 <div className="px-6 py-3 border-t border-border bg-secondary/20 flex items-center justify-between">
-                  <span className="text-xs text-muted-foreground">{openTrades.length} position{openTrades.length !== 1 ? "s" : ""}</span>
                   <span className="text-xs text-muted-foreground">
                     Total at risk: <span className="font-medium text-foreground">${openTrades.reduce((s, t) => s + t.amount, 0).toFixed(0)}</span>
                   </span>
+                  {openTrades.length > OPEN_POSITIONS_DEFAULT_SHOW && (
+                    <button
+                      onClick={() => setShowAllPositions(!showAllPositions)}
+                      className="text-xs text-primary hover:underline"
+                    >
+                      {showAllPositions
+                        ? "Show less"
+                        : `Show all ${openTrades.length} positions`}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
-
-            {/* Equity curve */}
-            <div className="rounded-2xl bg-card p-6 apple-shadow">
-              <div className="flex items-end justify-between mb-6">
-                <div>
-                  <p className="text-sm text-muted-foreground mb-1">Cumulative P&L</p>
-                  <p
-                    className={cn("text-4xl font-light tabular-nums", isPositive ? "text-profit" : "text-loss")}
-                    style={{ letterSpacing: "-0.03em" }}
-                  >
-                    {formatPnl(currentPnl)}
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Activity className="h-3 w-3" />
-                  <span>{equityData.length - 1} settlements</span>
-                </div>
-              </div>
-
-              {equityData.length > 1 ? (
-                <ResponsiveContainer width="100%" height={200}>
-                  <AreaChart data={equityData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop
-                          offset="0%"
-                          stopColor={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"}
-                          stopOpacity={0.2}
-                        />
-                        <stop
-                          offset="100%"
-                          stopColor={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"}
-                          stopOpacity={0}
-                        />
-                      </linearGradient>
-                    </defs>
-                    <XAxis
-                      dataKey="date"
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
-                      interval="preserveStartEnd"
-                    />
-                    <YAxis
-                      axisLine={false}
-                      tickLine={false}
-                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
-                      tickFormatter={(v) => `$${v}`}
-                      width={48}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        background: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
-                        borderRadius: "12px",
-                        fontSize: "12px",
-                        color: "hsl(var(--foreground))",
-                      }}
-                      formatter={(v: number) => [formatPnl(v), "P&L"]}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="pnl"
-                      stroke={isPositive ? "hsl(var(--profit))" : "hsl(var(--loss))"}
-                      strokeWidth={2}
-                      fill="url(#pnlGradient)"
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-[200px] flex items-center justify-center">
-                  <p className="text-sm text-muted-foreground">No settled trades yet — curve appears once markets resolve.</p>
-                </div>
-              )}
-            </div>
 
             {/* Per-strategy breakdown */}
             <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
