@@ -177,6 +177,18 @@ function StatCard({
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
+type Era = "all" | "redesign" | "mtd";
+const ERA_CUTOFFS: Record<Era, string | null> = {
+  all: null,
+  redesign: "2026-05-07T00:00:00Z", // S-002 hard price guard deployed
+  mtd: "2026-05-01T00:00:00Z",
+};
+const ERA_LABELS: Record<Era, string> = {
+  all: "All time",
+  redesign: "Post-redesign (May 7+)",
+  mtd: "MTD (May 1+)",
+};
+
 export function PerformancePage() {
   const [stats, setStats] = useState<OverallStats | null>(null);
   const [strategyRows, setStrategyRows] = useState<StrategyRow[]>([]);
@@ -185,9 +197,18 @@ export function PerformancePage() {
   const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [era, setEra] = useState<Era>("mtd");
+  const [allTradesRaw, setAllTradesRaw] = useState<any[]>([]);
+
+  const applyEra = useCallback((trades: any[], selectedEra: Era) => {
+    const cutoff = ERA_CUTOFFS[selectedEra];
+    return cutoff ? trades.filter(t => t.created_at >= cutoff) : trades;
+  }, []);
 
   const load = useCallback(async () => {
-    const { allTrades, recentSettled, openTrades: openPositions } = await fetchAll();
+    const { allTrades: rawAll, recentSettled, openTrades: openPositions } = await fetchAll();
+    setAllTradesRaw(rawAll);
+    const allTrades = applyEra(rawAll, era);
 
     // ── Overall stats ──
     const settled = allTrades.filter(t => t.settled_at);
@@ -259,7 +280,7 @@ export function PerformancePage() {
     setOpenTrades(openPositions as OpenTrade[]);
     setLastUpdated(new Date());
     setLoading(false);
-  }, []);
+  }, [era, applyEra]);
 
   useEffect(() => {
     load();
@@ -307,14 +328,33 @@ export function PerformancePage() {
 
       <main className="max-w-[900px] mx-auto px-8 py-10 space-y-10 apple-reveal">
         {/* Title */}
-        <div>
-          <h1 className="text-3xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
-            Track Record
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Autonomous paper trading on Kalshi prediction markets.
-            {stats?.firstTradeAt && ` Running since ${formatDate(stats.firstTradeAt)}.`}
-          </p>
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
+              Track Record
+            </h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Autonomous paper trading on Kalshi prediction markets.
+              {stats?.firstTradeAt && ` Running since ${formatDate(stats.firstTradeAt)}.`}
+            </p>
+          </div>
+          {/* Era selector */}
+          <div className="flex items-center gap-1 rounded-xl bg-secondary p-1 shrink-0">
+            {(Object.keys(ERA_LABELS) as Era[]).map((e) => (
+              <button
+                key={e}
+                onClick={() => setEra(e)}
+                className={cn(
+                  "px-3 py-1 text-xs rounded-lg font-medium transition-colors",
+                  era === e
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {ERA_LABELS[e]}
+              </button>
+            ))}
+          </div>
         </div>
 
         {loading ? (
