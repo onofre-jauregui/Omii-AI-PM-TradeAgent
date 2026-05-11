@@ -32,7 +32,13 @@ export interface TenantContext {
  */
 export async function resolveTenant(
   req: Request,
-  supabase: ReturnType<typeof createClient>
+  supabase: ReturnType<typeof createClient>,
+  /**
+   * Optional pre-parsed request body. Pass this if you've already called
+   * `await req.json()` in the handler, since the request body can only be
+   * consumed once and `req.clone().json()` fails after the original is read.
+   */
+  parsedBody?: any
 ): Promise<TenantContext> {
   // 1. Try to extract and verify a JWT from the Authorization header
   const authHeader = req.headers.get("Authorization") || req.headers.get("authorization");
@@ -54,9 +60,12 @@ export async function resolveTenant(
   }
 
   // 2. Try an explicit user_id in the request body (service-role / admin path)
-  // Note: the caller must clone the request before calling this, since reading
-  // body consumes it. We try only if the request method has a body.
-  if (req.method === "POST" || req.method === "PUT") {
+  // Prefer the pre-parsed body if the caller provided one. Fall back to
+  // cloning and reading the request only if they didn't.
+  if (parsedBody && typeof parsedBody.user_id === "string" && parsedBody.user_id.length > 0) {
+    return { userId: parsedBody.user_id, authenticated: false };
+  }
+  if (!parsedBody && (req.method === "POST" || req.method === "PUT")) {
     try {
       const cloned = req.clone();
       const body = await cloned.json();

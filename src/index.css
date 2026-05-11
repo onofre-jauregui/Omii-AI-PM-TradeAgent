@@ -56,47 +56,48 @@
   }
 
   .dark {
-    --background: 0 0% 0%;
-    --foreground: 0 0% 96%;
+    /* Claude-inspired: warm dark background, orange/coral accent */
+    --background: 24 12% 9%;
+    --foreground: 30 15% 92%;
 
-    --card: 0 0% 7%;
-    --card-foreground: 0 0% 96%;
+    --card: 24 10% 13%;
+    --card-foreground: 30 15% 92%;
 
-    --popover: 0 0% 7%;
-    --popover-foreground: 0 0% 96%;
+    --popover: 24 10% 13%;
+    --popover-foreground: 30 15% 92%;
 
-    --primary: 211 100% 50%;
+    --primary: 22 75% 60%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 11%;
-    --secondary-foreground: 0 0% 96%;
+    --secondary: 24 10% 16%;
+    --secondary-foreground: 30 15% 92%;
 
-    --muted: 0 0% 11%;
-    --muted-foreground: 0 0% 55%;
+    --muted: 24 10% 16%;
+    --muted-foreground: 30 10% 55%;
 
-    --accent: 0 0% 11%;
-    --accent-foreground: 0 0% 96%;
+    --accent: 24 10% 16%;
+    --accent-foreground: 30 15% 92%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 0 0% 16%;
-    --input: 0 0% 16%;
-    --ring: 211 100% 50%;
+    --border: 24 8% 20%;
+    --input: 24 8% 20%;
+    --ring: 22 75% 60%;
 
     --profit: 142 64% 45%;
     --loss: 0 72% 55%;
     --warning: 38 92% 55%;
-    --info: 211 100% 50%;
+    --info: 22 75% 60%;
 
-    --sidebar-background: 0 0% 0%;
-    --sidebar-foreground: 0 0% 96%;
-    --sidebar-primary: 211 100% 50%;
+    --sidebar-background: 24 12% 7%;
+    --sidebar-foreground: 30 15% 92%;
+    --sidebar-primary: 22 75% 60%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 0 0% 11%;
-    --sidebar-accent-foreground: 0 0% 96%;
-    --sidebar-border: 0 0% 16%;
-    --sidebar-ring: 211 100% 50%;
+    --sidebar-accent: 24 10% 13%;
+    --sidebar-accent-foreground: 30 15% 92%;
+    --sidebar-border: 24 8% 16%;
+    --sidebar-ring: 22 75% 60%;
   }
 }
 
@@ -143,7 +144,7 @@
     -webkit-backdrop-filter: blur(20px) saturate(180%);
   }
   .dark .frosted-glass {
-    background: rgba(0, 0, 0, 0.72);
+    background: rgba(22, 17, 14, 0.82);
   }
   .apple-reveal {
     animation: appleReveal 0.6s cubic-bezier(0.25, 0.1, 0.25, 1) both;

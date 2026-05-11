@@ -140,7 +140,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
     chat.setLoading(true);
     let assistantSoFar = "";
     await streamChat({
-      messages: messagesForApi.slice(1), // skip initial assistant greeting
+      messages: messagesForApi.slice(1).slice(-12), // skip greeting, keep last 6 turns
       strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
       model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode,
       onDelta: (chunk) => {

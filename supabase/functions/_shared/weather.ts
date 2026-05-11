@@ -1,32 +1,36 @@
 /**
  * Weather forecasting math for the S-005 weather strategy.
  *
- * Pure functions here — no I/O except the explicit fetchNwsForecast helper,
- * which is the only function that touches the network. Everything else is
- * deterministic and unit-testable.
+ * Pure functions here — no I/O except the explicit fetch helpers at the bottom.
+ * Everything else is deterministic and unit-testable.
+ *
+ * Forecast hierarchy (best-to-fallback):
+ *  1. GFS 31-member ensemble via Open-Meteo (free, no auth, better uncertainty)
+ *  2. NWS hourly point forecast (fallback when Open-Meteo is unavailable)
  *
  * Strategy backing:
- *  - Kalshi weather markets settle on the NWS Daily Climate Report
- *    [verified — Kalshi Help Center]
- *  - NWS publishes hourly forecasts at api.weather.gov with no auth
- *    [verified — api.weather.gov docs]
- *  - GFS ensemble data (31 members) is more accurate but requires NOAA
- *    NOMADS access and is more involved to parse. This module ships with
- *    a simpler NWS hourly fallback first, with a hook for upgrading to
- *    GFS ensemble in a follow-up.
+ *  - Kalshi weather markets settle on the NWS Daily Climate Report [verified]
+ *  - Open-Meteo serves GFS ensemble data freely at ensemble-api.open-meteo.com [verified]
+ *  - GFS seamless ensemble has 31 members, daily temperature_2m_max per member [verified]
  */
 
-// ─── Locations Kalshi runs daily weather markets for ─────────────────────
+// ─── Locations Kalshi runs daily weather markets for ──────────────────────────
 
 export interface WeatherLocation {
   code: string;
   name: string;
-  // NWS gridpoint endpoint for hourly forecast. Format: WFO/X,Y/forecast/hourly
-  // Coordinates are the airport / climate station that NWS Daily Climate
-  // Report uses for the city. Verified against api.weather.gov.
+  /** NWS gridpoint for fallback hourly forecast. Format: WFO/X,Y */
   nwsGridpoint: string;
-  // Climate station identifier used by Kalshi for settlement (informational)
+  /** Climate station Kalshi uses for settlement */
   climateStation: string;
+  /** Kalshi series ticker */
+  kalshiSeries: string;
+  /** Latitude of the climate station (for GFS ensemble fetch) */
+  lat: number;
+  /** Longitude of the climate station (for GFS ensemble fetch) */
+  lon: number;
+  /** IANA timezone string for the station */
+  timezone: string;
 }
 
 export const WEATHER_LOCATIONS: WeatherLocation[] = [
@@ -35,91 +39,104 @@ export const WEATHER_LOCATIONS: WeatherLocation[] = [
     name: "New York City",
     nwsGridpoint: "OKX/33,37",
     climateStation: "KNYC",
+    kalshiSeries: "KXHIGHNY",
+    lat: 40.7789,
+    lon: -73.9692,
+    timezone: "America/New_York",
   },
   {
     code: "CHI",
     name: "Chicago",
     nwsGridpoint: "LOT/76,73",
     climateStation: "KORD",
+    kalshiSeries: "KXHIGHCHI",
+    lat: 41.9796,
+    lon: -87.9046,
+    timezone: "America/Chicago",
   },
   {
     code: "MIA",
     name: "Miami",
     nwsGridpoint: "MFL/110,50",
     climateStation: "KMIA",
+    kalshiSeries: "KXHIGHMIA",
+    lat: 25.7959,
+    lon: -80.2870,
+    timezone: "America/New_York",
+  },
+  {
+    code: "LAX",
+    name: "Los Angeles",
+    nwsGridpoint: "LOX/151,13",
+    climateStation: "KLAX",
+    kalshiSeries: "KXHIGHLAX",
+    lat: 33.9425,
+    lon: -118.4081,
+    timezone: "America/Los_Angeles",
   },
   {
     code: "AUS",
     name: "Austin",
     nwsGridpoint: "EWX/156,91",
     climateStation: "KAUS",
+    kalshiSeries: "KXHIGHAUS",
+    lat: 30.1945,
+    lon: -97.6699,
+    timezone: "America/Chicago",
   },
 ];
 
-// ─── Forecast data shape ─────────────────────────────────────────────────
+// ─── Forecast data shape ──────────────────────────────────────────────────────
 
 export interface WeatherForecast {
   location: string;
-  forecastDate: string; // ISO date for the day the high temp will occur
+  forecastDate: string; // ISO date (YYYY-MM-DD) for the day the high temp will occur
   source: string;
   /** Mean of the temperature distribution (degrees F) */
   expectedHigh: number;
   /** Standard deviation of the distribution (degrees F) */
   stdDev: number;
   /**
-   * Bucketed probability distribution: { "55-59": 0.10, "60-64": 0.35, ... }
-   * Buckets are emitted in 5-degree spans. The caller can re-bucket if Kalshi
-   * uses different bucket boundaries.
+   * Bucketed probability distribution: { "65-70": 0.35, ... }
+   * Buckets are 5°F spans. Caller can re-bucket for different Kalshi boundaries.
    */
   distribution: Record<string, number>;
   raw?: any;
 }
 
-// ─── Pure math: normal CDF and PDF ───────────────────────────────────────
-// We model the daily high temperature as approximately normal around the
-// forecast mean. The std dev is estimated from the spread of the hourly
-// forecast values when GFS ensemble isn't available.
+// ─── Pure math: normal CDF and PDF ───────────────────────────────────────────
 
-/** Standard normal CDF using the Abramowitz & Stegun approximation. */
+/** Standard normal CDF (Abramowitz & Stegun approximation, max error ~1.5e-7) */
 export function normalCdf(x: number, mean = 0, stdDev = 1): number {
   if (stdDev <= 0) return x >= mean ? 1 : 0;
   const z = (x - mean) / (stdDev * Math.SQRT2);
   return 0.5 * (1 + erf(z));
 }
 
-/** Error function approximation (Abramowitz & Stegun 7.1.26, max error ~1.5e-7). */
 function erf(x: number): number {
   const sign = x < 0 ? -1 : 1;
   const ax = Math.abs(x);
-  const a1 = 0.254829592;
-  const a2 = -0.284496736;
-  const a3 = 1.421413741;
-  const a4 = -1.453152027;
-  const a5 = 1.061405429;
-  const p = 0.3275911;
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
   const t = 1.0 / (1.0 + p * ax);
-  const y =
-    1.0 -
-    (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
   return sign * y;
 }
 
 /**
- * Probability that the daily high falls in [low, high] given a normal
- * forecast distribution with the given mean and std dev.
+ * Probability that the daily high falls in [low, high) given a normal
+ * distribution with the given mean and std dev.
  */
 export function bucketProbability(
   low: number,
   high: number,
   mean: number,
-  stdDev: number
+  stdDev: number,
 ): number {
-  const pHigh = normalCdf(high, mean, stdDev);
-  const pLow = normalCdf(low, mean, stdDev);
-  return Math.max(0, Math.min(1, pHigh - pLow));
+  return Math.max(0, Math.min(1, normalCdf(high, mean, stdDev) - normalCdf(low, mean, stdDev)));
 }
 
-// ─── Bucket probability computation for a set of Kalshi markets ───────────
+// ─── Bucket probability computation for a set of Kalshi markets ──────────────
 
 export interface KalshiWeatherMarket {
   ticker: string;
@@ -130,53 +147,27 @@ export interface KalshiWeatherMarket {
   market_question?: string | null;
 }
 
-/**
- * For each Kalshi weather market, compute the model's probability that the
- * day's high lands in that bucket. Returns a map ticker -> probability.
- */
 export function computeBucketProbabilities(
   forecast: WeatherForecast,
-  markets: KalshiWeatherMarket[]
+  markets: KalshiWeatherMarket[],
 ): Map<string, number> {
   const out = new Map<string, number>();
   for (const m of markets) {
-    const p = bucketProbability(
-      m.bucket_low,
-      m.bucket_high,
-      forecast.expectedHigh,
-      forecast.stdDev
-    );
-    out.set(m.ticker, p);
+    out.set(m.ticker, bucketProbability(m.bucket_low, m.bucket_high, forecast.expectedHigh, forecast.stdDev));
   }
   return out;
 }
 
-// ─── Edge calculation vs market price ─────────────────────────────────────
+// ─── Edge calculation ─────────────────────────────────────────────────────────
 
 export interface EdgeResult {
-  /** "buy_yes" if model says market is underpriced YES, "buy_no" if overpriced */
   direction: "buy_yes" | "buy_no" | "skip";
-  /** True probability per the model (0..1) */
   trueProb: number;
-  /** Implied probability from the current Kalshi price (0..1) */
   impliedProb: number;
-  /** Edge in cents per contract (positive = profitable in the chosen direction) */
   edgeCents: number;
 }
 
-/**
- * Compare model probability to Kalshi market price and return a buy decision.
- *
- * Convention: prices are in cents (1-99). Implied probability = price/100.
- *
- * If the model probability is meaningfully higher than the YES ask, buy YES.
- * If meaningfully lower than the YES bid, buy NO at (100 - bid).
- * Otherwise skip.
- */
-export function computeEdge(
-  market: KalshiWeatherMarket,
-  trueProb: number
-): EdgeResult {
+export function computeEdge(market: KalshiWeatherMarket, trueProb: number): EdgeResult {
   const yesAsk = market.yes_ask;
   const yesBid = market.yes_bid;
 
@@ -184,21 +175,13 @@ export function computeEdge(
     return { direction: "skip", trueProb, impliedProb: NaN, edgeCents: 0 };
   }
 
-  // Use mid-price as the implied probability for the comparison
   const mid = yesAsk != null && yesBid != null
     ? (yesAsk + yesBid) / 2
     : yesAsk ?? yesBid ?? 50;
   const impliedProb = mid / 100;
-
   const trueProbCents = trueProb * 100;
 
-  // Buy YES at yes_ask: pay yes_ask, expected payoff = trueProb * 100 cents
-  // Edge = trueProbCents - yes_ask (positive = profitable)
   const buyYesEdge = trueProbCents - (yesAsk ?? mid);
-
-  // Buy NO at (100 - yes_bid): pay (100 - yes_bid), expected payoff = (1 - trueProb) * 100
-  // Edge = (100 - trueProbCents) - (100 - yes_bid) = yes_bid - trueProbCents
-  // Positive means NO is profitable (market thinks YES probability is higher than truth)
   const buyNoEdge = (yesBid ?? mid) - trueProbCents;
 
   if (buyYesEdge >= buyNoEdge && buyYesEdge > 0) {
@@ -210,20 +193,90 @@ export function computeEdge(
   return { direction: "skip", trueProb, impliedProb, edgeCents: 0 };
 }
 
-// ─── NWS forecast fetch (the only impure function in this module) ──────────
+// ─── Forecast fetchers ────────────────────────────────────────────────────────
 
 /**
- * Fetch the NWS hourly forecast for a location and reduce it to a daily
- * high-temperature distribution.
+ * Primary: GFS 31-member ensemble via Open-Meteo.
  *
- * NWS api.weather.gov is unauthenticated and free, but it requires a
- * descriptive User-Agent header per their TOS.
+ * Uses daily temperature_2m_max per member — one value per member per day,
+ * no hourly parsing needed. The 31-member spread gives a genuine uncertainty
+ * estimate rather than a proxy computed from the hourly NWS spread.
  *
- * IMPORTANT: this function is the ONE non-pure function in this module.
- * Tests should mock it. The production code path uses it.
+ * Open-Meteo is free, unauthenticated, and has no rate limits for reasonable use.
+ */
+export async function fetchGfsEnsembleForecast(
+  location: WeatherLocation,
+): Promise<WeatherForecast> {
+  const params = new URLSearchParams({
+    latitude: String(location.lat),
+    longitude: String(location.lon),
+    daily: "temperature_2m_max",
+    models: "gfs_seamless",
+    temperature_unit: "fahrenheit",
+    timezone: location.timezone,
+    forecast_days: "2",
+  });
+
+  const url = `https://ensemble-api.open-meteo.com/v1/ensemble?${params}`;
+  const resp = await fetch(url, {
+    headers: { "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)" },
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Open-Meteo GFS ensemble failed for ${location.code}: ${resp.status} ${resp.statusText}`);
+  }
+
+  const data = await resp.json();
+  const daily = data?.daily;
+  if (!daily) throw new Error(`Open-Meteo: no daily data for ${location.code}`);
+
+  // today's date in the station's local timezone
+  const forecastDate = new Date().toLocaleDateString("en-CA", { timeZone: location.timezone });
+  const dateIndex = (daily.time as string[]).indexOf(forecastDate);
+  if (dateIndex === -1) throw new Error(`Open-Meteo: today (${forecastDate}) not found in response for ${location.code}`);
+
+  // Collect the daily max from each ensemble member for today
+  const memberMaxes: number[] = [];
+  for (const key of Object.keys(daily)) {
+    if (!key.startsWith("temperature_2m_max_member")) continue;
+    const val = (daily[key] as number[])[dateIndex];
+    if (val != null && !isNaN(val)) memberMaxes.push(val);
+  }
+
+  if (memberMaxes.length === 0) {
+    throw new Error(`Open-Meteo: no ensemble member values for ${location.code} on ${forecastDate}`);
+  }
+
+  const mean = memberMaxes.reduce((a, b) => a + b, 0) / memberMaxes.length;
+  const variance = memberMaxes.reduce((sum, t) => sum + (t - mean) ** 2, 0) / memberMaxes.length;
+  // Use population std dev from the ensemble spread — this is the genuine uncertainty.
+  // Clamp to plausible range: ensemble spread is typically 1-5°F for 1-day forecast.
+  const stdDev = Math.max(1.5, Math.min(6, Math.sqrt(variance)));
+
+  const distribution: Record<string, number> = {};
+  for (let lo = Math.floor(mean) - 20; lo <= Math.floor(mean) + 20; lo += 5) {
+    distribution[`${lo}-${lo + 5}`] = bucketProbability(lo, lo + 5, mean, stdDev);
+  }
+
+  return {
+    location: location.code,
+    forecastDate,
+    source: "gfs_ensemble_31member",
+    expectedHigh: Math.round(mean * 10) / 10,
+    stdDev: Math.round(stdDev * 10) / 10,
+    distribution,
+    raw: { memberCount: memberMaxes.length, memberMaxes },
+  };
+}
+
+/**
+ * Fallback: NWS hourly point forecast.
+ *
+ * Less accurate than GFS ensemble (single deterministic run, no uncertainty
+ * quantification) but always available as a backup.
  */
 export async function fetchNwsForecast(
-  location: WeatherLocation
+  location: WeatherLocation,
 ): Promise<WeatherForecast> {
   const url = `https://api.weather.gov/gridpoints/${location.nwsGridpoint}/forecast/hourly`;
   const response = await fetch(url, {
@@ -234,45 +287,46 @@ export async function fetchNwsForecast(
   });
 
   if (!response.ok) {
-    throw new Error(
-      `NWS fetch failed for ${location.code}: ${response.status} ${response.statusText}`
-    );
+    throw new Error(`NWS fetch failed for ${location.code}: ${response.status} ${response.statusText}`);
   }
 
   const data = await response.json();
   const periods = data?.properties?.periods || [];
-  if (periods.length === 0) {
-    throw new Error(`NWS returned no forecast periods for ${location.code}`);
-  }
+  if (periods.length === 0) throw new Error(`NWS: no forecast periods for ${location.code}`);
 
-  // Take temperatures for the next 24 hours and find the max as expected high
   const next24 = periods.slice(0, 24);
   const temps = next24.map((p: any) => p.temperature).filter((t: any) => typeof t === "number");
-  if (temps.length === 0) {
-    throw new Error(`No numeric temperatures in NWS forecast for ${location.code}`);
-  }
+  if (temps.length === 0) throw new Error(`NWS: no numeric temperatures for ${location.code}`);
 
   const max = Math.max(...temps);
-  // Estimate the std dev from the spread of the hourly values around the max.
-  // This is a rough proxy until we wire in GFS ensemble data — typically 2-4°F
-  // for short-range forecasts on a clear day, larger when weather is volatile.
-  const variance = temps.reduce((sum, t) => sum + (t - max) * (t - max), 0) / temps.length;
-  const rawStdDev = Math.sqrt(variance);
-  const stdDev = Math.max(2, Math.min(8, rawStdDev / 2)); // clamp to plausible range
+  const variance = temps.reduce((sum: number, t: number) => sum + (t - max) ** 2, 0) / temps.length;
+  const stdDev = Math.max(2, Math.min(8, Math.sqrt(variance) / 2));
 
-  // Build bucketed distribution in 5°F spans from max-15 to max+15
+  const forecastDate = new Date().toLocaleDateString("en-CA", { timeZone: location.timezone });
   const distribution: Record<string, number> = {};
   for (let lo = Math.floor(max) - 15; lo <= Math.floor(max) + 15; lo += 5) {
-    const hi = lo + 5;
-    distribution[`${lo}-${hi}`] = bucketProbability(lo, hi, max, stdDev);
+    distribution[`${lo}-${lo + 5}`] = bucketProbability(lo, lo + 5, max, stdDev);
   }
 
   return {
     location: location.code,
-    forecastDate: new Date().toISOString().split("T")[0],
+    forecastDate,
     source: "nws_hourly",
     expectedHigh: max,
     stdDev,
     distribution,
   };
+}
+
+/**
+ * Main entry point: tries GFS ensemble first, falls back to NWS hourly.
+ * Callers should always use this rather than calling the individual fetchers.
+ */
+export async function fetchForecast(location: WeatherLocation): Promise<WeatherForecast> {
+  try {
+    return await fetchGfsEnsembleForecast(location);
+  } catch (gfsErr) {
+    console.warn(`GFS ensemble failed for ${location.code} (${gfsErr instanceof Error ? gfsErr.message : gfsErr}), falling back to NWS`);
+    return await fetchNwsForecast(location);
+  }
 }

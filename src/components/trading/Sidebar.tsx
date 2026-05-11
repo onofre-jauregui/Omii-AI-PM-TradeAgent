@@ -2,7 +2,7 @@ import { useState } from "react";
 import {
   LayoutDashboard, TrendingUp, Cpu, MessageSquare, ClipboardList,
   ShieldCheck, Settings, User, ChevronLeft, ChevronRight, Activity, Bot, LogOut,
-  FlaskConical,
+  FlaskConical, BarChart2,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { id: "markets", label: "Markets", icon: TrendingUp },
   { id: "strategies", label: "Strategies", icon: Cpu },
   { id: "demo", label: "Demo", icon: FlaskConical },
+  { id: "performance", label: "Performance", icon: BarChart2 },
   { id: "agent", label: "Live Agent", icon: MessageSquare },
   { id: "log", label: "Trade Log", icon: ClipboardList },
   { id: "compliance", label: "Compliance", icon: ShieldCheck },

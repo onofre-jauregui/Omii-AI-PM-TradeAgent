@@ -7,7 +7,14 @@
  *                         functions called directly from the browser SDK
  */
 
-const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") || "*";
+const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") ?? (() => {
+  // Warn in prod if this env var is not set — open CORS is acceptable for
+  // local dev but should be locked down before going public.
+  if (Deno.env.get("DENO_DEPLOYMENT_ID")) {
+    console.warn("CORS: ALLOWED_ORIGIN not set in a deployed function — defaulting to *. Set ALLOWED_ORIGIN to your frontend domain.");
+  }
+  return "*";
+})();
 
 export const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": ALLOWED_ORIGIN,

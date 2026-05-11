@@ -557,9 +557,10 @@ serve(async (req) => {
       .from("agent_memory")
       .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
       .eq("is_active", true)
+      .is("merged_into", null) // merged originals stay in DB but are excluded here; use recall_lessons to retrieve them
       .order("confidence", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(30); // fetch more, then trim to budget
+      .limit(30);
 
     let memoryBlock = "";
     if (topMemories && topMemories.length > 0) {
@@ -624,65 +625,18 @@ serve(async (req) => {
       modeNote +
       `
 
-You have access to these tools:
+## Tool Workflow
+recall_lessons → fetch_signals → scan_surface → check_portfolio → execute → save_insight/reflect_on_trades
 
-### Signal & Surface Tools (use these FIRST)
-1. **fetch_signals** — pre-scored market shortlist with direction (buy_yes / buy_no / skip) and composite_score. Start every session here.
-2. **scan_surface** — finds cross-market inconsistencies: monotonicity violations (arb), bracket sum violations (collective mispricing), spread anomalies. Run at least once per session.
+- Arb alerts (monotonicity_violation, bracket_sum_violation): **execute_basket** only — never execute_trade for 2-leg arb (naked exposure risk)
+- Single-leg signals: **execute_trade** with reasoning + expectedOutcome + confidenceLevel
+- composite_score ≥ 0.65 = strong; direction "skip" = pass
+- Kalshi prices in cents (1-99); YES+NO=100; use LIMIT orders; wide spread = low liquidity
 
-### Execution Tools
-3. **execute_basket** — for multi-leg arb trades from scan_surface alerts. Executes legs in order, re-checks edge after each fill, auto-flattens if basket can't complete. Use this for monotonicity_violation and bracket_sum_violation alerts — NEVER use execute_trade for arb.
-4. **execute_trade** — single-leg limit orders. Use for Resolution Fade, Economic Consensus, and Liquidity Provision strategies.
-5. **cancel_order** — cancel an open limit order by order ID.
-6. **check_portfolio** — current positions, balance, and P&L.
-7. **fetch_live_markets** — raw market data for deep-dive on specific tickers.
+## Conversation Memory
+Save user preferences via save_insight (tag "user_preference"): risk limits, market interests, style, strategy directives. Use memoryType "lesson", "market_note", or "strategy_insight".
 
-### Memory & Learning Tools
-8. **recall_lessons** — search persistent memory before making decisions.
-9. **reflect_on_trades** — analyze recent completed trades to learn from outcomes.
-10. **save_insight** — save a lesson, pattern, or insight to persistent memory.
-11. **update_memory** — confirm, contradict, or deactivate existing memories.
-
-### Optimal Trading Workflow
-1. recall_lessons — what do you already know?
-2. fetch_signals — get the scored shortlist
-3. scan_surface — find structural edge / arb
-4. check_portfolio — current exposure
-5. For arb alerts: execute_basket (2+ legs, auto-flatten protection)
-6. For single-leg signals: execute_trade (with reasoning + expectedOutcome + confidenceLevel)
-7. save_insight / reflect_on_trades — learn from the session
-
-### Critical Rule: execute_basket vs execute_trade
-- Surface arb (monotonicity_violation, bracket_sum_violation) → **execute_basket**
-- Everything else → **execute_trade**
-- Never use execute_trade for a 2-leg arb — if leg 2 fails you have naked exposure
-
-### Signal Interpretation
-- composite_score ≥ 0.65 = strong, prioritize
-- direction "buy_yes" = YES underpriced, direction "buy_no" = NO underpriced
-- direction "skip" = insufficient edge or liquidity
-
-### Surface Alert Interpretation
-- monotonicity_violation = near-riskless arb → execute_basket immediately
-- bracket_sum_violation = collective mispricing → execute_basket on top 2 liquid markets
-- spread_anomaly = wide spread → execute_trade with limit at mid
-
-Important Kalshi-specific notes:
-- Prices are in cents (1-99). YES price + NO price = 100.
-- Use LIMIT orders by default for better execution.
-- Always check the bid-ask spread before trading. Wide spreads mean low liquidity.
-- Never exceed position size limits.
-
-### Conversation Memory
-When the user tells you something important — preferences, risk tolerance, market interests, instructions about how to trade, corrections to your behavior, or any directive that should persist — use **save_insight** to remember it. Use memoryType "lesson" for trading preferences, "market_note" for market interests, or "strategy_insight" for strategy-specific guidance. Tag with "user_preference" so you can recall these later. This way you remember what the user told you across sessions.
-
-Examples of things to save:
-- "I only want to trade crypto markets" → save as market_note with tags ["user_preference", "crypto"]
-- "Never risk more than $20 per trade" → save as lesson with tags ["user_preference", "risk"]
-- "I like contrarian plays" → save as lesson with tags ["user_preference", "style"]
-- "Stop trading momentum, it's not working" → save as strategy_insight
-
-Always be transparent about your reasoning and risk assessment. Format responses with markdown.`;
+Format responses with markdown. Be transparent about reasoning and risk.`;
 
     // ── All tools ──
     const allTools = [
@@ -970,16 +924,17 @@ Always be transparent about your reasoning and risk assessment. Format responses
           try {
             const { data: recentTrades } = await supabase
               .from("trades")
-              .select("*")
+              .select("ticker, side, action, price, amount, pnl, strategy, status, created_at")
               .order("created_at", { ascending: false })
               .limit(10);
 
             const { data: openPositions } = await supabase
               .from("trades")
-              .select("*")
+              .select("ticker, market_question, side, action, price, amount, pnl, strategy, status, created_at")
               .in("status", ["filled", "open", "partial"])
               .eq("action", "buy")
-              .order("created_at", { ascending: false });
+              .order("created_at", { ascending: false })
+              .limit(20);
 
             const today = new Date().toISOString().split("T")[0];
             const { data: riskState } = await supabase
@@ -1011,7 +966,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
             const limit = args.limit || 20;
             let query = supabase
               .from("trades")
-              .select("id, ticker, market_question, side, action, price, amount, pnl, strategy, strategy_id, notes, status, filled_price, created_at")
+              .select("id, ticker, side, action, price, amount, pnl, strategy, strategy_id, status, created_at")
               .eq("status", "filled")
               .order("created_at", { ascending: false })
               .limit(limit);
@@ -1071,7 +1026,7 @@ Always be transparent about your reasoning and risk assessment. Format responses
             const limit = args.limit || 10;
             let query = supabase
               .from("agent_memory")
-              .select("*")
+              .select("id, memory_type, title, content, tags, confidence, strategy_id, created_at")
               .eq("is_active", true)
               .order("confidence", { ascending: false })
               .order("created_at", { ascending: false })
@@ -1152,10 +1107,8 @@ Always be transparent about your reasoning and risk assessment. Format responses
               updates.confidence = Math.min(0.95, (existing.confidence || 0.5) + 0.1);
             } else if (args.action === "contradict") {
               updates.contradictions = (existing.contradictions || 0) + 1;
-              // Lower confidence by 15%
+              // Lower confidence by 15%, floor at 0.05 — never deactivate automatically
               updates.confidence = Math.max(0.05, (existing.confidence || 0.5) - 0.15);
-              // Auto-deactivate if too many contradictions
-              if (updates.confidence < 0.15) updates.is_active = false;
             } else if (args.action === "deactivate") {
               updates.is_active = false;
             } else if (args.action === "update_content" && args.newContent) {
