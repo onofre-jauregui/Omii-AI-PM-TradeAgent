@@ -1,8 +1,7 @@
 import { useState } from "react";
 import {
-  LayoutDashboard, TrendingUp, Cpu, MessageSquare, ClipboardList,
-  ShieldCheck, Settings, User, ChevronLeft, ChevronRight, Activity, Bot, LogOut,
-  FlaskConical, BarChart2,
+  LayoutDashboard, BarChart2, Settings, ChevronLeft, ChevronRight,
+  Activity, Bot, LogOut,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
@@ -16,18 +15,12 @@ interface SidebarProps {
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "markets", label: "Markets", icon: TrendingUp },
-  { id: "strategies", label: "Strategies", icon: Cpu },
-  { id: "demo", label: "Demo", icon: FlaskConical },
-  { id: "performance", label: "Performance", icon: BarChart2 },
-  { id: "agent", label: "Live Agent", icon: MessageSquare },
-  { id: "log", label: "Trade Log", icon: ClipboardList },
-  { id: "compliance", label: "Compliance", icon: ShieldCheck },
+  { id: "agent",     label: "Agent",     icon: Bot },
+  { id: "markets",   label: "Markets",   icon: BarChart2 },
 ];
 
 const BOTTOM_ITEMS = [
   { id: "settings", label: "Settings", icon: Settings },
-  { id: "profile", label: "Profile", icon: User },
 ];
 
 export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
@@ -69,7 +62,6 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5">
         {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
           const active = activeTab === id;
-          const isDemo = id === "demo";
           return (
             <button
               key={id}
@@ -77,23 +69,14 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
               className={cn(
                 "w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm transition-all duration-200",
                 active
-                  ? isDemo
-                    ? "bg-primary/10 text-primary font-medium"
-                    : "bg-secondary text-foreground font-medium"
-                  : isDemo
-                    ? "text-primary/70 hover:bg-primary/10 hover:text-primary"
-                    : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+                  ? "bg-secondary text-foreground font-medium"
+                  : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
                 collapsed && "justify-center px-0"
               )}
               title={collapsed ? label : undefined}
             >
               <Icon className="h-4 w-4 shrink-0" />
               {!collapsed && <span className="truncate">{label}</span>}
-              {!collapsed && isDemo && (
-                <span className="ml-auto text-[9px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
-                  Paper
-                </span>
-              )}
             </button>
           );
         })}
@@ -147,7 +130,7 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
                 <p className="text-xs font-medium text-foreground truncate">
                   {userEmail ?? "Trader"}
                 </p>
-                <p className="text-[10px] text-muted-foreground truncate">Live mode</p>
+                <p className="text-[10px] text-muted-foreground truncate">TradeAgent</p>
               </div>
               <button
                 onClick={() => supabase.auth.signOut()}

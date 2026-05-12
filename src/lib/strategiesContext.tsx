@@ -184,6 +184,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     const newStrat = { ...strategy, id };
     setStrategies(prev => [...prev, newStrat]);
 
+    const { data: { session } } = await supabase.auth.getSession();
     await supabase.from("strategies").insert({
       id,
       name: strategy.name,
@@ -192,6 +193,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
       active: strategy.active,
       mode: strategy.mode || "paper",
       starting_balance: strategy.starting_balance || 1000,
+      user_id: session?.user?.id ?? null,
     });
   }, [strategies]);
 

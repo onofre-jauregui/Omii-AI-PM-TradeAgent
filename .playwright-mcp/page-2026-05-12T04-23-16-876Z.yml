@@ -1,0 +1,30 @@
+- generic [ref=e2]:
+  - region "Notifications (F8)":
+    - list
+  - region "Notifications alt+T"
+  - generic [ref=e236]:
+    - generic [ref=e237]:
+      - generic [ref=e238]:
+        - img [ref=e239]
+        - generic [ref=e242]: Omii TradeAgent
+      - paragraph [ref=e243]: AI-powered Kalshi trading
+    - generic [ref=e244]:
+      - generic [ref=e245]:
+        - heading "Sign in" [level=2] [ref=e246]
+        - paragraph [ref=e247]: Access your trading dashboard
+      - button "Continue with Google" [ref=e248] [cursor=pointer]:
+        - img [ref=e249]
+        - text: Continue with Google
+      - generic [ref=e256]: or
+      - generic [ref=e258]:
+        - generic [ref=e259]:
+          - text: Email
+          - textbox "you@example.com" [ref=e260]
+        - generic [ref=e261]:
+          - text: Password
+          - generic [ref=e262]:
+            - textbox "••••••••" [ref=e263]
+            - button [ref=e264] [cursor=pointer]:
+              - img [ref=e265]
+        - button "Sign in" [ref=e268] [cursor=pointer]
+      - button "Don't have an account? Sign up" [ref=e270] [cursor=pointer]
