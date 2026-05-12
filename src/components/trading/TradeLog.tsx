@@ -4,6 +4,7 @@ import { ArrowUpRight, ArrowDownRight, Clock, Loader2, RefreshCw } from "lucide-
 import { Button } from "@/components/ui/button";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 interface Trade {
   id: string;
@@ -48,10 +49,20 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
   useEffect(() => {
     loadTrades();
 
-    // Subscribe to real-time updates
+    // Subscribe to real-time updates + fire toast on profitable close
     const channel = supabase
       .channel(`trades-realtime-${filterMode ?? "all"}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "trades" }, (payload) => {
+        if ((payload.new as Trade)?.pnl != null && (payload.new as Trade).pnl! > 0) {
+          const q = (payload.new as Trade).market_question ?? "";
+          toast.success(`+$${((payload.new as Trade).pnl!).toFixed(2)} · ${q.substring(0, 40)}${q.length > 40 ? "…" : ""}`, {
+            duration: 4000,
+            icon: "🎯",
+          });
+        }
+        loadTrades();
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "trades" }, () => {
         loadTrades();
       })
       .subscribe();
@@ -99,8 +110,8 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
           ) : (
             <div className="divide-y divide-border">
               {trades.map((trade) => (
-                <div key={trade.id} className="flex items-center gap-4 px-6 py-4 transition-colors duration-300 hover:bg-secondary/50">
-                  <div className={`p-2 rounded-xl ${trade.action === 'buy' ? 'bg-profit/10' : 'bg-loss/10'}`}>
+                <div key={trade.id} className="flex items-start gap-3 px-4 py-3.5 sm:px-6 sm:py-4 transition-colors duration-300 hover:bg-secondary/50">
+                  <div className={`p-1.5 sm:p-2 rounded-xl shrink-0 mt-0.5 ${trade.action === 'buy' ? 'bg-profit/10' : 'bg-loss/10'}`}>
                     {trade.action === 'buy' ? (
                       <ArrowUpRight className="h-4 w-4 text-profit" />
                     ) : (
@@ -108,13 +119,33 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground truncate">{trade.market_question}</p>
+                    {/* Top row: question + PnL (mobile inline, desktop separate column) */}
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-medium text-foreground line-clamp-2 sm:truncate leading-snug">
+                        {trade.market_question}
+                      </p>
+                      {trade.pnl !== null && trade.pnl !== 0 && (
+                        <p className={`text-sm font-semibold tabular-nums shrink-0 sm:hidden ${(trade.pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {(trade.pnl ?? 0) >= 0 ? '+' : ''}${(trade.pnl ?? 0).toFixed(2)}
+                        </p>
+                      )}
+                    </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {new Date(trade.created_at).toLocaleString()} · {trade.strategy || "Manual"}
                       {trade.order_id && <span className="font-mono ml-1">#{trade.order_id.slice(0, 8)}</span>}
                     </p>
+                    {/* Mobile badges inline */}
+                    <div className="flex items-center gap-1.5 mt-1 sm:hidden">
+                      <Badge variant="secondary" className={`text-[10px] rounded-full font-normal ${statusColor(trade.status)}`}>
+                        {trade.status}
+                      </Badge>
+                      <Badge variant="secondary" className="text-[10px] rounded-full font-normal">
+                        {trade.mode}
+                      </Badge>
+                    </div>
                   </div>
-                  <div className="text-right">
+                  {/* Desktop: right column with PnL + badges */}
+                  <div className="hidden sm:flex flex-col items-end gap-1 shrink-0">
                     <p className="text-xs text-muted-foreground">
                       {trade.action.toUpperCase()} {trade.side.toUpperCase()} @ {trade.filled_price || trade.price}c
                     </p>
@@ -124,8 +155,6 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
                         {(trade.pnl ?? 0) >= 0 ? '+' : ''}${(trade.pnl ?? 0).toFixed(2)}
                       </p>
                     )}
-                  </div>
-                  <div className="flex flex-col items-end gap-1">
                     <Badge variant="secondary" className={`text-[10px] rounded-full font-normal ${statusColor(trade.status)}`}>
                       {trade.status}
                     </Badge>

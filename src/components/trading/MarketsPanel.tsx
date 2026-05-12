@@ -137,9 +137,10 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
         </p>
       </div>
 
-      {/* Search + filters row */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="relative flex-1 min-w-[200px]">
+      {/* Search + filters */}
+      <div className="space-y-2.5">
+        {/* Search always full width */}
+        <div className="relative w-full">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search markets or tickers..."
@@ -148,47 +149,50 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
             className="pl-11 rounded-xl bg-card border-0 apple-shadow h-11 text-sm"
           />
         </div>
-        <Select value={horizon} onValueChange={(v) => setHorizon(v as Horizon)}>
-          <SelectTrigger className="h-11 w-48 rounded-xl border-0 bg-card apple-shadow text-sm">
-            <Clock className="h-3.5 w-3.5 text-muted-foreground mr-1" />
-            <SelectValue placeholder="Close date" />
-          </SelectTrigger>
-          <SelectContent>
-            {HORIZON_OPTIONS.map(o => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
-          <SelectTrigger className="h-11 w-40 rounded-xl border-0 bg-card apple-shadow text-sm">
-            <SelectValue placeholder="Sort by" />
-          </SelectTrigger>
-          <SelectContent>
-            {SORT_OPTIONS.map(o => (
-              <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Button
-          variant="secondary"
-          onClick={loadMarkets}
-          disabled={loading}
-          className="rounded-xl h-11 gap-2 text-sm shrink-0"
-        >
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          Refresh
-        </Button>
+        {/* Filters: horizontal scroll on mobile */}
+        <div className="flex items-center gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0 pb-0.5">
+          <Select value={horizon} onValueChange={(v) => setHorizon(v as Horizon)}>
+            <SelectTrigger className="h-10 w-44 shrink-0 rounded-xl border-0 bg-card apple-shadow text-sm">
+              <Clock className="h-3.5 w-3.5 text-muted-foreground mr-1" />
+              <SelectValue placeholder="Close date" />
+            </SelectTrigger>
+            <SelectContent>
+              {HORIZON_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
+            <SelectTrigger className="h-10 w-36 shrink-0 rounded-xl border-0 bg-card apple-shadow text-sm">
+              <SelectValue placeholder="Sort by" />
+            </SelectTrigger>
+            <SelectContent>
+              {SORT_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="secondary"
+            onClick={loadMarkets}
+            disabled={loading}
+            className="rounded-xl h-10 gap-2 text-sm shrink-0"
+          >
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            Refresh
+          </Button>
+        </div>
       </div>
 
-      {/* Category pills */}
+      {/* Category pills — horizontal scroll on mobile */}
       {categories.length > 1 && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0 sm:flex-wrap pb-0.5">
           {categories.map(cat => (
             <button
               key={cat}
               onClick={() => setActiveCategory(cat)}
               className={cn(
-                "rounded-full px-3 py-1 text-xs font-medium transition-all duration-200",
+                "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 shrink-0",
                 activeCategory === cat
                   ? "bg-foreground text-background"
                   : "bg-card apple-shadow text-muted-foreground hover:text-foreground hover:bg-secondary"
@@ -248,10 +252,10 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
               className="rounded-2xl bg-card p-5 apple-shadow cursor-pointer transition-shadow duration-300 hover:apple-shadow-hover"
               onClick={() => setSelectedMarket(market)}
             >
-              <div className="flex items-start justify-between gap-6">
+              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-6">
                 <div className="flex-1 space-y-1.5">
                   <h3 className="text-sm font-medium leading-snug text-foreground">{market.question}</h3>
-                  <div className="flex items-center gap-4 text-xs text-muted-foreground flex-wrap">
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
                     <span className="flex items-center gap-1">
                       <Users className="h-3 w-3" /> {formatVolume(market.volume)}
                     </span>
@@ -271,7 +275,8 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                     </Badge>
                   </div>
                 </div>
-                <div className="text-right space-y-2 shrink-0">
+                {/* Prices + Trade button — row on mobile, column on desktop */}
+                <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 sm:gap-2 shrink-0">
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-muted-foreground w-5">Yes</span>
@@ -291,7 +296,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    className="text-xs h-7 px-3 w-full"
+                    className="text-xs h-10 sm:h-7 px-4 sm:px-3 sm:w-full min-w-[72px]"
                     onClick={(e) => { e.stopPropagation(); setTradeMarket(market); }}
                   >
                     Trade

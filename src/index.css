@@ -159,4 +159,18 @@
       transform: translateY(0);
     }
   }
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  .animate-pulse-gentle {
+    animation: pulseGently 2s ease-in-out infinite;
+  }
+  @keyframes pulseGently {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.65; }
+  }
 }

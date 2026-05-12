@@ -109,7 +109,7 @@ export function PortfolioChart({
       <div className="flex items-end justify-between">
         <div>
           <p className="text-muted-foreground text-sm mb-1">{label}</p>
-          <h1 className="text-5xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.03em' }}>
+          <h1 className="text-4xl sm:text-5xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.03em' }}>
             ${currentValue.toLocaleString()}
           </h1>
         </div>
@@ -120,7 +120,7 @@ export function PortfolioChart({
           </p>
         </div>
       </div>
-      <div className="rounded-2xl bg-card p-6 apple-shadow">
+      <div className="rounded-2xl bg-card p-4 sm:p-6 apple-shadow">
         <ChartContainer config={chartConfig} className="h-[200px] w-full">
           <AreaChart data={chartData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
             <defs>

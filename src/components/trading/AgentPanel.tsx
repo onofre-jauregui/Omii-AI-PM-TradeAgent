@@ -280,7 +280,7 @@ export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
         </div>
 
         {/* Chat */}
-        <div className="md:col-span-3 rounded-2xl bg-card apple-shadow flex flex-col h-[700px] overflow-hidden">
+        <div className="md:col-span-3 rounded-2xl bg-card apple-shadow flex flex-col h-[60vh] md:h-[700px] min-h-[400px] overflow-hidden">
           <div className="px-5 py-4 border-b border-border flex items-center justify-between">
             <div className="flex items-center gap-2">
               <MessageSquare className="h-4 w-4 text-muted-foreground" />

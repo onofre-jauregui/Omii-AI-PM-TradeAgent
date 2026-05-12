@@ -254,16 +254,16 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
             {positions.map((pos, i) => (
               <div
                 key={`${pos.market_id}-${i}`}
-                className="flex items-center justify-between py-4 border-b border-border last:border-0"
+                className="flex items-start justify-between py-4 border-b border-border last:border-0"
               >
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-foreground">{pos.market_question}</p>
+                <div className="flex-1 pr-3 min-w-0">
+                  <p className="text-sm font-medium text-foreground line-clamp-2">{pos.market_question}</p>
                   <p className="text-xs text-muted-foreground mt-1">
                     {pos.side.toUpperCase()} @ {pos.filled_price || pos.price}c · ${pos.amount}
                     {pos.strategy && <span> · {pos.strategy}</span>}
                   </p>
                 </div>
-                <div className="text-right">
+                <div className="text-right shrink-0">
                   {pos.pnl !== null && pos.pnl !== 0 && (
                     <p className={`text-sm font-medium tabular-nums ${(pos.pnl ?? 0) >= 0 ? "text-profit" : "text-loss"}`}>
                       {(pos.pnl ?? 0) >= 0 ? "+" : ""}${(pos.pnl ?? 0).toFixed(2)}
@@ -284,7 +284,7 @@ function StatCard({ icon: Icon, label, value, valueClass = "text-foreground", su
   icon: React.ElementType; label: string; value: string; valueClass?: string; sub?: string;
 }) {
   return (
-    <div className="rounded-2xl bg-card p-5 apple-shadow transition-shadow duration-300 hover:apple-shadow-hover">
+    <div className="rounded-2xl bg-card p-4 sm:p-5 apple-shadow transition-shadow duration-300 hover:apple-shadow-hover">
       <div className="flex items-center gap-2 mb-2">
         <Icon className="h-4 w-4 text-muted-foreground" />
         <span className="text-xs text-muted-foreground">{label}</span>

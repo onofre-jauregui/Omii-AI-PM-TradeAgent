@@ -92,21 +92,20 @@ export function CompliancePanel() {
   };
 
   return (
-    <div className="space-y-6 apple-reveal">
+    <div className="space-y-4 apple-reveal">
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.02em' }}>Compliance Log</h2>
-          <p className="text-sm text-muted-foreground mt-1">Audit trail of all trade executions, risk checks, and system events.</p>
-        </div>
         <div className="flex items-center gap-2">
-          {/* Live indicator */}
-          <div className="flex items-center gap-1.5 text-xs text-profit mr-1">
-            <span className="relative flex h-2 w-2">
+          <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium text-muted-foreground">Compliance Log</h3>
+          <div className="flex items-center gap-1.5 text-xs text-profit">
+            <span className="relative flex h-1.5 w-1.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-profit" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-profit" />
             </span>
             Live
           </div>
+        </div>
+        <div className="flex items-center gap-2">
           <Button variant="secondary" size="sm" onClick={exportLog} className="rounded-full gap-1 text-xs">
             <Download className="h-3 w-3" /> Export CSV
           </Button>
@@ -153,7 +152,7 @@ export function CompliancePanel() {
             </Button>
           )}
         </div>
-        <ScrollArea className="h-[500px]">
+        <ScrollArea className="h-[220px]">
           {loading && entries.length === 0 ? (
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />

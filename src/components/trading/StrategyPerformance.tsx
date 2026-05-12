@@ -209,7 +209,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
               const balance = stats?.balance ?? strat.starting_balance;
 
               return (
-                <div key={strat.id} className="flex items-center gap-4 px-6 py-4 hover:bg-secondary/50 transition-colors">
+                <div key={strat.id} className="flex items-center gap-3 px-4 py-3.5 sm:px-6 sm:py-4 hover:bg-secondary/50 transition-colors">
                   <span className="text-lg font-light text-muted-foreground w-6 text-center tabular-nums">
                     {rank + 1}
                   </span>
@@ -229,7 +229,8 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                       {stats?.totalTrades ?? 0} trades · {stats?.winningTrades ?? 0}W / {stats?.losingTrades ?? 0}L
                     </p>
                   </div>
-                  <div className="grid grid-cols-4 gap-4 text-right">
+                  {/* Desktop: 4-col stats */}
+                  <div className="hidden sm:grid grid-cols-4 gap-4 text-right">
                     <div>
                       <p className="text-[9px] text-muted-foreground">Balance</p>
                       <p className="text-xs font-medium tabular-nums">${Math.round(balance).toLocaleString()}</p>
@@ -252,6 +253,15 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                         {stats?.totalTrades ? `${stats.winRate}%` : '--'}
                       </p>
                     </div>
+                  </div>
+                  {/* Mobile: compact PnL + ROI only */}
+                  <div className="sm:hidden flex flex-col items-end gap-0.5 shrink-0">
+                    <p className={`text-xs font-semibold tabular-nums ${pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}
+                    </p>
+                    <p className={`text-[10px] text-muted-foreground tabular-nums ${roi >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {roi >= 0 ? '+' : ''}{roi.toFixed(1)}%
+                    </p>
                   </div>
                 </div>
               );

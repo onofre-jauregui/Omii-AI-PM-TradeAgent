@@ -29,7 +29,7 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
   return (
     <aside
       className={cn(
-        "flex flex-col h-screen sticky top-0 bg-card border-r border-border transition-all duration-300 ease-in-out shrink-0",
+        "hidden md:flex flex-col h-screen sticky top-0 bg-card border-r border-border transition-all duration-300 ease-in-out shrink-0",
         collapsed ? "w-[56px]" : "w-[220px]"
       )}
     >
