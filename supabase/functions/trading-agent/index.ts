@@ -248,6 +248,71 @@ const SCAN_SURFACE_TOOL = {
   },
 };
 
+const SEARCH_WEB_TOOL = {
+  type: "function",
+  function: {
+    name: "search_web",
+    description:
+      "Search the web for current events, news, or data relevant to a Kalshi market. Use for: upcoming FOMC decisions, weather outlooks, economic reports, sports schedules, political events. Returns up to 5 recent results with title, URL, and content snippet.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        focus: {
+          type: "string",
+          enum: ["news", "finance", "weather", "sports"],
+          description: "Optional search focus to improve result relevance",
+        },
+      },
+      required: ["query"],
+    },
+  },
+};
+
+const CREATE_STRATEGY_TOOL = {
+  type: "function",
+  function: {
+    name: "create_strategy",
+    description:
+      "Create a new trading strategy from a user description. Saves it as inactive — the user must activate it in the Strategies tab. Use when the user asks to create, define, or set up a strategy.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Short display name for the strategy" },
+        instructions: {
+          type: "string",
+          description: "Natural language rules for how the agent should qualify and trade signals for this strategy",
+        },
+        market_types: {
+          type: "array",
+          items: { type: "string" },
+          description: "Market series this strategy targets, e.g. [\"weather\", \"fomc\", \"crypto\"]",
+        },
+      },
+      required: ["name", "instructions"],
+    },
+  },
+};
+
+const TRIGGER_STRATEGY_RUN_TOOL = {
+  type: "function",
+  function: {
+    name: "trigger_strategy_run",
+    description:
+      "Manually trigger a strategy run right now without waiting for the 2-minute cron cycle. Use when the user asks the agent to 'go trade now', 'run a strategy', or 'execute S-002'. Returns the compliance log message from the run.",
+    parameters: {
+      type: "object",
+      properties: {
+        strategy_id: {
+          type: "string",
+          description: "Strategy ID to run, e.g. 'S-002' or 'S-005'",
+        },
+      },
+      required: ["strategy_id"],
+    },
+  },
+};
+
 // ─── Provider routing ───────────────────────────────────────────────────────
 
 type Provider = "openrouter" | "anthropic" | "openai" | "google";
@@ -625,6 +690,15 @@ serve(async (req) => {
       modeNote +
       `
 
+## Kalshi Market Catalogue
+- **KXHIGH[CITY]** — Daily high temperature (NY, CHI, LA, MIA, AUS, PHX, SEA, DAL). Settles at midnight local. Active strategies: S-002, S-005.
+- **KXFED** — Federal Reserve rate decisions (FOMC meetings). **HARD REJECTED** — confirmed zero liquidity in paper markets (agent memory conf=0.99).
+- **KXBTC** — Bitcoin price levels (daily/weekly). Monitor — no active strategy yet.
+- **KXETH** — Ethereum price levels. **HARD REJECTED** — consistent losses confirmed.
+- **KXGDP / KXPAYROLLS / KXCPI** — US macro reports. High edge potential on consensus vs Kalshi divergence. No active strategy yet.
+- **KXNHL / KXNBA / KXMLB** — Sports outcomes. No active strategy.
+When the user asks about a market or event, map it to the relevant KXSERIES above. Use **search_web** for current news on any of these before trading.
+
 ## Tool Workflow
 recall_lessons → fetch_signals → scan_surface → check_portfolio → execute → save_insight/reflect_on_trades
 
@@ -651,6 +725,9 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
       RECALL_LESSONS_TOOL,
       SAVE_INSIGHT_TOOL,
       UPDATE_MEMORY_TOOL,
+      SEARCH_WEB_TOOL,
+      CREATE_STRATEGY_TOOL,
+      TRIGGER_STRATEGY_RUN_TOOL,
     ];
 
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
@@ -1226,6 +1303,93 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
         // ── Unknown tool ──
         else {
           toolResult = JSON.stringify({ error: "Unknown tool" });
+        }
+
+        // ── search_web ──
+        else if (fnName === "search_web") {
+          try {
+            const tavilyKey = Deno.env.get("TAVILY_API_KEY");
+            if (!tavilyKey) {
+              toolResult = JSON.stringify({ error: "Web search not configured — add TAVILY_API_KEY secret" });
+            } else {
+              const resp = await fetch("https://api.tavily.com/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  api_key: tavilyKey,
+                  query: args.query,
+                  search_depth: "basic",
+                  max_results: 5,
+                  ...(args.focus ? { topic: args.focus } : {}),
+                }),
+              });
+              if (!resp.ok) {
+                toolResult = JSON.stringify({ error: `Tavily error: ${resp.status}` });
+              } else {
+                const data = await resp.json();
+                const results = (data.results || []).map((r: any) => ({
+                  title: r.title,
+                  url: r.url,
+                  content: r.content?.slice(0, 400),
+                }));
+                toolResult = JSON.stringify({ query: args.query, results });
+              }
+            }
+          } catch (e: any) {
+            toolResult = JSON.stringify({ error: "Web search failed: " + e.message });
+          }
+        }
+
+        // ── create_strategy ──
+        else if (fnName === "create_strategy") {
+          try {
+            const { data: newStrategy, error: insertErr } = await supabase
+              .from("strategies")
+              .insert({
+                name: args.name,
+                instructions: args.instructions,
+                market_types: args.market_types || [],
+                active: false,
+                mode: "paper",
+                user_id: userId,
+              })
+              .select("id, name")
+              .single();
+            if (insertErr) throw new Error(insertErr.message);
+            toolResult = JSON.stringify({
+              success: true,
+              strategy_id: newStrategy.id,
+              message: `Strategy "${newStrategy.name}" created (inactive). Activate it in the Strategies tab to start trading.`,
+            });
+          } catch (e: any) {
+            toolResult = JSON.stringify({ success: false, error: "Strategy creation failed: " + e.message });
+          }
+        }
+
+        // ── trigger_strategy_run ──
+        else if (fnName === "trigger_strategy_run") {
+          try {
+            const autoTradeUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/auto-trade`;
+            const resp = await fetch(autoTradeUrl, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ strategy_id: args.strategy_id, run_mode: "manual" }),
+            });
+            const runData = await resp.json();
+            toolResult = JSON.stringify({
+              success: resp.ok,
+              strategy_id: args.strategy_id,
+              result: runData,
+              message: resp.ok
+                ? `Strategy ${args.strategy_id} run triggered. Check Trade Log for new trades.`
+                : `Run failed: ${JSON.stringify(runData)}`,
+            });
+          } catch (e: any) {
+            toolResult = JSON.stringify({ success: false, error: "Trigger failed: " + e.message });
+          }
         }
 
         aiMessages.push({

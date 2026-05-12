@@ -69,7 +69,7 @@ const Index = () => {
               <PortfolioOverview mode="live" />
             </div>
           )}
-          {activeTab === "markets" && <MarketsPanel />}
+          {activeTab === "markets" && <MarketsPanel mode="paper" />}
           {activeTab === "strategies" && <StrategiesPanel />}
           {activeTab === "demo" && <DemoPanel />}
           {activeTab === "agent" && <AgentPanel />}

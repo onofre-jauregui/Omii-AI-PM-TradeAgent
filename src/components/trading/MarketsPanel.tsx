@@ -8,6 +8,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { fetchKalshiMarkets, formatVolume, type ParsedMarket } from "@/lib/kalshiApi";
 import { MOCK_MARKETS } from "@/lib/mockData";
 import { cn } from "@/lib/utils";
+import { TradeModal } from "./TradeModal";
 
 type SortKey = "volume" | "volume24h" | "yesPrice" | "noPrice" | "endDate";
 type Horizon = "any" | "today" | "week" | "month";
@@ -27,12 +28,17 @@ const HORIZON_OPTIONS: { value: Horizon; label: string; hours: number | null }[]
   { value: "month", label: "Closing this month", hours: 24 * 30 },
 ];
 
-export function MarketsPanel() {
+interface MarketsPanelProps {
+  mode?: "paper" | "live";
+}
+
+export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
   const [search, setSearch] = useState("");
   const [markets, setMarkets] = useState<ParsedMarket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<ParsedMarket | null>(null);
+  const [tradeMarket, setTradeMarket] = useState<ParsedMarket | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("All");
   const [sortBy, setSortBy] = useState<SortKey>("volume");
@@ -282,6 +288,14 @@ export function MarketsPanel() {
                       <span className="text-xs font-medium text-loss w-8 text-right">{market.noPrice}c</span>
                     </div>
                   </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-xs h-7 px-3 w-full"
+                    onClick={(e) => { e.stopPropagation(); setTradeMarket(market); }}
+                  >
+                    Trade
+                  </Button>
                 </div>
               </div>
             </div>
@@ -370,6 +384,13 @@ export function MarketsPanel() {
           )}
         </DialogContent>
       </Dialog>
+
+      <TradeModal
+        market={tradeMarket}
+        open={!!tradeMarket}
+        onClose={() => setTradeMarket(null)}
+        mode={mode}
+      />
     </div>
   );
 }

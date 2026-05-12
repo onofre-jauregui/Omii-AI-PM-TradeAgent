@@ -1,9 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { Area, AreaChart, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
+import { Area, AreaChart, BarChart, Bar, Cell, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import {
   TrendingUp, TrendingDown, Target, BarChart3,
-  Activity, Clock, RefreshCw, Bot,
+  Activity, Clock, RefreshCw, Bot, HelpCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -21,6 +21,12 @@ interface OverallStats {
   totalDeployed: number;
   daysRunning: number;
   firstTradeAt: string | null;
+  avgWin: number;
+  avgLoss: number;
+  profitFactor: number;
+  maxDrawdown: number;
+  pendingExposure: number;
+  avgHoldHours: number;
 }
 
 interface StrategyRow {
@@ -190,6 +196,12 @@ const ERA_LABELS: Record<Era, string> = {
 
 const OPEN_POSITIONS_DEFAULT_SHOW = 6;
 
+const STRATEGY_DESCRIPTIONS: Record<string, string> = {
+  "S-002": "Buys NO on highly-priced contracts (90–95¢), betting on market overconfidence",
+  "S-005": "Trades NWS forecast vs Kalshi implied temperature divergence",
+  "S-001": "FedWatch Oracle — CME futures vs Kalshi rate market divergence (paused)",
+};
+
 export function PerformancePage() {
   const [stats, setStats] = useState<OverallStats | null>(null);
   const [strategyRows, setStrategyRows] = useState<StrategyRow[]>([]);
@@ -201,6 +213,8 @@ export function PerformancePage() {
   const [era, setEra] = useState<Era>("mtd");
   const [allTradesRaw, setAllTradesRaw] = useState<any[]>([]);
   const [showAllPositions, setShowAllPositions] = useState(false);
+  const [pendingExposure, setPendingExposure] = useState(0);
+  const [dailyPnl, setDailyPnl] = useState<{ date: string; pnl: number }[]>([]);
 
   const applyEra = useCallback((trades: any[], selectedEra: Era) => {
     const cutoff = ERA_CUTOFFS[selectedEra];
@@ -224,6 +238,32 @@ export function PerformancePage() {
       ? Math.max(1, Math.ceil((Date.now() - new Date(firstAt).getTime()) / 86_400_000))
       : 0;
 
+    // ── Extended stats ──
+    const grossWins = wins.reduce((s, t) => s + (t.pnl ?? 0), 0);
+    const grossLosses = Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0));
+    const avgWin = wins.length > 0 ? grossWins / wins.length : 0;
+    const avgLoss = losses.length > 0 ? grossLosses / losses.length : 0;
+    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? Infinity : 0);
+
+    const settledSortedForDd = [...settled].sort(
+      (a, b) => new Date(a.settled_at!).getTime() - new Date(b.settled_at!).getTime()
+    );
+    let runningDd = 0, ddPeak = 0, maxDd = 0;
+    for (const t of settledSortedForDd) {
+      runningDd += t.pnl ?? 0;
+      ddPeak = Math.max(ddPeak, runningDd);
+      maxDd = Math.max(maxDd, ddPeak - runningDd);
+    }
+
+    const pendingExposureVal = openPositions.reduce((s: number, t: any) => s + (t.amount ?? 0), 0);
+
+    const holdTimes = settled
+      .filter(t => t.settled_at && t.created_at)
+      .map(t => (new Date(t.settled_at!).getTime() - new Date(t.created_at).getTime()) / 3600000);
+    const avgHoldHours = holdTimes.length > 0 ? holdTimes.reduce((a, b) => a + b, 0) / holdTimes.length : 0;
+
+    setPendingExposure(pendingExposureVal);
+
     setStats({
       totalTrades: allTrades.length,
       settledTrades: settled.length,
@@ -235,6 +275,12 @@ export function PerformancePage() {
       totalDeployed,
       daysRunning,
       firstTradeAt: firstAt,
+      avgWin,
+      avgLoss,
+      profitFactor,
+      maxDrawdown: maxDd,
+      pendingExposure: pendingExposureVal,
+      avgHoldHours,
     });
 
     // ── Per-strategy rows ──
@@ -277,6 +323,21 @@ export function PerformancePage() {
       });
     }
     setEquityData(curve);
+
+    // ── Daily P&L ──
+    const dailyMap = new Map<string, number>();
+    for (const t of settled) {
+      if (!t.settled_at) continue;
+      const day = t.settled_at.slice(0, 10);
+      dailyMap.set(day, (dailyMap.get(day) ?? 0) + (t.pnl ?? 0));
+    }
+    const dailyPnlData = [...dailyMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, pnl]) => ({
+        date: new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        pnl: parseFloat(pnl.toFixed(2)),
+      }));
+    setDailyPnl(dailyPnlData);
 
     setRecentTrades(recentSettled as RecentTrade[]);
     setOpenTrades(openPositions as OpenTrade[]);
@@ -345,14 +406,16 @@ export function PerformancePage() {
               <button
                 key={e}
                 onClick={() => setEra(e)}
+                title={e === "redesign" ? "Hard price guard deployed May 7 — excludes contracts entered above 80¢" : undefined}
                 className={cn(
-                  "px-3 py-1 text-xs rounded-lg font-medium transition-colors",
+                  "px-3 py-1 text-xs rounded-lg font-medium transition-colors flex items-center gap-1",
                   era === e
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 {ERA_LABELS[e]}
+                {e === "redesign" && <HelpCircle className="h-3 w-3 opacity-50" />}
               </button>
             ))}
           </div>
@@ -375,6 +438,11 @@ export function PerformancePage() {
                   >
                     {formatPnl(currentPnl)}
                   </p>
+                  {pendingExposure > 0 && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      +${pendingExposure.toFixed(0)} pending in {openTrades.length} open position{openTrades.length !== 1 ? "s" : ""}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <Activity className="h-3 w-3" />
@@ -442,7 +510,74 @@ export function PerformancePage() {
               />
             </div>
 
-            {/* ── 3. Open Positions (collapsed to 6, expandable) ────────────── */}
+            {/* ── 3. Second stat row ────────────────────────────────────────── */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <StatCard
+                icon={TrendingUp}
+                label="Avg Win"
+                value={stats!.avgWin > 0 ? `+$${stats!.avgWin.toFixed(2)}` : "--"}
+                valueClass="text-profit"
+                sub="per settled win"
+              />
+              <StatCard
+                icon={TrendingDown}
+                label="Avg Loss"
+                value={stats!.avgLoss > 0 ? `-$${stats!.avgLoss.toFixed(2)}` : "--"}
+                valueClass="text-loss"
+                sub="per settled loss"
+              />
+              <StatCard
+                icon={BarChart3}
+                label="Profit Factor"
+                value={stats!.profitFactor === Infinity ? "∞" : stats!.profitFactor > 0 ? `${stats!.profitFactor.toFixed(2)}x` : "--"}
+                valueClass={stats!.profitFactor >= 1 ? "text-profit" : "text-loss"}
+                sub="gross wins ÷ losses"
+              />
+              <StatCard
+                icon={Activity}
+                label="Max Drawdown"
+                value={stats!.maxDrawdown > 0 ? `-$${stats!.maxDrawdown.toFixed(2)}` : "$0"}
+                valueClass={stats!.maxDrawdown > 0 ? "text-loss" : ""}
+                sub="peak-to-trough"
+              />
+            </div>
+
+            {/* ── 4. Daily P&L bar chart ────────────────────────────────────── */}
+            {dailyPnl.length > 1 && (
+              <div className="rounded-2xl bg-card p-6 apple-shadow">
+                <p className="text-xs text-muted-foreground mb-4 uppercase tracking-widest">Daily P&L</p>
+                <ResponsiveContainer width="100%" height={120}>
+                  <BarChart data={dailyPnl} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }} />
+                    <YAxis hide />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "12px", fontSize: "12px" }}
+                      formatter={(v: number) => [formatPnl(v), "P&L"]}
+                    />
+                    <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
+                      {dailyPnl.map((entry, i) => (
+                        <Cell key={i} fill={entry.pnl >= 0 ? "hsl(var(--profit))" : "hsl(var(--loss))"} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* ── 5. Benchmark callout ──────────────────────────────────────── */}
+            {stats!.settledTrades > 0 && stats!.realizedPnl !== 0 && (
+              <div className="flex items-center gap-3 px-1 text-xs text-muted-foreground">
+                <span className={cn("font-medium", stats!.realizedPnl >= 0 ? "text-profit" : "text-loss")}>
+                  Agent MTD: {((stats!.realizedPnl / Math.max(stats!.totalDeployed * 0.5, 1)) * (365 / Math.max(stats!.daysRunning, 1)) * 100).toFixed(0)}% ann.
+                </span>
+                <span>·</span>
+                <span>S&P 500: ~12%/yr</span>
+                <span>·</span>
+                <span>HY Savings: ~5%/yr</span>
+              </div>
+            )}
+
+            {/* ── 6. Open Positions (collapsed to 6, expandable) ────────────── */}
             {openTrades.length > 0 && (
               <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
                 <div className="px-6 py-4 border-b border-border flex items-center justify-between">
@@ -545,6 +680,11 @@ export function PerformancePage() {
                           <p className="text-xs text-muted-foreground mt-0.5">
                             {row.trades} trades · {row.settled} settled · ${row.deployed.toFixed(0)} deployed
                           </p>
+                          {(STRATEGY_DESCRIPTIONS[row.strategy_id ?? ""] || null) && (
+                            <p className="text-xs text-muted-foreground mt-0.5 italic">
+                              {STRATEGY_DESCRIPTIONS[row.strategy_id ?? ""]}
+                            </p>
+                          )}
                         </div>
                         <div className="grid grid-cols-3 gap-6 text-right">
                           <div>

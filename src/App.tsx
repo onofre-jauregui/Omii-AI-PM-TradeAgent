@@ -11,6 +11,7 @@ import type { Session } from "@supabase/supabase-js";
 import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import { AuthPage } from "./pages/AuthPage.tsx";
+import LandingPage from "./pages/LandingPage.tsx";
 import PerformancePage from "./pages/PerformancePage.tsx";
 import SignupPage from "./pages/SignupPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
@@ -29,7 +30,12 @@ function ProtectedApp({ session }: { session: Session | null | undefined }) {
   // Auth gate: every user must sign in before reaching the trading UI.
   // Set VITE_DISABLE_AUTH=true in .env.local for solo-developer / NULL-tenant mode.
   const authDisabled = import.meta.env.VITE_DISABLE_AUTH === "true";
-  if (!authDisabled && !session) return <AuthPage />;
+  if (!authDisabled && !session) {
+    // Root path shows the marketing landing page; everything else redirects to /login.
+    if (window.location.pathname === "/") return <LandingPage />;
+    window.location.replace("/login");
+    return null;
+  }
 
   // Check onboarding completion for authenticated users (skip in auth-disabled dev mode)
   if (session && !authDisabled && onboardingCompleted === null) {
@@ -84,6 +90,7 @@ function AppRoutes() {
     <BrowserRouter>
       <Routes>
         {/* Public — no auth required */}
+        <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/performance" element={<PerformancePage />} />
         {/* Auth-protected — admin + onboarding + billing */}

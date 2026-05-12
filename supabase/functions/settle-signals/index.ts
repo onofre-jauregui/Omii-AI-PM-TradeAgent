@@ -1,0 +1,179 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+
+/**
+ * settle-signals: Computes shadow PnL for all signals whose markets have resolved.
+ *
+ * This is the biggest data unlock in v2: we learn from signals we SKIPPED,
+ * not just signals we traded. This lets us measure qualifier ROI — whether
+ * the LLM qualifier is adding value or destroying it.
+ *
+ * Shadow PnL = what 1 contract would have made if we had taken the signal.
+ *   YES signals: settlement - entry_price (in cents, normalized to $)
+ *   NO signals:  (100 - settlement) - (100 - entry_price)
+ *
+ * Scheduled: every 15 minutes via pg_cron.
+ */
+
+function getKalshiBaseUrl(): string {
+  return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
+}
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") return preflight();
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !supabaseKey) {
+    return new Response(JSON.stringify({ error: "Missing Supabase credentials" }), {
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
+  try {
+    // ── 1. Find unsettled signals whose markets have likely resolved ─────────
+    // Use expires_at as a filter: only check signals past their expiration.
+    // This avoids unnecessary Kalshi API calls for active markets.
+    const { data: unsettledSignals } = await supabase
+      .from("signals")
+      .select("id, ticker, direction, mid_price, expires_at, system_version")
+      .is("settlement_price", null)
+      .lt("expires_at", new Date().toISOString())
+      .limit(200); // batch size — next run catches the rest
+
+    if (!unsettledSignals || unsettledSignals.length === 0) {
+      return new Response(JSON.stringify({ settled: 0, reason: "No unsettled signals past expiration" }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // ── 2. Group by ticker to avoid duplicate Kalshi API calls ───────────────
+    const tickerToSignals = new Map<string, typeof unsettledSignals>();
+    for (const sig of unsettledSignals) {
+      if (!tickerToSignals.has(sig.ticker)) tickerToSignals.set(sig.ticker, []);
+      tickerToSignals.get(sig.ticker)!.push(sig);
+    }
+
+    // ── 3. Fetch settlement data from Kalshi ─────────────────────────────────
+    const kalshiBase = getKalshiBaseUrl();
+    let settledCount = 0;
+    const results: { ticker: string; status: string; settlement?: string }[] = [];
+
+    // Use system service credentials for Kalshi API
+    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase, null);
+
+    for (const [ticker, signals] of tickerToSignals) {
+      try {
+        // Fetch market details to check settlement status
+        const marketPath = `/trade-api/v2/markets/${ticker}`;
+        const timestamp = Math.floor(Date.now() / 1000);
+        const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", marketPath, timestamp);
+
+        const marketResp = await fetch(`${kalshiBase}${marketPath}`, {
+          method: "GET",
+          headers: authHeaders,
+        });
+
+        if (!marketResp.ok) {
+          // Market not found or API error — mark as error and skip
+          results.push({ ticker, status: "api_error" });
+          continue;
+        }
+
+        const marketData = await marketResp.json();
+        const market = marketData.market;
+
+        // Only process closed/resolved markets
+        if (market.status !== "closed" && market.status !== "settled") {
+          results.push({ ticker, status: `not_resolved (${market.status})` });
+          continue;
+        }
+
+        // Kalshi returns settlement_value as "yes" or "no" for binary markets
+        const settlementValue = market.settlement_value; // "yes" or "no"
+        if (!settlementValue) {
+          results.push({ ticker, status: "no_settlement_value" });
+          continue;
+        }
+
+        // settlement_price: 100 for YES, 0 for NO (in cents)
+        const settlementPriceCents = settlementValue === "yes" ? 100 : 0;
+
+        // ── 4. Compute shadow PnL for each signal on this ticker ─────────────
+        for (const sig of signals) {
+          const entryPrice = sig.mid_price; // cents at signal time
+          if (entryPrice === null || entryPrice === undefined) {
+            continue; // can't compute PnL without entry price
+          }
+
+          let shadowPnlCents: number;
+          if (sig.direction === "buy_yes") {
+            // Bought YES at entryPrice: profit = settlement - entry
+            shadowPnlCents = settlementPriceCents - entryPrice;
+          } else if (sig.direction === "buy_no") {
+            // Bought NO at entryPrice: NO price = 100 - YES price
+            // Entry NO price = 100 - entryPrice
+            // Settlement NO price = 100 - settlementPriceCents
+            const entryNoPrice = 100 - entryPrice;
+            const settlementNoPrice = 100 - settlementPriceCents;
+            shadowPnlCents = settlementNoPrice - entryNoPrice;
+          } else {
+            continue; // skip direction
+          }
+
+          // Convert cents to dollars (1 contract)
+          const shadowPnlDollars = shadowPnlCents / 100;
+
+          await supabase.from("signals").update({
+            shadow_pnl: shadowPnlDollars,
+            settlement_price: settlementPriceCents,
+            settled_at: new Date().toISOString(),
+          }).eq("id", sig.id);
+
+          settledCount++;
+        }
+
+        results.push({ ticker, status: "settled", settlement: settlementValue });
+
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "unknown";
+        console.error(`Failed to settle ${ticker}:`, msg);
+        results.push({ ticker, status: `error: ${msg}` });
+      }
+    }
+
+    // ── 5. Log this run ──────────────────────────────────────────────────────
+    await supabase.from("compliance_log").insert({
+      event_type: "settle_signals_run",
+      severity: "info",
+      message: `Settle signals: ${settledCount} signals settled from ${results.length} markets checked`,
+      metadata: { results, total_signals_checked: unsettledSignals.length },
+    });
+
+    return new Response(JSON.stringify({
+      success: true,
+      settled: settledCount,
+      markets_checked: results.length,
+      results: results.slice(0, 20), // truncate for response size
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
+    console.error("settle-signals error:", errMsg);
+
+    try {
+      await supabase.from("compliance_log").insert({
+        event_type: "settle_signals_error",
+        severity: "error",
+        message: `Settle signals failed: ${errMsg}`,
+      });
+    } catch {}
+
+    return new Response(JSON.stringify({ error: errMsg }), {
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+});
