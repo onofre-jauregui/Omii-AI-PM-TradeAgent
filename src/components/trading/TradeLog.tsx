@@ -1,6 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowUpRight, ArrowDownRight, Clock, Loader2, RefreshCw } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, Clock, Loader2, RefreshCw, ThumbsUp, ThumbsDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -24,11 +24,14 @@ interface Trade {
   order_type: string | null;
   filled_price: number | null;
   created_at: string;
+  user_rating: "good" | "bad" | null;
+  user_id: string | null;
 }
 
 export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
+  const [ratingId, setRatingId] = useState<string | null>(null);
 
   const loadTrades = useCallback(async () => {
     setLoading(true);
@@ -69,6 +72,37 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
 
     return () => { supabase.removeChannel(channel); };
   }, [loadTrades, filterMode]);
+
+  async function rateTrade(trade: Trade, rating: "good" | "bad") {
+    if (ratingId) return;
+    setRatingId(trade.id);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+
+      await supabase.from("trades").update({ user_rating: rating }).eq("id", trade.id);
+
+      const isGood = rating === "good";
+      const pnlStr = trade.pnl != null ? `P&L: ${trade.pnl >= 0 ? "+" : ""}$${trade.pnl.toFixed(2)}` : "P&L: pending";
+      await supabase.from("agent_memory").insert({
+        memory_type: isGood ? "success" : "mistake",
+        title: `User rated ${trade.strategy ?? "manual"} trade ${isGood ? "good" : "bad"}: ${trade.side.toUpperCase()} ${trade.ticker ?? trade.market_id}`,
+        content: `User marked this trade as ${isGood ? "a good decision" : "a bad decision"}. Market: "${trade.market_question}". Side: ${trade.side.toUpperCase()} @ ${trade.filled_price ?? trade.price}¢. Amount: $${trade.amount}. ${pnlStr}. Strategy: ${trade.strategy ?? "manual"}. ${isGood ? "Reinforce this type of setup." : "Avoid or be more selective with this type of setup."}`,
+        source_type: "user_feedback",
+        related_trade_ids: [trade.id],
+        strategy_id: trade.strategy ?? null,
+        confidence: 0.7,
+        tags: ["user_feedback", trade.strategy ?? "manual", trade.side, isGood ? "good_trade" : "bad_trade"],
+        user_id: user?.id ?? null,
+      });
+
+      setTrades((prev) => prev.map((t) => t.id === trade.id ? { ...t, user_rating: rating } : t));
+      toast.success(`Feedback saved — agent will ${isGood ? "look for more setups like this" : "be more selective here"}`);
+    } catch {
+      toast.error("Failed to save feedback");
+    } finally {
+      setRatingId(null);
+    }
+  }
 
   const statusColor = (status: string) => {
     switch (status) {
@@ -134,7 +168,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
                       {new Date(trade.created_at).toLocaleString()} · {trade.strategy || "Manual"}
                       {trade.order_id && <span className="font-mono ml-1">#{trade.order_id.slice(0, 8)}</span>}
                     </p>
-                    {/* Mobile badges inline */}
+                    {/* Mobile badges + rating inline */}
                     <div className="flex items-center gap-1.5 mt-1 sm:hidden">
                       <Badge variant="secondary" className={`text-[10px] rounded-full font-normal ${statusColor(trade.status)}`}>
                         {trade.status}
@@ -142,9 +176,23 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
                       <Badge variant="secondary" className="text-[10px] rounded-full font-normal">
                         {trade.mode}
                       </Badge>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); rateTrade(trade, "good"); }}
+                        disabled={!!ratingId}
+                        className={`p-1 rounded-lg transition-colors ${trade.user_rating === "good" ? "text-emerald-500 bg-emerald-500/10" : "text-muted-foreground hover:text-emerald-500"}`}
+                      >
+                        {ratingId === trade.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ThumbsUp className="h-3 w-3" />}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); rateTrade(trade, "bad"); }}
+                        disabled={!!ratingId}
+                        className={`p-1 rounded-lg transition-colors ${trade.user_rating === "bad" ? "text-red-500 bg-red-500/10" : "text-muted-foreground hover:text-red-500"}`}
+                      >
+                        <ThumbsDown className="h-3 w-3" />
+                      </button>
                     </div>
                   </div>
-                  {/* Desktop: right column with PnL + badges */}
+                  {/* Desktop: right column with PnL + badges + rating */}
                   <div className="hidden sm:flex flex-col items-end gap-1 shrink-0">
                     <p className="text-xs text-muted-foreground">
                       {trade.action.toUpperCase()} {trade.side.toUpperCase()} @ {trade.filled_price || trade.price}c
@@ -161,6 +209,25 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
                     <Badge variant="secondary" className="text-[10px] rounded-full font-normal">
                       {trade.mode}
                     </Badge>
+                    {/* Trade rating */}
+                    <div className="flex gap-1 mt-0.5">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); rateTrade(trade, "good"); }}
+                        disabled={!!ratingId}
+                        className={`p-1 rounded-lg transition-colors ${trade.user_rating === "good" ? "text-emerald-500 bg-emerald-500/10" : "text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10"}`}
+                        title="Good trade"
+                      >
+                        {ratingId === trade.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <ThumbsUp className="h-3 w-3" />}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); rateTrade(trade, "bad"); }}
+                        disabled={!!ratingId}
+                        className={`p-1 rounded-lg transition-colors ${trade.user_rating === "bad" ? "text-red-500 bg-red-500/10" : "text-muted-foreground hover:text-red-500 hover:bg-red-500/10"}`}
+                        title="Bad trade"
+                      >
+                        <ThumbsDown className="h-3 w-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
