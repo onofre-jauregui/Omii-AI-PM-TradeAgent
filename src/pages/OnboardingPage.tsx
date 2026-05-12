@@ -4,17 +4,18 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, Loader2, AlertCircle, ArrowRight } from "lucide-react";
+import { CheckCircle, Loader2, AlertCircle, ArrowRight, Zap } from "lucide-react";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
 const SAVE_KEY_URL = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
 
-type Step = "welcome" | "connect" | "mode";
+type Step = "welcome" | "connect" | "mode" | "live";
 
 export default function OnboardingPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState<Step>("welcome");
+  const [chosenMode, setChosenMode] = useState<"paper" | "live">("paper");
 
   async function finishOnboarding(destination: string) {
     const { data: { user } } = await supabase.auth.getUser();
@@ -26,6 +27,15 @@ export default function OnboardingPage() {
     navigate(destination);
   }
 
+  function chooseModeAndContinue(mode: "paper" | "live") {
+    setChosenMode(mode);
+    if (mode === "live") {
+      finishOnboarding("/billing");
+    } else {
+      setStep("live");
+    }
+  }
+
   // Kalshi key fields
   const [keyId, setKeyId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
@@ -35,8 +45,8 @@ export default function OnboardingPage() {
   const [pingError, setPingError] = useState<string | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
 
-  async function saveKalshiKey() {
-    if (!keyId.trim() || !privateKey.trim()) return;
+  async function saveKalshiKey(): Promise<boolean> {
+    if (!keyId.trim() || !privateKey.trim()) return false;
     setSaving(true);
     setSaveStatus("idle");
     try {
@@ -52,8 +62,10 @@ export default function OnboardingPage() {
       const json = await resp.json();
       if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
       setSaveStatus("saved");
+      return true;
     } catch {
       setSaveStatus("error");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -61,10 +73,8 @@ export default function OnboardingPage() {
 
   async function testConnection() {
     if (saveStatus !== "saved") {
-      await saveKalshiKey();
-      // saveStatus is a React state update — re-check via a fresh save attempt's result
-      // is not reliable here. Instead, we check if fields are filled and proceed.
-      if (!keyId.trim() || !privateKey.trim()) return;
+      const ok = await saveKalshiKey();
+      if (!ok) return;
     }
     setPingStatus("testing");
     setPingError(null);
@@ -97,7 +107,7 @@ export default function OnboardingPage() {
       <div className="w-full max-w-md">
         {/* Progress dots */}
         <div className="flex gap-1.5 mb-10 justify-center">
-          {(["welcome", "connect", "mode"] as Step[]).map((s) => (
+          {(["welcome", "connect", "mode", "live"] as Step[]).map((s) => (
             <div key={s} className={`h-1.5 rounded-full transition-all ${step === s ? "w-6 bg-foreground" : "w-1.5 bg-muted"}`} />
           ))}
         </div>
@@ -200,7 +210,7 @@ export default function OnboardingPage() {
             </p>
             <div className="space-y-3 mb-8">
               <button
-                onClick={() => finishOnboarding("/")}
+                onClick={() => chooseModeAndContinue("paper")}
                 className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
               >
                 <div className="flex items-center justify-between mb-1">
@@ -212,7 +222,7 @@ export default function OnboardingPage() {
                 </p>
               </button>
               <button
-                onClick={() => finishOnboarding("/billing")}
+                onClick={() => chooseModeAndContinue("live")}
                 className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
               >
                 <div className="flex items-center justify-between mb-1">
@@ -223,6 +233,33 @@ export default function OnboardingPage() {
                   Real orders placed on your Kalshi account. Requires an active API key and a paid subscription.
                 </p>
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Step 4: Agent is live ───────────────────────────────── */}
+        {step === "live" && (
+          <div className="text-center">
+            <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-6">
+              <Zap className="h-7 w-7 text-emerald-500" />
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight mb-2">Your agent is running.</h1>
+            <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
+              Two strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
+            </p>
+            <div className="space-y-2 text-left mb-8">
+              {[
+                ["S-002", "Longshot Bias", "Buys NO on overpriced contracts (90–95¢) betting on market overconfidence"],
+                ["S-005", "Weather Edge", "Trades NWS forecast vs Kalshi implied temperature divergence"],
+              ].map(([id, name, desc]) => (
+                <div key={id} className="rounded-xl bg-secondary/50 px-4 py-3 flex items-start gap-3">
+                  <span className="text-[10px] font-mono bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 shrink-0">{id}</span>
+                  <div>
+                    <p className="text-sm font-medium">{name}</p>
+                    <p className="text-xs text-muted-foreground leading-relaxed">{desc}</p>
+                  </div>
+                </div>
+              ))}
             </div>
             <Button className="w-full rounded-full gap-2" onClick={() => finishOnboarding("/")}>
               Go to dashboard <ArrowRight className="h-4 w-4" />
