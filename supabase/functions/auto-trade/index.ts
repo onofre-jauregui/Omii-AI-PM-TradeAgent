@@ -4,6 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -138,6 +139,17 @@ interface PositionCount {
   totalCount: number;
 }
 
+// Edge functions run as service role and bypass RLS, so we must enforce tenant
+// isolation manually on every query. Signals are system-generated (user_id=null)
+// or user-owned. A strategy should only see: system signals + its own user's signals.
+function applySignalTenantFilter(query: any, userId: string | null | undefined): any {
+  if (userId) {
+    return query.or(`user_id.eq.${userId},user_id.is.null`);
+  }
+  // System strategies (null user_id) only see system signals
+  return query.is("user_id", null);
+}
+
 async function countOpenPositions(
   supabase: any,
   strategyId?: string,
@@ -230,59 +242,57 @@ serve(async (req) => {
   let lockAcquired = false; // function-scoped so finally block can access it
 
   try {
-    // ── Advisory lock: skip if another run is in progress ───────────────────
-    // Table-based lock (not pg_try_advisory_lock) because Supabase pgbouncer
-    // gives each edge function invocation a different DB session. A table with
-    // single-row upsert is atomic and survives connection pooling.
-    // Graceful fallback: if the lock table doesn't exist yet (migration pending),
-    // proceed without locking — the old debounce behavior.
+    // ── Atomic table-based lock ─────────────────────────────────────────────
+    // Uses INSERT (not SELECT+UPSERT) so lock acquisition is a single atomic
+    // statement. Two concurrent invocations both attempt INSERT — Postgres
+    // unique constraint ensures only one succeeds. The losing invocation gets
+    // a 23505 unique-violation error and exits. This eliminates the TOCTOU
+    // race in the old SELECT→UPSERT pattern.
+    //
+    // Stale lock (>LOCK_STALE_MS) is cleaned up with DELETE before re-inserting.
+    // Graceful fallback: if the table doesn't exist, proceed without locking.
 
     try {
-      const { data: existingLock, error: selectError } = await supabase
+      const now = new Date().toISOString();
+
+      // Attempt atomic INSERT — fails with 23505 if lock exists and is fresh
+      const { error: insertError } = await supabase
         .from("auto_trade_locks")
-        .select("*")
-        .eq("lock_name", "auto_trade")
-        .maybeSingle();
+        .insert({ lock_name: "auto_trade", acquired_at: now, run_id: runId });
 
-      // If the table doesn't exist yet, fall through to proceed without locking
-      if (selectError && selectError.message.includes("Could not find")) {
-        console.warn("auto_trade_locks table not found — running without advisory lock. Run the v2 migration to enable 30s polling protection.");
-      } else if (selectError) {
-        console.warn("auto_trade_locks select error:", selectError.message);
-      } else if (existingLock) {
-        const lockAgeMs = Date.now() - new Date(existingLock.acquired_at).getTime();
-        if (lockAgeMs < LOCK_STALE_MS) {
-          const ageMin = (lockAgeMs / 60_000).toFixed(1);
-          return new Response(JSON.stringify({
-            skipped: true,
-            reason: `Locked by run ${existingLock.run_id.slice(0, 8)} (${ageMin}m ago)`,
-          }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-        }
-        // Stale lock — proceed and overwrite below
-      }
-
-      // Atomic lock acquisition via upsert (skip if table doesn't exist)
-      if (!selectError || !selectError.message.includes("Could not find")) {
-        const { error: lockError } = await supabase
+      if (!insertError) {
+        lockAcquired = true;
+      } else if (insertError.code === "23505") {
+        // Another run holds the lock — check if it's stale
+        const { data: existingLock } = await supabase
           .from("auto_trade_locks")
-          .upsert({ lock_name: "auto_trade", acquired_at: new Date().toISOString(), run_id: runId }, { onConflict: "lock_name" });
+          .select("acquired_at, run_id")
+          .eq("lock_name", "auto_trade")
+          .maybeSingle();
 
-        if (lockError) {
-          // Table might have been created between checks — if it's a "not found" error, proceed
-          if (lockError.message.includes("Could not find")) {
-            console.warn("auto_trade_locks upsert failed (table not found) — running without lock.");
-          } else {
+        if (existingLock) {
+          const lockAgeMs = Date.now() - new Date(existingLock.acquired_at).getTime();
+          if (lockAgeMs < LOCK_STALE_MS) {
+            const ageMin = (lockAgeMs / 60_000).toFixed(1);
             return new Response(JSON.stringify({
               skipped: true,
-              reason: `Lock acquisition failed: ${lockError.message}`,
+              reason: `Locked by run ${existingLock.run_id?.slice(0, 8)} (${ageMin}m ago)`,
             }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
           }
-        } else {
-          lockAcquired = true;
+          // Stale lock — delete and re-acquire
+          await supabase.from("auto_trade_locks").delete().eq("lock_name", "auto_trade");
+          const { error: retryError } = await supabase
+            .from("auto_trade_locks")
+            .insert({ lock_name: "auto_trade", acquired_at: new Date().toISOString(), run_id: runId });
+          if (!retryError) lockAcquired = true;
         }
+      } else if (insertError.message?.includes("Could not find") || insertError.message?.includes("does not exist")) {
+        console.warn("auto_trade_locks table not found — running without lock. Apply v2 migration to enable.");
+      } else {
+        console.warn("auto_trade_locks insert error:", insertError.message);
       }
     } catch (lockErr) {
-      console.warn("auto_trade_locks error — running without advisory lock:", lockErr instanceof Error ? lockErr.message : String(lockErr));
+      console.warn("auto_trade_locks error — running without lock:", lockErr instanceof Error ? lockErr.message : String(lockErr));
     }
 
     // ── Check global risk state ──────────────────────────────────────────────
@@ -429,8 +439,23 @@ serve(async (req) => {
         } else if (strategy.id === "S-005") {
           result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else {
-          // Unknown strategy — use generic signal-based handler
-          result = await runGenericSignalStrategy(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
+          // Unknown strategy — hard reject. All strategies require an explicit handler.
+          // This prevents a bad strategy_config row from triggering unguarded LLM usage.
+          console.warn(`[auto-trade] Unknown strategy ID: ${strategy.id} — skipping. Add an explicit handler to deploy.`);
+          await supabase.from("compliance_log").insert({
+            event_type: "unknown_strategy_skipped",
+            severity: "warning",
+            message: `Strategy ${strategy.id} has no handler — skipped`,
+            metadata: { strategy_id: strategy.id },
+          });
+          result = {
+            strategy_id: strategy.id,
+            strategy_name: strategy.name,
+            mode: strategy.mode || "paper",
+            status: "skipped",
+            action: "no_handler",
+            details: `Unknown strategy ID — not in allowlist (S-001, S-002, S-005). Add explicit handler to deploy.`,
+          };
         }
 
         result.elapsed_seconds = ((Date.now() - stratStart) / 1000).toFixed(1);
@@ -580,15 +605,18 @@ async function runS001FedWatchOracle(
 
   const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-  const { data: rawSignals } = await supabase
-    .from("signals")
-    .select("*")
-    .eq("source", "futures_oracle")
-    .gte("created_at", sixtyMinAgo)
-    .gte("edge_cents", minEdge)
-    .not("direction", "is", null)
-    .order("edge_cents", { ascending: false })
-    .limit(10);
+  const { data: rawSignals } = await applySignalTenantFilter(
+    supabase
+      .from("signals")
+      .select("*")
+      .eq("source", "futures_oracle")
+      .gte("created_at", sixtyMinAgo)
+      .gte("edge_cents", minEdge)
+      .not("direction", "is", null)
+      .order("edge_cents", { ascending: false })
+      .limit(10),
+    strategy.user_id
+  );
 
   if (!rawSignals || rawSignals.length === 0) {
     return {
@@ -759,18 +787,21 @@ async function runS002LongshotBias(
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   // Longshots only: YES ask 8-11¢. We buy NO on these markets.
-  const { data: rawSignals } = await supabase
-    .from("signals")
-    .select("*")
-    .lt("yes_ask", 12)
-    .gte("yes_ask", 8)
-    .gte("volume", 200)
-    .gte("days_to_close", 0.08)
-    .lte("days_to_close", 30)
-    .gte("created_at", twoHoursAgo)
-    .not("direction", "is", null)
-    .order("created_at", { ascending: false })
-    .limit(20);
+  const { data: rawSignals } = await applySignalTenantFilter(
+    supabase
+      .from("signals")
+      .select("*")
+      .lt("yes_ask", 12)
+      .gte("yes_ask", 8)
+      .gte("volume", 200)
+      .gte("days_to_close", 0.08)
+      .lte("days_to_close", 30)
+      .gte("created_at", twoHoursAgo)
+      .not("direction", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(20),
+    strategy.user_id
+  );
 
   // Hard block: no ETH, no sports series
   const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL"];
@@ -946,17 +977,18 @@ async function runS005WeatherEdge(
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  let signalQuery = supabase
-    .from("signals")
-    .select("*")
-    .eq("source", "weather_signal_s005")
-    .gte("created_at", thirtyMinAgo)
-    .gte("edge_cents", minEdge)
-    .not("direction", "is", null)
-    .order("edge_cents", { ascending: false })
-    .limit(MAX_PARALLEL_SIGNALS + excludedCities.length); // fetch extra, filter below
-
-  const { data: rawSignals } = await signalQuery;
+  const { data: rawSignals } = await applySignalTenantFilter(
+    supabase
+      .from("signals")
+      .select("*")
+      .eq("source", "weather_signal_s005")
+      .gte("created_at", thirtyMinAgo)
+      .gte("edge_cents", minEdge)
+      .not("direction", "is", null)
+      .order("edge_cents", { ascending: false })
+      .limit(MAX_PARALLEL_SIGNALS + excludedCities.length), // fetch extra, filter below
+    strategy.user_id
+  );
 
   // Filter out cities where S-005 has persistent forecast_bias losses
   const signals = excludedCities.length > 0
@@ -1177,91 +1209,6 @@ async function runS005WeatherEdge(
 // Fallback for strategies not mapped to S-001/004.
 // Uses the LLM more broadly but still filters signals server-side first.
 
-async function runGenericSignalStrategy(
-  supabase: any,
-  strategy: any,
-  config: StrategyConfig | undefined,
-  aiConfig: AiConfig,
-  supabaseUrl: string,
-  supabaseKey: string,
-  runId?: string,
-): Promise<StrategyResult> {
-  const mode = strategy.mode || "paper";
-  const minComposite = config?.min_composite_score ?? 0.4;
-  const maxPositionUsd = config?.max_position_usd ?? 50;
-
-  const { data: signals } = await supabase
-    .from("signals")
-    .select("*")
-    .gte("composite_score", minComposite)
-    .not("direction", "is", null)
-    .order("composite_score", { ascending: false })
-    .limit(3);
-
-  if (!signals || signals.length === 0) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: "No qualifying signals" };
-  }
-
-  const best = signals[0];
-  const qualifyPrompt = buildQualifyPrompt(`${strategy.name} (${strategy.id})`, {
-    ticker: best.ticker,
-    market_question: best.market_question,
-    direction: best.direction,
-    composite_score: best.composite_score,
-    edge_cents: best.edge_cents,
-    strategy_instructions: strategy.instructions?.slice(0, 400),
-  });
-
-  const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id);
-
-  if (!qualified) {
-    return { strategy_id: strategy.id, strategy_name: strategy.name, mode, status: "completed", action: "no_setup", details: `LLM rejected: ${reason}` };
-  }
-
-  const side = best.direction === "buy_yes" ? "yes" : "no";
-  const price = best.direction === "buy_yes" ? best.yes_ask : (100 - (best.yes_bid || 50));
-  // Pass dollar amount — execute-trade handles the cents→contract conversion.
-  // Old formula (maxPositionUsd * 100 / price) produced contract count, not dollars,
-  // causing a double-conversion that inflated positions by ~100x at low prices.
-  const amount = maxPositionUsd;
-
-  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const tradeResp = await fetch(executeUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ticker: best.ticker,
-      marketId: best.ticker,
-      marketQuestion: best.market_question || best.ticker,
-      side,
-      action: "buy",
-      price: Math.round(price),
-      amount,
-      strategy: strategy.name,
-      strategyId: strategy.id,
-      orderType: "limit",
-      mode,
-      expirationTime: parseSettlementDate(best.ticker)?.toISOString() || null,
-      notes: `${strategy.id} auto-trade: ${reason}`,
-      expectedOutcome: `${strategy.name}: ${best.direction} on ${best.ticker} at ${best.mid_price}c`,
-      confidenceLevel: best.composite_score,
-      user_id: strategy.user_id || null,
-      traceId: runId,
-    }),
-  });
-
-  const tradeResult = await tradeResp.json();
-
-  return {
-    strategy_id: strategy.id,
-    strategy_name: strategy.name,
-    mode,
-    status: "completed",
-    action: tradeResult.success ? "trade_executed" : "no_setup",
-    details: tradeResult.success ? `Executed: ${reason}` : `Failed: ${tradeResult.error}`,
-  };
-}
-
 // ─── Shared Helpers ───────────────────────────────────────────────────────────
 
 /**
@@ -1436,6 +1383,7 @@ async function checkPortfolioExposure(supabase: any): Promise<{ openCount: numbe
 /**
  * Resolve the best available AI config from DB api_keys or env vars.
  * Priority: OpenRouter → Anthropic → OpenAI → Google
+ * Handles both legacy plaintext and AES-GCM encrypted secrets (EncryptedSecret JSON).
  */
 async function resolveAiConfig(supabase: any): Promise<AiConfig | null> {
   // Check saved model preference
@@ -1447,17 +1395,39 @@ async function resolveAiConfig(supabase: any): Promise<AiConfig | null> {
 
   const preferredModel = savedModel?.key_id;
 
-  // Check available keys
+  // Load available keys (encrypted_secret may be plaintext or EncryptedSecret JSON)
   const { data: keyRows } = await supabase
     .from("api_keys")
     .select("provider, encrypted_secret")
     .in("provider", ["openrouter", "anthropic", "openai", "google"]);
 
-  const keyMap = new Map((keyRows || []).map((r: any) => [r.provider, r.encrypted_secret]));
+  // Decrypt a stored secret if it looks like a JSON EncryptedSecret object.
+  // Falls back to using the raw value for legacy plaintext rows.
+  async function resolveKey(raw: string | null | undefined): Promise<string | undefined> {
+    if (!raw) return undefined;
+    // Try parsing as EncryptedSecret JSON — legacy plaintext is never valid JSON
+    try {
+      const parsed = JSON.parse(raw) as EncryptedSecret;
+      if (parsed?.ciphertext && parsed?.iv) {
+        const masterKeyBase64 = Deno.env.get("API_KEY_ENCRYPTION_KEY");
+        if (!masterKeyBase64) {
+          console.error("resolveAiConfig: API_KEY_ENCRYPTION_KEY not set — cannot decrypt stored API key");
+          return undefined;
+        }
+        const masterKey = await importMasterKey(masterKeyBase64);
+        return await decryptSecret(parsed, masterKey);
+      }
+    } catch {
+      // Not JSON — treat as legacy plaintext
+    }
+    return raw;
+  }
 
-  const openrouterKey = keyMap.get("openrouter") || Deno.env.get("OPENROUTER_API_KEY");
-  const anthropicKey = keyMap.get("anthropic") || Deno.env.get("ANTHROPIC_API_KEY");
-  const openaiKey = keyMap.get("openai") || Deno.env.get("OPENAI_API_KEY");
+  const rawMap = new Map((keyRows || []).map((r: any) => [r.provider, r.encrypted_secret as string | null]));
+
+  const openrouterKey = await resolveKey(rawMap.get("openrouter")) ?? Deno.env.get("OPENROUTER_API_KEY");
+  const anthropicKey = await resolveKey(rawMap.get("anthropic")) ?? Deno.env.get("ANTHROPIC_API_KEY");
+  const openaiKey = await resolveKey(rawMap.get("openai")) ?? Deno.env.get("OPENAI_API_KEY");
 
   if (openrouterKey) {
     return {
