@@ -1300,11 +1300,6 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
           }
         }
 
-        // ── Unknown tool ──
-        else {
-          toolResult = JSON.stringify({ error: "Unknown tool" });
-        }
-
         // ── search_web ──
         else if (fnName === "search_web") {
           try {
@@ -1390,6 +1385,11 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Trigger failed: " + e.message });
           }
+        }
+
+        // ── Unknown tool ──
+        else {
+          toolResult = JSON.stringify({ error: "Unknown tool" });
         }
 
         aiMessages.push({
