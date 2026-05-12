@@ -6,7 +6,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, Loader2, AlertCircle, ArrowRight } from "lucide-react";
 
-const KALSHI_PING_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/kalshi-ping`;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
+const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
+const SAVE_KEY_URL = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
 
 type Step = "welcome" | "connect" | "mode";
 
@@ -38,11 +40,17 @@ export default function OnboardingPage() {
     setSaving(true);
     setSaveStatus("idle");
     try {
-      const { error } = await supabase.from("api_keys").upsert(
-        { provider: "kalshi_live", key_id: keyId.trim(), encrypted_secret: privateKey.trim(), updated_at: new Date().toISOString() },
-        { onConflict: "provider" }
-      );
-      if (error) throw error;
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(SAVE_KEY_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session?.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ key_id: keyId.trim(), private_key: privateKey.trim() }),
+      });
+      const json = await resp.json();
+      if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
       setSaveStatus("saved");
     } catch {
       setSaveStatus("error");
@@ -54,7 +62,9 @@ export default function OnboardingPage() {
   async function testConnection() {
     if (saveStatus !== "saved") {
       await saveKalshiKey();
-      if (saveStatus === "error") return;
+      // saveStatus is a React state update — re-check via a fresh save attempt's result
+      // is not reliable here. Instead, we check if fields are filled and proceed.
+      if (!keyId.trim() || !privateKey.trim()) return;
     }
     setPingStatus("testing");
     setPingError(null);
