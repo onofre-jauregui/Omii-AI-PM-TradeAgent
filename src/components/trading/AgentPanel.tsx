@@ -6,12 +6,13 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Cpu, Send, MessageSquare, Loader2, BookOpen, AlertTriangle, RefreshCw } from "lucide-react";
-import { useState, useRef, useEffect } from "react";
+import { Cpu, Send, MessageSquare, Loader2, BookOpen, RefreshCw, Shield, Save, CheckCircle, AlertCircle } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
 import { useChat } from "@/lib/chatContext";
 import { supabase } from "@/integrations/supabase/client";
+import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
 
 const FALLBACK_MODELS = [
   { id: "openai/gpt-4o-mini", name: "GPT-4o Mini", provider: "OpenAI" },
@@ -71,15 +72,13 @@ async function streamChat({
   onDone();
 }
 
-export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolean }) {
+export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
   const { getActiveStrategies } = useStrategies();
-  const chatChannel = forcePaperMode ? "demo" : "agent";
-  const chat = useChat(chatChannel);
+  const chat = useChat("agent");
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
   const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
   const [temperature, setTemperature] = useState([0.3]);
-  const [tradingMode, setTradingMode] = useState<"paper" | "live">(forcePaperMode ? "paper" : "paper");
   const [systemPrompt, setSystemPrompt] = useState(
     `You are an expert algorithmic trading agent for Kalshi event contracts. Analyze market data, news sentiment, probability shifts, and order book depth to identify profitable trading opportunities. Use limit orders for better execution. Provide clear trade signals with entry/exit prices and confidence levels.`
   );
@@ -87,6 +86,13 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
+
+  const [riskSettings, setRiskSettings] = useState({
+    maxDailyLoss: [500], maxDrawdown: [20], maxPositionSize: [500],
+    maxOpenPositions: [10], autoStopLoss: true, stopLossPct: [15], defaultOrderType: "limit",
+  });
+  const [riskSaving, setRiskSaving] = useState(false);
+  const [riskSaveStatus, setRiskSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Aliases for cleaner code below
   const chatMessages = chat.messages;
@@ -124,7 +130,52 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
     }
   };
 
-  useEffect(() => { loadModels(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const loadRiskSettings = useCallback(async () => {
+    const { data } = await supabase.from("risk_settings").select("*").single();
+    if (data) {
+      setRiskSettings({
+        maxDailyLoss: [data.max_daily_loss],
+        maxDrawdown: [data.max_drawdown_pct],
+        maxPositionSize: [data.max_position_size],
+        maxOpenPositions: [data.max_open_positions],
+        autoStopLoss: data.auto_stop_loss,
+        stopLossPct: [data.stop_loss_pct],
+        defaultOrderType: data.default_order_type,
+      });
+    }
+  }, []);
+
+  const handleSaveRiskSettings = async () => {
+    setRiskSaving(true);
+    setRiskSaveStatus("idle");
+    try {
+      const payload = {
+        max_daily_loss: riskSettings.maxDailyLoss[0],
+        max_drawdown_pct: riskSettings.maxDrawdown[0],
+        max_position_size: riskSettings.maxPositionSize[0],
+        max_open_positions: riskSettings.maxOpenPositions[0],
+        auto_stop_loss: riskSettings.autoStopLoss,
+        stop_loss_pct: riskSettings.stopLossPct[0],
+        default_order_type: riskSettings.defaultOrderType,
+        updated_at: new Date().toISOString(),
+      };
+      const { data: existing } = await supabase.from("risk_settings").select("id").single();
+      if (existing) {
+        await supabase.from("risk_settings").update(payload).eq("id", existing.id);
+      } else {
+        await supabase.from("risk_settings").insert(payload);
+      }
+      setRiskSaveStatus("success");
+      setTimeout(() => setRiskSaveStatus("idle"), 3000);
+    } catch {
+      setRiskSaveStatus("error");
+      setTimeout(() => setRiskSaveStatus("idle"), 3000);
+    } finally {
+      setRiskSaving(false);
+    }
+  };
+
+  useEffect(() => { loadModels(); loadRiskSettings(); }, [loadRiskSettings]); // eslint-disable-line react-hooks/exhaustive-deps
   // Scroll only within the chat box — never move the page
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -142,7 +193,7 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
     await streamChat({
       messages: messagesForApi.slice(1).slice(-12), // skip greeting, keep last 6 turns
       strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
-      model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode,
+      model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode: mode,
       onDelta: (chunk) => {
         assistantSoFar += chunk;
         chat.upsertAssistant(assistantSoFar);
@@ -156,156 +207,196 @@ export function AgentPanel({ forcePaperMode = false }: { forcePaperMode?: boolea
   };
 
   return (
-    <div className="grid md:grid-cols-5 gap-6 apple-reveal">
-      {/* Config */}
-      <div className="md:col-span-2 space-y-4">
-        <div className="rounded-2xl bg-card p-5 apple-shadow space-y-5">
-          <h3 className="text-sm font-medium text-muted-foreground">Model Configuration</h3>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-muted-foreground">AI Model</Label>
-              <button
-                onClick={loadModels}
-                disabled={loadingModels}
-                className="text-muted-foreground hover:text-foreground transition-colors"
-                title="Refresh model list"
-              >
-                {loadingModels
-                  ? <Loader2 className="h-3 w-3 animate-spin" />
-                  : <RefreshCw className="h-3 w-3" />}
-              </button>
-            </div>
-            <Select value={selectedModel} onValueChange={setSelectedModel}>
-              <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="max-h-72">
-                {models.map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    <div className="flex flex-col gap-0.5 py-0.5">
-                      <span className="flex items-center gap-1.5">
-                        <Cpu className="h-3 w-3 shrink-0" />
-                        <span>{m.name}</span>
-                      </span>
-                      <span className="text-[10px] text-muted-foreground font-mono pl-4">{m.id}</span>
-                    </div>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <div className="flex justify-between">
-              <Label className="text-sm text-muted-foreground">Temperature</Label>
-              <span className="text-sm text-foreground">{temperature[0]}</span>
-            </div>
-            <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} />
-          </div>
-          <div className="space-y-2">
-            <Label className="text-sm text-muted-foreground">System Prompt</Label>
-            <Textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} className="rounded-xl border-0 bg-secondary text-sm min-h-[100px] resize-none" />
-          </div>
-        </div>
-
-        {/* Trading Mode */}
-        {forcePaperMode ? (
-          <div className="rounded-2xl bg-primary/5 ring-1 ring-primary/20 p-5 apple-shadow">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-foreground">Trading Mode</span>
-              <Badge variant="secondary" className="text-[10px] rounded-full bg-primary/10 text-primary">Paper</Badge>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">Demo mode — simulated trades only, no real money.</p>
-          </div>
-        ) : (
-          <div className={`rounded-2xl p-5 apple-shadow transition-all duration-300 ${tradingMode === "live" ? "bg-loss/5 ring-1 ring-loss/20" : "bg-card"}`}>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-foreground">Trading Mode</span>
-                  <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
-                    {tradingMode === "live" ? "Live" : "Paper"}
-                  </Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  {tradingMode === "live" ? "Real trades on Kalshi" : "Simulated -- no real money"}
-                </p>
+    <div className="space-y-6 apple-reveal">
+      {/* Config + Chat grid */}
+      <div className="grid md:grid-cols-5 gap-6">
+        {/* Config */}
+        <div className="md:col-span-2 space-y-4">
+          <div className="rounded-2xl bg-card p-5 apple-shadow space-y-5">
+            <h3 className="text-sm font-medium text-muted-foreground">Model Configuration</h3>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-sm text-muted-foreground">AI Model</Label>
+                <button
+                  onClick={loadModels}
+                  disabled={loadingModels}
+                  className="text-muted-foreground hover:text-foreground transition-colors"
+                  title="Refresh model list"
+                >
+                  {loadingModels
+                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                    : <RefreshCw className="h-3 w-3" />}
+                </button>
               </div>
-              <Switch checked={tradingMode === "live"} onCheckedChange={(checked) => setTradingMode(checked ? "live" : "paper")} />
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  {models.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      <div className="flex flex-col gap-0.5 py-0.5">
+                        <span className="flex items-center gap-1.5">
+                          <Cpu className="h-3 w-3 shrink-0" />
+                          <span>{m.name}</span>
+                        </span>
+                        <span className="text-[10px] text-muted-foreground font-mono pl-4">{m.id}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            {tradingMode === "live" && (
-              <div className="mt-3 flex items-start gap-2 text-xs text-loss">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                Requires Kalshi API credentials. Uses real funds. Risk limits enforced.
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Temperature</Label>
+                <span className="text-sm text-foreground">{temperature[0]}</span>
+              </div>
+              <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm text-muted-foreground">System Prompt</Label>
+              <Textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} className="rounded-xl border-0 bg-secondary text-sm min-h-[100px] resize-none" />
+            </div>
+          </div>
+
+          {/* Active strategies chip list */}
+          <div className="rounded-2xl bg-card p-5 apple-shadow">
+            <div className="flex items-center gap-2 mb-3">
+              <BookOpen className="h-4 w-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium text-muted-foreground">Loaded Strategies</h3>
+            </div>
+            {activeStrategies.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No active strategies.</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {activeStrategies.map(s => (
+                  <Badge key={s.id} variant="secondary" className="text-[11px] rounded-full font-normal">{s.name}</Badge>
+                ))}
               </div>
             )}
+            <p className="text-[11px] text-muted-foreground mt-2">Strategy instructions are injected into the agent's context.</p>
           </div>
-        )}
+        </div>
 
-        {/* Loaded Strategies */}
-        <div className="rounded-2xl bg-card p-5 apple-shadow">
-          <div className="flex items-center gap-2 mb-3">
-            <BookOpen className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium text-muted-foreground">Loaded Strategies</h3>
-          </div>
-          {activeStrategies.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No active strategies.</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {activeStrategies.map(s => (
-                <Badge key={s.id} variant="secondary" className="text-[11px] rounded-full font-normal">{s.name}</Badge>
-              ))}
+        {/* Chat */}
+        <div className="md:col-span-3 rounded-2xl bg-card apple-shadow flex flex-col h-[700px] overflow-hidden">
+          <div className="px-5 py-4 border-b border-border flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="h-4 w-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium text-foreground">Agent Chat</h3>
+              {isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
             </div>
-          )}
-          <p className="text-[11px] text-muted-foreground mt-2">Strategy instructions are injected into the agent's context.</p>
-        </div>
-      </div>
-
-      {/* Chat */}
-      <div className="md:col-span-3 rounded-2xl bg-card apple-shadow flex flex-col h-[700px] overflow-hidden">
-        <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <MessageSquare className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium text-foreground">Agent Chat</h3>
-            {isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+            <Badge variant="secondary" className={`text-[10px] rounded-full ${mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
+              {mode === "live" ? "Live" : "Paper"}
+            </Badge>
           </div>
-          <Badge variant="secondary" className={`text-[10px] rounded-full ${tradingMode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
-            {tradingMode === "live" ? "Live" : "Paper"}
-          </Badge>
-        </div>
-        <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
-          {chatMessages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
-                msg.role === "user"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-secondary text-foreground"
-              }`}>
-                {msg.role === "assistant" ? (
-                  <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded-md [&_strong]:font-medium">
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
-                  </div>
-                ) : msg.content}
+          <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+            {chatMessages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                  msg.role === "user"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-secondary text-foreground"
+                }`}>
+                  {msg.role === "assistant" ? (
+                    <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded-md [&_strong]:font-medium">
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    </div>
+                  ) : msg.content}
+                </div>
               </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
+          <div className="px-5 py-4 border-t border-border">
+            <div className="flex gap-2">
+              <Input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+                placeholder={mode === "live" ? "Live mode — tell the agent what to trade..." : "Ask the agent to analyze or trade..."}
+                className="rounded-xl border-0 bg-secondary text-sm h-11"
+                disabled={isLoading}
+              />
+              <Button size="icon" onClick={handleSend} disabled={isLoading} className="rounded-full h-11 w-11 shrink-0">
+                {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </Button>
             </div>
-          ))}
-          <div ref={chatEndRef} />
-        </div>
-        <div className="px-5 py-4 border-t border-border">
-          <div className="flex gap-2">
-            <Input
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              placeholder={tradingMode === "live" ? "Live mode -- tell the agent what to trade..." : "Ask the agent to analyze or trade..."}
-              className="rounded-xl border-0 bg-secondary text-sm h-11"
-              disabled={isLoading}
-            />
-            <Button size="icon" onClick={handleSend} disabled={isLoading} className="rounded-full h-11 w-11 shrink-0">
-              {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </Button>
           </div>
         </div>
       </div>
+
+      {/* Risk Controls */}
+      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
+        <div className="flex items-center gap-2">
+          <Shield className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium text-muted-foreground">Risk Controls</h3>
+        </div>
+        <div className="grid md:grid-cols-2 gap-6">
+          <div className="space-y-5">
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Max Daily Loss</Label>
+                <span className="text-sm">${riskSettings.maxDailyLoss[0]}</span>
+              </div>
+              <Slider value={riskSettings.maxDailyLoss} onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxDailyLoss: v }))} max={5000} step={50} />
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Max Drawdown</Label>
+                <span className="text-sm">{riskSettings.maxDrawdown[0]}%</span>
+              </div>
+              <Slider value={riskSettings.maxDrawdown} onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxDrawdown: v }))} max={50} step={1} />
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Max Position Size</Label>
+                <span className="text-sm">${riskSettings.maxPositionSize[0]}</span>
+              </div>
+              <Slider value={riskSettings.maxPositionSize} onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxPositionSize: v }))} max={5000} step={50} />
+            </div>
+          </div>
+          <div className="space-y-5">
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Max Open Positions</Label>
+                <span className="text-sm">{riskSettings.maxOpenPositions[0]}</span>
+              </div>
+              <Slider value={riskSettings.maxOpenPositions} onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxOpenPositions: v }))} max={50} step={1} />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label className="text-sm">Auto Stop-Loss ({riskSettings.stopLossPct[0]}%)</Label>
+              <Switch checked={riskSettings.autoStopLoss} onCheckedChange={(checked) => setRiskSettings(prev => ({ ...prev, autoStopLoss: checked }))} />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Default Order Type</Label>
+              <Select value={riskSettings.defaultOrderType} onValueChange={(v) => setRiskSettings(prev => ({ ...prev, defaultOrderType: v }))}>
+                <SelectTrigger className="rounded-xl border-0 bg-secondary text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="limit">Limit</SelectItem>
+                  <SelectItem value="market">Market</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button className="rounded-full gap-2 text-sm" onClick={handleSaveRiskSettings} disabled={riskSaving}>
+            {riskSaving ? <Loader2 className="h-4 w-4 animate-spin" /> :
+             riskSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
+             riskSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
+             <Save className="h-4 w-4" />}
+            {riskSaveStatus === "success" ? "Saved" :
+             riskSaveStatus === "error" ? "Save failed" :
+             "Save Risk Settings"}
+          </Button>
+          <p className="text-[10px] text-muted-foreground">Enforced server-side on every trade execution.</p>
+        </div>
+      </div>
+
+      {/* Strategies */}
+      <StrategiesPanel />
     </div>
   );
 }

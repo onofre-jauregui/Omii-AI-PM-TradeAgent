@@ -75,7 +75,7 @@ const Index = () => {
                 onClick={() => setMode("live")}
                 className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
                   mode === "live"
-                    ? "bg-background text-foreground shadow-sm"
+                    ? "bg-red-500 text-white shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
@@ -116,7 +116,7 @@ const Index = () => {
                   </button>
                 ))}
               </div>
-              {agentSubTab === "activity" && <AgentPanel />}
+              {agentSubTab === "activity" && <AgentPanel mode={mode} />}
               {agentSubTab === "history" && <TradeLog filterMode={mode} />}
             </div>
           )}
@@ -132,9 +132,9 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-8 apple-reveal">
+              <ProfilePanel />
               <SettingsPanel />
               <CompliancePanel />
-              <ProfilePanel />
             </div>
           )}
 
