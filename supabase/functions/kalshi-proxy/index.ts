@@ -1,10 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
-import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return preflight("extended");
+  if (req.method === "OPTIONS") return preflight(req, "extended");
+
+  const corsHeaders = makeCorsHeaders(req.headers.get("origin"), "extended");
 
   try {
     const url = new URL(req.url);
