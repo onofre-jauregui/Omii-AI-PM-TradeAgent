@@ -14,9 +14,11 @@ import { TradeLog } from "@/components/trading/TradeLog";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { CompliancePanel } from "@/components/trading/CompliancePanel";
+import { AccountStatusCard } from "@/components/trading/AccountStatusCard";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot } from "lucide-react";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 type Tab = "dashboard" | "agent" | "markets" | "settings";
 type Mode = "paper" | "live";
@@ -78,45 +80,83 @@ const Index = () => {
         {/* Top header */}
         <header
           className={cn(
-            "frosted-glass sticky top-0 z-40 flex items-center justify-between shrink-0",
+            "frosted-glass sticky top-0 z-40 shrink-0",
             isMobile ? "h-14 px-4" : "h-12 px-8"
           )}
           style={{ boxShadow: "0 1px 0 rgba(0,0,0,0.08)" }}
         >
           {isMobile ? (
-            <div className="flex items-center gap-2">
-              <Bot className="h-4 w-4 text-foreground" />
-              <span className="text-sm font-semibold tracking-tight text-foreground">TradeAgent</span>
+            /* Mobile: 3-column [Logo | toggle | avatar] */
+            <div className="flex items-center justify-between h-full gap-2">
+              {/* Left: brand */}
+              <div className="flex items-center gap-2 shrink-0">
+                <Bot className="h-4 w-4 text-foreground" />
+                <span className="text-sm font-semibold tracking-tight text-foreground">TradeAgent</span>
+              </div>
+
+              {/* Center: Paper/Live toggle (dashboard + agent only) */}
+              <div className="flex-1 flex justify-center">
+                {(activeTab === "dashboard" || activeTab === "agent") && (
+                  <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
+                    <button
+                      onClick={() => handleModeChange("paper")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+                      }`}
+                    >
+                      Paper
+                    </button>
+                    <button
+                      onClick={() => handleModeChange("live")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground"
+                      }`}
+                    >
+                      Live
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Right: profile avatar → taps to settings */}
+              <button
+                onClick={() => handleNavigate("settings")}
+                className="shrink-0 active:scale-95 transition-transform"
+                title="Settings"
+              >
+                <Avatar className="h-8 w-8">
+                  <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
+                    {userEmail ? userEmail[0].toUpperCase() : "T"}
+                  </AvatarFallback>
+                </Avatar>
+              </button>
             </div>
           ) : (
-            <h1 className="text-sm font-medium text-foreground tracking-tight">
-              {TAB_LABELS[activeTab]}
-            </h1>
-          )}
-
-          {/* Paper / Live mode toggle — visible on dashboard and agent tabs */}
-          {(activeTab === "dashboard" || activeTab === "agent") && (
-            <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
-              <button
-                onClick={() => handleModeChange("paper")}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                  mode === "paper"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Paper
-              </button>
-              <button
-                onClick={() => handleModeChange("live")}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                  mode === "live"
-                    ? "bg-red-500 text-white shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Live
-              </button>
+            /* Desktop: tab label left + toggle right */
+            <div className="flex items-center justify-between h-full">
+              <h1 className="text-sm font-medium text-foreground tracking-tight">
+                {TAB_LABELS[activeTab]}
+              </h1>
+              {(activeTab === "dashboard" || activeTab === "agent") && (
+                <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
+                  <button
+                    onClick={() => handleModeChange("paper")}
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                      mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Paper
+                  </button>
+                  <button
+                    onClick={() => handleModeChange("live")}
+                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                      mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Live
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </header>
@@ -174,6 +214,7 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-8 apple-reveal">
+              <AccountStatusCard mode={mode} userEmail={userEmail} />
               <ProfilePanel />
               <SettingsPanel />
               <CompliancePanel />

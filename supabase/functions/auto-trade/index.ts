@@ -142,12 +142,14 @@ interface PositionCount {
 // Edge functions run as service role and bypass RLS, so we must enforce tenant
 // isolation manually on every query. Signals are system-generated (user_id=null)
 // or user-owned. A strategy should only see: system signals + its own user's signals.
+// NOTE: signals table does not currently have a user_id column — system strategies
+// pass null here and must receive the query unmodified so the filter doesn't fail.
 function applySignalTenantFilter(query: any, userId: string | null | undefined): any {
   if (userId) {
     return query.or(`user_id.eq.${userId},user_id.is.null`);
   }
-  // System strategies (null user_id) only see system signals
-  return query.is("user_id", null);
+  // System strategy (null user_id): no filter — signals are system-generated with no user scope
+  return query;
 }
 
 async function countOpenPositions(
@@ -803,8 +805,9 @@ async function runS002LongshotBias(
     strategy.user_id
   );
 
-  // Hard block: no ETH, no sports series
-  const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL"];
+  // Hard block: no ETH, no sports, no weather (S-005 owns weather with a real GFS model;
+  // S-002 has no weather-specific edge and will trade against S-005's positions)
+  const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL", "KXHIGH"];
   const signals = (rawSignals || []).filter((s: any) =>
     !blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))
   );
