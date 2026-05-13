@@ -37,10 +37,28 @@ const Index = () => {
   const isMobile = useIsMobile();
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       setUserEmail(session?.user?.email ?? undefined);
+      if (session?.user?.id) {
+        const { data } = await supabase
+          .from("profiles")
+          .select("trading_mode")
+          .eq("id", session.user.id)
+          .single();
+        if (data?.trading_mode === "live" || data?.trading_mode === "paper") {
+          setMode(data.trading_mode);
+        }
+      }
     });
   }, []);
+
+  async function handleModeChange(next: Mode) {
+    setMode(next);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      supabase.from("profiles").update({ trading_mode: next }).eq("id", user.id);
+    }
+  }
 
   function handleNavigate(tab: string) {
     if (tab === "performance") {
@@ -80,7 +98,7 @@ const Index = () => {
           {(activeTab === "dashboard" || activeTab === "agent") && (
             <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
               <button
-                onClick={() => setMode("paper")}
+                onClick={() => handleModeChange("paper")}
                 className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
                   mode === "paper"
                     ? "bg-background text-foreground shadow-sm"
@@ -90,7 +108,7 @@ const Index = () => {
                 Paper
               </button>
               <button
-                onClick={() => setMode("live")}
+                onClick={() => handleModeChange("live")}
                 className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
                   mode === "live"
                     ? "bg-red-500 text-white shadow-sm"

@@ -17,12 +17,15 @@ export default function OnboardingPage() {
   const [step, setStep] = useState<Step>("welcome");
   const [chosenMode, setChosenMode] = useState<"paper" | "live">("paper");
 
-  async function finishOnboarding(destination: string) {
+  async function finishOnboarding(destination: string, mode?: "paper" | "live") {
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
       await supabase
         .from("profiles")
-        .upsert({ id: user.id, onboarding_completed: true }, { onConflict: "id" });
+        .upsert(
+          { id: user.id, onboarding_completed: true, ...(mode ? { trading_mode: mode } : {}) },
+          { onConflict: "id" }
+        );
     }
     navigate(destination);
   }
@@ -30,7 +33,7 @@ export default function OnboardingPage() {
   function chooseModeAndContinue(mode: "paper" | "live") {
     setChosenMode(mode);
     if (mode === "live") {
-      finishOnboarding("/billing");
+      finishOnboarding("/billing", "live");
     } else {
       setStep("live");
     }
@@ -261,7 +264,7 @@ export default function OnboardingPage() {
                 </div>
               ))}
             </div>
-            <Button className="w-full rounded-full gap-2" onClick={() => finishOnboarding("/")}>
+            <Button className="w-full rounded-full gap-2" onClick={() => finishOnboarding("/", chosenMode)}>
               Go to dashboard <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
