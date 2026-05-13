@@ -1,4 +1,4 @@
-import { Bot, Clock, Zap, MessageSquare, BarChart3 } from "lucide-react";
+import { Bot, Clock, Zap, MessageSquare, TrendingUp, ArrowUpRight } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -10,13 +10,22 @@ interface HeroStats {
   totalReturn: number;
   totalReturnPct: number;
   todayPnl: number;
-  todayPnlPct: number;
   winRate: number;
   openPositions: number;
   tradesToday: number;
   winStreak: number;
   marketsClosingToday: number;
+  lastTradeAt: string | null;
+  settledCount: number;
   loading: boolean;
+}
+
+function timeAgo(iso: string) {
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 function AgentStatusBadge() {
@@ -95,12 +104,13 @@ export function DashboardHero({
     totalReturn: 0,
     totalReturnPct: 0,
     todayPnl: 0,
-    todayPnlPct: 0,
     winRate: 0,
     openPositions: 0,
     tradesToday: 0,
     winStreak: 0,
     marketsClosingToday: 0,
+    lastTradeAt: null,
+    settledCount: 0,
     loading: true,
   });
 
@@ -115,7 +125,8 @@ export function DashboardHero({
         .from("trades")
         .select("pnl, settled_at, mode")
         .eq("status", "settled")
-        .order("settled_at", { ascending: false }),
+        .order("settled_at", { ascending: false })
+        .limit(500),
       // Open positions: filled but not yet settled
       supabase
         .from("trades")
@@ -157,9 +168,6 @@ export function DashboardHero({
     // Today's P&L — trades that settled today
     const settledToday = modeTrades.filter(t => t.settled_at && t.settled_at >= todayISO);
     const todayPnl = settledToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const todayPnlPct = startingBalance > 0
-      ? parseFloat(((todayPnl / startingBalance) * 100).toFixed(2))
-      : 0;
 
     // Win rate across all settled trades
     const winners = modeTrades.filter(t => (t.pnl ?? 0) > 0).length;
@@ -187,87 +195,70 @@ export function DashboardHero({
       totalReturn: totalPnl,
       totalReturnPct,
       todayPnl,
-      todayPnlPct,
       winRate,
       openPositions: openTrades.length,
       tradesToday,
       winStreak,
       marketsClosingToday,
+      lastTradeAt: modeTrades[0]?.settled_at ?? null,
+      settledCount: modeTrades.length,
       loading: false,
     });
   }, [mode]);
 
   useEffect(() => { load(); }, [load]);
 
-  const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, todayPnlPct, winRate, openPositions, tradesToday, winStreak, marketsClosingToday } = stats;
+  const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;
   const isTodayUp = todayPnl >= 0;
-
-  const greeting = (() => {
-    const h = new Date().getHours();
-    if (h < 12) return "Good morning";
-    if (h < 17) return "Good afternoon";
-    return "Good evening";
-  })();
-
-  const dateLabel = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 
   return (
     <div className="space-y-3 apple-reveal">
       {/* Hero card */}
       <div className="rounded-2xl bg-gradient-to-br from-card to-card/80 p-5 apple-shadow">
-        {/* Greeting */}
-        <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3">
-          {greeting} · {dateLabel}
-        </p>
 
-        {/* Label row */}
-        <div className="flex items-start justify-between mb-1 gap-2">
-          <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest">
-            {mode === "paper" ? "Your Paper Portfolio" : mode === "live" ? "Your Portfolio" : "Your Portfolio"}
+        {/* Top row: label + status */}
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
+            {mode === "paper" ? "Paper Portfolio" : "Live Portfolio"}
           </p>
           <AgentStatusBadge />
         </div>
 
-        {/* Current portfolio value */}
+        {/* Portfolio value — the number */}
         <h1
-          className="text-[42px] font-light leading-none text-foreground mb-1"
-          style={{ letterSpacing: "-0.03em" }}
+          className="text-[44px] font-light leading-none text-foreground"
+          style={{ letterSpacing: "-0.04em" }}
         >
           {stats.loading
-            ? "--"
+            ? <span className="text-muted-foreground">--</span>
             : `$${portfolioValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
           }
         </h1>
 
-        {/* Starting balance context */}
-        {!stats.loading && startingBalance > 0 && (
-          <p className="text-[11px] text-muted-foreground mb-2">
-            Started at ${startingBalance.toLocaleString("en-US")}
-          </p>
-        )}
-
-        {/* All-time return + today + streak */}
-        <div className="flex items-center gap-2 flex-wrap mb-4">
-          <span className={cn("text-base font-medium tabular-nums", isUp ? "text-profit" : "text-loss")}>
-            {isUp ? "+" : ""}${Math.abs(totalReturn).toFixed(2)} all-time
-          </span>
-          <span className={cn("text-sm tabular-nums", isUp ? "text-profit" : "text-loss")}>
-            ({isUp ? "+" : ""}{totalReturnPct}%)
+        {/* P&L delta row */}
+        <div className="flex items-center gap-2 flex-wrap mt-1.5 mb-4">
+          <span className={cn(
+            "inline-flex items-center gap-1 text-sm font-medium tabular-nums px-2 py-0.5 rounded-full",
+            isUp ? "text-profit bg-profit/10" : "text-loss bg-loss/10"
+          )}>
+            <ArrowUpRight className={cn("h-3.5 w-3.5", !isUp && "rotate-180")} />
+            {isUp ? "+" : ""}{totalReturnPct}%
+            <span className="text-[11px] opacity-70">({isUp ? "+" : ""}${Math.abs(totalReturn).toFixed(2)})</span>
           </span>
           {todayPnl !== 0 && (
-            <span className={cn("text-xs tabular-nums text-muted-foreground")}>
-              · {isTodayUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)} today
+            <span className={cn("text-xs tabular-nums", isTodayUp ? "text-profit" : "text-loss")}>
+              {isTodayUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)} today
             </span>
           )}
           {winStreak >= 3 && (
-            <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2.5 py-0.5 rounded-full animate-pulse-gentle">
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
               🔥 {winStreak} streak
             </span>
           )}
         </div>
 
-        {/* 4-up quick stats */}
+        {/* Stats grid */}
         <div className="grid grid-cols-4 gap-2 mb-4">
           <QuickStat
             label="Win Rate"
@@ -275,20 +266,23 @@ export function DashboardHero({
             color={winRate > 0 ? (winRate >= 50 ? "profit" : "loss") : undefined}
             progress={winRate > 0 ? winRate : undefined}
           />
-          <QuickStat label="Placed" value={tradesToday > 0 ? `${tradesToday}` : "0"} />
+          <QuickStat
+            label="Settled"
+            value={settledCount > 0 ? `${settledCount}` : "0"}
+          />
           <QuickStat
             label="Open"
             value={openPositions > 0 ? `${openPositions}` : "0"}
             color={openPositions > 0 ? "primary" : undefined}
           />
           <QuickStat
-            label="Mode"
-            value={mode === "live" ? "Live" : "Paper"}
-            color={mode === "live" ? "loss" : "primary"}
+            label="Today"
+            value={tradesToday > 0 ? `${tradesToday}` : "0"}
+            color={tradesToday > 0 ? "profit" : undefined}
           />
         </div>
 
-        {/* Quick actions */}
+        {/* Actions */}
         <div className="grid grid-cols-3 gap-2">
           <button
             onClick={() => onNavigate?.("markets")}
@@ -305,17 +299,24 @@ export function DashboardHero({
             Ask Agent
           </button>
           <button
-            onClick={() => onNavigate?.("agent")}
+            onClick={() => onNavigate?.("performance" as string)}
             className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
           >
-            <BarChart3 className="h-3.5 w-3.5 text-primary" />
-            Positions
+            <TrendingUp className="h-3.5 w-3.5 text-primary" />
+            Performance
           </button>
         </div>
       </div>
 
-      {/* FOMO alert chips — horizontal scroll strip */}
+      {/* Status chips */}
       <div className="flex gap-2 overflow-x-auto pb-0.5 scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0">
+        {lastTradeAt && (
+          <AlertChip
+            icon={<Bot className="h-3 w-3" />}
+            label={`Last trade: ${timeAgo(lastTradeAt)}`}
+            color="primary"
+          />
+        )}
         {marketsClosingToday > 0 && (
           <AlertChip
             icon={<Clock className="h-3 w-3" />}
@@ -324,11 +325,13 @@ export function DashboardHero({
             onClick={() => onNavigate?.("markets")}
           />
         )}
-        <AlertChip
-          icon={<Bot className="h-3 w-3 animate-pulse" />}
-          label="Agent scanning markets"
-          color="primary"
-        />
+        {!lastTradeAt && !stats.loading && (
+          <AlertChip
+            icon={<Bot className="h-3 w-3 animate-pulse" />}
+            label="Agent scanning — first trades appear within 30 min"
+            color="primary"
+          />
+        )}
       </div>
     </div>
   );

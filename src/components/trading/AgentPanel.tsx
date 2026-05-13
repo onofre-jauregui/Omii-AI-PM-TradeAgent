@@ -30,11 +30,12 @@ const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-
 const AGENT_URL      = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/trading-agent`;
 
 const QUICK_PROMPTS = [
-  { label: "Best opportunities",  text: "Scan Kalshi markets and show me the 3 best trading opportunities right now." },
-  { label: "Show my positions",   text: "What positions do I currently have open and how are they performing?" },
-  { label: "Market summary",      text: "Give me a quick summary of today's most active prediction markets." },
-  { label: "Suggest a trade",     text: "Suggest one high-confidence trade for my active strategies." },
-  { label: "Risk check",          text: "Review my risk exposure and flag anything I should watch." },
+  { label: "Portfolio status",    text: "Give me a full status update — P&L, open positions, and how each strategy is performing." },
+  { label: "Best opportunities",  text: "Scan Kalshi markets and show me the top 3 opportunities right now with confidence levels." },
+  { label: "What traded today?",  text: "What did the agent trade today? Show me the trades, reasoning, and P&L." },
+  { label: "Run S-002 now",       text: "Trigger strategy S-002 to run right now and tell me what it finds." },
+  { label: "Risk check",          text: "Review my risk exposure across all open positions and flag anything outside my risk parameters." },
+  { label: "New strategy",        text: "I want to create a new strategy. Ask me what market type and edge I want to target." },
 ];
 
 async function streamChat({
@@ -92,7 +93,15 @@ export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
   const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
   const [temperature, setTemperature] = useState([0.3]);
   const [systemPrompt, setSystemPrompt] = useState(
-    `You are an expert algorithmic trading agent for Kalshi event contracts. Analyze market data, news sentiment, probability shifts, and order book depth to identify profitable trading opportunities. Use limit orders for better execution. Provide clear trade signals with entry/exit prices and confidence levels.`
+    `You are the orchestration layer of an autonomous trading system on Kalshi prediction markets. You have two roles:
+
+1. ANSWER questions about the portfolio — P&L, open positions, trade history, strategy performance, risk exposure. Use your tools to fetch live data before answering. Never guess numbers you can retrieve.
+
+2. ACT on user commands — trigger strategy runs, create new strategies, place manual trades, adjust risk settings. When the user says "run S-002" or "trade this market", do it via your tools.
+
+The EXECUTOR (auto-trade function) handles scheduled cron-based trades. You handle everything the user asks for directly.
+
+Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   );
   const [chatInput, setChatInput] = useState("");
   const [configOpen, setConfigOpen] = useState(false);
@@ -164,73 +173,71 @@ export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
       style={{ minHeight: "520px", height: "clamp(520px, 65vh, 700px)" }}>
 
       {/* Header */}
-      <div className="px-4 sm:px-5 py-3.5 border-b border-border flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className={`h-2 w-2 rounded-full ${mode === "live" ? "bg-red-500" : "bg-profit"} animate-pulse-gentle`} />
-          <h3 className="text-sm font-medium text-foreground">Your Agent</h3>
+      <div className="px-4 sm:px-5 py-3 border-b border-border flex items-center justify-between shrink-0 gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className={`h-2 w-2 rounded-full shrink-0 ${mode === "live" ? "bg-red-500" : "bg-profit"} animate-pulse-gentle`} />
+          <h3 className="text-sm font-medium text-foreground shrink-0">Agent</h3>
           {isLoading && (
-            <span className="text-[10px] text-muted-foreground flex items-center gap-1">
+            <span className="text-[10px] text-muted-foreground flex items-center gap-1 shrink-0">
               <Loader2 className="h-3 w-3 animate-spin" /> Thinking…
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="secondary" className={`text-[10px] rounded-full ${mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Model selector — always visible */}
+          <Select value={selectedModel} onValueChange={async (id) => {
+            setSelectedModel(id);
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) supabase.from("api_keys").upsert({ user_id: user.id, provider: "model_agent", key_id: id }, { onConflict: "provider,user_id" });
+          }}>
+            <SelectTrigger className="h-7 rounded-full border-0 bg-secondary text-[11px] font-medium px-3 gap-1 min-w-0 max-w-[140px]">
+              <Cpu className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="max-h-64">
+              {models.map((m) => (
+                <SelectItem key={m.id} value={m.id}>
+                  <span className="flex items-center gap-1.5 text-xs">
+                    {m.name}
+                    <span className="text-[10px] text-muted-foreground">{m.provider}</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Badge variant="secondary" className={`text-[10px] rounded-full shrink-0 ${mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
             {mode === "live" ? "Live" : "Paper"}
           </Badge>
           <button
             onClick={() => setConfigOpen(o => !o)}
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-lg px-2 py-1 hover:bg-secondary"
+            className="flex items-center gap-0.5 text-muted-foreground hover:text-foreground transition-colors rounded-lg p-1.5 hover:bg-secondary shrink-0"
+            title="Advanced settings"
           >
             <Settings2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">{currentModel?.name ?? "Model"}</span>
             {configOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
           </button>
         </div>
       </div>
 
-      {/* Collapsible config */}
+      {/* Collapsible config — temperature + strategies + advanced prompt */}
       {configOpen && (
-        <div className="border-b border-border bg-secondary/30 px-4 sm:px-5 py-4 space-y-4 shrink-0">
-          <div className="grid sm:grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">AI Model</Label>
-                <button onClick={loadModels} disabled={loadingModels} className="text-muted-foreground hover:text-foreground transition-colors">
-                  {loadingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                </button>
-              </div>
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger className="rounded-xl border-0 bg-background text-sm h-9">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="max-h-64">
-                  {models.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      <span className="flex items-center gap-1.5">
-                        <Cpu className="h-3 w-3 shrink-0" />
-                        <span>{m.name}</span>
-                        <span className="text-[10px] text-muted-foreground">{m.provider}</span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-xs text-muted-foreground">Creativity</Label>
-                <span className="text-xs text-foreground">
-                  {temperature[0] <= 0.2 ? "Precise" : temperature[0] <= 0.5 ? "Balanced" : temperature[0] <= 0.7 ? "Creative" : "Wild"}&nbsp;·&nbsp;{temperature[0]}
-                </span>
-              </div>
-              <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} />
+        <div className="border-b border-border bg-secondary/30 px-4 sm:px-5 py-4 space-y-3 shrink-0">
+          <div className="flex items-center gap-3">
+            <button onClick={loadModels} disabled={loadingModels} className="text-muted-foreground hover:text-foreground transition-colors shrink-0" title="Reload models">
+              {loadingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            </button>
+            <div className="flex items-center gap-2 flex-1">
+              <Label className="text-xs text-muted-foreground shrink-0">Creativity</Label>
+              <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} className="flex-1" />
+              <span className="text-xs text-muted-foreground shrink-0">
+                {temperature[0] <= 0.2 ? "Precise" : temperature[0] <= 0.5 ? "Balanced" : temperature[0] <= 0.7 ? "Creative" : "Wild"}
+              </span>
             </div>
           </div>
           {activeStrategies.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <BookOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-              <span className="text-xs text-muted-foreground">Loaded:</span>
+              <span className="text-xs text-muted-foreground">Active:</span>
               {activeStrategies.map(s => (
                 <Badge key={s.id} variant="secondary" className="text-[10px] rounded-full font-normal">{s.name}</Badge>
               ))}
@@ -241,13 +248,13 @@ export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
             className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
           >
             {advancedOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-            Advanced (system prompt)
+            System prompt
           </button>
           {advancedOpen && (
             <Textarea
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              className="rounded-xl border-0 bg-background text-xs min-h-[80px] resize-none"
+              className="rounded-xl border-0 bg-background text-xs min-h-[100px] resize-none font-mono"
             />
           )}
         </div>
