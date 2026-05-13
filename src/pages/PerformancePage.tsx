@@ -58,6 +58,20 @@ interface RecentTrade {
   created_at: string;
 }
 
+interface CategoryRow {
+  category: string;
+  trades: number;
+  settled: number;
+  wins: number;
+  pnl: number;
+}
+
+interface DistBucket {
+  label: string;
+  count: number;
+  pnl: number;
+}
+
 interface OpenTrade {
   id: string;
   ticker: string;
@@ -120,6 +134,15 @@ function timeAgo(iso: string) {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function categoryFromTicker(ticker: string | null | undefined): string {
+  if (!ticker) return "Other";
+  if (/KXHIGH|WEATHER|TEMP/i.test(ticker)) return "Weather";
+  if (/KXBTC|KXETH|CRYPTO/i.test(ticker)) return "Crypto";
+  if (/KXFED|KXCPI|KXGDP|KXPAYROLLS|KXCHCUTS/i.test(ticker)) return "Macro";
+  if (/KXNHL|KXNBA|KXMLB|SPORTS/i.test(ticker)) return "Sports";
+  return "Other";
 }
 
 /**
@@ -215,6 +238,8 @@ export function PerformancePage() {
   const [showAllPositions, setShowAllPositions] = useState(false);
   const [pendingExposure, setPendingExposure] = useState(0);
   const [dailyPnl, setDailyPnl] = useState<{ date: string; pnl: number }[]>([]);
+  const [categoryRows, setCategoryRows] = useState<CategoryRow[]>([]);
+  const [pnlDistribution, setPnlDistribution] = useState<DistBucket[]>([]);
 
   const applyEra = useCallback((trades: any[], selectedEra: Era) => {
     const cutoff = ERA_CUTOFFS[selectedEra];
@@ -338,6 +363,42 @@ export function PerformancePage() {
         pnl: parseFloat(pnl.toFixed(2)),
       }));
     setDailyPnl(dailyPnlData);
+
+    // ── Category breakdown ──
+    const catMap = new Map<string, CategoryRow>();
+    for (const t of allTrades) {
+      const cat = categoryFromTicker(t.ticker);
+      if (!catMap.has(cat)) {
+        catMap.set(cat, { category: cat, trades: 0, settled: 0, wins: 0, pnl: 0 });
+      }
+      const row = catMap.get(cat)!;
+      row.trades++;
+      if (t.settled_at) {
+        row.settled++;
+        row.pnl += t.pnl ?? 0;
+        if ((t.pnl ?? 0) > 0) row.wins++;
+      }
+    }
+    setCategoryRows([...catMap.values()].sort((a, b) => b.pnl - a.pnl));
+
+    // ── P&L distribution histogram ──
+    const BUCKET_MIN = -10, BUCKET_MAX = 10;
+    const buckets = new Map<number, number>();
+    for (let i = BUCKET_MIN; i <= BUCKET_MAX; i++) buckets.set(i, 0);
+    for (const t of settled) {
+      if (t.pnl == null) continue;
+      const bucket = Math.max(BUCKET_MIN, Math.min(BUCKET_MAX, Math.floor(t.pnl)));
+      buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+    }
+    setPnlDistribution(
+      [...buckets.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([pnl, count]) => ({
+          label: pnl === BUCKET_MIN ? `≤${pnl}` : pnl === BUCKET_MAX ? `≥+${pnl}` : pnl >= 0 ? `+${pnl}` : `${pnl}`,
+          count,
+          pnl,
+        }))
+    );
 
     setRecentTrades(recentSettled as RecentTrade[]);
     setOpenTrades(openPositions as OpenTrade[]);
@@ -564,7 +625,33 @@ export function PerformancePage() {
               </div>
             )}
 
-            {/* ── 5. Benchmark callout ──────────────────────────────────────── */}
+            {/* ── 5. P&L distribution histogram ────────────────────────────── */}
+            {pnlDistribution.some(b => b.count > 0) && (
+              <div className="rounded-2xl bg-card p-6 apple-shadow">
+                <div className="flex items-center justify-between mb-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-widest">P&L Distribution</p>
+                  <p className="text-xs text-muted-foreground">outcome skew per settled trade</p>
+                </div>
+                <ResponsiveContainer width="100%" height={120}>
+                  <BarChart data={pnlDistribution} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                    <XAxis dataKey="label" axisLine={false} tickLine={false}
+                      tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 9 }} />
+                    <YAxis hide />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "12px", fontSize: "12px" }}
+                      formatter={(v: number) => [v, "trades"]}
+                    />
+                    <Bar dataKey="count" radius={[3, 3, 0, 0]}>
+                      {pnlDistribution.map((b, i) => (
+                        <Cell key={i} fill={b.pnl >= 0 ? "hsl(var(--profit))" : "hsl(var(--loss))"} fillOpacity={b.count === 0 ? 0.15 : 0.85} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* ── 6. Benchmark callout ──────────────────────────────────────── */}
             {stats!.settledTrades > 0 && stats!.realizedPnl !== 0 && (
               <div className="flex items-center gap-3 px-1 text-xs text-muted-foreground">
                 <span className={cn("font-medium", stats!.realizedPnl >= 0 ? "text-profit" : "text-loss")}>
@@ -712,6 +799,54 @@ export function PerformancePage() {
                 </div>
               )}
             </div>
+
+            {/* ── By Category ───────────────────────────────────────────── */}
+            {categoryRows.length > 0 && (
+              <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+                <div className="px-6 py-4 border-b border-border flex items-center gap-2">
+                  <BarChart3 className="h-4 w-4 text-muted-foreground" />
+                  <h3 className="text-sm font-medium text-muted-foreground">By Market Category</h3>
+                </div>
+                <div className="divide-y divide-border">
+                  {categoryRows.map((row) => {
+                    const winRate = row.settled > 0 ? Math.round((row.wins / row.settled) * 100) : null;
+                    const maxPnl = Math.max(...categoryRows.map(r => Math.abs(r.pnl)), 1);
+                    const barWidth = Math.abs(row.pnl) / maxPnl * 100;
+                    return (
+                      <div key={row.category} className="px-6 py-3.5 hover:bg-secondary/40 transition-colors">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-sm font-medium">{row.category}</span>
+                          <div className="flex items-center gap-6 text-right">
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">Trades</p>
+                              <p className="text-sm tabular-nums">{row.trades}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">Win%</p>
+                              <p className={cn("text-sm tabular-nums", winRate !== null ? (winRate >= 50 ? "text-profit" : "text-loss") : "")}>
+                                {winRate !== null ? `${winRate}%` : "--"}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">P&L</p>
+                              <p className={cn("text-sm font-medium tabular-nums", row.pnl >= 0 ? "text-profit" : "text-loss")}>
+                                {formatPnl(row.pnl)}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="h-1 rounded-full bg-secondary overflow-hidden">
+                          <div
+                            className={cn("h-full rounded-full transition-all", row.pnl >= 0 ? "bg-profit/60" : "bg-loss/60")}
+                            style={{ width: `${barWidth}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Recent settled trades */}
             <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
