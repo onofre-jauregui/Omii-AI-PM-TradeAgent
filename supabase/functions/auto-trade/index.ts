@@ -1025,8 +1025,8 @@ async function runS005WeatherEdge(
     };
   }
 
-  // Dedup: skip tickers already held to prevent placing multiple trades on the same market
-  // across auto-trade runs (signals stay fresh for 30 min; auto-trade runs every 10 min).
+  // Dedup: skip tickers already held AND skip cities already held (one leg per city per run).
+  // Prevents double-exposure when both a "T73" and "B70.5" signal exist for the same city.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
@@ -1034,7 +1034,18 @@ async function runS005WeatherEdge(
     .is("exit_reason", null)
     .is("settled_at", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
-  const deduped = signals.filter((s: any) => !openTickers.has(s.ticker));
+  const openCities = new Set(
+    (openTrades || []).map((t: any) => {
+      const m = (t.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
+      return m ? m[1] : null;
+    }).filter(Boolean)
+  );
+  const deduped = signals.filter((s: any) => {
+    if (openTickers.has(s.ticker)) return false;
+    const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
+    if (cityMatch && openCities.has(cityMatch[1])) return false;
+    return true;
+  });
 
   if (deduped.length === 0) {
     return {

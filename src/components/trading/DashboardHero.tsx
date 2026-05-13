@@ -4,10 +4,11 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchKalshiMarkets } from "@/lib/kalshiApi";
 
-const PAPER_STARTING = 10_000;
-
 interface HeroStats {
+  startingBalance: number;
   portfolioValue: number;
+  totalReturn: number;
+  totalReturnPct: number;
   todayPnl: number;
   todayPnlPct: number;
   winRate: number;
@@ -89,7 +90,10 @@ export function DashboardHero({
   onNavigate?: (tab: string) => void;
 }) {
   const [stats, setStats] = useState<HeroStats>({
-    portfolioValue: PAPER_STARTING,
+    startingBalance: 0,
+    portfolioValue: 0,
+    totalReturn: 0,
+    totalReturnPct: 0,
     todayPnl: 0,
     todayPnlPct: 0,
     winRate: 0,
@@ -105,56 +109,66 @@ export function DashboardHero({
     todayStart.setHours(0, 0, 0, 0);
     const todayISO = todayStart.toISOString();
 
-    const [tradesRes, recentRes, marketsRes] = await Promise.allSettled([
+    const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes] = await Promise.allSettled([
+      // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
         .from("trades")
-        .select("pnl, created_at, status, mode")
-        .eq("status", "filled")
-        .order("created_at", { ascending: false }),
+        .select("pnl, settled_at, mode")
+        .eq("status", "settled")
+        .order("settled_at", { ascending: false }),
+      // Open positions: filled but not yet settled
       supabase
         .from("trades")
-        .select("pnl")
+        .select("id")
         .eq("status", "filled")
-        .order("created_at", { ascending: false })
-        .limit(10),
+        .is("settled_at", null),
+      // Trades placed today (for activity count)
+      supabase
+        .from("trades")
+        .select("id")
+        .gte("created_at", todayISO),
+      // Starting balance = sum of strategy starting_balances (real paper capital allocated)
+      supabase
+        .from("strategies")
+        .select("starting_balance")
+        .eq("active", true),
       fetchKalshiMarkets(200),
     ]);
 
-    const allTrades = tradesRes.status === "fulfilled" ? (tradesRes.value.data ?? []) : [];
-    const recentTrades = recentRes.status === "fulfilled" ? (recentRes.value.data ?? []) : [];
+    const settledTrades = settledRes.status === "fulfilled" ? (settledRes.value.data ?? []) : [];
+    const openTrades = openRes.status === "fulfilled" ? (openRes.value.data ?? []) : [];
+    const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
+    const strategies = strategiesRes.status === "fulfilled" ? (strategiesRes.value.data ?? []) : [];
     const markets = marketsRes.status === "fulfilled" ? marketsRes.value : [];
 
-    // Filter by mode
-    const modeTrades = mode ? allTrades.filter(t => t.mode === mode) : allTrades;
+    // Starting balance from DB — what was allocated when strategies were set up
+    const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
 
-    // Portfolio value: starting balance + total PnL
+    // Filter by mode if specified
+    const modeTrades = mode ? settledTrades.filter(t => t.mode === mode) : settledTrades;
+
+    // Total P&L from all settled trades
     const totalPnl = modeTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const portfolioValue = PAPER_STARTING + totalPnl;
-
-    // Today's PnL
-    const todayTrades = modeTrades.filter(t => t.created_at >= todayISO);
-    const todayPnl = todayTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const todayPnlPct = portfolioValue > 0
-      ? parseFloat(((todayPnl / (portfolioValue - todayPnl)) * 100).toFixed(2))
+    const portfolioValue = startingBalance + totalPnl;
+    const totalReturnPct = startingBalance > 0
+      ? parseFloat(((totalPnl / startingBalance) * 100).toFixed(2))
       : 0;
 
-    // Win rate
-    const pnls = modeTrades.map(t => t.pnl ?? 0);
-    const winners = pnls.filter(p => p > 0).length;
-    const losers = pnls.filter(p => p < 0).length;
+    // Today's P&L — trades that settled today
+    const settledToday = modeTrades.filter(t => t.settled_at && t.settled_at >= todayISO);
+    const todayPnl = settledToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
+    const todayPnlPct = startingBalance > 0
+      ? parseFloat(((todayPnl / startingBalance) * 100).toFixed(2))
+      : 0;
+
+    // Win rate across all settled trades
+    const winners = modeTrades.filter(t => (t.pnl ?? 0) > 0).length;
+    const losers = modeTrades.filter(t => (t.pnl ?? 0) < 0).length;
     const winRate = winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0;
 
-    // Open positions (trades today not yet settled — simplified as all today's trades)
-    const openPositions = modeTrades.filter(
-      t => t.status === "filled" && t.created_at >= todayISO
-    ).length;
-
-    // Trades today
-    const tradesToday = todayTrades.length;
-
-    // Win streak from most recent trades
+    // Win streak from most recent settled trades
     let winStreak = 0;
-    for (const t of recentTrades) {
+    for (const t of modeTrades) {
       if ((t.pnl ?? 0) > 0) winStreak++;
       else break;
     }
@@ -168,11 +182,14 @@ export function DashboardHero({
     }).length;
 
     setStats({
+      startingBalance,
       portfolioValue,
+      totalReturn: totalPnl,
+      totalReturnPct,
       todayPnl,
       todayPnlPct,
       winRate,
-      openPositions,
+      openPositions: openTrades.length,
       tradesToday,
       winStreak,
       marketsClosingToday,
@@ -182,8 +199,9 @@ export function DashboardHero({
 
   useEffect(() => { load(); }, [load]);
 
-  const { portfolioValue, todayPnl, todayPnlPct, winRate, openPositions, tradesToday, winStreak, marketsClosingToday } = stats;
-  const isUp = todayPnl >= 0;
+  const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, todayPnlPct, winRate, openPositions, tradesToday, winStreak, marketsClosingToday } = stats;
+  const isUp = totalReturn >= 0;
+  const isTodayUp = todayPnl >= 0;
 
   const greeting = (() => {
     const h = new Date().getHours();
@@ -211,22 +229,37 @@ export function DashboardHero({
           <AgentStatusBadge />
         </div>
 
-        {/* Giant P&L value */}
+        {/* Current portfolio value */}
         <h1
-          className="text-[42px] font-light leading-none text-foreground mb-2"
+          className="text-[42px] font-light leading-none text-foreground mb-1"
           style={{ letterSpacing: "-0.03em" }}
         >
-          ${portfolioValue.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+          {stats.loading
+            ? "--"
+            : `$${portfolioValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          }
         </h1>
 
-        {/* Today's change + streak */}
+        {/* Starting balance context */}
+        {!stats.loading && startingBalance > 0 && (
+          <p className="text-[11px] text-muted-foreground mb-2">
+            Started at ${startingBalance.toLocaleString("en-US")}
+          </p>
+        )}
+
+        {/* All-time return + today + streak */}
         <div className="flex items-center gap-2 flex-wrap mb-4">
           <span className={cn("text-base font-medium tabular-nums", isUp ? "text-profit" : "text-loss")}>
-            {isUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)}
+            {isUp ? "+" : ""}${Math.abs(totalReturn).toFixed(2)} all-time
           </span>
-          <span className={cn("text-sm", isUp ? "text-profit" : "text-loss")}>
-            ({isUp ? "+" : ""}{todayPnlPct}% today)
+          <span className={cn("text-sm tabular-nums", isUp ? "text-profit" : "text-loss")}>
+            ({isUp ? "+" : ""}{totalReturnPct}%)
           </span>
+          {todayPnl !== 0 && (
+            <span className={cn("text-xs tabular-nums text-muted-foreground")}>
+              · {isTodayUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)} today
+            </span>
+          )}
           {winStreak >= 3 && (
             <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2.5 py-0.5 rounded-full animate-pulse-gentle">
               🔥 {winStreak} streak
@@ -242,8 +275,12 @@ export function DashboardHero({
             color={winRate > 0 ? (winRate >= 50 ? "profit" : "loss") : undefined}
             progress={winRate > 0 ? winRate : undefined}
           />
-          <QuickStat label="Today" value={tradesToday > 0 ? `${tradesToday} tr` : "0 tr"} />
-          <QuickStat label="Open" value={openPositions > 0 ? `${openPositions} pos` : "0 pos"} />
+          <QuickStat label="Placed" value={tradesToday > 0 ? `${tradesToday}` : "0"} />
+          <QuickStat
+            label="Open"
+            value={openPositions > 0 ? `${openPositions}` : "0"}
+            color={openPositions > 0 ? "primary" : undefined}
+          />
           <QuickStat
             label="Mode"
             value={mode === "live" ? "Live" : "Paper"}

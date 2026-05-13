@@ -21,8 +21,8 @@ async function fetchKalshiBalance(): Promise<number | null> {
   }
 }
 
-// Starting paper capital — paper trades are simulated against this balance
-const PAPER_STARTING_BALANCE = 10_000;
+// Fallback if strategies table can't be reached — matches real DB sum (S-001: $1k, S-002: $1k, S-005: $500)
+const PAPER_STARTING_BALANCE = 2_500;
 
 interface Position {
   market_id: string;
@@ -64,39 +64,43 @@ export function PortfolioStats({
   const load = useCallback(async () => {
     setLoading(true);
 
-    let filledBuysQuery = supabase
-      .from("trades").select("amount, pnl, mode").eq("status", "filled").eq("action", "buy");
-    let allTradesQuery = supabase
-      .from("trades").select("pnl, status, action, mode").eq("status", "filled");
-    let sellsQuery = supabase
-      .from("trades").select("amount, mode").eq("status", "filled").eq("action", "sell");
+    // PnL only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
+    let settledQuery = supabase
+      .from("trades").select("pnl, mode").eq("status", "settled");
+    // Open positions: placed but not yet resolved
+    let openQuery = supabase
+      .from("trades").select("amount, mode").eq("status", "filled").is("settled_at", null);
+    // Starting balance from strategies table
+    const strategiesQuery = supabase
+      .from("strategies").select("starting_balance").eq("active", true);
 
     if (mode) {
-      filledBuysQuery = filledBuysQuery.eq("mode", mode);
-      allTradesQuery = allTradesQuery.eq("mode", mode);
-      sellsQuery = sellsQuery.eq("mode", mode);
+      settledQuery = settledQuery.eq("mode", mode);
+      openQuery = openQuery.eq("mode", mode);
     }
 
-    const [{ data: buys }, { data: allTrades }, { data: sells }] = await Promise.all([
-      filledBuysQuery,
-      allTradesQuery,
-      sellsQuery,
+    const [{ data: settledTrades }, { data: openPositions }, { data: strategyRows }] = await Promise.all([
+      settledQuery,
+      openQuery,
+      strategiesQuery,
     ]);
 
-    const totalBuyAmount = (buys ?? []).reduce((sum, t) => sum + (t.amount || 0), 0);
-    const totalSellAmount = (sells ?? []).reduce((sum, t) => sum + (t.amount || 0), 0);
-    const totalPnl = (allTrades ?? []).reduce((sum, t) => sum + (t.pnl || 0), 0);
-    const winners = (allTrades ?? []).filter(t => (t.pnl || 0) > 0).length;
-    const totalWithPnl = (allTrades ?? []).filter(t => t.pnl !== null && t.pnl !== 0).length;
+    const startingBalance = strategyRows
+      ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
+      : effectiveStartingBalance;
+
+    const totalPnl = (settledTrades ?? []).reduce((sum, t) => sum + (t.pnl || 0), 0);
+    const winners = (settledTrades ?? []).filter(t => (t.pnl || 0) > 0).length;
+    const losers = (settledTrades ?? []).filter(t => (t.pnl || 0) < 0).length;
+    const capitalInFlight = (openPositions ?? []).reduce((s, t) => s + (t.amount || 0), 0);
 
     let portfolioValue: number;
     let cashAvailable: number;
 
-    if (mode === "paper") {
-      // Paper balance = starting capital - capital tied up in open positions + realized P&L
-      const netInvested = Math.max(0, totalBuyAmount - totalSellAmount);
-      portfolioValue = effectiveStartingBalance - netInvested + totalPnl;
-      cashAvailable = portfolioValue;
+    if (mode === "paper" || !mode) {
+      // Paper: starting capital + settled P&L. Cash available = that minus what's currently in flight.
+      portfolioValue = startingBalance + totalPnl;
+      cashAvailable = Math.max(0, portfolioValue - capitalInFlight);
     } else {
       // Live: fetch real balance from Kalshi; fall back to trade math if API unavailable
       const kalshiBalance = await fetchKalshiBalance();
@@ -104,8 +108,8 @@ export function PortfolioStats({
         cashAvailable = kalshiBalance;
         portfolioValue = kalshiBalance + totalPnl;
       } else {
-        portfolioValue = totalBuyAmount - totalSellAmount + totalPnl;
-        cashAvailable = portfolioValue;
+        portfolioValue = startingBalance + totalPnl;
+        cashAvailable = Math.max(0, portfolioValue - capitalInFlight);
       }
     }
 
@@ -113,9 +117,9 @@ export function PortfolioStats({
       portfolioValue,
       cashAvailable,
       totalPnl,
-      winRate: totalWithPnl > 0 ? Math.round((winners / totalWithPnl) * 100) : 0,
-      openPositionCount: (buys ?? []).length,
-      totalTrades: (allTrades ?? []).length,
+      winRate: winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0,
+      openPositionCount: (openPositions ?? []).length,
+      totalTrades: (settledTrades ?? []).length,
     });
     setLoading(false);
   }, [mode]);
