@@ -11,6 +11,7 @@ import { MarketsPanel } from "@/components/trading/MarketsPanel";
 import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
 import { AgentPanel } from "@/components/trading/AgentPanel";
 import { TradeLog } from "@/components/trading/TradeLog";
+import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { CompliancePanel } from "@/components/trading/CompliancePanel";
@@ -33,7 +34,7 @@ const TAB_LABELS: Record<Tab, string> = {
 const Index = () => {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [mode, setMode] = useState<Mode>("paper");
-  const [agentSubTab, setAgentSubTab] = useState<"activity" | "history">("activity");
+  const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history">("chat");
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const navigate = useNavigate();
   const isMobile = useIsMobile();
@@ -181,25 +182,32 @@ const Index = () => {
 
           {/* ── Agent ──────────────────────────────────────────────── */}
           {activeTab === "agent" && (
-            <div className="space-y-6 apple-reveal">
-              {/* Sub-tabs */}
-              <div className="flex gap-0 border-b border-border">
-                {(["activity", "history"] as const).map((sub) => (
+            <div className="space-y-5 apple-reveal">
+              {/* Sub-tabs — Claude/OpenAI style */}
+              <div className="flex gap-1 overflow-x-auto scrollbar-none">
+                {([
+                  { id: "chat",       label: "Chat"       },
+                  { id: "strategies", label: "Strategies" },
+                  { id: "risk",       label: "Risk"       },
+                  { id: "history",    label: "History"    },
+                ] as const).map(({ id, label }) => (
                   <button
-                    key={sub}
-                    onClick={() => setAgentSubTab(sub)}
-                    className={`px-4 py-2.5 sm:py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-                      agentSubTab === sub
-                        ? "border-foreground text-foreground"
-                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    key={id}
+                    onClick={() => setAgentSubTab(id)}
+                    className={`shrink-0 px-4 py-2 text-sm font-medium rounded-full transition-all duration-150 ${
+                      agentSubTab === id
+                        ? "bg-foreground text-background"
+                        : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                     }`}
                   >
-                    {sub === "activity" ? "Activity" : "Trade History"}
+                    {label}
                   </button>
                 ))}
               </div>
-              {agentSubTab === "activity" && <AgentPanel mode={mode} />}
-              {agentSubTab === "history" && <TradeLog filterMode={mode} />}
+              {agentSubTab === "chat"       && <AgentPanel mode={mode} />}
+              {agentSubTab === "strategies" && <StrategiesPanel />}
+              {agentSubTab === "risk"       && <RiskControlsPanel />}
+              {agentSubTab === "history"    && <TradeLog filterMode={mode} />}
             </div>
           )}
 

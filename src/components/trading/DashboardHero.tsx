@@ -1,4 +1,4 @@
-import { Bot, Clock } from "lucide-react";
+import { Bot, Clock, Zap, MessageSquare, BarChart3 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -185,10 +185,24 @@ export function DashboardHero({
   const { portfolioValue, todayPnl, todayPnlPct, winRate, openPositions, tradesToday, winStreak, marketsClosingToday } = stats;
   const isUp = todayPnl >= 0;
 
+  const greeting = (() => {
+    const h = new Date().getHours();
+    if (h < 12) return "Good morning";
+    if (h < 17) return "Good afternoon";
+    return "Good evening";
+  })();
+
+  const dateLabel = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+
   return (
     <div className="space-y-3 apple-reveal">
       {/* Hero card */}
-      <div className="rounded-2xl bg-card p-5 apple-shadow">
+      <div className="rounded-2xl bg-gradient-to-br from-card to-card/80 p-5 apple-shadow">
+        {/* Greeting */}
+        <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-3">
+          {greeting} · {dateLabel}
+        </p>
+
         {/* Label row */}
         <div className="flex items-start justify-between mb-1 gap-2">
           <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-widest">
@@ -221,7 +235,7 @@ export function DashboardHero({
         </div>
 
         {/* 4-up quick stats */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-4 gap-2 mb-4">
           <QuickStat
             label="Win Rate"
             value={winRate > 0 ? `${winRate}%` : "--"}
@@ -235,6 +249,31 @@ export function DashboardHero({
             value={mode === "live" ? "Live" : "Paper"}
             color={mode === "live" ? "loss" : "primary"}
           />
+        </div>
+
+        {/* Quick actions */}
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            onClick={() => onNavigate?.("markets")}
+            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
+          >
+            <Zap className="h-3.5 w-3.5 text-primary" />
+            Scan Markets
+          </button>
+          <button
+            onClick={() => onNavigate?.("agent")}
+            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
+          >
+            <MessageSquare className="h-3.5 w-3.5 text-primary" />
+            Ask Agent
+          </button>
+          <button
+            onClick={() => onNavigate?.("agent")}
+            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
+          >
+            <BarChart3 className="h-3.5 w-3.5 text-primary" />
+            Positions
+          </button>
         </div>
       </div>
 

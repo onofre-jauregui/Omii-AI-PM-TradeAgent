@@ -15,10 +15,15 @@ interface TradeModalProps {
   open: boolean;
   onClose: () => void;
   mode: "paper" | "live";
+  initialSide?: "yes" | "no";
 }
 
-export function TradeModal({ market, open, onClose, mode }: TradeModalProps) {
-  const [side, setSide] = useState<"yes" | "no">("no");
+export function TradeModal({ market, open, onClose, mode, initialSide }: TradeModalProps) {
+  const [side, setSide] = useState<"yes" | "no">(initialSide ?? "no");
+
+  useEffect(() => {
+    if (initialSide) setSide(initialSide);
+  }, [initialSide, open]);
   const [amount, setAmount] = useState(20);
   const [price, setPrice] = useState(50);
   const [submitting, setSubmitting] = useState(false);

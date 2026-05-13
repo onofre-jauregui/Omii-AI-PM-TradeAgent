@@ -11,6 +11,20 @@ import { cn } from "@/lib/utils";
 import { TradeModal } from "./TradeModal";
 
 type SortKey = "volume" | "volume24h" | "yesPrice" | "noPrice" | "endDate";
+
+const CATEGORY_THEME: Record<string, { text: string; bg: string; border: string }> = {
+  "Federal Reserve": { text: "text-blue-500",   bg: "bg-blue-500/10",   border: "border-l-blue-500"   },
+  "Economics":       { text: "text-indigo-500", bg: "bg-indigo-500/10", border: "border-l-indigo-500" },
+  "Crypto":          { text: "text-amber-500",  bg: "bg-amber-500/10",  border: "border-l-amber-500"  },
+  "Sports":          { text: "text-violet-500", bg: "bg-violet-500/10", border: "border-l-violet-500" },
+  "Politics":        { text: "text-rose-500",   bg: "bg-rose-500/10",   border: "border-l-rose-500"   },
+  "Weather":         { text: "text-sky-500",    bg: "bg-sky-500/10",    border: "border-l-sky-500"    },
+  "default":         { text: "text-muted-foreground", bg: "bg-secondary", border: "border-l-border"   },
+};
+
+function getCategoryTheme(category: string) {
+  return CATEGORY_THEME[category] ?? CATEGORY_THEME["default"];
+}
 type Horizon = "any" | "today" | "week" | "month";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
@@ -39,6 +53,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<ParsedMarket | null>(null);
   const [tradeMarket, setTradeMarket] = useState<ParsedMarket | null>(null);
+  const [tradeInitialSide, setTradeInitialSide] = useState<"yes" | "no" | undefined>();
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("All");
   const [sortBy, setSortBy] = useState<SortKey>("volume");
@@ -246,16 +261,36 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((market) => (
-            <div
-              key={market.id}
-              className="rounded-2xl bg-card p-5 apple-shadow cursor-pointer transition-shadow duration-300 hover:apple-shadow-hover"
-              onClick={() => setSelectedMarket(market)}
-            >
-              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-6">
-                <div className="flex-1 space-y-1.5">
-                  <h3 className="text-sm font-medium leading-snug text-foreground">{market.question}</h3>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+          {filtered.map((market) => {
+            const theme = getCategoryTheme(market.category);
+            return (
+              <div
+                key={market.id}
+                className={cn(
+                  "rounded-2xl bg-card apple-shadow cursor-pointer transition-shadow duration-300 hover:apple-shadow-hover",
+                  "border-l-4 overflow-hidden",
+                  theme.border
+                )}
+                onClick={() => setSelectedMarket(market)}
+              >
+                <div className="p-4 sm:p-5 space-y-3">
+                  {/* Top row: category pill + close date */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={cn("text-[10px] font-medium px-2 py-0.5 rounded-full", theme.bg, theme.text)}>
+                      {market.category}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground flex items-center gap-1 shrink-0">
+                      <Clock className="h-2.5 w-2.5" /> {market.endDate}
+                    </span>
+                  </div>
+
+                  {/* Question */}
+                  <h3 className="text-sm font-medium leading-snug text-foreground line-clamp-2">
+                    {market.question}
+                  </h3>
+
+                  {/* Volume row */}
+                  <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
                     <span className="flex items-center gap-1">
                       <Users className="h-3 w-3" /> {formatVolume(market.volume)}
                     </span>
@@ -264,47 +299,46 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                         <TrendingUp className="h-3 w-3" /> {formatVolume(market.volume24hr)} 24h
                       </span>
                     )}
-                    <span className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" /> {market.endDate}
-                    </span>
                     {market.spread > 0 && (
-                      <span className="text-[10px]">Spread: {market.spread}c</span>
+                      <span>Spread: {market.spread}¢</span>
                     )}
-                    <Badge variant="secondary" className="text-[10px] rounded-full font-normal">
-                      {market.category}
-                    </Badge>
                   </div>
-                </div>
-                {/* Prices + Trade button — row on mobile, column on desktop */}
-                <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 sm:gap-2 shrink-0">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-muted-foreground w-5">Yes</span>
-                      <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
-                        <div className="h-full bg-profit rounded-full transition-all duration-500" style={{ width: `${market.yesPrice}%` }} />
-                      </div>
-                      <span className="text-xs font-medium text-profit w-8 text-right">{market.yesPrice}c</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-muted-foreground w-5">No</span>
-                      <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
-                        <div className="h-full bg-loss rounded-full transition-all duration-500" style={{ width: `${market.noPrice}%` }} />
-                      </div>
-                      <span className="text-xs font-medium text-loss w-8 text-right">{market.noPrice}c</span>
-                    </div>
+
+                  {/* YES / NO pill buttons */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTradeInitialSide("yes");
+                        setTradeMarket(market);
+                      }}
+                      className="flex-1 h-9 rounded-full text-xs font-semibold border transition-all duration-150 active:scale-95 bg-profit/10 text-profit border-profit/20 hover:bg-profit hover:text-white hover:border-profit"
+                    >
+                      Yes&nbsp;&nbsp;{market.yesPrice}¢
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTradeInitialSide("no");
+                        setTradeMarket(market);
+                      }}
+                      className="flex-1 h-9 rounded-full text-xs font-semibold border transition-all duration-150 active:scale-95 bg-loss/10 text-loss border-loss/20 hover:bg-loss hover:text-white hover:border-loss"
+                    >
+                      No&nbsp;&nbsp;{market.noPrice}¢
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0 h-9 px-3 text-xs rounded-full"
+                      onClick={(e) => { e.stopPropagation(); setSelectedMarket(market); }}
+                    >
+                      Detail
+                    </Button>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs h-10 sm:h-7 px-4 sm:px-3 sm:w-full min-w-[72px]"
-                    onClick={(e) => { e.stopPropagation(); setTradeMarket(market); }}
-                  >
-                    Trade
-                  </Button>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -393,8 +427,9 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
       <TradeModal
         market={tradeMarket}
         open={!!tradeMarket}
-        onClose={() => setTradeMarket(null)}
+        onClose={() => { setTradeMarket(null); setTradeInitialSide(undefined); }}
         mode={mode}
+        initialSide={tradeInitialSide}
       />
     </div>
   );
