@@ -2,16 +2,82 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Omii TradeAgent - Kalshi Event Contracts</title>
-    <meta name="description" content="AI-powered trading agent for Kalshi event contracts" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>TradeAgent — Hands-Free Kalshi Trading, Powered by Community Intelligence</title>
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#161109" media="(prefers-color-scheme: dark)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="TradeAgent" />
+    <link rel="apple-touch-icon" href="/pwa-192.png" />
+    <meta name="description" content="TradeAgent scans Kalshi prediction markets 24/7, executes on your behalf, and feeds every outcome into a shared AI memory pool. The more users trade, the smarter it gets." />
     <meta name="author" content="Omii AI" />
 
-    <meta property="og:title" content="Omii TradeAgent" />
-    <meta property="og:description" content="AI-powered trading agent for Kalshi event contracts" />
+    <meta property="og:title" content="TradeAgent — Hands-Free Kalshi Trading" />
+    <meta property="og:description" content="Set it and forget it. TradeAgent executes on Kalshi 24/7 using community-powered AI. Free to start, paper mode by default." />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://tradeagent.omii.ai" />
+    <meta property="og:image" content="https://tradeagent.omii.ai/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
 
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="TradeAgent — Hands-Free Kalshi Trading" />
+    <meta name="twitter:description" content="Set it and forget it. TradeAgent executes on Kalshi 24/7 using community-powered AI." />
+    <meta name="twitter:image" content="https://tradeagent.omii.ai/og-image.png" />
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Do you hold or custody my funds?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Your funds never leave Kalshi. TradeAgent uses a trading API key to place and close trades on your behalf — we cannot withdraw funds or transfer money. You can revoke access from your Kalshi account at any time."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How is my Kalshi API key stored?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Your API key is encrypted with AES-256 at rest. It is never logged, never shared, and only used to execute trades on your behalf on the Kalshi exchange."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What data gets shared with the community?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "When opted in, your trade outcomes (win/loss/confidence scores) are anonymized and contributed to the shared AI memory pool. No personally identifiable information or exact trade sizes are shared. You can opt out at any time from your account settings."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is paper trading really risk-free?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. Paper mode simulates trades on live Kalshi market prices without executing real orders. No real money is used. You can run paper mode indefinitely before choosing to go live."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Kalshi a regulated exchange?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. Kalshi is the only CFTC-licensed prediction market exchange in the United States. Trades executed by TradeAgent are on a regulated, federally supervised venue."
+          }
+        }
+      ]
+    }
+    </script>
   </head>
 
   <body>
