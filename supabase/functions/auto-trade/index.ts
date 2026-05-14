@@ -1164,8 +1164,14 @@ async function runS005WeatherEdge(
       const price = sig.direction === "buy_yes"
         ? Math.max(1, (sig.yes_bid || 50) + 1)
         : Math.max(1, (100 - (sig.yes_ask || 50)) + 1);
-      // Pass dollar amount — execute-trade handles the cents→contract conversion.
-      const amount = maxPositionUsd;
+      // Tiered sizing: scale position by edge magnitude.
+      // Larger edge = more confident GFS divergence = bigger bet, capped at maxPositionUsd.
+      const edgeCents = sig.edge_cents ?? 0;
+      const amount = edgeCents >= 35
+        ? maxPositionUsd                          // high-conviction: full size ($20)
+        : edgeCents >= 20
+          ? Math.round(maxPositionUsd * 0.65)    // medium: 65% ($13)
+          : Math.round(maxPositionUsd * 0.40);   // threshold-level: 40% ($8)
 
       const tradeResp = await fetch(executeUrl, {
         method: "POST",

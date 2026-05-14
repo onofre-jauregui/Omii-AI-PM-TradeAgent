@@ -355,9 +355,12 @@ serve(async (req) => {
           });
         }
 
-        // 4. Insert signals (the auto-trade S-005 handler will pick them up)
+        // 4. Upsert signals — one live row per ticker per source, updated each run
         if (signals.length > 0) {
-          const { error: sigErr } = await supabase.from("signals").insert(signals);
+          const { error: sigErr } = await supabase.from("signals").upsert(signals, {
+            onConflict: "ticker,source",
+            ignoreDuplicates: false,
+          });
           if (sigErr) {
             console.error(`Signal insert failed for ${loc.code}:`, sigErr.message);
             locResult.status = "signal_insert_error";

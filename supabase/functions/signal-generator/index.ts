@@ -383,10 +383,14 @@ serve(async (req) => {
         source: "signal_generator",
       }));
 
-      const { error: insertErr } = await supabase.from("signals").insert(rows);
+      // Upsert on ticker: each market gets one live row updated in place per run.
+      // Plain INSERT was accumulating dozens of duplicate rows per ticker per hour.
+      const { error: insertErr } = await supabase.from("signals").upsert(rows, {
+        onConflict: "ticker",
+        ignoreDuplicates: false,
+      });
       if (insertErr) {
         console.error("Failed to persist signals:", insertErr.message);
-        // Also log to compliance_log so we notice in prod
         await supabase.from("compliance_log").insert({
           event_type: "signal_persist_error",
           severity: "error",
