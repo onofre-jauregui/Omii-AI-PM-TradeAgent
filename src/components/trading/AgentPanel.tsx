@@ -33,7 +33,6 @@ const QUICK_PROMPTS = [
   { label: "Portfolio status",    text: "Give me a full status update — P&L, open positions, and how each strategy is performing." },
   { label: "Best opportunities",  text: "Scan Kalshi markets and show me the top 3 opportunities right now with confidence levels." },
   { label: "What traded today?",  text: "What did the agent trade today? Show me the trades, reasoning, and P&L." },
-  { label: "Run S-002 now",       text: "Trigger strategy S-002 to run right now and tell me what it finds." },
   { label: "Risk check",          text: "Review my risk exposure across all open positions and flag anything outside my risk parameters." },
   { label: "New strategy",        text: "I want to create a new strategy. Ask me what market type and edge I want to target." },
 ];
