@@ -27,11 +27,20 @@ export default function OnboardingPage() {
           { onConflict: "id" }
         );
 
-      // Seed the two starter strategies so the dashboard shows a $2,000 portfolio from day one.
-      // Only insert if they don't already exist (idempotent re-runs of onboarding are safe).
+      // Seed all three starter strategies. Idempotent — safe to re-run.
       const tradeMode = mode ?? "paper";
       await supabase.from("strategies").upsert(
         [
+          {
+            id: "S-001",
+            name: "Surface Arbitrage",
+            description: "Exploits bracket-sum mispricing in KXINX/KXBTC/KXETH markets.",
+            instructions: "Read surface_alerts for bracket_sum_violation. Buy NO on the most overpriced YES legs (yesAsk descending). Max 3 legs per event at $15/leg. Mark alert is_exploited after fill. No LLM gate — structural edge.",
+            active: true,
+            mode: tradeMode,
+            starting_balance: 500,
+            user_id: user.id,
+          },
           {
             id: "S-002",
             name: "Resolution Fade",
@@ -212,23 +221,34 @@ export default function OnboardingPage() {
             )}
 
             <div className="space-y-2">
-              <Button
-                className="w-full rounded-full gap-2"
-                onClick={testConnection}
-                disabled={saving || pingStatus === "testing" || (!keyId.trim() && !privateKey.trim())}
-              >
-                {(saving || pingStatus === "testing") && <Loader2 className="h-4 w-4 animate-spin" />}
-                {pingStatus === "ok" ? <CheckCircle className="h-4 w-4" /> : null}
-                {pingStatus === "fail" ? <AlertCircle className="h-4 w-4" /> : null}
-                {saving || pingStatus === "testing" ? "Testing…" : pingStatus === "ok" ? "Connected" : "Save & Test Connection"}
-              </Button>
-              <Button
-                variant="ghost"
-                className="w-full rounded-full text-muted-foreground text-sm"
-                onClick={() => setStep("mode")}
-              >
-                Skip — I'll use paper mode for now
-              </Button>
+              {pingStatus === "ok" ? (
+                <Button
+                  className="w-full rounded-full gap-2"
+                  onClick={() => setStep("mode")}
+                >
+                  <ArrowRight className="h-4 w-4" />
+                  Continue
+                </Button>
+              ) : (
+                <Button
+                  className="w-full rounded-full gap-2"
+                  onClick={testConnection}
+                  disabled={saving || pingStatus === "testing" || (!keyId.trim() && !privateKey.trim())}
+                >
+                  {(saving || pingStatus === "testing") && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {pingStatus === "fail" ? <AlertCircle className="h-4 w-4" /> : null}
+                  {saving || pingStatus === "testing" ? "Testing…" : "Save & Test Connection"}
+                </Button>
+              )}
+              {pingStatus !== "ok" && (
+                <Button
+                  variant="ghost"
+                  className="w-full rounded-full text-muted-foreground text-sm"
+                  onClick={() => setStep("mode")}
+                >
+                  Skip — start with paper trading
+                </Button>
+              )}
             </div>
           </div>
         )}
@@ -277,11 +297,12 @@ export default function OnboardingPage() {
             </div>
             <h1 className="text-2xl font-semibold tracking-tight mb-2">Your agent is running.</h1>
             <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
-              Two strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
+              Three strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
             </p>
             <div className="space-y-2 text-left mb-8">
               {[
-                ["S-002", "Longshot Bias", "Buys NO on overpriced contracts (90–95¢) betting on market overconfidence"],
+                ["S-001", "Surface Arbitrage", "Exploits bracket mispricing in S&P 500, BTC, and ETH markets — structural edge, direction-agnostic"],
+                ["S-002", "Resolution Fade", "Buys NO on overpriced contracts near resolution, fading market overconfidence"],
                 ["S-005", "Weather Edge", "Trades NWS forecast vs Kalshi implied temperature divergence"],
               ].map(([id, name, desc]) => (
                 <div key={id} className="rounded-xl bg-secondary/50 px-4 py-3 flex items-start gap-3">
