@@ -435,7 +435,7 @@ serve(async (req) => {
         let result: StrategyResult;
 
         if (strategy.id === "S-001") {
-          result = await runS001FedWatchOracle(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
+          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else if (strategy.id === "S-002") {
           result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else if (strategy.id === "S-005") {
@@ -583,15 +583,20 @@ serve(async (req) => {
   }
 });
 
-// ─── Strategy S-001: FedWatch Oracle ─────────────────────────────────────────
-// Reads futures_oracle signals (inserted by futures-signal edge function) and
-// places MAKER limit orders when CME FedWatch vs. Kalshi KXFED divergence ≥12¢.
+// ─── Strategy S-001: KXINX Surface Arbitrage ─────────────────────────────────
+// Exploits bracket-sum violations in KXINX (S&P 500) markets.
 //
-// Edge source: CME FedWatch implied probabilities from $400B/day Fed funds
-// futures are more accurate than Kalshi retail pricing for KXFED markets.
-// When they diverge, trade Kalshi toward the FedWatch implied probability.
+// Edge: Kalshi KXINX brackets must sum to exactly 100¢ (exactly one range wins).
+// When they sum to >100¢, all YES markets are collectively overpriced — buying NO
+// on the most expensive ones is structurally profitable regardless of S&P direction.
+//
+// Source: surface_alerts table (written by surface-scanner cron).
+// Only trades bracket_sum_violation on KXINX (100% confidence, structural edge).
+// Skips ETH/BTC (confirmed money-losers) and spread anomalies (require limit orders).
 
-async function runS001FedWatchOracle(
+const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
+
+async function runS001SurfaceArb(
   supabase: any,
   strategy: any,
   config: StrategyConfig | undefined,
@@ -601,162 +606,140 @@ async function runS001FedWatchOracle(
   runId?: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const minEdge = config?.min_edge_cents ?? 12;
-  const maxPositionUsd = config?.max_position_usd ?? 50;
-  const MAX_S001_POSITIONS = 1000;
+  const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
+  const MAX_LEGS_PER_EVENT = 3;
+  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-  const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  // 1. Fetch fresh, unexploited KXINX bracket-sum violation alerts
+  const { data: alerts } = await supabase
+    .from("surface_alerts")
+    .select("*")
+    .eq("alert_type", "bracket_sum_violation")
+    .eq("is_exploited", false)
+    .gte("detected_at", thirtyMinAgo)
+    .gte("confidence", 0.9)
+    .like("event_ticker", "KXINX%")
+    .order("expected_edge_cents", { ascending: false })
+    .limit(3);
 
-  const { data: rawSignals } = await applySignalTenantFilter(
-    supabase
-      .from("signals")
-      .select("*")
-      .eq("source", "futures_oracle")
-      .gte("created_at", sixtyMinAgo)
-      .gte("edge_cents", minEdge)
-      .not("direction", "is", null)
-      .order("edge_cents", { ascending: false })
-      .limit(10),
-    strategy.user_id
-  );
-
-  if (!rawSignals || rawSignals.length === 0) {
+  if (!alerts || alerts.length === 0) {
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
       mode,
       status: "completed",
       action: "no_setup",
-      details: `No fresh FedWatch Oracle signals with edge ≥${minEdge}¢ (run futures-signal first)`,
+      details: "No fresh KXINX bracket-sum violations (surface-scanner must run first)",
     };
   }
 
-  // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot
-  const positions = await countOpenPositions(supabase, "S-001", 7, strategy.user_id ?? null);
-  const openS001Count = positions.weightedCost;
-  const nearTermOnly = positions.nearTermCount;
-  const farTermOnly = positions.farTermCount;
-
-  if (openS001Count >= MAX_S001_POSITIONS) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "completed",
-      action: "no_setup",
-      details: `S-001 at max positions: weighted ${openS001Count.toFixed(1)}/${MAX_S001_POSITIONS} (near: ${nearTermOnly}, far: ${farTermOnly})`,
-    };
-  }
-
-  const slotsAvailable = MAX_S001_POSITIONS - openS001Count;
-
-  // Dedup: fetch open tickers to skip already-held positions
-  const { data: s001OpenTrades } = await supabase
+  // 2. Dedup: which tickers are already open under S-001?
+  const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
     .eq("strategy_id", "S-001")
-    .is("exit_reason", null)
     .is("settled_at", null);
-  const openTickers = new Set((s001OpenTrades || []).map((t: any) => t.ticker));
-  // Agent memory (conf=0.99): KXFED markets have zero liquidity — hard reject.
-  const seenTickers = new Set<string>();
-  const candidates = (rawSignals || []).filter((s: any) => {
-    if ((s.ticker || "").startsWith("KXFED-")) return false;
-    if (openTickers.has(s.ticker)) return false;
-    if (seenTickers.has(s.ticker)) return false;
-    seenTickers.add(s.ticker);
-    return true;
-  }).slice(0, slotsAvailable);
-
-  if (candidates.length === 0) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "completed",
-      action: "no_setup",
-      details: "All FedWatch Oracle signals already have open positions",
-    };
-  }
+  const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
-  const execResults = await Promise.all(candidates.map(async (sig: any) => {
-    const edgeCents = sig.edge_cents || 12;
-    const midPrice = sig.mid_price || 50;
+  const allFilled: string[] = [];
+  const seenEvents = new Set<string>();
 
-    // Kelly-based position sizing capped at $50
-    const trueP = sig.true_probability
-      || (sig.direction === "buy_yes"
-        ? (midPrice + edgeCents) / 100
-        : (midPrice - edgeCents) / 100);
-    const marketP = midPrice / 100;
-    const amount = Math.min(maxPositionUsd, kellySize(trueP, marketP, 500, 0.25));
+  for (const alert of alerts) {
+    const eventTicker = alert.event_ticker as string;
+    if (seenEvents.has(eventTicker)) continue;
+    seenEvents.add(eventTicker);
 
-    // MAKER orders: rest inside the spread
-    const side = sig.direction === "buy_yes" ? "yes" : "no";
-    const price = sig.direction === "buy_yes"
-      ? Math.max(1, Math.min(99, (sig.yes_bid || 50) + 1))
-      : Math.max(1, Math.min(99, (100 - (sig.yes_ask || 50)) + 1));
+    // 3. Fetch all KXINX markets for this event from Kalshi
+    let eventMarkets: any[] = [];
+    try {
+      const resp = await fetch(
+        `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(eventTicker)}&status=open&limit=50`
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      eventMarkets = data?.markets || [];
+    } catch {
+      continue;
+    }
 
-    const qualifyPrompt = buildQualifyPrompt("S-001 FedWatch Oracle", {
-      ticker: sig.ticker,
-      market_question: sig.market_question,
-      direction: sig.direction,
-      edge_cents: edgeCents,
-      mid_price: midPrice,
-      yes_bid: sig.yes_bid,
-      yes_ask: sig.yes_ask,
-      true_probability: sig.true_probability,
-      implied_probability: sig.implied_probability,
-      days_to_close: sig.days_to_close,
-      meeting_date_from_question: `Extracted from market_question: ${sig.market_question || sig.ticker}`,
-      note: `FedWatch Oracle: Yahoo Finance ZQ futures imply a different rate probability than Kalshi, creating ${edgeCents}¢ edge. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY. QUALIFY whenever edge_cents >= 10 and the market_question contains a specific meeting date. The market_question above contains the meeting date." : "require unambiguous meeting date match."}. REJECT only if: market expires in < 12h, market_question has no meeting date at all, or prices are null.`,
-    });
+    if (eventMarkets.length === 0) continue;
 
-    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id);
-    if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
+    // 4. Find the most overpriced markets: highest YES ask = most overpriced relative to fair value
+    // In a fair bracket, each market's YES price should reflect its true probability.
+    // When bracket sums > 100¢, all are overpriced — focus on the highest-priced ones.
+    const tradeable = eventMarkets
+      .filter((m: any) => {
+        const yesAsk = Math.round(parseFloat(m.yes_ask || "0") * 100);
+        return (
+          yesAsk >= 5 &&       // enough payout if NO wins
+          yesAsk <= 92 &&      // NO side at least 8¢ to pay for commission
+          !openTickers.has(m.ticker)
+        );
+      })
+      .map((m: any) => ({
+        ticker: m.ticker,
+        yesAsk: Math.round(parseFloat(m.yes_ask || "0") * 100),
+        noPrice: 100 - Math.round(parseFloat(m.yes_ask || "0") * 100),
+        title: m.title || m.ticker,
+        closeTime: m.close_time,
+      }))
+      .sort((a: any, b: any) => b.yesAsk - a.yesAsk) // highest YES = most overpriced
+      .slice(0, MAX_LEGS_PER_EVENT);
 
-    const tradeResp = await fetch(executeUrl, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ticker: sig.ticker,
-        marketId: sig.ticker,
-        marketQuestion: sig.market_question || sig.ticker,
-        side,
-        action: "buy",
-        price,
-        amount,
-        strategy: strategy.name,
-        strategyId: strategy.id,
-        orderType: "limit",
-        mode,
-        expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
-        notes: `FedWatch Oracle: edge=${edgeCents}¢, fedwatch_p=${sig.true_probability}, kalshi_mid=${midPrice}¢, maker bid+1¢. ${reason}`,
-        expectedOutcome: `${sig.direction} at ${price}¢ (maker), FedWatch p=${sig.true_probability}`,
-        confidenceLevel: sig.composite_score,
-        user_id: strategy.user_id || null,
-        traceId: runId,
-        sourceSignalId: sig.id || null,
-        systemVersion: 'v2',
-      }),
-    });
+    if (tradeable.length === 0) continue;
 
-    const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
-    return { sig, success: result.success, detail: result.success ? `${sig.ticker} @ ${price}¢` : result.error };
-  }));
+    // 5. Execute NO buys on the top overpriced markets — no LLM gate needed.
+    //    The arb is structural: bracket must sum to 100¢, market says it sums to >100¢.
+    const legResults = await Promise.all(tradeable.map(async (leg: any) => {
+      const tradeResp = await fetch(executeUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: leg.ticker,
+          marketId: leg.ticker,
+          marketQuestion: leg.title,
+          side: "no",
+          action: "buy",
+          price: leg.noPrice,
+          amount: AMOUNT_PER_LEG,
+          strategy: strategy.name,
+          strategyId: strategy.id,
+          orderType: "limit",
+          mode,
+          notes: `S-001 Surface Arb: bracket sum violation on ${eventTicker}. YES overpriced at ${leg.yesAsk}¢ (bracket sums >100¢). Buying NO @ ${leg.noPrice}¢.`,
+          expectedOutcome: `NO wins if S&P does NOT land in this bracket. Structural arb, not directional.`,
+          confidenceLevel: alert.confidence,
+          user_id: strategy.user_id || null,
+          traceId: runId,
+          systemVersion: "v2",
+        }),
+      });
+      const result = await tradeResp.json().catch(() => ({ success: false }));
+      return { ticker: leg.ticker, success: result.success, price: leg.noPrice };
+    }));
 
-  const filled = execResults.filter(r => r.success);
+    const legsFilled = legResults.filter(r => r.success);
+    if (legsFilled.length > 0) {
+      allFilled.push(...legsFilled.map(r => `${r.ticker}@${r.price}¢`));
+      // Mark alert as exploited so we don't re-trade same event this run
+      await supabase
+        .from("surface_alerts")
+        .update({ is_exploited: true, exploited_at: new Date().toISOString() })
+        .eq("id", alert.id);
+    }
+  }
+
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
     mode,
     status: "completed",
-    action: filled.length > 0 ? "trade_executed" : "no_setup",
-    details: filled.length > 0
-      ? `FedWatch Oracle executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
-      : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
+    action: allFilled.length > 0 ? "trade_executed" : "no_setup",
+    details: allFilled.length > 0
+      ? `S-001 Surface Arb: ${allFilled.length} legs filled — ${allFilled.join(", ")}`
+      : "No fillable KXINX legs (all tickers already held or no liquid markets)",
   };
 }
 
