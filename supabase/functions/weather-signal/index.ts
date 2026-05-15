@@ -306,7 +306,7 @@ serve(async (req) => {
         for (const m of markets) {
           // Skip settled markets — yes_bid >= 95 or yes_ask <= 5 means
           // the contract has already resolved (or is trading as if it has).
-          if ((m.yes_bid ?? 0) >= 95 || (m.yes_ask ?? 100) <= 5) continue;
+          if ((m.yes_bid ?? 0) >= 90 || (m.yes_ask ?? 100) <= 10) continue;
 
           const trueProb = bucketProbs.get(m.ticker);
           if (trueProb === undefined) continue;

@@ -776,6 +776,52 @@ async function runS002LongshotBias(
   // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
   const AMOUNT_PER_TRADE = 20;
 
+  // Time-based auto-exit: close NO positions expiring within 12h to stop
+  // holding losers to full resolution (-91¢ each). Strategy instructions say
+  // "exit if < 12h remaining" but were never enforced in code.
+  const twelveHourCutoff = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+  const { data: expiringPositions } = await supabase
+    .from("trades")
+    .select("id, ticker, side, price, amount, market_question")
+    .eq("status", "filled")
+    .eq("strategy_id", "S-002")
+    .is("exit_reason", null)
+    .is("settled_at", null)
+    .not("expiration_time", "is", null)
+    .lt("expiration_time", twelveHourCutoff);
+
+  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
+  const timeExitResults: string[] = [];
+  for (const pos of expiringPositions ?? []) {
+    // We bought NO to open — sell NO to close (or equivalently buy YES).
+    // Use a market-price sell at 1¢ above NO bid (aggressive close).
+    const closeResp = await fetch(executeUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ticker: pos.ticker,
+        marketId: pos.ticker,
+        marketQuestion: pos.market_question || pos.ticker,
+        side: pos.side || "no",
+        action: "sell",
+        price: 2, // aggressive: accept near-zero to guarantee fill before expiry
+        amount: pos.amount || AMOUNT_PER_TRADE,
+        strategy: strategy.name,
+        strategyId: strategy.id,
+        orderType: "limit",
+        time_in_force: "day",
+        mode,
+        exit_reason: "time_exit_12h",
+        notes: `S-002 time-based exit: position within 12h of expiry — closing to prevent full-resolution loss`,
+        user_id: strategy.user_id || null,
+        traceId: runId,
+        systemVersion: "v2",
+      }),
+    });
+    const closeResult = await closeResp.json().catch(() => ({ success: false }));
+    timeExitResults.push(`${pos.ticker}: ${closeResult.success ? "closed" : "close_failed"}`);
+  }
+
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   // Longshots only: YES ask 8-11¢. We buy NO on these markets.
@@ -842,10 +888,16 @@ async function runS002LongshotBias(
     .is("settled_at", null);
   const openTickers = new Set((s002OpenTrades || []).map((t: any) => t.ticker));
   const seenTickers = new Set<string>();
+  const seenEventRoots = new Set<string>();
   const candidates = signals.filter((s: any) => {
     if (openTickers.has(s.ticker)) return false;
     if (seenTickers.has(s.ticker)) return false;
     seenTickers.add(s.ticker);
+    // Prevent entering two correlated thresholds on the same economic event
+    // e.g. KXCHCUTS-26MAY07-T60000 and KXCHCUTS-26MAY07-T75000 → same root KXCHCUTS-26MAY07
+    const eventRoot = (s.ticker || "").replace(/-[TB]\d+.*$/, "");
+    if (eventRoot && seenEventRoots.has(eventRoot)) return false;
+    if (eventRoot) seenEventRoots.add(eventRoot);
     return true;
   }).slice(0, Math.min(slotsAvailable, 5));
 
@@ -859,8 +911,6 @@ async function runS002LongshotBias(
       details: "All longshot signals already have open positions",
     };
   }
-
-  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
 
   const execResults = await Promise.all(candidates.map(async (sig: any) => {
     const yesAsk = sig.yes_ask || 10;
@@ -938,9 +988,12 @@ async function runS002LongshotBias(
     mode,
     status: "completed",
     action: filled.length > 0 ? "trade_executed" : "no_setup",
-    details: filled.length > 0
-      ? `Longshot Bias executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
-      : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
+    details: [
+      filled.length > 0
+        ? `Longshot Bias executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
+        : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
+      timeExitResults.length > 0 ? `Time exits (12h): ${timeExitResults.join(", ")}` : "",
+    ].filter(Boolean).join(" | "),
   };
 }
 
@@ -1030,10 +1083,15 @@ async function runS005WeatherEdge(
       return m ? m[1] : null;
     }).filter(Boolean)
   );
+  const seenCities = new Set<string>();
   const deduped = signals.filter((s: any) => {
     if (openTickers.has(s.ticker)) return false;
     const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
-    if (cityMatch && openCities.has(cityMatch[1])) return false;
+    if (cityMatch) {
+      if (openCities.has(cityMatch[1])) return false;
+      if (seenCities.has(cityMatch[1])) return false;
+      seenCities.add(cityMatch[1]);
+    }
     return true;
   });
 
@@ -1053,6 +1111,18 @@ async function runS005WeatherEdge(
   const cityTags = [...new Set(candidates.map((s: any) => (s.metadata?.location ?? "").toLowerCase()).filter(Boolean))];
   const lessonsByCity = new Map<string, any[]>();
   const cityWinLoss = new Map<string, { wins: number; losses: number; totalPnl: number }>();
+
+  // Bayesian agent_memory: high-confidence distilled lessons for this strategy
+  const { data: strategyMemories } = await supabase
+    .from("agent_memory")
+    .select("title, content, confidence")
+    .eq("strategy_id", strategy.id)
+    .eq("is_active", true)
+    .order("confidence", { ascending: false })
+    .limit(5);
+  const memoryBlock = (strategyMemories ?? [])
+    .map((m: any) => `[confidence ${m.confidence.toFixed(2)}] ${m.title}: ${m.content}`)
+    .join("\n");
 
   if (cityTags.length > 0) {
     // Settled trades for weather tickers to get per-city win rates
@@ -1125,6 +1195,7 @@ async function runS005WeatherEdge(
         location: sig.metadata?.location,
         city_history: cityHistoryNote,
         ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
+        ...(memoryBlock ? { strategy_memory: memoryBlock } : {}),
         note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
       });
       const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id);
