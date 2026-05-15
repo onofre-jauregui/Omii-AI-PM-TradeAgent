@@ -26,6 +26,35 @@ export default function OnboardingPage() {
           { id: user.id, onboarding_completed: true, ...(mode ? { trading_mode: mode } : {}) },
           { onConflict: "id" }
         );
+
+      // Seed the two starter strategies so the dashboard shows a $2,000 portfolio from day one.
+      // Only insert if they don't already exist (idempotent re-runs of onboarding are safe).
+      const tradeMode = mode ?? "paper";
+      await supabase.from("strategies").upsert(
+        [
+          {
+            id: "S-002",
+            name: "Resolution Fade",
+            description: "Fade overreaction price moves in markets 2–7 days from resolution.",
+            instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range.",
+            active: true,
+            mode: tradeMode,
+            starting_balance: 1000,
+            user_id: user.id,
+          },
+          {
+            id: "S-005",
+            name: "Weather Edge",
+            description: "Trades NWS forecast vs Kalshi implied temperature divergence.",
+            instructions: "Compare NWS probability-of-precipitation and temperature forecasts to Kalshi Weather markets. Trade when divergence exceeds 15¢. Size $15–$30.",
+            active: true,
+            mode: tradeMode,
+            starting_balance: 1000,
+            user_id: user.id,
+          },
+        ],
+        { onConflict: "id" }
+      );
     }
     navigate(destination);
   }

@@ -21,8 +21,8 @@ async function fetchKalshiBalance(): Promise<number | null> {
   }
 }
 
-// Fallback if strategies table can't be reached — matches real DB sum (S-001: $1k, S-002: $1k, S-005: $500)
-const PAPER_STARTING_BALANCE = 2_500;
+// Fallback if strategies table can't be reached — matches onboarding default (S-002: $1k, S-005: $1k)
+const PAPER_STARTING_BALANCE = 2_000;
 
 interface Position {
   market_id: string;
