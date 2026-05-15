@@ -122,8 +122,17 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Encryption migration: api_keys ciphertext column, encryption helper module
 - Stripe schema: subscriptions table, stripe_events log, webhook handler scaffolded
 - Auth page exists, Supabase auth wired
+- Landing page: CSS variable theming, trust cards, flywheel section, Terms + Privacy pages, SEO meta/sitemap
+- Onboarding flow: multi-step wizard exists (OnboardingPage.tsx), seeds S-002 + S-005 with $1k each ($2k total paper portfolio) on completion
+- S-001: KXINX/KXBTC/KXETH surface arb (bracket-sum violations)
+- S-002 fixes (2026-05-15): event-root dedup (no duplicate thresholds per event), 12h time-based auto-exit
+- S-005 fixes (2026-05-15): within-batch city dedup (seenCities), mid-price filter 5/95¢ → 10/90¢
+- Agent memory → LLM gate: agent_memory active lessons now injected into qualify prompt alongside trade_lessons
+- Dashboard redesign, performance page with category breakdown + P&L histogram, PWA support
+- AgentPanel: chat-first layout, quick prompts (trimmed to 5), collapsible config
 
 ### In progress / partially done
+- Onboarding: flow exists but API key entry step not wired end-to-end to encryption
 - Edge functions: `user_id` column exists in schema but queries don't filter by it yet — single-user in practice
 - Encryption: migration written, `encrypted_secret` plaintext column still present, key management not wired end-to-end
 - Stripe: schema and webhook handler exist, no billing UI, no subscription enforcement in edge functions
@@ -131,10 +140,8 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
-- Public performance page (the track record artifact)
-- Onboarding flow (API key entry, strategy selection, paper trade activation)
-- Landing page
-- Legal disclaimers
+- Public performance page (the track record artifact — code exists but not live-linked)
+- User feedback mechanism (thumbs up/down on agent decisions)
 
 ### Priority order
 1. `suspended_until` migration (unblocks strategy health monitor)
@@ -142,6 +149,5 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 3. Finish encryption key management end-to-end (security blocker)
 4. Billing UI + subscription enforcement
 5. Community knowledge-sharing layer (the moat — highest strategic value)
-6. Public performance page
-7. Onboarding flow
-8. Landing page + legal
+6. User feedback mechanism
+7. Public performance page (track record artifact for uncle capital unlock)
