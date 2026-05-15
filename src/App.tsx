@@ -17,6 +17,8 @@ import SignupPage from "./pages/SignupPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
 import WaitlistPage from "./pages/admin/WaitlistPage.tsx";
 import BillingPage from "./pages/BillingPage.tsx";
+import TermsPage from "./pages/TermsPage.tsx";
+import PrivacyPage from "./pages/PrivacyPage.tsx";
 
 const queryClient = new QueryClient();
 
@@ -93,6 +95,8 @@ function AppRoutes() {
         <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/performance" element={<PerformancePage />} />
+        <Route path="/terms" element={<TermsPage />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
         {/* Auth-protected — admin + onboarding + billing */}
         <Route path="/admin/waitlist" element={<WaitlistPage />} />
         <Route path="/onboarding" element={<OnboardingPage />} />

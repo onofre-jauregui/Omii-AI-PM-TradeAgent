@@ -12,7 +12,10 @@ import {
   Bot,
   Activity,
   ChevronRight,
+  Lock,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 // ── Scroll-reveal hook ────────────────────────────────────────────────────────
 function useInView(threshold = 0.12) {
@@ -69,8 +72,8 @@ function Reveal({
       className={className}
       style={{
         opacity: inView ? 1 : 0,
-        transform: inView ? "translateY(0)" : "translateY(24px)",
-        transition: `opacity 0.65s ease ${delay}ms, transform 0.65s ease ${delay}ms`,
+        transform: inView ? "translateY(0)" : "translateY(20px)",
+        transition: `opacity 0.6s cubic-bezier(0.25,0.1,0.25,1) ${delay}ms, transform 0.6s cubic-bezier(0.25,0.1,0.25,1) ${delay}ms`,
       }}
     >
       {children}
@@ -78,7 +81,7 @@ function Reveal({
   );
 }
 
-// ── Live trade ticker (decorative) ───────────────────────────────────────────
+// ── Live trade ticker ─────────────────────────────────────────────────────────
 const MOCK_TRADES = [
   { market: "Fed rate cut by Dec?", side: "YES", size: "$240", result: "+$88" },
   { market: "S&P 500 above 5400?", side: "NO", size: "$180", result: "+$126" },
@@ -105,24 +108,21 @@ function TradeTicker() {
   const trade = MOCK_TRADES[idx];
   return (
     <div
-      className="inline-flex items-center gap-3 rounded-full border border-neutral-700/60 bg-neutral-900/80 px-4 py-2 text-xs backdrop-blur-sm"
-      style={{
-        opacity: visible ? 1 : 0,
-        transition: "opacity 0.3s ease",
-      }}
+      className="inline-flex items-center gap-3 rounded-full border border-border bg-card px-4 py-2 text-xs apple-shadow"
+      style={{ opacity: visible ? 1 : 0, transition: "opacity 0.3s ease" }}
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-      <span className="text-neutral-400">Agent just closed</span>
-      <span className="text-neutral-200 font-medium">{trade.market}</span>
-      <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-neutral-300">
+      <span className="h-1.5 w-1.5 rounded-full bg-profit animate-pulse-gentle" />
+      <span className="text-muted-foreground">Agent just closed</span>
+      <span className="text-foreground font-medium">{trade.market}</span>
+      <span className="rounded bg-secondary px-1.5 py-0.5 text-foreground/70">
         {trade.side}
       </span>
-      <span className="font-semibold text-emerald-400">{trade.result}</span>
+      <span className="font-semibold text-profit">{trade.result}</span>
     </div>
   );
 }
 
-// ── Stats bar data ────────────────────────────────────────────────────────────
+// ── Stats bar ─────────────────────────────────────────────────────────────────
 function StatsBar() {
   const { ref, inView } = useInView();
   const notional = useCounter(13, 1600, inView);
@@ -130,36 +130,23 @@ function StatsBar() {
   const markets = useCounter(3200, 1400, inView);
 
   return (
-    <div
-      ref={ref}
-      className="border-y border-neutral-800/60 bg-neutral-900/40 py-10 backdrop-blur-sm"
-    >
+    <div ref={ref} className="border-y border-border bg-secondary/50 py-10">
       <div className="mx-auto max-w-5xl px-6">
-        <p className="text-center text-[11px] uppercase tracking-widest text-neutral-600 mb-8">
-          Kalshi — CFTC-regulated prediction market exchange
+        <p className="text-center text-[11px] uppercase tracking-widest text-muted-foreground/60 mb-8">
+          Kalshi · CFTC-regulated prediction market exchange
         </p>
         <div className="grid grid-cols-3 gap-8 text-center">
           <div>
-            <div className="text-3xl font-semibold text-neutral-100">
-              ${notional}B+
-            </div>
-            <div className="mt-1 text-sm text-neutral-500">
-              Notional traded in March 2026
-            </div>
+            <div className="text-3xl font-semibold text-foreground">${notional}B+</div>
+            <div className="mt-1 text-sm text-muted-foreground">Notional traded in March 2026</div>
           </div>
           <div>
-            <div className="text-3xl font-semibold text-neutral-100">
-              {growth}%
-            </div>
-            <div className="mt-1 text-sm text-neutral-500">YoY volume growth</div>
+            <div className="text-3xl font-semibold text-foreground">{growth}%</div>
+            <div className="mt-1 text-sm text-muted-foreground">YoY volume growth</div>
           </div>
           <div>
-            <div className="text-3xl font-semibold text-neutral-100">
-              {markets.toLocaleString()}+
-            </div>
-            <div className="mt-1 text-sm text-neutral-500">
-              Active markets scanned daily
-            </div>
+            <div className="text-3xl font-semibold text-foreground">{markets.toLocaleString()}+</div>
+            <div className="mt-1 text-sm text-muted-foreground">Active markets scanned daily</div>
           </div>
         </div>
       </div>
@@ -167,7 +154,7 @@ function StatsBar() {
   );
 }
 
-// ── How it works ──────────────────────────────────────────────────────────────
+// ── How it works steps ────────────────────────────────────────────────────────
 const STEPS = [
   {
     number: "01",
@@ -223,7 +210,31 @@ const FEATURES = [
   },
 ];
 
-// ── Flywheel ──────────────────────────────────────────────────────────────────
+// ── Trust signals ─────────────────────────────────────────────────────────────
+const TRUST = [
+  {
+    icon: Lock,
+    title: "Funds never leave Kalshi",
+    body: "We trade on your behalf using your API key. We cannot withdraw funds or move money. Revoke access from Kalshi in one click, anytime.",
+  },
+  {
+    icon: Shield,
+    title: "AES-256 encrypted keys",
+    body: "Your API key is encrypted at rest and never logged. Only used to execute your trades — never shared with any third party.",
+  },
+  {
+    icon: TrendingUp,
+    title: "You control the risk",
+    body: "Set position limits, drawdown thresholds, and strategy aggression. The agent enforces your rules, always.",
+  },
+  {
+    icon: Users,
+    title: "CFTC-regulated venue",
+    body: "Kalshi is the only CFTC-licensed prediction market exchange in the US. Every trade executes on a federally supervised venue.",
+  },
+];
+
+// ── Flywheel diagram ──────────────────────────────────────────────────────────
 const FLYWHEEL_NODES = [
   { label: "More Users", angle: 270 },
   { label: "More Trades", angle: 342 },
@@ -245,37 +256,28 @@ function FlywheelDiagram() {
 
   return (
     <div className="relative flex items-center justify-center">
-      <svg
-        width={320}
-        height={320}
-        viewBox="0 0 320 320"
-        className="overflow-visible"
-      >
+      <svg width={320} height={320} viewBox="0 0 320 320" className="overflow-visible">
         {/* Outer ring */}
         <circle
-          cx={cx}
-          cy={cy}
-          r={R}
+          cx={cx} cy={cy} r={R}
           fill="none"
-          stroke="rgba(249,115,22,0.15)"
+          stroke="hsl(var(--primary) / 0.2)"
           strokeWidth={1.5}
           strokeDasharray="6 4"
           style={{ transform: `rotate(${rotation}deg)`, transformOrigin: `${cx}px ${cy}px` }}
         />
         {/* Inner glow */}
         <circle
-          cx={cx}
-          cy={cy}
-          r={52}
-          fill="rgba(249,115,22,0.06)"
-          stroke="rgba(249,115,22,0.25)"
+          cx={cx} cy={cy} r={52}
+          fill="hsl(var(--primary) / 0.06)"
+          stroke="hsl(var(--primary) / 0.3)"
           strokeWidth={1}
         />
         {/* Center label */}
-        <text x={cx} y={cy - 7} textAnchor="middle" fill="#f97316" fontSize={11} fontWeight={600}>
+        <text x={cx} y={cy - 7} textAnchor="middle" fill="hsl(var(--primary))" fontSize={11} fontWeight={600}>
           COLLECTIVE
         </text>
-        <text x={cx} y={cy + 9} textAnchor="middle" fill="#f97316" fontSize={11} fontWeight={600}>
+        <text x={cx} y={cy + 9} textAnchor="middle" fill="hsl(var(--primary))" fontSize={11} fontWeight={600}>
           INTELLIGENCE
         </text>
 
@@ -286,19 +288,17 @@ function FlywheelDiagram() {
           const ny = cy + R * Math.sin(rad);
           return (
             <g key={label}>
-              <circle cx={nx} cy={ny} r={30} fill="rgba(23,20,17,0.95)" stroke="rgba(249,115,22,0.3)" strokeWidth={1} />
-              <text
-                x={nx}
-                y={ny - 2}
-                textAnchor="middle"
-                fill="#e5e5e5"
-                fontSize={8.5}
-                fontWeight={500}
+              <circle cx={nx} cy={ny} r={30}
+                fill="hsl(var(--card))"
+                stroke="hsl(var(--primary) / 0.35)"
+                strokeWidth={1}
+              />
+              <text x={nx} y={ny - 2} textAnchor="middle"
+                fill="hsl(var(--card-foreground))"
+                fontSize={8.5} fontWeight={500}
               >
                 {label.split(" ").map((word, i) => (
-                  <tspan key={i} x={nx} dy={i === 0 ? 0 : 11}>
-                    {word}
-                  </tspan>
+                  <tspan key={i} x={nx} dy={i === 0 ? 0 : 11}>{word}</tspan>
                 ))}
               </text>
             </g>
@@ -313,7 +313,10 @@ function FlywheelDiagram() {
           const ax = cx + arrowR * Math.cos(midAngle);
           const ay = cy + arrowR * Math.sin(midAngle);
           return (
-            <text key={i} x={ax} y={ay} textAnchor="middle" fill="rgba(249,115,22,0.5)" fontSize={10}>
+            <text key={i} x={ax} y={ay} textAnchor="middle"
+              fill="hsl(var(--primary) / 0.5)"
+              fontSize={10}
+            >
               →
             </text>
           );
@@ -326,109 +329,84 @@ function FlywheelDiagram() {
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function LandingPage() {
   return (
-    <div
-      className="min-h-screen text-neutral-100"
-      style={{
-        backgroundColor: "#0f0d0b",
-        backgroundImage: `
-          linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)
-        `,
-        backgroundSize: "52px 52px",
-      }}
-    >
+    <div className="min-h-screen bg-background text-foreground">
       {/* ── Navbar ── */}
-      <nav className="sticky top-0 z-50 border-b border-neutral-800/60 bg-neutral-950/80 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+      <nav className="frosted-glass sticky top-0 z-50 border-b border-border">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3.5">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500">
-              <Bot className="h-4.5 w-4.5 text-white" style={{ width: 18, height: 18 }} />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
+              <Bot className="h-[18px] w-[18px] text-primary-foreground" />
             </div>
-            <span className="text-[15px] font-semibold tracking-tight text-neutral-100">
+            <span className="text-[15px] font-semibold tracking-tight text-foreground">
               TradeAgent
             </span>
           </div>
-          <div className="flex items-center gap-6">
-            <a href="#how-it-works" className="hidden text-sm text-neutral-400 hover:text-neutral-200 transition-colors sm:block">
+          <div className="flex items-center gap-5">
+            <a href="#how-it-works" className="hidden text-sm text-muted-foreground hover:text-foreground transition-colors sm:block">
               How it works
             </a>
-            <a href="#features" className="hidden text-sm text-neutral-400 hover:text-neutral-200 transition-colors sm:block">
+            <a href="#features" className="hidden text-sm text-muted-foreground hover:text-foreground transition-colors sm:block">
               Features
             </a>
-            <Link
-              to="/login"
-              className="rounded-full border border-neutral-700 px-4 py-1.5 text-sm text-neutral-300 hover:border-neutral-500 hover:text-neutral-100 transition-all"
-            >
-              Sign in
-            </Link>
-            <Link
-              to="/login"
-              className="rounded-full bg-orange-500 px-4 py-1.5 text-sm font-medium text-white hover:bg-orange-400 transition-colors"
-            >
-              Start free
-            </Link>
+            <Button variant="ghost" size="sm" asChild className="text-muted-foreground hover:text-foreground">
+              <Link to="/login">Sign in</Link>
+            </Button>
+            <Button size="sm" asChild className="rounded-full px-5">
+              <Link to="/login">Start free</Link>
+            </Button>
           </div>
         </div>
       </nav>
 
       {/* ── Hero ── */}
       <section className="relative overflow-hidden px-6 pb-24 pt-28 text-center">
-        {/* Orange glow behind hero */}
+        {/* Subtle primary glow */}
         <div
           className="pointer-events-none absolute left-1/2 top-0 -translate-x-1/2"
           style={{
             width: 800,
             height: 500,
-            background:
-              "radial-gradient(ellipse at center top, rgba(249,115,22,0.12) 0%, transparent 70%)",
+            background: "radial-gradient(ellipse at center top, hsl(var(--primary) / 0.1) 0%, transparent 70%)",
           }}
         />
 
         <div className="relative mx-auto max-w-4xl">
           {/* Live badge */}
-          <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-orange-500/30 bg-orange-500/10 px-3 py-1 text-xs text-orange-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-orange-400 animate-pulse" />
+          <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-3 py-1 text-xs text-primary">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse-gentle" />
             Now live on Kalshi · Paper and live trading available
           </div>
 
           {/* Headline */}
-          <h1 className="mb-6 text-5xl font-bold leading-[1.08] tracking-tight text-neutral-50 sm:text-6xl lg:text-7xl">
+          <h1 className="mb-6 text-5xl font-bold leading-[1.08] tracking-tight text-foreground sm:text-6xl lg:text-7xl"
+            style={{ letterSpacing: "-0.03em" }}
+          >
             The more we trade
             <br />
-            <span
-              style={{
-                background: "linear-gradient(135deg, #f97316 0%, #fb923c 50%, #fbbf24 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-              }}
-            >
+            <span className="text-primary">
               together, the smarter
               <br />
               it gets.
             </span>
           </h1>
 
-          <p className="mx-auto mb-10 max-w-xl text-lg leading-relaxed text-neutral-400">
+          <p className="mx-auto mb-10 max-w-xl text-lg leading-relaxed text-muted-foreground">
             TradeAgent scans Kalshi prediction markets 24/7, executes on your
             behalf, and feeds every outcome into a shared intelligence layer.
             Your wins make everyone sharper. Everyone's wins make you sharper.
           </p>
 
           {/* CTAs */}
-          <div className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-            <Link
-              to="/login"
-              className="group inline-flex items-center gap-2 rounded-full bg-orange-500 px-7 py-3.5 text-[15px] font-semibold text-white shadow-lg shadow-orange-500/20 hover:bg-orange-400 transition-all"
-            >
-              Start trading free
-              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-            </Link>
-            <a
-              href="#how-it-works"
-              className="inline-flex items-center gap-2 rounded-full border border-neutral-700 px-7 py-3.5 text-[15px] text-neutral-300 hover:border-neutral-500 hover:text-neutral-100 transition-all"
-            >
-              See how it works
-            </a>
+          <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+            <Button size="lg" asChild className="rounded-full px-8 gap-2 shadow-lg">
+              <Link to="/login">
+                Start trading free
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+            <Button size="lg" variant="outline" asChild className="rounded-full px-8 gap-2">
+              <a href="#how-it-works">See how it works</a>
+            </Button>
           </div>
 
           {/* Live trade ticker */}
@@ -437,8 +415,8 @@ export default function LandingPage() {
           </div>
 
           {/* Trust line */}
-          <p className="mt-5 text-xs text-neutral-600">
-            No credit card required · Start in paper mode · Go live when you're ready
+          <p className="mt-5 text-xs text-muted-foreground/60">
+            No credit card required · Your funds never leave Kalshi · AES-256 encrypted keys
           </p>
         </div>
       </section>
@@ -450,30 +428,26 @@ export default function LandingPage() {
       <section id="how-it-works" className="px-6 py-28">
         <div className="mx-auto max-w-5xl">
           <Reveal className="text-center mb-16">
-            <p className="mb-3 text-[11px] uppercase tracking-widest text-orange-500">
+            <p className="mb-3 text-[11px] uppercase tracking-widest text-primary">
               How it works
             </p>
-            <h2 className="text-4xl font-bold tracking-tight text-neutral-50">
+            <h2 className="text-4xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>
               Three steps to hands-free alpha
             </h2>
           </Reveal>
 
-          <div className="grid gap-8 md:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-3">
             {STEPS.map((step, i) => (
               <Reveal key={step.number} delay={i * 100}>
-                <div className="group relative rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8 hover:border-orange-500/30 transition-all duration-300">
-                  {/* Hover glow */}
-                  <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity"
-                    style={{ background: "radial-gradient(circle at top left, rgba(249,115,22,0.06) 0%, transparent 60%)" }}
-                  />
-                  <span className="mb-6 block font-mono text-[11px] font-bold tracking-widest text-orange-500/60">
+                <div className="rounded-2xl border border-border bg-card p-8 apple-shadow hover:border-primary/20 transition-all duration-200">
+                  <span className="mb-6 block font-mono text-[11px] font-bold tracking-widest text-primary/50">
                     {step.number}
                   </span>
-                  <step.icon className="mb-4 h-6 w-6 text-orange-400" />
-                  <h3 className="mb-3 text-lg font-semibold text-neutral-100">
+                  <step.icon className="mb-4 h-5 w-5 text-primary" />
+                  <h3 className="mb-3 text-base font-semibold text-foreground">
                     {step.title}
                   </h3>
-                  <p className="text-sm leading-relaxed text-neutral-500">
+                  <p className="text-sm leading-relaxed text-muted-foreground">
                     {step.body}
                   </p>
                 </div>
@@ -484,40 +458,43 @@ export default function LandingPage() {
       </section>
 
       {/* ── Flywheel (the moat) ── */}
-      <section className="px-6 py-24 border-y border-neutral-800/50">
+      <section className="px-6 py-24 border-y border-border bg-secondary/30">
         <div className="mx-auto max-w-5xl">
           <div className="grid gap-16 md:grid-cols-2 md:items-center">
             <Reveal>
-              <p className="mb-3 text-[11px] uppercase tracking-widest text-orange-500">
+              <p className="mb-3 text-[11px] uppercase tracking-widest text-primary">
                 The moat
               </p>
-              <h2 className="mb-6 text-4xl font-bold tracking-tight text-neutral-50 leading-tight">
+              <h2 className="mb-6 text-4xl font-bold tracking-tight text-foreground leading-tight" style={{ letterSpacing: "-0.02em" }}>
                 A trading edge that
                 <br />
                 compounds as it grows.
               </h2>
-              <p className="mb-6 text-neutral-400 leading-relaxed">
+              <p className="mb-6 text-muted-foreground leading-relaxed">
                 Most trading tools are static. You get the same software
                 every other user gets. TradeAgent is different — the platform
                 memory compounds with every trade ever executed by the community.
               </p>
-              <p className="mb-8 text-neutral-400 leading-relaxed">
+              <p className="mb-8 text-muted-foreground leading-relaxed">
                 High-confidence lessons graduate to the shared pool. Every
                 opted-in user benefits. Every trade you make sharpens the
                 signal for everyone — and everyone's signal sharpens yours.
               </p>
-              <ul className="space-y-3">
+              <ul className="space-y-3 mb-6">
                 {[
                   "Solo operators can't replicate a collective feedback loop",
                   "Closed-source competitors don't improve from user outcomes",
                   "The edge scales — not degrades — as the community grows",
                 ].map((point) => (
                   <li key={point} className="flex items-start gap-3">
-                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-                    <span className="text-sm text-neutral-400">{point}</span>
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-profit" />
+                    <span className="text-sm text-muted-foreground">{point}</span>
                   </li>
                 ))}
               </ul>
+              <p className="text-xs text-muted-foreground/60">
+                Your trade outcomes are anonymized before contributing to the shared model. No personal data or exact position sizes are shared. You can opt out at any time from your account settings — opted-out users trade in isolation without receiving platform memory updates.
+              </p>
             </Reveal>
 
             <Reveal delay={150}>
@@ -531,23 +508,23 @@ export default function LandingPage() {
       <section id="features" className="px-6 py-28">
         <div className="mx-auto max-w-5xl">
           <Reveal className="text-center mb-16">
-            <p className="mb-3 text-[11px] uppercase tracking-widest text-orange-500">
+            <p className="mb-3 text-[11px] uppercase tracking-widest text-primary">
               Features
             </p>
-            <h2 className="text-4xl font-bold tracking-tight text-neutral-50">
+            <h2 className="text-4xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>
               Everything your edge needs
             </h2>
           </Reveal>
 
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map((f, i) => (
               <Reveal key={f.title} delay={i * 60}>
-                <div className="group rounded-2xl border border-neutral-800 bg-neutral-900/40 p-6 hover:border-orange-500/20 hover:bg-neutral-900/70 transition-all">
-                  <div className="mb-4 inline-flex h-10 w-10 items-center justify-center rounded-xl bg-orange-500/10">
-                    <f.icon className="h-5 w-5 text-orange-400" />
+                <div className="rounded-2xl border border-border bg-card p-6 apple-shadow hover:border-primary/20 transition-all duration-200">
+                  <div className="mb-4 inline-flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10">
+                    <f.icon className="h-4.5 w-4.5 text-primary" style={{ width: 18, height: 18 }} />
                   </div>
-                  <h3 className="mb-2 font-semibold text-neutral-100">{f.title}</h3>
-                  <p className="text-sm leading-relaxed text-neutral-500">{f.body}</p>
+                  <h3 className="mb-2 text-sm font-semibold text-foreground">{f.title}</h3>
+                  <p className="text-sm leading-relaxed text-muted-foreground">{f.body}</p>
                 </div>
               </Reveal>
             ))}
@@ -556,33 +533,25 @@ export default function LandingPage() {
       </section>
 
       {/* ── Trust signals ── */}
-      <section className="border-y border-neutral-800/50 bg-neutral-900/30 px-6 py-16">
-        <div className="mx-auto max-w-4xl">
-          <div className="grid gap-8 md:grid-cols-3 text-center">
-            {[
-              {
-                icon: Shield,
-                title: "CFTC-Regulated",
-                body: "Kalshi is the only CFTC-licensed prediction market exchange in the US. Your trades are on a legitimate, regulated venue.",
-              },
-              {
-                icon: Zap,
-                title: "Start in 60 seconds",
-                body: "Connect your Kalshi API key and the agent is live. Paper mode on by default — no money at risk until you flip the switch.",
-              },
-              {
-                icon: TrendingUp,
-                title: "You control the risk",
-                body: "Set your own position limits, drawdown thresholds, and strategy aggression. The agent enforces your rules, always.",
-              },
-            ].map((item, i) => (
+      <section className="border-y border-border bg-secondary/30 px-6 py-16">
+        <div className="mx-auto max-w-5xl">
+          <Reveal className="text-center mb-12">
+            <p className="mb-3 text-[11px] uppercase tracking-widest text-primary">
+              Built to trust
+            </p>
+            <h2 className="text-2xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>
+              Your keys. Your funds. Your rules.
+            </h2>
+          </Reveal>
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {TRUST.map((item, i) => (
               <Reveal key={item.title} delay={i * 80}>
-                <div className="flex flex-col items-center">
-                  <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-full border border-neutral-700 bg-neutral-900">
-                    <item.icon className="h-5 w-5 text-orange-400" />
+                <div className="rounded-2xl border border-border bg-card p-5 apple-shadow text-center">
+                  <div className="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
+                    <item.icon className="h-5 w-5 text-primary" />
                   </div>
-                  <h3 className="mb-2 font-semibold text-neutral-100">{item.title}</h3>
-                  <p className="text-sm leading-relaxed text-neutral-500">{item.body}</p>
+                  <h3 className="mb-2 text-sm font-semibold text-foreground">{item.title}</h3>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{item.body}</p>
                 </div>
               </Reveal>
             ))}
@@ -597,54 +566,49 @@ export default function LandingPage() {
           style={{
             width: 700,
             height: 400,
-            background:
-              "radial-gradient(ellipse at center, rgba(249,115,22,0.1) 0%, transparent 70%)",
+            background: "radial-gradient(ellipse at center, hsl(var(--primary) / 0.08) 0%, transparent 70%)",
           }}
         />
         <Reveal className="relative mx-auto max-w-2xl">
-          <h2 className="mb-4 text-5xl font-bold tracking-tight text-neutral-50">
+          <h2 className="mb-4 text-5xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
             Trade smarter.
             <br />
-            <span
-              style={{
-                background: "linear-gradient(135deg, #f97316 0%, #fbbf24 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-              }}
-            >
-              Starting today.
-            </span>
+            <span className="text-primary">Starting today.</span>
           </h2>
-          <p className="mb-10 text-lg text-neutral-400">
+          <p className="mb-10 text-lg text-muted-foreground">
             Free to start. No credit card. Switch to live trading when your
             paper record earns your confidence.
           </p>
-          <Link
-            to="/login"
-            className="group inline-flex items-center gap-2.5 rounded-full bg-orange-500 px-9 py-4 text-base font-semibold text-white shadow-xl shadow-orange-500/25 hover:bg-orange-400 transition-all"
-          >
-            Get started free
-            <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
-          </Link>
+          <Button size="lg" asChild className="rounded-full px-10 gap-2 shadow-xl">
+            <Link to="/login">
+              Get started free
+              <ChevronRight className="h-4 w-4" />
+            </Link>
+          </Button>
         </Reveal>
       </section>
 
       {/* ── Footer ── */}
-      <footer className="border-t border-neutral-800/60 px-6 py-10">
-        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 sm:flex-row">
-          <div className="flex items-center gap-2">
-            <div className="flex h-6 w-6 items-center justify-center rounded-md bg-orange-500">
-              <Bot className="h-3.5 w-3.5 text-white" />
+      <footer className="border-t border-border px-6 py-10">
+        <div className="mx-auto max-w-6xl">
+          <div className="flex flex-col items-center justify-between gap-6 sm:flex-row">
+            <div className="flex items-center gap-2">
+              <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary">
+                <Bot className="h-3.5 w-3.5 text-primary-foreground" />
+              </div>
+              <span className="text-sm font-medium text-muted-foreground">TradeAgent</span>
             </div>
-            <span className="text-sm font-medium text-neutral-400">TradeAgent</span>
+            <div className={cn("flex items-center gap-5 text-xs text-muted-foreground/60")}>
+              <Link to="/performance" className="hover:text-foreground transition-colors">Performance</Link>
+              <Link to="/terms" className="hover:text-foreground transition-colors">Terms</Link>
+              <Link to="/privacy" className="hover:text-foreground transition-colors">Privacy</Link>
+              <Link to="/login" className="hover:text-foreground transition-colors">Sign in</Link>
+            </div>
           </div>
-          <p className="text-xs text-neutral-700 max-w-md text-center">
+          <p className="mt-6 text-xs text-muted-foreground/40 text-center">
             For informational and educational purposes only. Not financial advice.
             All trading involves risk. Past performance is not indicative of future results.
           </p>
-          <Link to="/login" className="text-sm text-neutral-600 hover:text-neutral-400 transition-colors">
-            Sign in →
-          </Link>
         </div>
       </footer>
     </div>
