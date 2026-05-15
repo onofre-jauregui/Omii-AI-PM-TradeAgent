@@ -610,26 +610,33 @@ async function runS001SurfaceArb(
   const MAX_LEGS_PER_EVENT = 3;
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
-  // 1. Fetch fresh, unexploited KXINX bracket-sum violation alerts
-  const { data: alerts } = await supabase
+  // 1. Fetch fresh, unexploited bracket-sum violation alerts.
+  // Covers KXINX (S&P 500), KXBTC, and KXETH — all are bracket markets where
+  // structural mispricing is direction-agnostic. Sports/weather tickers excluded below.
+  // Prioritise by edge descending so highest-confidence violations execute first.
+  const ALLOWED_PREFIXES = ["KXINX", "KXBTC", "KXETH"];
+  const { data: rawAlerts } = await supabase
     .from("surface_alerts")
     .select("*")
     .eq("alert_type", "bracket_sum_violation")
     .eq("is_exploited", false)
     .gte("detected_at", thirtyMinAgo)
     .gte("confidence", 0.9)
-    .like("event_ticker", "KXINX%")
     .order("expected_edge_cents", { ascending: false })
-    .limit(3);
+    .limit(20);
 
-  if (!alerts || alerts.length === 0) {
+  const alerts = (rawAlerts ?? []).filter((a: any) =>
+    ALLOWED_PREFIXES.some((pfx) => (a.event_ticker as string).startsWith(pfx))
+  ).slice(0, 5);
+
+  if (alerts.length === 0) {
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No fresh KXINX bracket-sum violations (surface-scanner must run first)",
+      details: "No fresh bracket-sum violations on KXINX/KXBTC/KXETH (surface-scanner must run first)",
     };
   }
 
@@ -651,7 +658,7 @@ async function runS001SurfaceArb(
     if (seenEvents.has(eventTicker)) continue;
     seenEvents.add(eventTicker);
 
-    // 3. Fetch all KXINX markets for this event from Kalshi
+    // 3. Fetch all bracket markets for this event from Kalshi
     let eventMarkets: any[] = [];
     try {
       const resp = await fetch(
