@@ -7,11 +7,67 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
-  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2,
+  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, Wallet,
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useStrategies, type Strategy } from "@/lib/strategiesContext";
 import { supabase } from "@/integrations/supabase/client";
+
+function BudgetSummary({ strategies }: { strategies: Strategy[] }) {
+  const [perTradeMax, setPerTradeMax] = useState<number | null>(null);
+
+  useEffect(() => {
+    supabase.from("risk_settings").select("max_position_size").single()
+      .then(({ data }) => { if (data) setPerTradeMax(data.max_position_size); });
+  }, []);
+
+  const active = strategies.filter(s => s.active);
+  const totalAllocated = active.reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
+
+  return (
+    <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+      <div className="px-5 py-4 border-b border-border flex items-center gap-2">
+        <Wallet className="h-4 w-4 text-muted-foreground" />
+        <h3 className="text-sm font-medium">Agent Budget</h3>
+        <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full ml-auto">
+          Soft limits · enforced by risk engine
+        </span>
+      </div>
+      <div className="px-5 py-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">Total allocated</span>
+          <span className="text-sm font-semibold tabular-nums">
+            ${totalAllocated.toLocaleString("en-US", { minimumFractionDigits: 0 })}
+          </span>
+        </div>
+        {perTradeMax !== null && (
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-muted-foreground">Per-trade max</span>
+            <span className="text-sm font-medium tabular-nums text-muted-foreground">
+              ${perTradeMax.toLocaleString("en-US", { minimumFractionDigits: 0 })}
+            </span>
+          </div>
+        )}
+        {active.length > 0 && (
+          <div className="pt-1 space-y-1.5 border-t border-border">
+            {active.map(s => (
+              <div key={s.id} className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">{s.name}</span>
+                <span className="text-xs tabular-nums">
+                  ${(s.starting_balance ?? 0).toLocaleString("en-US", { minimumFractionDigits: 0 })}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[11px] text-muted-foreground pt-1">
+          Your Kalshi balance is separate — the agent only uses what you allocate here.
+          Revoke access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
+        </p>
+      </div>
+    </div>
+  );
+}
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
@@ -226,6 +282,7 @@ export function StrategiesPanel() {
 
   return (
     <div className="space-y-8 apple-reveal">
+      <BudgetSummary strategies={strategies} />
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>Strategies</h2>

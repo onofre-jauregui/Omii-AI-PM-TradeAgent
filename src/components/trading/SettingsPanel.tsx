@@ -6,6 +6,9 @@ import { Key, Bell, Save, Loader2, CheckCircle, AlertCircle, Circle } from "luci
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string)?.trim() ?? "";
+const SAVE_KALSHI_KEY_URL = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
+
 function StatusBadge({ saved }: { saved: boolean }) {
   return saved ? (
     <span className="inline-flex items-center gap-1 text-[11px] font-medium text-profit bg-profit/10 px-2.5 py-1 rounded-full shrink-0">
@@ -77,10 +80,17 @@ export function SettingsPanel() {
     setKalshiSaving(true);
     setKalshiSaveStatus("idle");
     try {
-      await supabase.from("api_keys").upsert(
-        { provider: "kalshi_live", key_id: kalshiLive.key_id, encrypted_secret: kalshiLive.private_key, updated_at: new Date().toISOString() },
-        { onConflict: "provider" }
-      );
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(SAVE_KALSHI_KEY_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session?.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ key_id: kalshiLive.key_id.trim(), private_key: kalshiLive.private_key.trim() }),
+      });
+      const json = await resp.json();
+      if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
       await loadSavedKeys();
       setKalshiSaveStatus("success");
       setTimeout(() => setKalshiSaveStatus("idle"), 3000);

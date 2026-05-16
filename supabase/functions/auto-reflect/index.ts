@@ -393,7 +393,7 @@ serve(async (req) => {
 
       const { data: recentSettled } = await supabase
         .from("trades")
-        .select("id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at")
+        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at")
         .not("settled_at", "is", null)
         .not("pnl", "is", null)
         .neq("pnl", 0)
@@ -457,6 +457,7 @@ serve(async (req) => {
           .from("trade_lessons")
           .insert({
             trade_id: trade.id,
+            user_id: trade.user_id ?? null,
             ticker: trade.ticker,
             strategy_id: trade.strategy_id,
             outcome,
@@ -486,6 +487,7 @@ serve(async (req) => {
             title: `${outcome === "loss" ? "Loss" : "Win"} on ${trade.ticker} at ${price}¢ — ${lesson_type}`,
             content: `${lesson} ${do_differently}`,
             source_type: "trade_outcome",
+            user_id: trade.user_id ?? null,
             strategy_id: trade.strategy_id,
             tags: [trade.strategy_id?.toLowerCase(), lesson_type, outcome, trade.ticker.split("-")[0].toLowerCase()].filter(Boolean),
             confidence: outcome === "loss" ? 0.85 : 0.75,

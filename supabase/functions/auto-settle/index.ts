@@ -98,10 +98,11 @@ serve(async (req) => {
   const runId = crypto.randomUUID();
 
   try {
-    // 1. Find all unique tickers with unsettled filled paper trades
+    // 1. Find all (ticker, user_id) pairs with unsettled filled paper trades.
+    // View now groups by both so each user's positions are isolated.
     const { data: pendingTickers, error: pendingErr } = await supabase
       .from("agent_trades_pending_resolution")
-      .select("ticker, trades_pending, trade_ids, earliest_entry");
+      .select("ticker, user_id, trades_pending, trade_ids, earliest_entry");
 
     if (pendingErr) {
       console.error("pending fetch error:", pendingErr);
@@ -128,7 +129,8 @@ serve(async (req) => {
     let totalStillPending = 0;
     const results: any[] = [];
 
-    // 2. For each ticker, fetch Kalshi and settle if resolved
+    // 2. For each (ticker, user_id) pair, fetch Kalshi and settle if resolved.
+    // The view now groups by both columns so each user's positions are independent.
     for (const row of pendingTickers) {
       const ticker = row.ticker as string;
       const tradeIds = row.trade_ids as string[];
@@ -214,6 +216,7 @@ serve(async (req) => {
             .from("signals")
             .select("id")
             .eq("ticker", ticker)
+            .is("user_id", null)
             .lte("created_at", t.created_at || new Date().toISOString())
             .order("created_at", { ascending: false })
             .limit(1)
