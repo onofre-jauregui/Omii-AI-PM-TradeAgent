@@ -772,7 +772,7 @@ async function runS002LongshotBias(
   runId?: string,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const MAX_S002_POSITIONS = 1000;
+  const MAX_S002_POSITIONS = 12; // Hard cap: max concurrent longshot positions
   // 8-11¢ YES range: EV is positive here. Below 8¢, the payout ratio (win ~9¢, lose ~91¢)
   // requires >91% win rate to break even — the longshot bias (~5pp edge) isn't enough.
   // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
@@ -846,9 +846,20 @@ async function runS002LongshotBias(
   // Hard block: no ETH, no sports, no weather (S-005 owns weather with a real GFS model;
   // S-002 has no weather-specific edge and will trade against S-005's positions)
   const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL", "KXHIGH"];
-  const signals = (rawSignals || []).filter((s: any) =>
-    !blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))
-  );
+  // Live close-time guard: even if days_to_close in the signal looks positive (stale),
+  // reject any market whose close_time is already in the past or within 2 hours.
+  // This was the root cause of the 48-position runaway on KXINX-26MAY15 — the signal
+  // generator kept emitting fresh signals with stale days_to_close after market close.
+  const twoHoursFromNow = Date.now() + 2 * 60 * 60 * 1000;
+  const signals = (rawSignals || []).filter((s: any) => {
+    if (blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))) return false;
+    // Reject if close_time is set and market is already closed or closing within 2h
+    if (s.close_time) {
+      const closeMs = new Date(s.close_time).getTime();
+      if (closeMs <= twoHoursFromNow) return false;
+    }
+    return true;
+  });
 
   if (signals.length === 0) {
     return {
@@ -880,14 +891,19 @@ async function runS002LongshotBias(
 
   const slotsAvailable = MAX_S002_POSITIONS - openS002Count;
 
-  // Dedup: fetch open tickers to skip already-held positions
-  const { data: s002OpenTrades } = await supabase
+  // Dedup: fetch open tickers to skip already-held positions.
+  // Must scope by user_id to avoid cross-tenant false positives.
+  let dedupQuery = supabase
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
     .eq("strategy_id", strategy.id)
     .is("exit_reason", null)
     .is("settled_at", null);
+  dedupQuery = strategy.user_id
+    ? dedupQuery.eq("user_id", strategy.user_id)
+    : dedupQuery.is("user_id", null);
+  const { data: s002OpenTrades } = await dedupQuery;
   const openTickers = new Set((s002OpenTrades || []).map((t: any) => t.ticker));
   const seenTickers = new Set<string>();
   const seenEventRoots = new Set<string>();

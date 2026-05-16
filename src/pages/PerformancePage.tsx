@@ -85,6 +85,9 @@ interface OpenTrade {
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
 
+// May 1 2026 — only show calibrated trades; pre-May was development/uncalibrated
+const MAY_START = "2026-05-01T00:00:00.000Z";
+
 async function fetchAll() {
   const [tradesRes, settledRes, openRes] = await Promise.all([
     supabase
@@ -92,12 +95,14 @@ async function fetchAll() {
       .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
       .eq("mode", "paper")
       .in("status", ["filled", "settled"])
+      .gte("created_at", MAY_START)
       .order("created_at", { ascending: true }),
     supabase
       .from("trades")
       .select("ticker, market_question, side, price, amount, pnl, resolution, settled_at, strategy, created_at")
       .eq("mode", "paper")
       .eq("status", "settled")
+      .gte("settled_at", MAY_START)
       .order("settled_at", { ascending: false })
       .limit(25),
     supabase

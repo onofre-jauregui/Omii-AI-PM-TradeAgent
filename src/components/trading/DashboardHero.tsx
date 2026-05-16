@@ -118,6 +118,8 @@ export function DashboardHero({
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const todayISO = todayStart.toISOString();
+    // May 1 2026 — only count calibrated trades; pre-May was development/uncalibrated
+    const MAY_START = "2026-05-01T00:00:00.000Z";
 
     const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
@@ -125,6 +127,7 @@ export function DashboardHero({
         .from("trades")
         .select("pnl, settled_at, mode")
         .eq("status", "settled")
+        .gte("settled_at", MAY_START)
         .order("settled_at", { ascending: false })
         .limit(500),
       // Open positions: filled but not yet settled
