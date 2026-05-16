@@ -21,8 +21,8 @@ async function fetchKalshiBalance(): Promise<number | null> {
   }
 }
 
-// Fallback if strategies table can't be reached — matches onboarding default (S-002: $1k, S-005: $1k)
-const PAPER_STARTING_BALANCE = 2_000;
+// Fallback if strategies table can't be reached — matches onboarding seed (S-001: $500, S-002: $1k, S-005: $1k)
+const PAPER_STARTING_BALANCE = 2_500;
 
 interface Position {
   market_id: string;

@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Area, AreaChart, BarChart, Bar, Cell, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import {
   TrendingUp, TrendingDown, Target, BarChart3,
-  Activity, Clock, RefreshCw, Bot, HelpCircle,
+  Activity, Clock, RefreshCw, Bot, HelpCircle, ArrowLeft,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -231,6 +232,7 @@ const STRATEGY_DESCRIPTIONS: Record<string, string> = {
 };
 
 export function PerformancePage() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState<OverallStats | null>(null);
   const [strategyRows, setStrategyRows] = useState<StrategyRow[]>([]);
   const [equityData, setEquityData] = useState<EquityPoint[]>([]);
@@ -434,7 +436,14 @@ export function PerformancePage() {
         className="frosted-glass sticky top-0 z-40 h-12 flex items-center justify-between px-8 shrink-0"
         style={{ boxShadow: "0 1px 0 rgba(0,0,0,0.08)" }}
       >
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate(-1)}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            title="Back to dashboard"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
           <Bot className="h-4 w-4 text-foreground" />
           <span className="text-sm font-medium tracking-tight">Trade Agent</span>
         </div>

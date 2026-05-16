@@ -84,13 +84,13 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
 
       {/* Bottom: live status + profile/settings */}
       <div className="shrink-0 border-t border-border py-3 px-2 space-y-0.5">
-        {/* Live indicator */}
+        {/* Agent active indicator */}
         <div className={cn(
           "flex items-center gap-2 px-2.5 py-1.5 text-xs text-profit",
           collapsed && "justify-center"
         )}>
-          <Activity className="h-3 w-3 shrink-0" />
-          {!collapsed && <span>Live</span>}
+          <span className="h-1.5 w-1.5 rounded-full bg-profit animate-pulse-gentle shrink-0" />
+          {!collapsed && <span>Agent Active</span>}
         </div>
 
         {BOTTOM_ITEMS.map(({ id, label, icon: Icon }) => {
@@ -114,10 +114,10 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
           );
         })}
 
-        {/* Profile avatar + sign out */}
+        {/* Avatar + sign out */}
         <div className={cn(
           "flex items-center gap-2 rounded-lg px-2.5 py-2 mt-1",
-          collapsed && "justify-center px-0"
+          collapsed ? "justify-center px-0" : "justify-between"
         )}>
           <Avatar className="h-6 w-6 shrink-0">
             <AvatarFallback className="bg-secondary text-foreground text-[9px] font-medium">
@@ -125,21 +125,13 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
             </AvatarFallback>
           </Avatar>
           {!collapsed && (
-            <>
-              <div className="overflow-hidden flex-1 min-w-0">
-                <p className="text-xs font-medium text-foreground truncate">
-                  {userEmail ?? "Trader"}
-                </p>
-                <p className="text-[10px] text-muted-foreground truncate">TradeAgent</p>
-              </div>
-              <button
-                onClick={() => supabase.auth.signOut()}
-                className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                title="Sign out"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-              </button>
-            </>
+            <button
+              onClick={() => supabase.auth.signOut()}
+              className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+              title="Sign out"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
           )}
         </div>
       </div>
