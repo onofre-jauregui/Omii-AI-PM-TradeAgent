@@ -13,9 +13,12 @@ import {
   Activity,
   ChevronRight,
   Lock,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
 
 // ── Scroll-reveal hook ────────────────────────────────────────────────────────
 function useInView(threshold = 0.12) {
@@ -326,6 +329,151 @@ function FlywheelDiagram() {
   );
 }
 
+// ── Pricing tiers ─────────────────────────────────────────────────────────────
+const TIERS = [
+  {
+    name: "Free",
+    price: "$0",
+    period: "",
+    badge: null,
+    description: "Build your track record with zero risk.",
+    features: [
+      "Full paper trading dashboard",
+      "All active strategies running",
+      "Agent chat + memory",
+      "Performance analytics",
+    ],
+    cta: "Start free",
+    ctaLink: "/login",
+    highlight: false,
+  },
+  {
+    name: "Starter",
+    price: "$29",
+    period: "/mo",
+    badge: "Waitlist",
+    description: "Real money, controlled risk. The agent trades for you.",
+    features: [
+      "Everything in Free",
+      "Live trading on Kalshi",
+      "Set your own dollar limit",
+      "Strategies run automatically",
+      "Strategy logic is managed for you",
+    ],
+    cta: "Join waitlist",
+    ctaLink: "#waitlist",
+    highlight: true,
+  },
+  {
+    name: "Pro",
+    price: "$79",
+    period: "/mo",
+    badge: "Waitlist",
+    description: "Full control. See, edit, and build your own strategies.",
+    features: [
+      "Everything in Starter",
+      "Full strategy library access",
+      "Edit and create custom strategies",
+      "Community intelligence pool",
+      "Priority support",
+    ],
+    cta: "Join waitlist",
+    ctaLink: "#waitlist",
+    highlight: false,
+  },
+];
+
+// ── Waitlist form ─────────────────────────────────────────────────────────────
+function WaitlistForm() {
+  const [email, setEmail] = useState("");
+  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [count, setCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    supabase.from("waitlist").select("id", { count: "exact", head: true }).then(({ count: c }) => {
+      if (c !== null) setCount(c);
+    });
+  }, []);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email.trim()) return;
+    setStatus("loading");
+    const { error } = await supabase.from("waitlist").insert({ email: email.trim() });
+    if (error) {
+      if (error.code === "23505") {
+        // Already on the list — treat as success
+        setStatus("success");
+      } else {
+        setStatus("error");
+      }
+    } else {
+      setStatus("success");
+      setCount((c) => (c !== null ? c + 1 : 1));
+    }
+  }
+
+  return (
+    <div id="waitlist" className="relative overflow-hidden px-6 py-36 text-center">
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        style={{
+          width: 700,
+          height: 400,
+          background: "radial-gradient(ellipse at center, hsl(var(--primary) / 0.1) 0%, transparent 70%)",
+        }}
+      />
+      <Reveal className="relative mx-auto max-w-xl">
+        <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-3 py-1 text-xs text-primary">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse-gentle" />
+          {count !== null ? `${count} people already waiting` : "Live trading opening soon"}
+        </div>
+
+        <h2 className="mb-4 text-5xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
+          Be first in.
+          <br />
+          <span className="text-primary">Join the waitlist.</span>
+        </h2>
+        <p className="mb-8 text-lg text-muted-foreground">
+          Live trading is opening to waitlist members first. Drop your email and we'll reach out when your spot is ready.
+        </p>
+
+        {status === "success" ? (
+          <div className="rounded-2xl border border-profit/30 bg-profit/10 px-6 py-5 text-sm text-profit">
+            <Check className="mx-auto mb-2 h-6 w-6" />
+            <p className="font-medium">You're on the list.</p>
+            <p className="text-profit/70 mt-1">We'll reach out when live trading opens for your spot.</p>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="flex flex-col gap-3 sm:flex-row sm:max-w-md sm:mx-auto">
+            <Input
+              type="email"
+              placeholder="your@email.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              className="rounded-full border-border bg-card px-5 h-12 text-sm flex-1"
+            />
+            <Button
+              type="submit"
+              size="lg"
+              disabled={status === "loading"}
+              className="rounded-full px-7 gap-2 h-12 shrink-0"
+            >
+              {status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {status === "loading" ? "Joining…" : "Join waitlist"}
+            </Button>
+          </form>
+        )}
+        {status === "error" && (
+          <p className="mt-3 text-xs text-destructive">Something went wrong. Try again.</p>
+        )}
+        <p className="mt-5 text-xs text-muted-foreground/50">No spam. Unsubscribe anytime.</p>
+      </Reveal>
+    </div>
+  );
+}
+
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function LandingPage() {
   return (
@@ -347,6 +495,9 @@ export default function LandingPage() {
             </a>
             <a href="#features" className="hidden text-sm text-muted-foreground hover:text-foreground transition-colors sm:block">
               Features
+            </a>
+            <a href="#pricing" className="hidden text-sm text-muted-foreground hover:text-foreground transition-colors sm:block">
+              Pricing
             </a>
             <Button variant="ghost" size="sm" asChild className="text-muted-foreground hover:text-foreground">
               <Link to="/login">Sign in</Link>
@@ -559,34 +710,64 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ── Final CTA ── */}
-      <section className="relative overflow-hidden px-6 py-36 text-center">
-        <div
-          className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-          style={{
-            width: 700,
-            height: 400,
-            background: "radial-gradient(ellipse at center, hsl(var(--primary) / 0.08) 0%, transparent 70%)",
-          }}
-        />
-        <Reveal className="relative mx-auto max-w-2xl">
-          <h2 className="mb-4 text-5xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.03em" }}>
-            Trade smarter.
-            <br />
-            <span className="text-primary">Starting today.</span>
-          </h2>
-          <p className="mb-10 text-lg text-muted-foreground">
-            Free to start. No credit card. Switch to live trading when your
-            paper record earns your confidence.
-          </p>
-          <Button size="lg" asChild className="rounded-full px-10 gap-2 shadow-xl">
-            <Link to="/login">
-              Get started free
-              <ChevronRight className="h-4 w-4" />
-            </Link>
-          </Button>
-        </Reveal>
+      {/* ── Pricing ── */}
+      <section id="pricing" className="px-6 py-28">
+        <div className="mx-auto max-w-5xl">
+          <Reveal className="text-center mb-16">
+            <p className="mb-3 text-[11px] uppercase tracking-widest text-primary">Pricing</p>
+            <h2 className="text-4xl font-bold tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>
+              Start free. Scale when ready.
+            </h2>
+            <p className="mt-4 text-muted-foreground">Paper trading is free forever. Live trading opens to waitlist members first.</p>
+          </Reveal>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            {TIERS.map((tier, i) => (
+              <Reveal key={tier.name} delay={i * 80}>
+                <div className={cn(
+                  "relative rounded-2xl border p-8 apple-shadow flex flex-col h-full transition-all duration-200",
+                  tier.highlight
+                    ? "border-primary bg-primary/5 ring-1 ring-primary/20"
+                    : "border-border bg-card hover:border-primary/20"
+                )}>
+                  {tier.badge && (
+                    <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-primary px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-foreground">
+                      {tier.badge}
+                    </span>
+                  )}
+                  <div className="mb-6">
+                    <p className="text-[11px] uppercase tracking-widest text-muted-foreground mb-2">{tier.name}</p>
+                    <div className="flex items-baseline gap-1 mb-2">
+                      <span className="text-4xl font-bold text-foreground">{tier.price}</span>
+                      <span className="text-sm text-muted-foreground">{tier.period}</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground leading-relaxed">{tier.description}</p>
+                  </div>
+                  <ul className="space-y-3 mb-8 flex-1">
+                    {tier.features.map((f) => (
+                      <li key={f} className="flex items-start gap-2.5 text-sm text-muted-foreground">
+                        <Check className="h-4 w-4 text-profit shrink-0 mt-0.5" />
+                        {f}
+                      </li>
+                    ))}
+                  </ul>
+                  <Button
+                    size="sm"
+                    variant={tier.highlight ? "default" : "outline"}
+                    className="w-full rounded-full"
+                    asChild
+                  >
+                    <a href={tier.ctaLink}>{tier.cta}</a>
+                  </Button>
+                </div>
+              </Reveal>
+            ))}
+          </div>
+        </div>
       </section>
+
+      {/* ── Waitlist / Final CTA ── */}
+      <WaitlistForm />
 
       {/* ── Footer ── */}
       <footer className="border-t border-border px-6 py-10">
