@@ -32,7 +32,7 @@
     --input: 0 0% 90%;
     --ring: 211 100% 44%;
 
-    --radius: 18px;
+    --radius: 12px;
 
     --profit: 142 64% 40%;
     --loss: 0 72% 51%;
@@ -56,48 +56,48 @@
   }
 
   .dark {
-    /* Claude-inspired: warm dark background, orange/coral accent */
-    --background: 24 12% 9%;
-    --foreground: 30 15% 92%;
+    /* Apple dark mode — cool charcoal, not warm amber */
+    --background: 0 0% 0%;
+    --foreground: 240 5% 96%;
 
-    --card: 24 10% 13%;
-    --card-foreground: 30 15% 92%;
+    --card: 240 4% 10%;
+    --card-foreground: 240 5% 96%;
 
-    --popover: 24 10% 13%;
-    --popover-foreground: 30 15% 92%;
+    --popover: 240 4% 10%;
+    --popover-foreground: 240 5% 96%;
 
-    --primary: 22 75% 60%;
+    --primary: 211 100% 50%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 24 10% 16%;
-    --secondary-foreground: 30 15% 92%;
+    --secondary: 240 4% 14%;
+    --secondary-foreground: 240 5% 96%;
 
-    --muted: 24 10% 16%;
-    --muted-foreground: 30 10% 55%;
+    --muted: 240 4% 14%;
+    --muted-foreground: 240 5% 55%;
 
-    --accent: 24 10% 16%;
-    --accent-foreground: 30 15% 92%;
+    --accent: 240 4% 14%;
+    --accent-foreground: 240 5% 96%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 24 8% 20%;
-    --input: 24 8% 20%;
-    --ring: 22 75% 60%;
+    --border: 240 4% 18%;
+    --input: 240 4% 18%;
+    --ring: 211 100% 50%;
 
     --profit: 142 64% 45%;
     --loss: 0 72% 55%;
     --warning: 38 92% 55%;
-    --info: 22 75% 60%;
+    --info: 211 100% 50%;
 
-    --sidebar-background: 24 12% 7%;
-    --sidebar-foreground: 30 15% 92%;
-    --sidebar-primary: 22 75% 60%;
+    --sidebar-background: 0 0% 0%;
+    --sidebar-foreground: 240 5% 96%;
+    --sidebar-primary: 211 100% 50%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 24 10% 13%;
-    --sidebar-accent-foreground: 30 15% 92%;
-    --sidebar-border: 24 8% 16%;
-    --sidebar-ring: 22 75% 60%;
+    --sidebar-accent: 240 4% 10%;
+    --sidebar-accent-foreground: 240 5% 96%;
+    --sidebar-border: 240 4% 16%;
+    --sidebar-ring: 211 100% 50%;
   }
 }
 
@@ -107,7 +107,7 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -133,10 +133,10 @@
     background-color: hsl(var(--loss));
   }
   .apple-shadow {
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+    box-shadow: 2px 4px 12px rgba(0, 0, 0, 0.08);
   }
   .apple-shadow-hover {
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+    box-shadow: 2px 8px 24px rgba(0, 0, 0, 0.12);
   }
   .frosted-glass {
     background: rgba(255, 255, 255, 0.72);
