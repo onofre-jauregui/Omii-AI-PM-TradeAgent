@@ -325,17 +325,51 @@ export async function fetchKalshiSeries(limit = 200): Promise<KalshiSeries[]> {
   }));
 }
 
+// Maps our display tab names → Kalshi API category strings
+const CATEGORY_API_NAME: Record<string, string> = {
+  "Culture":       "Entertainment",
+  "Climate":       "Climate and Weather",
+  "Tech & Science":"Science and Technology",
+  // All others match 1:1: Elections, Politics, Sports, Crypto,
+  // Commodities, Economics, Companies, Financials, Mentions
+};
+
 export async function fetchKalshiMarketsByCategory(
-  allSeries: KalshiSeries[],
+  _allSeries: KalshiSeries[], // kept for API compat — no longer used
   category: string,
   limitPerSeries = 10
 ): Promise<ParsedMarket[]> {
-  const targets = category === "Trending"
-    ? allSeries.slice(0, 20)
-    : allSeries.filter(s => s.category === category);
+  // "Trending" uses the curated high-volume series that already work
+  if (category === "Trending") {
+    return fetchKalshiMarkets(200);
+  }
 
+  // Resolve our display name to Kalshi's API category name
+  const apiCategory = CATEGORY_API_NAME[category] ?? category;
+
+  // Fetch up to 25 active series for this category
+  let seriesList: KalshiSeries[] = [];
+  try {
+    const data = await kalshiProxyGet("series", {
+      status: "active",
+      category: apiCategory,
+      limit: "25",
+    });
+    seriesList = (data.series ?? []).map((s: any) => ({
+      ticker: s.ticker ?? "",
+      title: s.title ?? s.ticker ?? "",
+      category: s.category ?? apiCategory,
+      frequency: s.frequency ?? "singular",
+    }));
+  } catch {
+    return [];
+  }
+
+  if (seriesList.length === 0) return [];
+
+  // Fetch markets from each series in parallel
   const results = await Promise.allSettled(
-    targets.map(s =>
+    seriesList.map(s =>
       kalshiProxyGet("markets", { series_ticker: s.ticker, status: "open", limit: String(limitPerSeries) })
         .then(d => (d.markets ?? []) as KalshiMarket[])
         .catch(() => [] as KalshiMarket[])

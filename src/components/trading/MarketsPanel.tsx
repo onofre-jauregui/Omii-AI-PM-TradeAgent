@@ -144,16 +144,8 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
     return () => clearInterval(id);
   }, []);
 
-  // Bootstrap: fetch all series once
-  useEffect(() => {
-    fetchKalshiSeries(200)
-      .then(setAllSeries)
-      .catch(() => {
-        // Fallback: use hardcoded series list if series endpoint fails
-        setAllSeries([]);
-      });
-  }, []);
-
+  // allSeries is no longer needed — fetchKalshiMarketsByCategory is self-contained
+  // Kept in state to avoid breaking the KalshiSeries type import
   const fetchCategory = useCallback(async (category: string, force = false) => {
     const TTL = 30_000;
     const cached = cache.current.get(category);
@@ -166,25 +158,13 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      let result: ParsedMarket[];
-      if (allSeries.length > 0) {
-        result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
-      } else {
-        // Fallback to existing bulk fetch if series endpoint unavailable
-        result = await fetchKalshiMarkets(200);
-        if (category !== "Trending") {
-          result = result.filter(m => m.category === category);
-        }
-      }
+      const result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
       cache.current.set(category, { markets: result, fetchedAt: Date.now() });
       setMarkets(result);
       setLastUpdated(new Date());
-    } catch (err) {
-      setError("Using cached data — live feed unavailable");
-      setMarkets(MOCK_MARKETS.map(m => ({
-        ...m, ticker: m.id, eventTicker: m.id, description: "", volume24hr: 0, liquidity: 0,
-        openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0, yesAsk: 0, noBid: 0, noAsk: 0, closeTime: "",
-      })));
+    } catch {
+      setError("Live feed unavailable");
+      setMarkets([]);
     } finally {
       setLoading(false);
     }
