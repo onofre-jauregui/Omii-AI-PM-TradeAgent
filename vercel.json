@@ -1,3 +1,4 @@
 {
+  "alias": ["omii-trade-agent.vercel.app"],
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
 }
