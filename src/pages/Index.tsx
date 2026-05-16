@@ -222,8 +222,8 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-8 apple-reveal">
-              <AccountStatusCard mode={mode} userEmail={userEmail} />
               <ProfilePanel />
+              <AccountStatusCard mode={mode} userEmail={userEmail} />
               <SettingsPanel />
               <CompliancePanel />
             </div>

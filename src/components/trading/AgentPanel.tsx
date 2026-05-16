@@ -189,7 +189,7 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
             const { data: { user } } = await supabase.auth.getUser();
             if (user) supabase.from("api_keys").upsert({ user_id: user.id, provider: "model_agent", key_id: id }, { onConflict: "provider,user_id" });
           }}>
-            <SelectTrigger className="h-7 rounded-full border-0 bg-secondary text-[11px] font-medium px-3 gap-1 min-w-0 max-w-[140px]">
+            <SelectTrigger className="h-7 rounded-full border-0 bg-secondary text-[11px] font-medium px-3 gap-1 min-w-0 max-w-[140px] whitespace-nowrap">
               <Cpu className="h-3 w-3 shrink-0 text-muted-foreground" />
               <SelectValue />
             </SelectTrigger>
