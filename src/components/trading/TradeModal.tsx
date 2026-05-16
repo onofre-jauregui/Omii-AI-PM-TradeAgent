@@ -67,7 +67,7 @@ export function TradeModal({ market, open, onClose, mode, initialSide }: TradeMo
           price,
           amount,
           mode,
-          ...(strategyId ? { strategyId } : {}),
+          ...(strategyId && strategyId !== "none" ? { strategyId } : {}),
           orderType: "limit",
         }),
       });
@@ -173,7 +173,7 @@ export function TradeModal({ market, open, onClose, mode, initialSide }: TradeMo
                   <SelectValue placeholder="No strategy" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">No strategy</SelectItem>
+                  <SelectItem value="none">No strategy</SelectItem>
                   {strategies.map((s) => (
                     <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
                   ))}
