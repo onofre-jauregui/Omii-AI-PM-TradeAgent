@@ -16,6 +16,7 @@ import PerformancePage from "./pages/PerformancePage.tsx";
 import SignupPage from "./pages/SignupPage.tsx";
 import OnboardingPage from "./pages/OnboardingPage.tsx";
 import WaitlistPage from "./pages/admin/WaitlistPage.tsx";
+import CostReport from "./pages/admin/CostReport.tsx";
 import BillingPage from "./pages/BillingPage.tsx";
 import TermsPage from "./pages/TermsPage.tsx";
 import PrivacyPage from "./pages/PrivacyPage.tsx";
@@ -99,6 +100,7 @@ function AppRoutes() {
         <Route path="/privacy" element={<PrivacyPage />} />
         {/* Auth-protected — admin + onboarding + billing */}
         <Route path="/admin/waitlist" element={<WaitlistPage />} />
+        <Route path="/admin/costs" element={<CostReport />} />
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/billing" element={<BillingPage />} />
         {/* Everything else goes through the auth gate */}
