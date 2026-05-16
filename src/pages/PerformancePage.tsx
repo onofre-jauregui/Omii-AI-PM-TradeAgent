@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Area, AreaChart, BarChart, Bar, Cell, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import {
   TrendingUp, TrendingDown, Target, BarChart3,
-  Activity, Clock, RefreshCw, Bot, HelpCircle, ArrowLeft,
+  Activity, Clock, RefreshCw, Bot, HelpCircle, ArrowLeft, Share2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -460,6 +460,21 @@ export function PerformancePage() {
               <RefreshCw className="h-3 w-3" />
               {timeAgo(lastUpdated.toISOString())}
             </span>
+          )}
+          {stats && (
+            <button
+              onClick={() => {
+                const pnl = stats.realizedPnl >= 0 ? `+$${stats.realizedPnl.toFixed(2)}` : `-$${Math.abs(stats.realizedPnl).toFixed(2)}`;
+                const text = `My AI trading agent on Kalshi is ${stats.realizedPnl >= 0 ? "up" : "down"} ${pnl} with a ${stats.winRate}% win rate across ${stats.settledTrades} trades. Running 24/7 on @KalshiHQ — check the live track record:`;
+                const url = encodeURIComponent("https://tradeagent.omii.ai/performance");
+                window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${url}`, "_blank");
+              }}
+              className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-md hover:bg-muted"
+              title="Share on X"
+            >
+              <Share2 className="h-3 w-3" />
+              Share
+            </button>
           )}
         </div>
       </header>

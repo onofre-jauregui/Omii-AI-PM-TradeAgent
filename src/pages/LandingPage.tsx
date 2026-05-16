@@ -212,43 +212,63 @@ function WaitlistForm() {
     e.preventDefault();
     if (!email.trim()) return;
     setStatus("loading");
-    const { error } = await supabase.from("waitlist").insert({ email: email.trim() });
-    if (error) {
-      if (error.code === "23505") {
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? "";
+      const resp = await fetch(`${supabaseUrl}/functions/v1/waitlist-signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim() }),
+      });
+      const json = await resp.json();
+      if (json.ok || resp.ok) {
         setStatus("success");
+        setCount((c) => (c !== null ? c + 1 : 1));
       } else {
         setStatus("error");
       }
-    } else {
-      setStatus("success");
-      setCount((c) => (c !== null ? c + 1 : 1));
+    } catch {
+      setStatus("error");
     }
   }
 
+  if (status === "success") {
+    return (
+      <div className="sm:max-w-md sm:mx-auto rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-6 py-4 text-center">
+        <p className="text-emerald-600 dark:text-emerald-400 font-medium text-sm">You're on the list. Check your inbox for a confirmation.</p>
+        {count !== null && <p className="text-xs text-muted-foreground mt-1">{count} people waiting</p>}
+      </div>
+    );
+  }
+
   return (
-    <form onSubmit={submit} className="flex flex-col gap-3 sm:flex-row sm:max-w-md sm:mx-auto">
-      <Input
-        type="email"
-        placeholder="your@email.com"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        required
-        className="rounded-full border-border bg-white px-5 h-12 text-sm flex-1"
-      />
-      <Button
-        type="submit"
-        size="lg"
-        disabled={status === "loading"}
-        className="rounded-full px-7 gap-2 h-12 shrink-0"
-        style={{ background: "#0071e3", color: "#fff", border: "none" }}
-      >
-        {status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-        {status === "loading" ? "Joining…" : "Join waitlist"}
-      </Button>
-      {count !== null && status === "idle" && (
-        <span className="sr-only">{count} already waiting</span>
+    <div className="flex flex-col gap-2 items-center">
+      <form onSubmit={submit} className="flex flex-col gap-3 sm:flex-row sm:max-w-md sm:mx-auto w-full">
+        <Input
+          type="email"
+          placeholder="your@email.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+          className="rounded-full border-border bg-white px-5 h-12 text-sm flex-1"
+        />
+        <Button
+          type="submit"
+          size="lg"
+          disabled={status === "loading"}
+          className="rounded-full px-7 gap-2 h-12 shrink-0"
+          style={{ background: "#0071e3", color: "#fff", border: "none" }}
+        >
+          {status === "loading" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {status === "loading" ? "Joining…" : "Join waitlist"}
+        </Button>
+      </form>
+      {status === "error" && (
+        <p className="text-xs text-destructive">Something went wrong. Try again.</p>
       )}
-    </form>
+      {count !== null && status === "idle" && (
+        <p className="text-xs text-muted-foreground">{count} {count === 1 ? "person" : "people"} on the waitlist</p>
+      )}
+    </div>
   );
 }
 
