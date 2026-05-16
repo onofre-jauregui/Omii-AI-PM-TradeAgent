@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 
 export interface Strategy {
   id: string;
+  template_id?: string;
   name: string;
   description: string;
   instructions: string;
@@ -70,25 +71,25 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
         starting_balance: s.starting_balance,
       })));
     } else {
-      // Fallback defaults if DB not ready
+      // Fallback defaults if DB not ready — display only, not used for routing
       setStrategies([
         {
-          id: "S-001", name: "Surface Arbitrage", mode: "paper", starting_balance: 1000, active: true,
+          id: "S-001", template_id: "S-001", name: "Surface Arbitrage", mode: "paper", starting_balance: 500, active: true,
           description: "Exploit structural price inconsistencies between related Kalshi markets — monotonicity violations, bracket sum gaps, and spread anomalies detected by the surface scanner.",
           instructions: "Always start by calling scan_surface. Prioritize monotonicity violations (lower threshold priced cheaper than higher threshold — near-riskless arb). Then bracket sum violations where sum of YES < 85¢. Then spread anomalies — post limit orders at the mid. Size $15–$50 depending on alert type. Do not trade alerts with confidence < 0.3.",
         },
         {
-          id: "S-002", name: "Resolution Fade", mode: "paper", starting_balance: 1000, active: true,
+          id: "S-002", template_id: "S-002", name: "Resolution Fade", mode: "paper", starting_balance: 1000, active: true,
           description: "Fade overreaction price moves in markets 2–7 days from resolution. Prediction market participants systematically overreact to recent news near expiry.",
           instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. For each candidate, judge: was the price move caused by a confirmed fundamental (skip) or sentiment/rumor (fade)? Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range. Hard stop if price moves 10¢ further against you.",
         },
         {
-          id: "S-003", name: "Economic Consensus", mode: "paper", starting_balance: 1000, active: true,
+          id: "S-003", template_id: "S-003", name: "Economic Consensus", mode: "paper", starting_balance: 1000, active: true,
           description: "Trade KXFED, KXCPI, KXPAYROLLS, KXGDP toward analyst consensus when Kalshi prices diverge from professional forecasts by more than 15¢.",
           instructions: "Focus on KXFED, KXCPI, KXPAYROLLS, KXGDP, KXCHCUTS series. For each market, reason from your training data and saved memories about the current professional consensus forecast. When Kalshi mid price diverges from consensus-implied probability by >= 15¢, trade toward consensus. Size $30–$75. Never hold through the data release unless conviction is high.",
         },
         {
-          id: "S-004", name: "Liquidity Provision", mode: "paper", starting_balance: 1000, active: false,
+          id: "S-004", template_id: "S-004", name: "Liquidity Provision", mode: "paper", starting_balance: 1000, active: false,
           description: "Post limit orders near the mid on liquid, range-bound markets to passively collect the bid-ask spread. Low directional risk.",
           instructions: "Use fetch_signals to find markets with liquidity_score >= 0.5, spread >= 6¢, mid between 30¢–70¢, and no catalyst within 48h. Post YES and NO limit orders at mid±1¢ simultaneously. Size $10–$20 per order. Cancel if price moves > 8¢ from entry mid or if one side fills but not the other within 4 hours. Max 5 open LP positions at once.",
         },

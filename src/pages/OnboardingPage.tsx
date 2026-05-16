@@ -27,12 +27,16 @@ export default function OnboardingPage() {
           { onConflict: "id" }
         );
 
-      // Seed all three starter strategies. Idempotent — safe to re-run.
+      // Seed all three starter strategies with user-scoped IDs so system strategy
+      // rows (user_id=null) are never overwritten. template_id links to the strategy
+      // type so auto-trade can route correctly regardless of the PK.
       const tradeMode = mode ?? "paper";
+      const uid8 = user.id.replace(/-/g, "").slice(0, 8);
       await supabase.from("strategies").upsert(
         [
           {
-            id: "S-001",
+            id: `S-001-${uid8}`,
+            template_id: "S-001",
             name: "Surface Arbitrage",
             description: "Exploits bracket-sum mispricing in KXINX/KXBTC/KXETH markets.",
             instructions: "Read surface_alerts for bracket_sum_violation. Buy NO on the most overpriced YES legs (yesAsk descending). Max 3 legs per event at $15/leg. Mark alert is_exploited after fill. No LLM gate — structural edge.",
@@ -42,7 +46,8 @@ export default function OnboardingPage() {
             user_id: user.id,
           },
           {
-            id: "S-002",
+            id: `S-002-${uid8}`,
+            template_id: "S-002",
             name: "Resolution Fade",
             description: "Fade overreaction price moves in markets 2–7 days from resolution.",
             instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range.",
@@ -52,7 +57,8 @@ export default function OnboardingPage() {
             user_id: user.id,
           },
           {
-            id: "S-005",
+            id: `S-005-${uid8}`,
+            template_id: "S-005",
             name: "Weather Edge",
             description: "Trades NWS forecast vs Kalshi implied temperature divergence.",
             instructions: "Compare NWS probability-of-precipitation and temperature forecasts to Kalshi Weather markets. Trade when divergence exceeds 15¢. Size $15–$30.",

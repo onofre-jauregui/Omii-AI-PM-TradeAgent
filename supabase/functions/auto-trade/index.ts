@@ -334,22 +334,22 @@ serve(async (req) => {
     // Load system strategies (null user_id) + strategies for active subscribers
     let strategyQuery = supabase
       .from("strategies")
-      .select("id, name, description, instructions, mode, starting_balance, user_id")
+      .select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
       .eq("active", true)
       .order("id");
 
     if (activeUserIds.length > 0) {
       // Supabase doesn't support OR with IS NULL directly, so we fetch both and merge
       const [{ data: systemStrategies }, { data: userStrategies }] = await Promise.all([
-        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
           .eq("active", true).is("user_id", null).order("id"),
-        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
           .eq("active", true).in("user_id", activeUserIds).order("id"),
       ]);
       var strategies = [...(systemStrategies || []), ...(userStrategies || [])];
     } else {
       const { data: systemStrategies } = await supabase
-        .from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id")
+        .from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
         .eq("active", true).is("user_id", null).order("id");
       var strategies = systemStrategies || [];
     }
@@ -433,12 +433,14 @@ serve(async (req) => {
         }
 
         let result: StrategyResult;
+        // Route by template_id (user strategies) with fallback to id (system strategies).
+        const templateId = (strategy as any).template_id ?? strategy.id;
 
-        if (strategy.id === "S-001") {
+        if (templateId === "S-001") {
           result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
-        } else if (strategy.id === "S-002") {
+        } else if (templateId === "S-002") {
           result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
-        } else if (strategy.id === "S-005") {
+        } else if (templateId === "S-005") {
           result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else {
           // Unknown strategy — hard reject. All strategies require an explicit handler.
@@ -640,12 +642,12 @@ async function runS001SurfaceArb(
     };
   }
 
-  // 2. Dedup: which tickers are already open under S-001?
+  // 2. Dedup: which tickers are already open under this strategy?
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
-    .eq("strategy_id", "S-001")
+    .eq("strategy_id", strategy.id)
     .is("settled_at", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
 
@@ -784,7 +786,7 @@ async function runS002LongshotBias(
     .from("trades")
     .select("id, ticker, side, price, amount, market_question")
     .eq("status", "filled")
-    .eq("strategy_id", "S-002")
+    .eq("strategy_id", strategy.id)
     .is("exit_reason", null)
     .is("settled_at", null)
     .not("expiration_time", "is", null)
@@ -883,7 +885,7 @@ async function runS002LongshotBias(
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
-    .eq("strategy_id", "S-002")
+    .eq("strategy_id", strategy.id)
     .is("exit_reason", null)
     .is("settled_at", null);
   const openTickers = new Set((s002OpenTrades || []).map((t: any) => t.ticker));
@@ -1130,7 +1132,7 @@ async function runS005WeatherEdge(
       .from("trades")
       .select("ticker, pnl, notes")
       .eq("status", "settled")
-      .eq("strategy_id", "S-005");
+      .eq("strategy_id", strategy.id);
 
     for (const t of weatherTrades || []) {
       const pnl = Number(t.pnl) || 0;
