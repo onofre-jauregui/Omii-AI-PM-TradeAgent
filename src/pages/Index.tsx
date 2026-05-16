@@ -213,9 +213,8 @@ const Index = () => {
 
           {/* ── Markets ────────────────────────────────────────────── */}
           {activeTab === "markets" && (
-            <div className="space-y-8 apple-reveal">
-              <MarketsPanel mode="paper" />
-              <StrategiesPanel />
+            <div className="apple-reveal">
+              <MarketsPanel mode={mode} />
             </div>
           )}
 

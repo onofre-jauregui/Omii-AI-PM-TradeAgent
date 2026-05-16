@@ -2,10 +2,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2, Info, Zap, Wallet } from "lucide-react";
+import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2, Zap, Wallet, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { fetchKalshiMarkets, formatVolume, type ParsedMarket } from "@/lib/kalshiApi";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {
+  fetchKalshiMarkets,
+  fetchKalshiSeries,
+  fetchKalshiMarketsByCategory,
+  formatVolume,
+  type ParsedMarket,
+  type KalshiSeries,
+} from "@/lib/kalshiApi";
 import { MOCK_MARKETS } from "@/lib/mockData";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -26,73 +33,96 @@ interface OpenPosition {
   strategy_id: string | null;
 }
 
-type SortKey = "volume" | "volume24h" | "yesPrice" | "noPrice" | "endDate";
+type SortKey = "volume" | "volume24h" | "endDate";
 
-const CATEGORY_THEME: Record<string, { text: string; bg: string; border: string }> = {
-  "Federal Reserve": { text: "text-blue-500",   bg: "bg-blue-500/10",   border: "border-l-blue-500"   },
-  "Economics":       { text: "text-indigo-500", bg: "bg-indigo-500/10", border: "border-l-indigo-500" },
-  "Crypto":          { text: "text-amber-500",  bg: "bg-amber-500/10",  border: "border-l-amber-500"  },
-  "Sports":          { text: "text-violet-500", bg: "bg-violet-500/10", border: "border-l-violet-500" },
-  "Politics":        { text: "text-rose-500",   bg: "bg-rose-500/10",   border: "border-l-rose-500"   },
-  "Weather":         { text: "text-sky-500",    bg: "bg-sky-500/10",    border: "border-l-sky-500"    },
-  "default":         { text: "text-muted-foreground", bg: "bg-secondary", border: "border-l-border"   },
+// Kalshi-native categories — order matches their browse page
+const FIXED_CATEGORIES = [
+  "Trending",
+  "Elections",
+  "Politics",
+  "Sports",
+  "Culture",
+  "Crypto",
+  "Commodities",
+  "Climate",
+  "Economics",
+  "Companies",
+  "Financials",
+  "Tech & Science",
+];
+
+const CATEGORY_THEME: Record<string, { text: string; bg: string; dot: string }> = {
+  "Elections":      { text: "text-rose-500",    bg: "bg-rose-500/10",    dot: "bg-rose-500"    },
+  "Politics":       { text: "text-orange-500",  bg: "bg-orange-500/10",  dot: "bg-orange-500"  },
+  "Sports":         { text: "text-violet-500",  bg: "bg-violet-500/10",  dot: "bg-violet-500"  },
+  "Culture":        { text: "text-pink-500",    bg: "bg-pink-500/10",    dot: "bg-pink-500"    },
+  "Crypto":         { text: "text-amber-500",   bg: "bg-amber-500/10",   dot: "bg-amber-500"   },
+  "Commodities":    { text: "text-yellow-600",  bg: "bg-yellow-500/10",  dot: "bg-yellow-500"  },
+  "Climate":        { text: "text-sky-500",     bg: "bg-sky-500/10",     dot: "bg-sky-500"     },
+  "Economics":      { text: "text-indigo-500",  bg: "bg-indigo-500/10",  dot: "bg-indigo-500"  },
+  "Federal Reserve":{ text: "text-blue-500",    bg: "bg-blue-500/10",    dot: "bg-blue-500"    },
+  "Companies":      { text: "text-teal-500",    bg: "bg-teal-500/10",    dot: "bg-teal-500"    },
+  "Financials":     { text: "text-emerald-500", bg: "bg-emerald-500/10", dot: "bg-emerald-500" },
+  "Tech & Science": { text: "text-cyan-500",    bg: "bg-cyan-500/10",    dot: "bg-cyan-500"    },
+  "default":        { text: "text-muted-foreground", bg: "bg-secondary", dot: "bg-muted-foreground" },
 };
 
 function getCategoryTheme(category: string) {
   return CATEGORY_THEME[category] ?? CATEGORY_THEME["default"];
 }
-type Horizon = "any" | "today" | "week" | "month";
 
-const SORT_OPTIONS: { value: SortKey; label: string }[] = [
-  { value: "volume", label: "Total Volume" },
-  { value: "volume24h", label: "24h Volume" },
-  { value: "yesPrice", label: "Yes Price" },
-  { value: "noPrice", label: "No Price" },
-  { value: "endDate", label: "Closing Soon" },
-];
+function isClosingSoon(closeTime: string): boolean {
+  if (!closeTime) return false;
+  const diff = new Date(closeTime).getTime() - Date.now();
+  return diff > 0 && diff < 24 * 3600 * 1000;
+}
 
-const HORIZON_OPTIONS: { value: Horizon; label: string; hours: number | null }[] = [
-  { value: "any", label: "Any close date", hours: null },
-  { value: "today", label: "Closing today", hours: 24 },
-  { value: "week", label: "Closing this week", hours: 24 * 7 },
-  { value: "month", label: "Closing this month", hours: 24 * 30 },
-];
+const HORIZON_OPTIONS = [
+  { value: "any",   label: "Any date",       hours: null    },
+  { value: "today", label: "Today",          hours: 24      },
+  { value: "week",  label: "This week",      hours: 24 * 7  },
+  { value: "month", label: "This month",     hours: 24 * 30 },
+] as const;
+
+type Horizon = typeof HORIZON_OPTIONS[number]["value"];
 
 interface MarketsPanelProps {
   mode?: "paper" | "live";
 }
 
 export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
-  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string>("Trending");
+  const [allSeries, setAllSeries] = useState<KalshiSeries[]>([]);
+  // Cache: category → markets, so switching tabs doesn't re-fetch
+  const cache = useRef<Map<string, { markets: ParsedMarket[]; fetchedAt: number }>>(new Map());
+  const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const [markets, setMarkets] = useState<ParsedMarket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>("volume");
+  const [horizon, setHorizon] = useState<Horizon>("any");
+
   const [selectedMarket, setSelectedMarket] = useState<ParsedMarket | null>(null);
   const [tradeMarket, setTradeMarket] = useState<ParsedMarket | null>(null);
   const [tradeInitialSide, setTradeInitialSide] = useState<"yes" | "no" | undefined>();
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [activeCategory, setActiveCategory] = useState<string>("All");
-  const [sortBy, setSortBy] = useState<SortKey>("volume");
-  const [horizon, setHorizon] = useState<Horizon>("any");
+
   const [signalMap, setSignalMap] = useState<Map<string, AgentSignal>>(new Map());
   const [positionMap, setPositionMap] = useState<Map<string, OpenPosition>>(new Map());
 
-  // Load agent signals and open positions from DB — refreshes every 30s
+  // Load DB overlays once
   useEffect(() => {
     async function loadOverlays() {
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
       const [signalsRes, positionsRes] = await Promise.allSettled([
-        supabase
-          .from("signals")
-          .select("ticker, direction, edge_score, yes_ask, source")
-          .gte("created_at", twoHoursAgo)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("trades")
-          .select("ticker, side, amount, strategy_id")
-          .eq("status", "filled")
-          .is("settled_at", null)
-          .is("exit_reason", null),
+        supabase.from("signals").select("ticker, direction, edge_score, yes_ask, source")
+          .gte("created_at", twoHoursAgo).order("created_at", { ascending: false }),
+        supabase.from("trades").select("ticker, side, amount, strategy_id")
+          .eq("status", "filled").is("settled_at", null).is("exit_reason", null),
       ]);
       if (signalsRes.status === "fulfilled" && signalsRes.value.data) {
         const map = new Map<string, AgentSignal>();
@@ -114,58 +144,76 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
     return () => clearInterval(id);
   }, []);
 
-  const loadMarkets = useCallback(async () => {
+  // Bootstrap: fetch all series once
+  useEffect(() => {
+    fetchKalshiSeries(200)
+      .then(setAllSeries)
+      .catch(() => {
+        // Fallback: use hardcoded series list if series endpoint fails
+        setAllSeries([]);
+      });
+  }, []);
+
+  const fetchCategory = useCallback(async (category: string, force = false) => {
+    const TTL = 30_000;
+    const cached = cache.current.get(category);
+    if (!force && cached && Date.now() - cached.fetchedAt < TTL) {
+      setMarkets(cached.markets);
+      setLastUpdated(new Date(cached.fetchedAt));
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
-      // Fetch 200 markets — Kalshi ignores timestamp query params so we filter client-side
-      const data = await fetchKalshiMarkets(200);
-      setMarkets(data);
+      let result: ParsedMarket[];
+      if (allSeries.length > 0) {
+        result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
+      } else {
+        // Fallback to existing bulk fetch if series endpoint unavailable
+        result = await fetchKalshiMarkets(200);
+        if (category !== "Trending") {
+          result = result.filter(m => m.category === category);
+        }
+      }
+      cache.current.set(category, { markets: result, fetchedAt: Date.now() });
+      setMarkets(result);
       setLastUpdated(new Date());
     } catch (err) {
-      console.error("Failed to fetch live markets, using mock data:", err);
       setError("Using cached data — live feed unavailable");
       setMarkets(MOCK_MARKETS.map(m => ({
         ...m, ticker: m.id, eventTicker: m.id, description: "", volume24hr: 0, liquidity: 0,
-        openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0,
-        yesAsk: 0, noBid: 0, noAsk: 0, closeTime: "",
+        openInterest: 0, slug: "", active: true, spread: 0, yesBid: 0, yesAsk: 0, noBid: 0, noAsk: 0, closeTime: "",
       })));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [allSeries]);
 
+  // When active category changes or series list arrives, fetch
   useEffect(() => {
-    loadMarkets();
-    const interval = setInterval(loadMarkets, 10_000);
-    return () => clearInterval(interval);
-  }, [loadMarkets]);
+    fetchCategory(activeCategory);
 
-  // Derive unique categories from results
-  const categories = useMemo(() => {
-    const cats = Array.from(new Set(markets.map(m => m.category).filter(Boolean)));
-    return ["All", ...cats.sort()];
-  }, [markets]);
+    if (refreshTimer.current) clearInterval(refreshTimer.current);
+    refreshTimer.current = setInterval(() => fetchCategory(activeCategory, true), 30_000);
+    return () => {
+      if (refreshTimer.current) clearInterval(refreshTimer.current);
+    };
+  }, [activeCategory, fetchCategory]);
 
-  // Filter + sort
   const filtered = useMemo(() => {
     let list = markets;
-
-    if (activeCategory !== "All") {
-      list = list.filter(m => m.category === activeCategory);
-    }
 
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(m => m.question.toLowerCase().includes(q) || m.ticker.toLowerCase().includes(q));
     }
 
-    // Client-side horizon filter — Kalshi API ignores timestamp query params
     if (horizon !== "any") {
-      const horizonDef = HORIZON_OPTIONS.find(h => h.value === horizon);
-      if (horizonDef?.hours) {
+      const def = HORIZON_OPTIONS.find(h => h.value === horizon);
+      if (def?.hours) {
         const now = Date.now();
-        const cutoff = now + horizonDef.hours * 3600 * 1000;
+        const cutoff = now + def.hours * 3600 * 1000;
         list = list.filter(m => {
           if (!m.closeTime) return false;
           const t = new Date(m.closeTime).getTime();
@@ -174,15 +222,11 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
       }
     }
 
-    // When a horizon is active, default to "Closing Soon" sort so nearest markets surface first
     const effectiveSort = horizon !== "any" && sortBy === "volume" ? "endDate" : sortBy;
-
-    list = [...list].sort((a, b) => {
+    return [...list].sort((a, b) => {
       switch (effectiveSort) {
-        case "volume": return b.volume - a.volume;
+        case "volume":   return b.volume - a.volume;
         case "volume24h": return b.volume24hr - a.volume24hr;
-        case "yesPrice": return b.yesPrice - a.yesPrice;
-        case "noPrice": return b.noPrice - a.noPrice;
         case "endDate": {
           const at = a.closeTime ? new Date(a.closeTime).getTime() : Infinity;
           const bt = b.closeTime ? new Date(b.closeTime).getTime() : Infinity;
@@ -191,40 +235,50 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
         default: return 0;
       }
     });
-
-    return list;
-  }, [markets, activeCategory, search, sortBy, horizon]);
+  }, [markets, search, sortBy, horizon]);
 
   return (
-    <div className="space-y-5 apple-reveal">
-      {/* Data source info banner */}
-      <div className="flex items-start gap-2.5 rounded-2xl bg-secondary/60 px-5 py-3.5">
-        <Info className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          <span className="font-medium text-foreground">Data source:</span> Kalshi public API — up to 200 open markets, 10-second auto-refresh.
-          {" "}<span className="font-medium text-foreground">24h Volume</span> = contracts traded in the last 24 hours (higher = more active, better fills).
-          {" "}Use <span className="font-medium text-foreground">Close date</span> to filter to markets resolving today, this week, or this month — shorter horizons are better for short-term trading.
-        </p>
+    <div className="space-y-0 apple-reveal">
+
+      {/* Category tabs — horizontal scroll */}
+      <div className="flex items-center overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0 border-b border-border/50 mb-5">
+        {FIXED_CATEGORIES.map(cat => (
+          <button
+            key={cat}
+            onClick={() => {
+              setActiveCategory(cat);
+              setSearch("");
+            }}
+            className={cn(
+              "shrink-0 px-4 py-3 text-sm font-medium transition-all duration-150 border-b-2 -mb-px whitespace-nowrap",
+              activeCategory === cat
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {cat}
+          </button>
+        ))}
       </div>
 
-      {/* Search + filters */}
-      <div className="space-y-2.5">
-        {/* Search always full width */}
-        <div className="relative w-full">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search markets or tickers..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-11 rounded-xl bg-card border-0 apple-shadow h-11 text-sm"
-          />
-        </div>
-        {/* Filters: horizontal scroll on mobile */}
-        <div className="flex items-center gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0 pb-0.5">
+      {/* Filter bar */}
+      <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2 flex-1 overflow-x-auto scrollbar-none">
+          <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
+            <SelectTrigger className="h-9 w-auto shrink-0 rounded-full border border-border bg-card text-sm px-4 gap-1.5">
+              <SelectValue placeholder="Sort" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="volume">Volume</SelectItem>
+              <SelectItem value="volume24h">24h Volume</SelectItem>
+              <SelectItem value="endDate">Closing Soon</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Select value={horizon} onValueChange={(v) => setHorizon(v as Horizon)}>
-            <SelectTrigger className="h-10 w-44 shrink-0 rounded-xl border-0 bg-card apple-shadow text-sm">
-              <Clock className="h-3.5 w-3.5 text-muted-foreground mr-1" />
-              <SelectValue placeholder="Close date" />
+            <SelectTrigger className="h-9 w-auto shrink-0 rounded-full border border-border bg-card text-sm px-4 gap-1.5">
+              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+              <SelectValue placeholder="Timeframe" />
             </SelectTrigger>
             <SelectContent>
               {HORIZON_OPTIONS.map(o => (
@@ -232,197 +286,91 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
               ))}
             </SelectContent>
           </Select>
-          <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortKey)}>
-            <SelectTrigger className="h-10 w-36 shrink-0 rounded-xl border-0 bg-card apple-shadow text-sm">
-              <SelectValue placeholder="Sort by" />
-            </SelectTrigger>
-            <SelectContent>
-              {SORT_OPTIONS.map(o => (
-                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button
-            variant="secondary"
-            onClick={loadMarkets}
+        </div>
+
+        {/* Search toggle */}
+        <div className="flex items-center gap-2 shrink-0">
+          {searchOpen ? (
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <Input
+                autoFocus
+                placeholder="Search..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9 pr-8 h-9 w-44 rounded-full border-border bg-card text-sm"
+              />
+              <button
+                onClick={() => { setSearch(""); setSearchOpen(false); }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="h-9 w-9 rounded-full border border-border bg-card flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Search className="h-4 w-4" />
+            </button>
+          )}
+
+          <button
+            onClick={() => fetchCategory(activeCategory, true)}
             disabled={loading}
-            className="rounded-xl h-10 gap-2 text-sm shrink-0"
+            className="h-9 w-9 rounded-full border border-border bg-card flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
           >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Refresh
-          </Button>
+            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          </button>
         </div>
       </div>
 
-      {/* Category pills — horizontal scroll on mobile */}
-      {categories.length > 1 && (
-        <div className="flex items-center gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 sm:mx-0 sm:px-0 sm:flex-wrap pb-0.5">
-          {categories.map(cat => (
-            <button
-              key={cat}
-              onClick={() => setActiveCategory(cat)}
-              className={cn(
-                "rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 shrink-0",
-                activeCategory === cat
-                  ? "bg-foreground text-background"
-                  : "bg-card apple-shadow text-muted-foreground hover:text-foreground hover:bg-secondary"
-              )}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Status bar */}
+      {/* Status line */}
       {error ? (
-        <p className="text-sm text-warning">{error}</p>
+        <p className="text-xs text-amber-500 mb-3">{error}</p>
       ) : lastUpdated && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-3">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-profit" />
           </span>
           <span className="text-profit font-medium">Live</span>
-          <span>
-            · {lastUpdated.toLocaleTimeString()} · {filtered.length} of {markets.length} markets
-            {activeCategory !== "All" && ` · ${activeCategory}`}
-            {horizon !== "any" && ` · ${HORIZON_OPTIONS.find(h => h.value === horizon)?.label}`}
-          </span>
+          <span>· {lastUpdated.toLocaleTimeString()} · {filtered.length} markets</span>
         </div>
       )}
 
-      {/* Market list */}
+      {/* Market grid */}
       {loading && markets.length === 0 ? (
-        <div className="flex items-center justify-center py-16">
+        <div className="flex items-center justify-center py-20">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          <span className="ml-3 text-sm text-muted-foreground">Loading Kalshi markets...</span>
+          <span className="ml-3 text-sm text-muted-foreground">Loading {activeCategory} markets...</span>
         </div>
       ) : filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 gap-2">
+        <div className="flex flex-col items-center justify-center py-20 gap-2">
           <span className="text-sm text-muted-foreground">
-            {horizon !== "any"
-              ? `No markets closing ${HORIZON_OPTIONS.find(h => h.value === horizon)?.label.toLowerCase().replace("closing ", "")}${activeCategory !== "All" ? ` in ${activeCategory}` : ""}.`
-              : `No markets match "${search}"${activeCategory !== "All" ? ` in ${activeCategory}` : ""}.`}
+            {search
+              ? `No markets match "${search}"`
+              : `No ${activeCategory} markets closing ${HORIZON_OPTIONS.find(h => h.value === horizon)?.label.toLowerCase() ?? ""}.`}
           </span>
           {horizon !== "any" && (
-            <button
-              onClick={() => setHorizon("any")}
-              className="text-xs text-primary hover:opacity-70 transition-opacity"
-            >
-              Show all close dates →
+            <button onClick={() => setHorizon("any")} className="text-xs text-primary hover:opacity-70 transition-opacity">
+              Show all dates →
             </button>
           )}
         </div>
       ) : (
-        <div className="space-y-3">
-          {filtered.map((market) => {
-            const theme = getCategoryTheme(market.category);
-            return (
-              <div
-                key={market.id}
-                className={cn(
-                  "rounded-2xl bg-card apple-shadow cursor-pointer transition-shadow duration-300 hover:apple-shadow-hover",
-                  "border-l-4 overflow-hidden",
-                  theme.border
-                )}
-                onClick={() => setSelectedMarket(market)}
-              >
-                <div className="p-4 sm:p-5 space-y-3">
-                  {/* Top row: category pill + close date */}
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className={cn("text-[10px] font-medium px-2 py-0.5 rounded-full", theme.bg, theme.text)}>
-                        {market.category}
-                      </span>
-                      {/* Agent signal badge */}
-                      {signalMap.has(market.ticker) && (() => {
-                        const sig = signalMap.get(market.ticker)!;
-                        const isBuyYes = sig.direction === "buy_yes";
-                        return (
-                          <span className={cn(
-                            "inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full",
-                            isBuyYes
-                              ? "bg-profit/15 text-profit"
-                              : "bg-amber-500/15 text-amber-500"
-                          )}>
-                            <Zap className="h-2.5 w-2.5" />
-                            Agent: {isBuyYes ? "Buy YES" : "Buy NO"}
-                            {sig.edge_score != null ? ` · ${Math.round(sig.edge_score * 100)}¢ edge` : ""}
-                          </span>
-                        );
-                      })()}
-                      {/* Open position badge */}
-                      {positionMap.has(market.ticker) && (() => {
-                        const pos = positionMap.get(market.ticker)!;
-                        return (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                            <Wallet className="h-2.5 w-2.5" />
-                            Holding {pos.side.toUpperCase()} ${pos.amount}
-                          </span>
-                        );
-                      })()}
-                    </div>
-                    <span className="text-[10px] text-muted-foreground flex items-center gap-1 shrink-0">
-                      <Clock className="h-2.5 w-2.5" /> {market.endDate}
-                    </span>
-                  </div>
-
-                  {/* Question */}
-                  <h3 className="text-sm font-medium leading-snug text-foreground line-clamp-2">
-                    {market.question}
-                  </h3>
-
-                  {/* Volume row */}
-                  <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                    <span className="flex items-center gap-1">
-                      <Users className="h-3 w-3" /> {formatVolume(market.volume)}
-                    </span>
-                    {market.volume24hr > 0 && (
-                      <span className="flex items-center gap-1">
-                        <TrendingUp className="h-3 w-3" /> {formatVolume(market.volume24hr)} 24h
-                      </span>
-                    )}
-                    {market.spread > 0 && (
-                      <span>Spread: {market.spread}¢</span>
-                    )}
-                  </div>
-
-                  {/* YES / NO pill buttons */}
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setTradeInitialSide("yes");
-                        setTradeMarket(market);
-                      }}
-                      className="flex-1 h-9 rounded-full text-xs font-semibold border transition-all duration-150 active:scale-95 bg-profit/10 text-profit border-profit/20 hover:bg-profit hover:text-white hover:border-profit"
-                    >
-                      Yes&nbsp;&nbsp;{market.yesPrice}¢
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setTradeInitialSide("no");
-                        setTradeMarket(market);
-                      }}
-                      className="flex-1 h-9 rounded-full text-xs font-semibold border transition-all duration-150 active:scale-95 bg-loss/10 text-loss border-loss/20 hover:bg-loss hover:text-white hover:border-loss"
-                    >
-                      No&nbsp;&nbsp;{market.noPrice}¢
-                    </button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="shrink-0 h-9 px-3 text-xs rounded-full"
-                      onClick={(e) => { e.stopPropagation(); setSelectedMarket(market); }}
-                    >
-                      Detail
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filtered.map((market) => (
+            <KalshiMarketCard
+              key={market.id}
+              market={market}
+              signal={signalMap.get(market.ticker)}
+              position={positionMap.get(market.ticker)}
+              onDetail={() => setSelectedMarket(market)}
+              onTrade={(side) => { setTradeInitialSide(side); setTradeMarket(market); }}
+            />
+          ))}
         </div>
       )}
 
@@ -442,30 +390,30 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                 <div>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-xs text-muted-foreground">Yes</span>
-                    <span className="text-lg font-medium text-profit">{selectedMarket.yesPrice}c</span>
+                    <span className="text-lg font-medium text-profit">{selectedMarket.yesPrice}¢</span>
                   </div>
                   <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
                     <div className="h-full bg-profit rounded-full transition-all duration-500" style={{ width: `${selectedMarket.yesPrice}%` }} />
                   </div>
                   {selectedMarket.yesBid > 0 && (
                     <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
-                      <span>Bid: {selectedMarket.yesBid}c</span>
-                      <span>Ask: {selectedMarket.yesAsk}c</span>
+                      <span>Bid: {selectedMarket.yesBid}¢</span>
+                      <span>Ask: {selectedMarket.yesAsk}¢</span>
                     </div>
                   )}
                 </div>
                 <div>
                   <div className="flex justify-between mb-1.5">
                     <span className="text-xs text-muted-foreground">No</span>
-                    <span className="text-lg font-medium text-loss">{selectedMarket.noPrice}c</span>
+                    <span className="text-lg font-medium text-loss">{selectedMarket.noPrice}¢</span>
                   </div>
                   <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
                     <div className="h-full bg-loss rounded-full transition-all duration-500" style={{ width: `${selectedMarket.noPrice}%` }} />
                   </div>
                   {selectedMarket.noBid > 0 && (
                     <div className="flex justify-between text-[10px] text-muted-foreground mt-1">
-                      <span>Bid: {selectedMarket.noBid}c</span>
-                      <span>Ask: {selectedMarket.noAsk}c</span>
+                      <span>Bid: {selectedMarket.noBid}¢</span>
+                      <span>Ask: {selectedMarket.noAsk}¢</span>
                     </div>
                   )}
                 </div>
@@ -493,7 +441,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                     setSelectedMarket(null);
                   }}
                 >
-                  Buy Yes @ {selectedMarket.yesAsk || selectedMarket.yesPrice}c
+                  Buy Yes @ {selectedMarket.yesAsk || selectedMarket.yesPrice}¢
                 </Button>
                 <Button
                   className="flex-1 h-10 rounded-full text-sm bg-loss/10 text-loss hover:bg-loss/20 border-0"
@@ -503,7 +451,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                     setSelectedMarket(null);
                   }}
                 >
-                  Buy No @ {selectedMarket.noAsk || selectedMarket.noPrice}c
+                  Buy No @ {selectedMarket.noAsk || selectedMarket.noPrice}¢
                 </Button>
               </div>
 
@@ -529,6 +477,138 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
         mode={mode}
         initialSide={tradeInitialSide}
       />
+    </div>
+  );
+}
+
+interface KalshiMarketCardProps {
+  market: ParsedMarket;
+  signal?: AgentSignal;
+  position?: OpenPosition;
+  onDetail: () => void;
+  onTrade: (side: "yes" | "no") => void;
+}
+
+function KalshiMarketCard({ market, signal, position, onDetail, onTrade }: KalshiMarketCardProps) {
+  const theme = getCategoryTheme(market.category);
+  const live = isClosingSoon(market.closeTime);
+
+  return (
+    <div
+      onClick={onDetail}
+      className="rounded-2xl bg-card apple-shadow cursor-pointer transition-shadow duration-200 hover:apple-shadow-hover flex flex-col overflow-hidden"
+    >
+      <div className="p-4 flex flex-col gap-3 flex-1">
+        {/* Category label row */}
+        <div className="flex items-center gap-2">
+          <div className={cn("h-6 w-6 rounded-md flex items-center justify-center text-[9px] font-bold shrink-0", theme.bg, theme.text)}>
+            {(market.category || "MK").slice(0, 2).toUpperCase()}
+          </div>
+          <span className={cn("text-[11px] font-medium uppercase tracking-wide", theme.text)}>
+            {market.category}
+          </span>
+          {/* Agent signal pill */}
+          {signal && (
+            <span className={cn(
+              "ml-auto inline-flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0",
+              signal.direction === "buy_yes" ? "bg-profit/15 text-profit" : "bg-amber-500/15 text-amber-500"
+            )}>
+              <Zap className="h-2.5 w-2.5" />
+              {signal.direction === "buy_yes" ? "YES" : "NO"}
+            </span>
+          )}
+          {/* Position pill */}
+          {position && !signal && (
+            <span className="ml-auto inline-flex items-center gap-1 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-primary/10 text-primary shrink-0">
+              <Wallet className="h-2.5 w-2.5" />
+              Open
+            </span>
+          )}
+        </div>
+
+        {/* Question */}
+        <p className="text-sm font-medium leading-snug text-foreground line-clamp-3 flex-1">
+          {market.question}
+        </p>
+
+        {/* Live/close indicator */}
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          {live && (
+            <span className="relative flex h-1.5 w-1.5 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-red-500" />
+            </span>
+          )}
+          <Clock className={cn("h-3 w-3", live && "hidden")} />
+          <span>{market.endDate}</span>
+        </div>
+
+        {/* YES / NO probability rows */}
+        <div className="space-y-2">
+          <ProbabilityRow
+            label="Yes"
+            price={market.yesPrice}
+            colorClass="bg-profit"
+            onClick={(e) => { e.stopPropagation(); onTrade("yes"); }}
+          />
+          <ProbabilityRow
+            label="No"
+            price={market.noPrice}
+            colorClass="bg-loss"
+            onClick={(e) => { e.stopPropagation(); onTrade("no"); }}
+          />
+        </div>
+
+        {/* Volume footer */}
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground pt-1 border-t border-border/40">
+          <span className="flex items-center gap-1">
+            <Users className="h-3 w-3" /> {formatVolume(market.volume)}
+          </span>
+          {market.volume24hr > 0 && (
+            <span className="flex items-center gap-1">
+              <TrendingUp className="h-3 w-3" /> {formatVolume(market.volume24hr)} 24h
+            </span>
+          )}
+          {market.spread > 0 && (
+            <span className="ml-auto">Spread: {market.spread}¢</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProbabilityRow({
+  label,
+  price,
+  colorClass,
+  onClick,
+}: {
+  label: string;
+  price: number;
+  colorClass: string;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-xs text-muted-foreground w-5 shrink-0">{label}</span>
+      <div className="flex-1 h-1.5 bg-secondary rounded-full overflow-hidden">
+        <div
+          className={cn("h-full rounded-full transition-all duration-500", colorClass)}
+          style={{ width: `${Math.max(2, price)}%`, opacity: 0.7 }}
+        />
+      </div>
+      <button
+        onClick={onClick}
+        className={cn(
+          "shrink-0 h-8 w-14 rounded-full border-2 text-xs font-semibold transition-all duration-150 active:scale-95",
+          label === "Yes"
+            ? "border-profit/30 text-profit hover:bg-profit hover:text-white hover:border-profit"
+            : "border-loss/30 text-loss hover:bg-loss hover:text-white hover:border-loss"
+        )}
+      >
+        {price}%
+      </button>
     </div>
   );
 }

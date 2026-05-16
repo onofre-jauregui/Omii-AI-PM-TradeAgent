@@ -306,6 +306,58 @@ export async function fetchKalshiEvents(limit = 20): Promise<ParsedMarket[]> {
   return fetchKalshiMarkets(limit);
 }
 
+// ─── Series Discovery ────────────────────────────────────────
+
+export interface KalshiSeries {
+  ticker: string;
+  title: string;
+  category: string;
+  frequency: string;
+}
+
+export async function fetchKalshiSeries(limit = 200): Promise<KalshiSeries[]> {
+  const data = await kalshiProxyGet("series", { status: "active", limit: String(limit) });
+  return (data.series ?? []).map((s: any) => ({
+    ticker: s.ticker,
+    title: s.title ?? s.ticker,
+    category: s.category ?? "Other",
+    frequency: s.frequency ?? "singular",
+  }));
+}
+
+export async function fetchKalshiMarketsByCategory(
+  allSeries: KalshiSeries[],
+  category: string,
+  limitPerSeries = 10
+): Promise<ParsedMarket[]> {
+  const targets = category === "Trending"
+    ? allSeries.slice(0, 20)
+    : allSeries.filter(s => s.category === category);
+
+  const results = await Promise.allSettled(
+    targets.map(s =>
+      kalshiProxyGet("markets", { series_ticker: s.ticker, status: "open", limit: String(limitPerSeries) })
+        .then(d => (d.markets ?? []) as KalshiMarket[])
+        .catch(() => [] as KalshiMarket[])
+    )
+  );
+
+  const seen = new Set<string>();
+  const markets: ParsedMarket[] = [];
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const raw of result.value) {
+      if (seen.has(raw.ticker)) continue;
+      seen.add(raw.ticker);
+      const parsed = parseKalshiMarket(raw);
+      if (parsed) markets.push(parsed);
+    }
+  }
+
+  return markets.sort((a, b) => b.volume - a.volume);
+}
+
 // ─── Portfolio & Orders ──────────────────────────────────────
 
 export async function fetchKalshiBalance(): Promise<KalshiBalance> {
