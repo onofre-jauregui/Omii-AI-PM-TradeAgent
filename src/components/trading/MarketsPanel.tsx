@@ -2,13 +2,29 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2, Info } from "lucide-react";
+import { Search, Users, Clock, TrendingUp, BarChart3, Droplets, ExternalLink, RefreshCw, Loader2, Info, Zap, Wallet } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { fetchKalshiMarkets, formatVolume, type ParsedMarket } from "@/lib/kalshiApi";
 import { MOCK_MARKETS } from "@/lib/mockData";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
 import { TradeModal } from "./TradeModal";
+
+interface AgentSignal {
+  ticker: string;
+  direction: string | null;
+  edge_score: number | null;
+  yes_ask: number | null;
+  source: string | null;
+}
+
+interface OpenPosition {
+  ticker: string;
+  side: string;
+  amount: number;
+  strategy_id: string | null;
+}
 
 type SortKey = "volume" | "volume24h" | "yesPrice" | "noPrice" | "endDate";
 
@@ -58,6 +74,45 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
   const [activeCategory, setActiveCategory] = useState<string>("All");
   const [sortBy, setSortBy] = useState<SortKey>("volume");
   const [horizon, setHorizon] = useState<Horizon>("any");
+  const [signalMap, setSignalMap] = useState<Map<string, AgentSignal>>(new Map());
+  const [positionMap, setPositionMap] = useState<Map<string, OpenPosition>>(new Map());
+
+  // Load agent signals and open positions from DB — refreshes every 30s
+  useEffect(() => {
+    async function loadOverlays() {
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const [signalsRes, positionsRes] = await Promise.allSettled([
+        supabase
+          .from("signals")
+          .select("ticker, direction, edge_score, yes_ask, source")
+          .gte("created_at", twoHoursAgo)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("trades")
+          .select("ticker, side, amount, strategy_id")
+          .eq("status", "filled")
+          .is("settled_at", null)
+          .is("exit_reason", null),
+      ]);
+      if (signalsRes.status === "fulfilled" && signalsRes.value.data) {
+        const map = new Map<string, AgentSignal>();
+        for (const s of signalsRes.value.data) {
+          if (s.ticker && !map.has(s.ticker)) map.set(s.ticker, s as AgentSignal);
+        }
+        setSignalMap(map);
+      }
+      if (positionsRes.status === "fulfilled" && positionsRes.value.data) {
+        const map = new Map<string, OpenPosition>();
+        for (const p of positionsRes.value.data) {
+          if (p.ticker) map.set(p.ticker, p as OpenPosition);
+        }
+        setPositionMap(map);
+      }
+    }
+    loadOverlays();
+    const id = setInterval(loadOverlays, 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   const loadMarkets = useCallback(async () => {
     setLoading(true);
@@ -276,9 +331,38 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
                 <div className="p-4 sm:p-5 space-y-3">
                   {/* Top row: category pill + close date */}
                   <div className="flex items-center justify-between gap-2">
-                    <span className={cn("text-[10px] font-medium px-2 py-0.5 rounded-full", theme.bg, theme.text)}>
-                      {market.category}
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={cn("text-[10px] font-medium px-2 py-0.5 rounded-full", theme.bg, theme.text)}>
+                        {market.category}
+                      </span>
+                      {/* Agent signal badge */}
+                      {signalMap.has(market.ticker) && (() => {
+                        const sig = signalMap.get(market.ticker)!;
+                        const isBuyYes = sig.direction === "buy_yes";
+                        return (
+                          <span className={cn(
+                            "inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                            isBuyYes
+                              ? "bg-profit/15 text-profit"
+                              : "bg-amber-500/15 text-amber-500"
+                          )}>
+                            <Zap className="h-2.5 w-2.5" />
+                            Agent: {isBuyYes ? "Buy YES" : "Buy NO"}
+                            {sig.edge_score != null ? ` · ${Math.round(sig.edge_score * 100)}¢ edge` : ""}
+                          </span>
+                        );
+                      })()}
+                      {/* Open position badge */}
+                      {positionMap.has(market.ticker) && (() => {
+                        const pos = positionMap.get(market.ticker)!;
+                        return (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                            <Wallet className="h-2.5 w-2.5" />
+                            Holding {pos.side.toUpperCase()} ${pos.amount}
+                          </span>
+                        );
+                      })()}
+                    </div>
                     <span className="text-[10px] text-muted-foreground flex items-center gap-1 shrink-0">
                       <Clock className="h-2.5 w-2.5" /> {market.endDate}
                     </span>
@@ -401,10 +485,24 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
               )}
 
               <div className="flex gap-3">
-                <Button className="flex-1 h-10 rounded-full text-sm bg-profit/10 text-profit hover:bg-profit/20 border-0">
+                <Button
+                  className="flex-1 h-10 rounded-full text-sm bg-profit/10 text-profit hover:bg-profit/20 border-0"
+                  onClick={() => {
+                    setTradeInitialSide("yes");
+                    setTradeMarket(selectedMarket);
+                    setSelectedMarket(null);
+                  }}
+                >
                   Buy Yes @ {selectedMarket.yesAsk || selectedMarket.yesPrice}c
                 </Button>
-                <Button className="flex-1 h-10 rounded-full text-sm bg-loss/10 text-loss hover:bg-loss/20 border-0">
+                <Button
+                  className="flex-1 h-10 rounded-full text-sm bg-loss/10 text-loss hover:bg-loss/20 border-0"
+                  onClick={() => {
+                    setTradeInitialSide("no");
+                    setTradeMarket(selectedMarket);
+                    setSelectedMarket(null);
+                  }}
+                >
                   Buy No @ {selectedMarket.noAsk || selectedMarket.noPrice}c
                 </Button>
               </div>
