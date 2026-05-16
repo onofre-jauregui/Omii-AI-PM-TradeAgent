@@ -850,13 +850,15 @@ async function runS002LongshotBias(
   // reject any market whose close_time is already in the past or within 2 hours.
   // This was the root cause of the 48-position runaway on KXINX-26MAY15 — the signal
   // generator kept emitting fresh signals with stale days_to_close after market close.
-  const twoHoursFromNow = Date.now() + 2 * 60 * 60 * 1000;
+  const fifteenMinFromNow = Date.now() + 15 * 60 * 1000;
   const signals = (rawSignals || []).filter((s: any) => {
     if (blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))) return false;
-    // Reject if close_time is set and market is already closed or closing within 2h
+    // Reject only if market is already closed or closing within 15 min — not enough
+    // time for a limit order to fill. Short-duration trades (1-2h left) are valid
+    // and often stronger setups for the longshot bias.
     if (s.close_time) {
       const closeMs = new Date(s.close_time).getTime();
-      if (closeMs <= twoHoursFromNow) return false;
+      if (closeMs <= fifteenMinFromNow) return false;
     }
     return true;
   });
