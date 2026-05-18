@@ -144,7 +144,9 @@ function buildChartPath(points: DailyCumulative[]): { fill: string; line: string
     const curr = coords[i];
     const cp1x = prev.x + (curr.x - prev.x) / 3;
     const cp2x = prev.x + (2 * (curr.x - prev.x)) / 3;
-    d += ` C${cp1x.toFixed(1)},${prev.y.toFixed(1)} ${cp2x.toFixed(1)},${curr.y.toFixed(1)} ${curr.x.toFixed(1)},${curr.y.toFixed(1)}`;
+    const cp1y = prev.y + (curr.y - prev.y) / 3;
+    const cp2y = prev.y + (2 * (curr.y - prev.y)) / 3;
+    d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${curr.x.toFixed(1)},${curr.y.toFixed(1)}`;
   }
 
   const lastCoord = coords[coords.length - 1];
