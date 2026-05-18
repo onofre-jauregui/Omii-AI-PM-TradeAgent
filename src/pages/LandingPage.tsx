@@ -739,7 +739,7 @@ export default function LandingPage() {
           >
             Trade Kalshi Effortlessly
             <br />
-            Use AI.
+            Use AI
           </h1>
 
           {/* Subhead */}
