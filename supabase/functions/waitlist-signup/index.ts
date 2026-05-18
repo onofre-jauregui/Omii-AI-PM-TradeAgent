@@ -47,8 +47,8 @@ async function sendConfirmation(apiKey: string, to: string): Promise<void> {
     },
     body: JSON.stringify({
       personalizations: [{ to: [{ email: to }] }],
-      from: { email: "hello@omii.ai", name: "TradeAgent" },
-      reply_to: { email: "hello@omii.ai" },
+      from: { email: "tradeagentcomm@yahoo.com", name: "TradeAgent" },
+      reply_to: { email: "tradeagentcomm@yahoo.com" },
       subject: "You're on the TradeAgent waitlist",
       content: [
         {
@@ -65,9 +65,9 @@ async function sendConfirmation(apiKey: string, to: string): Promise<void> {
   <p style="color:rgba(255,255,255,0.6);font-size:15px;line-height:1.6;margin:0 0 32px;">
     In the meantime, paper trading is <strong style="color:#fff;">free and available now</strong>. The agent runs on real market prices — no real money required.
   </p>
-  <a href="https://tradeagent.omii.ai/signup" style="display:inline-block;background:#22c55e;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:12px 24px;border-radius:100px;">Start paper trading →</a>
+  <a href="https://omii-trade-agent.vercel.app/signup" style="display:inline-block;background:#22c55e;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:12px 24px;border-radius:100px;">Start paper trading →</a>
   <p style="color:rgba(255,255,255,0.3);font-size:12px;margin:32px 0 0;">
-    You're receiving this because you joined the TradeAgent waitlist at tradeagent.omii.ai.<br>
+    You're receiving this because you joined the TradeAgent waitlist at omii-trade-agent.vercel.app.<br>
     Questions? Reply to this email.
   </p>
 </div>

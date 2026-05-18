@@ -658,6 +658,14 @@ async function runS001SurfaceArb(
   for (const alert of alerts) {
     const eventTicker = alert.event_ticker as string;
     if (seenEvents.has(eventTicker)) continue;
+
+    // Event-level dedup across runs: skip if we already have any open position in this event.
+    // Prevents the surface scanner's 30s refresh from re-triggering new brackets on the same event.
+    const alreadyInMarket = (openTrades || []).some(
+      (t: any) => (t.ticker as string).startsWith(eventTicker)
+    );
+    if (alreadyInMarket) continue;
+
     seenEvents.add(eventTicker);
 
     // 3. Fetch all bracket markets for this event from Kalshi
@@ -678,19 +686,21 @@ async function runS001SurfaceArb(
     // 4. Find the most overpriced markets: highest YES ask = most overpriced relative to fair value
     // In a fair bracket, each market's YES price should reflect its true probability.
     // When bracket sums > 100¢, all are overpriced — focus on the highest-priced ones.
+    // Kalshi API returns prices as *_dollars (e.g. yes_ask_dollars: 0.45 = 45¢)
+    const yesAskCents = (m: any) => Math.round(parseFloat(m.yes_ask_dollars ?? m.yes_ask ?? "0") * 100);
     const tradeable = eventMarkets
       .filter((m: any) => {
-        const yesAsk = Math.round(parseFloat(m.yes_ask || "0") * 100);
+        const ask = yesAskCents(m);
         return (
-          yesAsk >= 5 &&       // enough payout if NO wins
-          yesAsk <= 92 &&      // NO side at least 8¢ to pay for commission
+          ask >= 5 &&       // enough payout if NO wins
+          ask <= 92 &&      // NO side at least 8¢ to pay for commission
           !openTickers.has(m.ticker)
         );
       })
       .map((m: any) => ({
         ticker: m.ticker,
-        yesAsk: Math.round(parseFloat(m.yes_ask || "0") * 100),
-        noPrice: 100 - Math.round(parseFloat(m.yes_ask || "0") * 100),
+        yesAsk: yesAskCents(m),
+        noPrice: 100 - yesAskCents(m),
         title: m.title || m.ticker,
         closeTime: m.close_time,
       }))
@@ -1186,9 +1196,17 @@ async function runS005WeatherEdge(
     }
   }
 
-  // 3. LLM-gate all signals in parallel
-  const qualifyResults = await Promise.all(
-    candidates.map(async (sig: any) => {
+  // 3. LLM-gate signals. High-edge signals (>= 25¢) bypass the LLM entirely — the
+  //    NWS/Kalshi divergence is structural, not sentiment-driven. Same logic as S-001 arb.
+  //    Low-edge signals still go through the LLM gate for discretionary review.
+  const AUTO_QUALIFY_EDGE = 25;
+  const autoQualified = candidates
+    .filter((s: any) => (s.edge_cents ?? 0) >= AUTO_QUALIFY_EDGE)
+    .map((sig: any) => ({ sig, qualified: true, reason: `auto-qualified: edge ${sig.edge_cents}¢ >= ${AUTO_QUALIFY_EDGE}¢` }));
+  const needsLlm = candidates.filter((s: any) => (s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE);
+
+  const qualifyResults = needsLlm.length > 0 ? await Promise.all(
+    needsLlm.map(async (sig: any) => {
       const city = (sig.metadata?.location ?? "").toLowerCase();
       const cityLessons = lessonsByCity.get(city) ?? [];
       const stat = cityWinLoss.get(city);
@@ -1221,9 +1239,9 @@ async function runS005WeatherEdge(
       const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id);
       return { sig, qualified, reason };
     })
-  );
+  ) : [];
 
-  const qualifiedList = qualifyResults.filter(r => r.qualified);
+  const qualifiedList = [...autoQualified, ...qualifyResults.filter(r => r.qualified)];
   if (qualifiedList.length === 0) {
     const reasons = qualifyResults.map(r => `${r.sig.ticker}: ${r.reason}`).join("; ");
     return {

@@ -386,7 +386,7 @@ serve(async (req) => {
       // Upsert on ticker: each market gets one live row updated in place per run.
       // Plain INSERT was accumulating dozens of duplicate rows per ticker per hour.
       const { error: insertErr } = await supabase.from("signals").upsert(rows, {
-        onConflict: "ticker",
+        onConflict: "ticker,source",
         ignoreDuplicates: false,
       });
       if (insertErr) {

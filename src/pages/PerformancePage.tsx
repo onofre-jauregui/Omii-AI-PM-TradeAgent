@@ -466,7 +466,7 @@ export function PerformancePage() {
               onClick={() => {
                 const pnl = stats.realizedPnl >= 0 ? `+$${stats.realizedPnl.toFixed(2)}` : `-$${Math.abs(stats.realizedPnl).toFixed(2)}`;
                 const text = `My AI trading agent on Kalshi is ${stats.realizedPnl >= 0 ? "up" : "down"} ${pnl} with a ${stats.winRate}% win rate across ${stats.settledTrades} trades. Running 24/7 on @KalshiHQ — check the live track record:`;
-                const url = encodeURIComponent("https://tradeagent.omii.ai/performance");
+                const url = encodeURIComponent("https://omii-trade-agent.vercel.app/performance");
                 window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${url}`, "_blank");
               }}
               className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-md hover:bg-muted"

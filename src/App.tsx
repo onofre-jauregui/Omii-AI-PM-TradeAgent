@@ -20,6 +20,7 @@ import CostReport from "./pages/admin/CostReport.tsx";
 import BillingPage from "./pages/BillingPage.tsx";
 import TermsPage from "./pages/TermsPage.tsx";
 import PrivacyPage from "./pages/PrivacyPage.tsx";
+import ObservabilityPage from "./pages/ObservabilityPage.tsx";
 
 const queryClient = new QueryClient();
 
@@ -96,6 +97,7 @@ function AppRoutes() {
         <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/performance" element={<PerformancePage />} />
+        <Route path="/observability" element={<ObservabilityPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
         {/* Auth-protected — admin + onboarding + billing */}
