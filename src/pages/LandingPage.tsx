@@ -127,15 +127,17 @@ function buildChartPath(points: DailyCumulative[]): { fill: string; line: string
     };
   }
 
-  const maxPnl = Math.max(...points.map((p) => p.cumPnl));
-  const minPnl = Math.min(0, ...points.map((p) => p.cumPnl));
-  const range = maxPnl - minPnl || 1;
+  const STARTING_BALANCE = 2500;
+  const portfolioValues = points.map((p) => STARTING_BALANCE + p.cumPnl);
+  const maxVal = Math.max(...portfolioValues);
+  const minVal = Math.min(...portfolioValues);
+  const range = maxVal - minVal || 1;
 
-  // Map cumPnl to Y coordinate (inverted: higher = smaller Y, 5px top padding)
-  const toY = (pnl: number) => 85 - ((pnl - minPnl) / range) * 80;
+  // Map portfolio value to Y (inverted: higher = smaller Y, 5px top padding)
+  const toY = (val: number) => 85 - ((val - minVal) / range) * 80;
   const toX = (i: number) => (i / (points.length - 1)) * 800;
 
-  const coords = points.map((p, i) => ({ x: toX(i), y: toY(p.cumPnl) }));
+  const coords = portfolioValues.map((val, i) => ({ x: toX(i), y: toY(val) }));
 
   // Build smooth cubic bezier path
   let d = `M${coords[0].x.toFixed(1)},${coords[0].y.toFixed(1)}`;
