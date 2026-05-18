@@ -613,9 +613,9 @@ export default function LandingPage() {
               marginBottom: 28,
             }}
           >
-            The AI agent that trades
+            Trade Kalshi effortlessly
             <br />
-            Kalshi for you.
+            — with AI.
           </h1>
 
           {/* Subhead */}
@@ -630,8 +630,8 @@ export default function LandingPage() {
               marginBottom: 40,
             }}
           >
-            Set your budget. Choose your strategies. The agent scans markets 24/7,
-            qualifies every setup, and executes — all while learning from every outcome.
+            Set your budget. Pick your strategies. Our agent watches the markets,
+            spots trades, and executes instantly — improving with every outcome.
           </p>
 
           {/* CTAs */}
