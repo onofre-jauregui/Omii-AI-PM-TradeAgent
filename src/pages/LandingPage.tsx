@@ -613,9 +613,9 @@ export default function LandingPage() {
               marginBottom: 28,
             }}
           >
-            Trade Kalshi effortlessly
+            Trade Kalshi effortlessly,
             <br />
-            — with AI.
+            Use AI.
           </h1>
 
           {/* Subhead */}
