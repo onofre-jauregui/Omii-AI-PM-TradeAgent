@@ -17,6 +17,7 @@ function GoogleIcon() {
 }
 
 export function AuthPage() {
+  const returnTo = new URLSearchParams(window.location.search).get("return") || "/";
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -30,7 +31,7 @@ export function AuthPage() {
     setError(null);
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: window.location.origin },
+      options: { redirectTo: window.location.origin + returnTo },
     });
     if (error) { setError(error.message); setLoading(false); }
   };
@@ -43,7 +44,12 @@ export function AuthPage() {
 
     if (mode === "login") {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setError(error.message);
+      if (error) {
+        setError(error.message);
+      } else {
+        window.location.replace(returnTo);
+        return;
+      }
     } else {
       const { error } = await supabase.auth.signUp({ email, password });
       if (error) {

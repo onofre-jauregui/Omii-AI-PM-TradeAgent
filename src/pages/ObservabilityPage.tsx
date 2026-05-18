@@ -140,6 +140,7 @@ export default function ObservabilityPage() {
   const [strategyWinRates, setStrategyWinRates] = useState<Record<string, { wins: number; total: number }>>({});
   const [trades, setTrades] = useState<SettledTrade[]>([]);
   const [liveIndicator, setLiveIndicator] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
 
   // Pulse live indicator
@@ -259,8 +260,11 @@ export default function ObservabilityPage() {
     if (data) setTrades(data as SettledTrade[]);
   }, []);
 
-  // Initial load
+  // Session check + initial load
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsAuthenticated(!!session);
+    });
     loadStatus();
     loadEvents();
     loadMemories();
@@ -322,6 +326,21 @@ export default function ObservabilityPage() {
         </div>
       </header>
 
+      {/* ── Auth banner ──────────────────────────────────────────────────── */}
+      {isAuthenticated === false && (
+        <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-8 py-2.5 flex items-center justify-between">
+          <span className="text-xs text-yellow-600 dark:text-yellow-400">
+            Sign in to see the live event feed and agent memory.
+          </span>
+          <a
+            href="/login?return=/observability"
+            className="text-xs font-medium text-yellow-600 dark:text-yellow-400 underline underline-offset-2 hover:opacity-80 transition-opacity"
+          >
+            Sign in →
+          </a>
+        </div>
+      )}
+
       {/* ── Status Bar ───────────────────────────────────────────────────── */}
       <div className="border-b border-border px-8 py-3 flex items-center gap-8 overflow-x-auto scrollbar-none">
         {status.isHalted && (
@@ -374,9 +393,14 @@ export default function ObservabilityPage() {
             className="overflow-y-auto flex-1 divide-y divide-border"
           >
             {events.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 gap-2 text-center">
+              <div className="flex flex-col items-center justify-center py-20 gap-2 text-center px-6">
                 <Activity className="h-8 w-8 text-muted-foreground/20" />
-                <p className="text-sm text-muted-foreground">Waiting for events…</p>
+                <p className="text-sm text-muted-foreground">
+                  {isAuthenticated === false ? "Sign in to view live events." : "Waiting for events…"}
+                </p>
+                {isAuthenticated === false && (
+                  <a href="/login?return=/observability" className="text-xs text-primary underline underline-offset-2">Sign in →</a>
+                )}
               </div>
             ) : events.map((ev) => (
               <div
@@ -420,8 +444,13 @@ export default function ObservabilityPage() {
             </div>
             <div className="divide-y divide-border">
               {memories.length === 0 ? (
-                <div className="flex items-center justify-center py-10">
-                  <p className="text-sm text-muted-foreground">No active memories.</p>
+                <div className="flex flex-col items-center justify-center py-10 gap-1">
+                  <p className="text-sm text-muted-foreground">
+                    {isAuthenticated === false ? "Sign in to view agent memory." : "No active memories."}
+                  </p>
+                  {isAuthenticated === false && (
+                    <a href="/login?return=/observability" className="text-xs text-primary underline underline-offset-2">Sign in →</a>
+                  )}
                 </div>
               ) : memories.map((m) => {
                 const conf = Math.round(((m.exposed_confidence != null ? m.exposed_confidence : m.confidence) ?? 0) * 100);
