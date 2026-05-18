@@ -68,7 +68,114 @@ function Reveal({
 }
 
 // ── Hero dashboard mockup ─────────────────────────────────────────────────────
+
+interface DailyCumulative {
+  date: string;
+  cumPnl: number;
+}
+
+interface RecentTrade {
+  ticker: string;
+  side: string;
+  amount: number;
+  pnl: number;
+}
+
+interface PlatformStats {
+  totalPnl: number;
+  winRate: number;
+  tradeCount: number;
+  startDate: string;
+  dailyCumulative: DailyCumulative[];
+  recentTrades: RecentTrade[];
+}
+
+// Fallback data used when fetch fails
+const FALLBACK_STATS: PlatformStats = {
+  totalPnl: 940.30,
+  winRate: 81.3,
+  tradeCount: 150,
+  startDate: "2026-04-23",
+  dailyCumulative: [
+    { date: "2026-04-23", cumPnl: 130.92 },
+    { date: "2026-04-24", cumPnl: 246.27 },
+    { date: "2026-04-25", cumPnl: 306.56 },
+    { date: "2026-04-27", cumPnl: 119.77 },
+    { date: "2026-04-28", cumPnl: 133.85 },
+    { date: "2026-05-05", cumPnl: 350.43 },
+    { date: "2026-05-07", cumPnl: 272.68 },
+    { date: "2026-05-08", cumPnl: 412.16 },
+    { date: "2026-05-09", cumPnl: 396.12 },
+    { date: "2026-05-11", cumPnl: 1085.89 },
+    { date: "2026-05-12", cumPnl: 969.85 },
+    { date: "2026-05-13", cumPnl: 1008.06 },
+    { date: "2026-05-14", cumPnl: 953.30 },
+    { date: "2026-05-16", cumPnl: 940.30 },
+  ],
+  recentTrades: [
+    { ticker: "KXBTC-26MAY1619-B74000", side: "NO", amount: 50, pnl: -13.00 },
+    { ticker: "KXBTC-26MAY1619-B72000", side: "YES", amount: 50, pnl: 38.21 },
+    { ticker: "KXBTC-26MAY1619-B70000", side: "YES", amount: 50, pnl: -54.76 },
+  ],
+};
+
+function buildChartPath(points: DailyCumulative[]): { fill: string; line: string } {
+  if (points.length < 2) {
+    return {
+      fill: "M0,85 L800,85 L800,85 L0,85 Z",
+      line: "M0,85 L800,85",
+    };
+  }
+
+  const maxPnl = Math.max(...points.map((p) => p.cumPnl));
+  const minPnl = Math.min(0, ...points.map((p) => p.cumPnl));
+  const range = maxPnl - minPnl || 1;
+
+  // Map cumPnl to Y coordinate (inverted: higher = smaller Y, 5px top padding)
+  const toY = (pnl: number) => 85 - ((pnl - minPnl) / range) * 80;
+  const toX = (i: number) => (i / (points.length - 1)) * 800;
+
+  const coords = points.map((p, i) => ({ x: toX(i), y: toY(p.cumPnl) }));
+
+  // Build smooth cubic bezier path
+  let d = `M${coords[0].x.toFixed(1)},${coords[0].y.toFixed(1)}`;
+  for (let i = 1; i < coords.length; i++) {
+    const prev = coords[i - 1];
+    const curr = coords[i];
+    const cp1x = prev.x + (curr.x - prev.x) / 3;
+    const cp2x = prev.x + (2 * (curr.x - prev.x)) / 3;
+    d += ` C${cp1x.toFixed(1)},${prev.y.toFixed(1)} ${cp2x.toFixed(1)},${curr.y.toFixed(1)} ${curr.x.toFixed(1)},${curr.y.toFixed(1)}`;
+  }
+
+  const lastCoord = coords[coords.length - 1];
+  const fill = `${d} L${lastCoord.x.toFixed(1)},90 L0,90 Z`;
+  return { fill, line: d };
+}
+
 function HeroDashboardMockup() {
+  const [stats, setStats] = useState<PlatformStats | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const STATS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/platform-stats`;
+    fetch(STATS_URL)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((data: PlatformStats) => {
+        // Use live data only if we got meaningful results; otherwise fall back
+        if (data && typeof data.totalPnl === "number") {
+          setStats(data);
+        } else {
+          setStats(FALLBACK_STATS);
+        }
+      })
+      .catch(() => setStats(FALLBACK_STATS))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const s = stats ?? FALLBACK_STATS;
+  const portfolio = (2500 + s.totalPnl).toFixed(2);
+  const { fill: chartFill, line: chartLine } = buildChartPath(s.dailyCumulative);
+
   return (
     <div
       className="relative w-full overflow-hidden"
@@ -99,89 +206,106 @@ function HeroDashboardMockup() {
 
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-0 px-6 pt-5">
-        {[
-          { label: "Portfolio", value: "$2,000.00", sub: "Paper balance", color: "#f5f5f7" },
-          { label: "P&L Today", value: "+$84.20", sub: "+4.2%", color: "#34d058" },
-          { label: "Win Rate", value: "67%", sub: "Last 30 trades", color: "#f5f5f7" },
-          { label: "Open", value: "3", sub: "Active positions", color: "#f5f5f7" },
-        ].map((stat) => (
-          <div key={stat.label} className="px-3 first:pl-0">
-            <div style={{ color: "#6e6e73", fontSize: 10, letterSpacing: "0.05em", marginBottom: 4 }}>
-              {stat.label.toUpperCase()}
+        {loading ? (
+          // Skeleton state
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="px-3 first:pl-0">
+              <div className="h-2 w-14 rounded animate-pulse mb-2" style={{ background: "rgba(255,255,255,0.08)" }} />
+              <div className="h-5 w-20 rounded animate-pulse mb-1" style={{ background: "rgba(255,255,255,0.10)" }} />
+              <div className="h-2 w-16 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.06)" }} />
             </div>
-            <div style={{ color: stat.color, fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>
-              {stat.value}
+          ))
+        ) : (
+          [
+            { label: "Portfolio", value: `$${portfolio}`, sub: "Paper balance", color: "#f5f5f7" },
+            { label: `P&L Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+$${s.totalPnl.toFixed(2)}`, sub: `+${((s.totalPnl / 2500) * 100).toFixed(1)}%`, color: "#34d058" },
+            { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
+            { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
+          ].map((stat) => (
+            <div key={stat.label} className="px-3 first:pl-0">
+              <div style={{ color: "#6e6e73", fontSize: 10, letterSpacing: "0.05em", marginBottom: 4 }}>
+                {stat.label.toUpperCase()}
+              </div>
+              <div style={{ color: stat.color, fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>
+                {stat.value}
+              </div>
+              <div style={{ color: "#6e6e73", fontSize: 10, marginTop: 2 }}>{stat.sub}</div>
             </div>
-            <div style={{ color: "#6e6e73", fontSize: 10, marginTop: 2 }}>{stat.sub}</div>
-          </div>
-        ))}
+          ))
+        )}
       </div>
 
       {/* Chart area */}
       <div className="px-6 pt-5">
         <div style={{ height: 1, background: "rgba(255,255,255,0.04)", marginBottom: 12 }} />
-        <svg width="100%" height="90" viewBox="0 0 800 90" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#34d058" stopOpacity="0.25" />
-              <stop offset="100%" stopColor="#34d058" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          <path
-            d="M0,75 C50,72 80,68 120,60 C160,52 180,58 220,50 C260,42 290,45 330,35 C370,25 400,30 440,22 C480,14 510,18 550,12 C590,6 620,10 660,8 C700,6 730,4 800,5"
-            fill="url(#pnlGrad)"
-            stroke="none"
-          />
-          <path
-            d="M0,75 C50,72 80,68 120,60 C160,52 180,58 220,50 C260,42 290,45 330,35 C370,25 400,30 440,22 C480,14 510,18 550,12 C590,6 620,10 660,8 C700,6 730,4 800,5"
-            fill="none"
-            stroke="#34d058"
-            strokeWidth="2"
-            strokeLinecap="round"
-          />
-        </svg>
+        {loading ? (
+          <div className="h-[90px] rounded animate-pulse" style={{ background: "rgba(255,255,255,0.05)" }} />
+        ) : (
+          <svg width="100%" height="90" viewBox="0 0 800 90" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#34d058" stopOpacity="0.25" />
+                <stop offset="100%" stopColor="#34d058" stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            <path d={chartFill} fill="url(#pnlGrad)" stroke="none" />
+            <path d={chartLine} fill="none" stroke="#34d058" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        )}
       </div>
 
       {/* Trade rows */}
       <div className="px-6 pt-2 pb-5 space-y-1.5">
-        {[
-          { market: "Fed rate cut by Dec?", side: "YES", size: "$240", pnl: "+$88.20", open: false },
-          { market: "BTC above $70k by EOD?", side: "YES", size: "$95", pnl: "+$41.00", open: false },
-          { market: "US recession Q3 2026?", side: "NO", size: "$180", pnl: "open", open: true },
-        ].map((t) => (
-          <div
-            key={t.market}
-            className="flex items-center justify-between rounded-lg px-3 py-2"
-            style={{ background: "rgba(255,255,255,0.04)" }}
-          >
-            <span style={{ color: "#f5f5f7", fontSize: 11 }}>{t.market}</span>
-            <div className="flex items-center gap-3">
-              <span
-                style={{
-                  color: "#6e6e73",
-                  fontSize: 10,
-                  background: "rgba(255,255,255,0.07)",
-                  padding: "2px 6px",
-                  borderRadius: 4,
-                }}
-              >
-                {t.side}
-              </span>
-              <span style={{ color: "#6e6e73", fontSize: 11 }}>{t.size}</span>
-              <span
-                style={{
-                  color: t.open ? "#6e6e73" : "#34d058",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  minWidth: 56,
-                  textAlign: "right",
-                }}
-              >
-                {t.pnl}
-              </span>
+        {loading ? (
+          Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex items-center justify-between rounded-lg px-3 py-2" style={{ background: "rgba(255,255,255,0.04)" }}>
+              <div className="h-3 w-32 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.08)" }} />
+              <div className="h-3 w-16 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.06)" }} />
             </div>
-          </div>
-        ))}
+          ))
+        ) : (
+          s.recentTrades.map((t, i) => {
+            // Strip everything after the first hyphen-separated segment that looks like a date/price suffix
+            // e.g. KXBTC-26MAY1619-B74000 → KXBTC
+            const series = t.ticker.split("-")[0] ?? t.ticker;
+            const pnlColor = t.pnl >= 0 ? "#34d058" : "#ff453a";
+            const pnlLabel = t.pnl >= 0 ? `+$${t.pnl.toFixed(2)}` : `-$${Math.abs(t.pnl).toFixed(2)}`;
+            return (
+              <div
+                key={i}
+                className="flex items-center justify-between rounded-lg px-3 py-2"
+                style={{ background: "rgba(255,255,255,0.04)" }}
+              >
+                <span style={{ color: "#f5f5f7", fontSize: 11 }}>{series}</span>
+                <div className="flex items-center gap-3">
+                  <span
+                    style={{
+                      color: "#6e6e73",
+                      fontSize: 10,
+                      background: "rgba(255,255,255,0.07)",
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                    }}
+                  >
+                    {t.side}
+                  </span>
+                  <span style={{ color: "#6e6e73", fontSize: 11 }}>${t.amount.toFixed(2)}</span>
+                  <span
+                    style={{
+                      color: pnlColor,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      minWidth: 56,
+                      textAlign: "right",
+                    }}
+                  >
+                    {pnlLabel}
+                  </span>
+                </div>
+              </div>
+            );
+          })
+        )}
       </div>
 
       {/* Subtle vignette overlay */}
