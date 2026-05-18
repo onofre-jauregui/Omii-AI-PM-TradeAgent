@@ -613,7 +613,7 @@ export default function LandingPage() {
               marginBottom: 28,
             }}
           >
-            Trade Kalshi effortlessly,
+            Trade Kalshi Effortlessly
             <br />
             Use AI.
           </h1>
