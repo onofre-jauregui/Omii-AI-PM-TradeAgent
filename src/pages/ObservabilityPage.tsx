@@ -429,8 +429,23 @@ export default function ObservabilityPage() {
     loadStrategies,
   ]);
 
-  // Real-time
+  // Real-time + polling fallback
   useEffect(() => {
+    const STRATEGY_SUSPENSION_EVENTS = new Set([
+      "strategy_suspended_sharpe",
+      "strategy_suspended_drawdown",
+      "strategy_suspended_hitrate",
+      "strategy_resumed",
+    ]);
+    const ERROR_EVENTS = new Set([
+      "risk_check_failed",
+      "position_limit_hit",
+      "daily_loss_limit_hit",
+      "strategy_loss_streak",
+      "memory_quarantined",
+      "auto_trade_strategy_error",
+    ]);
+
     const channel = supabase
       .channel("obs-realtime-v2")
       .on(
@@ -438,25 +453,32 @@ export default function ObservabilityPage() {
         { event: "INSERT", schema: "public", table: "compliance_log" },
         (payload) => {
           const ev = payload.new as ComplianceEvent;
-          // Hero feed
+
+          // Hero live ticker
           setHeroFeed((prev) => [ev, ...prev.slice(0, 9)]);
           setNewEventIds((prev) => {
             const next = new Set(prev);
             next.add(ev.id);
-            setTimeout(() => {
-              setNewEventIds((s) => {
-                const n = new Set(s);
-                n.delete(ev.id);
-                return n;
-              });
-            }, 2000);
+            setTimeout(() => setNewEventIds((s) => { const n = new Set(s); n.delete(ev.id); return n; }), 2000);
             return next;
           });
-          // Refresh trace list if it's a run
+
+          // Prepend to trace list on new run
           if (ev.event_type === "auto_trade_run") {
             setTraceRuns((prev) => [ev, ...prev.slice(0, 19)]);
+            loadHeroStatus();
+            loadComplianceLast30d(); // refresh tool counts
           }
-          loadHeroStatus();
+
+          // Refresh errors section on any error/guardrail event
+          if (ERROR_EVENTS.has(ev.event_type) || ev.severity === "error" || ev.severity === "critical" || ev.severity === "warning") {
+            loadErrors();
+          }
+
+          // Refresh strategy health on suspension/resume
+          if (STRATEGY_SUSPENSION_EVENTS.has(ev.event_type)) {
+            loadStrategies();
+          }
         }
       )
       .on(
@@ -466,13 +488,37 @@ export default function ObservabilityPage() {
           loadHeroStatus();
           loadDecisionHistory();
           loadPerformance();
+          loadComplianceLast30d(); // trade count for cost section
         }
       )
       .subscribe();
+
+    // 2-minute polling fallback — catches anything real-time misses
+    const poll = setInterval(() => {
+      loadHeroStatus();
+      loadHeroFeed();
+      loadTraceLogs();
+      loadDecisionHistory();
+      loadPerformance();
+      loadComplianceLast30d();
+      loadErrors();
+      loadStrategies();
+    }, 2 * 60 * 1000);
+
     return () => {
       supabase.removeChannel(channel);
+      clearInterval(poll);
     };
-  }, [loadHeroStatus, loadDecisionHistory, loadPerformance]);
+  }, [
+    loadHeroStatus,
+    loadHeroFeed,
+    loadTraceLogs,
+    loadDecisionHistory,
+    loadPerformance,
+    loadComplianceLast30d,
+    loadErrors,
+    loadStrategies,
+  ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
 
