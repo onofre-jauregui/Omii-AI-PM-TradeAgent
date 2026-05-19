@@ -87,9 +87,6 @@ function StrategyDetailModal({
           <DialogHeader>
             <div className="flex items-center gap-2 mb-1">
               <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strategy.id}</Badge>
-              <Badge variant="secondary" className={`text-[10px] rounded-full ${
-                strategy.mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
-              }`}>{strategy.mode}</Badge>
               {strategy.active && (
                 <Badge variant="secondary" className="text-[10px] rounded-full bg-profit/10 text-profit">Active</Badge>
               )}
@@ -260,9 +257,6 @@ export function StrategiesPanel() {
                 <div className="flex-1 min-w-0 pr-3">
                   <div className="flex items-center gap-2 mb-1">
                     <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strat.id}</Badge>
-                    <Badge variant="secondary" className={`text-[10px] rounded-full ${
-                      strat.mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
-                    }`}>{strat.mode}</Badge>
                   </div>
                   <h3 className="text-sm font-medium text-foreground">{strat.name}</h3>
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{strat.description}</p>

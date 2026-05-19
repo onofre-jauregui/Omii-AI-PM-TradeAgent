@@ -211,11 +211,6 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                         {strat.id}
                       </Badge>
                       <p className="text-sm font-medium text-foreground truncate">{strat.name}</p>
-                      <Badge variant="secondary" className={`text-[9px] rounded-full ${
-                        strat.mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
-                      }`}>
-                        {strat.mode}
-                      </Badge>
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {stats?.totalTrades ?? 0} trades · {stats?.winningTrades ?? 0}W / {stats?.losingTrades ?? 0}L
