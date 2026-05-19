@@ -205,9 +205,9 @@ export default function ObservabilityPage() {
   const [equityData, setEquityData] = useState<EquityPoint[]>([]);
 
   // Cost / tools
-  const [complianceLast30d, setComplianceLast30d] = useState<
-    ComplianceEvent[]
-  >([]);
+  const [complianceLast30d, setComplianceLast30d] = useState<ComplianceEvent[]>([]);
+  const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
+  const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
 
   // Errors
   const [guardrailEvents, setGuardrailEvents] = useState<ComplianceEvent[]>(
@@ -321,12 +321,48 @@ export default function ObservabilityPage() {
 
   const loadComplianceLast30d = useCallback(async () => {
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const { data } = await supabase
-      .from("compliance_log")
-      .select("id, created_at, event_type, severity, message, trade_id")
-      .gte("created_at", since)
-      .order("created_at", { ascending: false });
-    if (data) setComplianceLast30d(data as ComplianceEvent[]);
+
+    // Fetch recent events for display (limited) + dedicated count queries per tool type
+    const toolEventTypes = [
+      "surface_scan_complete",
+      "auto_trade_strategy_run",
+      "auto_trade_strategy_error",
+      "order_submitted",
+      "order_filled",
+      "auto_settle_run",
+      "auto_reflect_run",
+      "risk_check_passed",
+      "risk_check_failed",
+    ];
+
+    const [eventsRes, tradesCountRes, ...countResults] = await Promise.all([
+      supabase
+        .from("compliance_log")
+        .select("id, created_at, event_type, severity, message, trade_id")
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(500),
+      supabase
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .gte("created_at", since),
+      ...toolEventTypes.map((et) =>
+        supabase
+          .from("compliance_log")
+          .select("id", { count: "exact", head: true })
+          .eq("event_type", et)
+          .gte("created_at", since)
+      ),
+    ]);
+
+    if (eventsRes.data) setComplianceLast30d(eventsRes.data as ComplianceEvent[]);
+    setTradesLast30dCount(tradesCountRes.count ?? 0);
+
+    const counts: Record<string, number> = {};
+    toolEventTypes.forEach((et, i) => {
+      counts[et] = countResults[i].count ?? 0;
+    });
+    setToolCounts(counts);
   }, []);
 
   const loadErrors = useCallback(async () => {
@@ -339,6 +375,7 @@ export default function ObservabilityPage() {
       "strategy_suspended_hitrate",
       "strategy_loss_streak",
       "memory_quarantined",
+      "auto_trade_strategy_error",
     ];
 
     const [guardrailRes, errorRes] = await Promise.all([
@@ -347,13 +384,13 @@ export default function ObservabilityPage() {
         .select("id, created_at, event_type, severity, message, trade_id")
         .in("event_type", guardrailTypes)
         .order("created_at", { ascending: false })
-        .limit(20),
+        .limit(25),
       supabase
         .from("compliance_log")
         .select("id, created_at, event_type, severity, message, trade_id")
-        .in("severity", ["error", "critical"])
+        .in("severity", ["error", "critical", "warning"])
         .order("created_at", { ascending: false })
-        .limit(10),
+        .limit(20),
     ]);
 
     if (guardrailRes.data) setGuardrailEvents(guardrailRes.data as ComplianceEvent[]);
@@ -503,68 +540,57 @@ export default function ObservabilityPage() {
   // All trades (for count)
   const totalTradeCount = decisionTrades.length; // approximation from loaded batch
 
-  // Cost stats from compliance_last30d
-  const tradesLast30d = complianceLast30d.filter(
-    (e) => e.event_type === "order_submitted"
-  ).length;
-
+  // Cost stats — use direct trade count (accurate) not proxy from compliance_log
+  const llmCallsLast30d = Math.round(tradesLast30dCount * 1.5); // includes rejected setups
   const dailyLLMSpend =
-    tradesLast30d > 0
-      ? (tradesLast30d *
-          1.5 *
+    llmCallsLast30d > 0
+      ? (llmCallsLast30d *
           ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M +
             (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M)) /
         30
       : 0;
   const avgTokensPerDecision = QUALIFY_INPUT_TOKENS + QUALIFY_OUTPUT_TOKENS;
   const costPerTrade =
-    tradesLast30d > 0 ? (dailyLLMSpend * 30) / tradesLast30d : null;
-
-  // Tool counts from compliance_last30d
-  type EventCountMap = Record<string, number>;
-  const eventCounts: EventCountMap = {};
-  for (const e of complianceLast30d) {
-    eventCounts[e.event_type] = (eventCounts[e.event_type] ?? 0) + 1;
-  }
+    tradesLast30dCount > 0 ? (dailyLLMSpend * 30) / tradesLast30dCount : null;
 
   const tools = [
     {
       name: "Market Scanner",
       desc: "Scans all open markets for edge opportunities",
-      calls: eventCounts["surface_scan_complete"] ?? 0,
+      calls: toolCounts["surface_scan_complete"] ?? 0,
       errors: 0,
     },
     {
       name: "Strategy Engine",
       desc: "Evaluates signals per active strategy",
-      calls: eventCounts["auto_trade_strategy_run"] ?? 0,
-      errors: eventCounts["auto_trade_strategy_error"] ?? 0,
+      calls: toolCounts["auto_trade_strategy_run"] ?? 0,
+      errors: toolCounts["auto_trade_strategy_error"] ?? 0,
     },
     {
       name: "Order Execution",
       desc: "Submits orders to Kalshi REST API",
-      calls: eventCounts["order_submitted"] ?? 0,
+      calls: toolCounts["order_submitted"] ?? 0,
       errors: 0,
     },
     {
       name: "Settlement Engine",
       desc: "Resolves positions after market closes",
-      calls: eventCounts["auto_settle_run"] ?? 0,
+      calls: toolCounts["auto_settle_run"] ?? 0,
       errors: 0,
     },
     {
       name: "Memory & Learning",
       desc: "Reflects on trades and updates agent memory",
-      calls: eventCounts["auto_reflect_run"] ?? 0,
+      calls: toolCounts["auto_reflect_run"] ?? 0,
       errors: 0,
     },
     {
       name: "Risk Guard",
       desc: "Checks position limits and daily loss caps",
       calls:
-        (eventCounts["risk_check_passed"] ?? 0) +
-        (eventCounts["risk_check_failed"] ?? 0),
-      errors: eventCounts["risk_check_failed"] ?? 0,
+        (toolCounts["risk_check_passed"] ?? 0) +
+        (toolCounts["risk_check_failed"] ?? 0),
+      errors: toolCounts["risk_check_failed"] ?? 0,
     },
   ];
 
@@ -1084,7 +1110,7 @@ export default function ObservabilityPage() {
                     : "—"}
                 </p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {tradesLast30d} orders last 30d
+                  {tradesLast30dCount} trades last 30d
                 </p>
               </div>
             </div>
@@ -1191,11 +1217,11 @@ export default function ObservabilityPage() {
             {/* Recent errors */}
             <div className="px-6 py-4">
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
-                Recent Errors
+                Warnings &amp; Errors
               </p>
               {errorEvents.length === 0 ? (
                 <p className="text-xs text-muted-foreground py-2">
-                  No errors in the log.
+                  No warnings or errors in the log.
                 </p>
               ) : (
                 <table className="w-full text-sm">
