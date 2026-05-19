@@ -6,6 +6,12 @@ function authHeader(): string {
   return "Basic " + btoa(`${PUBLIC_KEY}:${SECRET_KEY}`);
 }
 
+// Strip OpenRouter provider prefix so Langfuse can match model pricing.
+// "openai/gpt-4o-mini" → "gpt-4o-mini", "anthropic/claude-3-5-sonnet" → "claude-3-5-sonnet"
+function normalizeModel(model: string): string {
+  return model.includes("/") ? model.split("/").slice(1).join("/") : model;
+}
+
 // Fire-and-forget batch ingestion. Never throws — observability must not block trades.
 export function langfuseIngest(events: object[]): void {
   if (!PUBLIC_KEY || !SECRET_KEY) return;
@@ -43,18 +49,24 @@ export function generationEvent(opts: {
 }) {
   return {
     id: crypto.randomUUID(),
-    type: "generation-create",
+    type: "observation-create",          // was "generation-create" — not a valid Langfuse type
     timestamp: new Date().toISOString(),
     body: {
+      id: crypto.randomUUID(),           // observation needs its own id
       traceId: opts.traceId,
+      type: "GENERATION",               // required to classify as a generation observation
       name: opts.name,
-      model: opts.model,
+      model: normalizeModel(opts.model), // strip "openai/" prefix for cost lookup
       startTime: opts.startTime,
       endTime: opts.endTime,
       input: [{ role: "user", content: opts.prompt }],
       output: opts.completion,
       usage: opts.inputTokens != null
-        ? { input: opts.inputTokens, output: opts.outputTokens ?? 0 }
+        ? {
+            input: opts.inputTokens,
+            output: opts.outputTokens ?? 0,
+            unit: "TOKENS",             // required for Langfuse cost calculation
+          }
         : undefined,
       metadata: opts.metadata,
     },
@@ -67,6 +79,12 @@ export function scoreEvent(traceId: string, name: string, value: number, comment
     id: crypto.randomUUID(),
     type: "score-create",
     timestamp: new Date().toISOString(),
-    body: { traceId, name, value, comment },
+    body: {
+      traceId,
+      name,
+      value,
+      dataType: "NUMERIC",             // explicit type prevents ambiguous score warnings
+      comment,
+    },
   };
 }
