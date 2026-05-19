@@ -31,7 +31,6 @@ export function ProfilePanel() {
     const { data: trades } = await supabase
       .from("trades")
       .select("pnl, amount, price, created_at, status")
-      .eq("status", "filled")
       .order("created_at", { ascending: true });
 
     if (trades && trades.length > 0) {
