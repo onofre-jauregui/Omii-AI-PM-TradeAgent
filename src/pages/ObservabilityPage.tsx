@@ -303,6 +303,7 @@ export default function ObservabilityPage() {
       .from("trades")
       .select("id, pnl, created_at, settled_at, status")
       .eq("status", "settled")
+      .gte("settled_at", "2026-04-22T00:00:00.000Z")
       .order("settled_at", { ascending: true });
     if (data) {
       setAllSettledTrades(data as Trade[]);
