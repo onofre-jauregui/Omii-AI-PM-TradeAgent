@@ -18,83 +18,99 @@ const chartConfig = {
 
 interface PortfolioChartProps {
   mode?: "paper" | "live";
-  startingBalance?: number;
-  strategyFilter?: string | null; // strategy name to narrow by
+  strategyFilter?: string | null;
   label?: string;
 }
 
+// May 1 2026 — same cutoff as all other dashboard components
+const MAY_START = "2026-05-01T00:00:00.000Z";
+const FALLBACK_STARTING_BALANCE = 2_500;
+
 export function PortfolioChart({
   mode,
-  startingBalance = 5000,
   strategyFilter,
   label = "Portfolio Value",
 }: PortfolioChartProps) {
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
+  const [startingBalance, setStartingBalance] = useState(FALLBACK_STARTING_BALANCE);
   const [loading, setLoading] = useState(true);
 
   const loadChartData = useCallback(async () => {
     setLoading(true);
 
-    // May 1 2026 — same cutoff as DashboardHero, excludes pre-calibration trades
-    const MAY_START = "2026-05-01T00:00:00.000Z";
+    // Get starting balance from strategies table (same source as DashboardHero)
+    const { data: strategyRows } = await supabase
+      .from("strategies")
+      .select("starting_balance")
+      .eq("active", true);
 
+    const balance = strategyRows && strategyRows.length > 0
+      ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
+      : FALLBACK_STARTING_BALANCE;
+    setStartingBalance(balance);
+
+    // Query settled trades only — pnl is 0 on filled trades until Kalshi resolves
     let q = supabase
       .from("trades")
-      .select("created_at, amount, pnl, action, status, mode, strategy")
-      .eq("status", "filled")
-      .gte("created_at", MAY_START)
-      .order("created_at", { ascending: true });
+      .select("settled_at, pnl, mode, strategy")
+      .eq("status", "settled")
+      .gte("settled_at", MAY_START)
+      .order("settled_at", { ascending: true });
 
     if (mode) q = q.eq("mode", mode);
     if (strategyFilter) q = q.eq("strategy", strategyFilter);
 
     const { data: trades } = await q;
 
-    if (trades && trades.length > 0) {
-      let cumulativeValue = startingBalance;
-      const points: ChartPoint[] = [{ date: "Start", value: startingBalance }];
-
-      for (const trade of trades) {
-        const pnl = trade.pnl || 0;
-        if (trade.action === "buy") {
-          cumulativeValue = cumulativeValue - trade.amount + pnl;
-        } else {
-          cumulativeValue = cumulativeValue + trade.amount + pnl;
-        }
-        points.push({
-          date: new Date(trade.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-          value: Math.round(cumulativeValue),
-        });
-      }
-
-      setChartData(points);
-    } else {
+    if (!trades || trades.length === 0) {
       setChartData([
-        { date: "Start", value: startingBalance },
-        { date: "Now", value: startingBalance },
+        { date: "May 1", value: balance },
+        { date: "Now", value: balance },
       ]);
+      setLoading(false);
+      return;
     }
 
+    // Group P&L by day (settled_at date)
+    const byDay: Record<string, number> = {};
+    for (const t of trades) {
+      const day = (t.settled_at ?? "").slice(0, 10);
+      if (!day) continue;
+      byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
+    }
+
+    // Build cumulative portfolio value per day
+    let cumulative = balance;
+    const points: ChartPoint[] = [{ date: "Start", value: balance }];
+
+    for (const day of Object.keys(byDay).sort()) {
+      cumulative += byDay[day];
+      const label = new Date(day + "T12:00:00Z").toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+      });
+      points.push({ date: label, value: Math.round(cumulative * 100) / 100 });
+    }
+
+    setChartData(points);
     setLoading(false);
-  }, [mode, startingBalance, strategyFilter]);
+  }, [mode, strategyFilter]);
 
   useEffect(() => {
     loadChartData();
 
-    // Refresh chart when any trade is inserted or updated
     const channel = supabase
       .channel(`portfolio-chart-rt-${mode ?? "all"}-${strategyFilter ?? "none"}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, loadChartData)
       .subscribe();
 
-    // Also poll every 30s as a fallback (pnl updates won't always fire realtime)
     const interval = setInterval(loadChartData, 30_000);
 
     return () => {
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [loadChartData, mode, strategyFilter]);
+  }, [loadChartData]);
 
   if (loading) {
     return (
@@ -105,7 +121,9 @@ export function PortfolioChart({
   }
 
   const currentValue = chartData.length > 0 ? chartData[chartData.length - 1].value : startingBalance;
-  const totalReturn = startingBalance > 0 ? (((currentValue - startingBalance) / startingBalance) * 100).toFixed(1) : "0.0";
+  const totalReturn = startingBalance > 0
+    ? (((currentValue - startingBalance) / startingBalance) * 100).toFixed(1)
+    : "0.0";
   const isPositive = currentValue >= startingBalance;
 
   return (
@@ -113,14 +131,20 @@ export function PortfolioChart({
       <div className="flex items-end justify-between">
         <div>
           <p className="text-muted-foreground text-sm mb-1">{label}</p>
-          <h1 className="text-4xl sm:text-5xl font-light tracking-tight text-foreground" style={{ letterSpacing: '-0.03em' }}>
-            ${currentValue.toLocaleString()}
+          <h1
+            className="text-4xl sm:text-5xl font-light tracking-tight text-foreground"
+            style={{ letterSpacing: "-0.03em" }}
+          >
+            ${currentValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </h1>
         </div>
         <div className="text-right">
           <p className="text-muted-foreground text-sm mb-1">Return</p>
-          <p className={`text-2xl font-light ${isPositive ? 'text-profit' : 'text-loss'}`} style={{ letterSpacing: '-0.02em' }}>
-            {isPositive ? '+' : ''}{totalReturn}%
+          <p
+            className={`text-2xl font-light ${isPositive ? "text-profit" : "text-loss"}`}
+            style={{ letterSpacing: "-0.02em" }}
+          >
+            {isPositive ? "+" : ""}{totalReturn}%
           </p>
         </div>
       </div>
@@ -138,6 +162,7 @@ export function PortfolioChart({
               axisLine={false}
               tickLine={false}
               tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
+              interval="preserveStartEnd"
             />
             <YAxis
               axisLine={false}
@@ -145,6 +170,7 @@ export function PortfolioChart({
               tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
               tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`}
               width={50}
+              domain={["auto", "auto"]}
             />
             <ChartTooltip content={<ChartTooltipContent />} />
             <Area
