@@ -221,7 +221,7 @@ function HeroDashboardMockup() {
           ))
         ) : (
           [
-            { label: "Portfolio", value: `$${portfolio}`, sub: "Paper balance", color: "#f5f5f7" },
+            { label: "Portfolio", value: `$${portfolio}`, sub: "", color: "#f5f5f7" },
             { label: `P&L Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+$${s.totalPnl.toFixed(2)}`, sub: `+${((s.totalPnl / 2500) * 100).toFixed(1)}%`, color: "#34d058" },
             { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
