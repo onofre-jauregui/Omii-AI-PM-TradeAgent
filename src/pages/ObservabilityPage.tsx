@@ -220,11 +220,16 @@ export default function ObservabilityPage() {
     Record<string, ComplianceEvent[]>
   >({});
   const loadingTracesRef = useRef<Set<string>>(new Set());
+  const [traceDay, setTraceDay] = useState<string>(() => {
+    return new Date().toISOString().slice(0, 10);
+  });
 
   // Decision history
   const [decisionTrades, setDecisionTrades] = useState<Trade[]>([]);
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
   const [selectedError, setSelectedError] = useState<ComplianceEvent | null>(null);
+  const [decisionDateFilter, setDecisionDateFilter] = useState<"today" | "7d" | "30d" | "all">("30d");
+  const [decisionStatusFilter, setDecisionStatusFilter] = useState<"all" | "filled" | "settled">("all");
 
   // Performance
   const [allSettledTrades, setAllSettledTrades] = useState<Trade[]>([]);
@@ -268,7 +273,7 @@ export default function ObservabilityPage() {
       supabase
         .from("compliance_log")
         .select("created_at")
-        .eq("event_type", "auto_trade_run")
+        .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle(),
@@ -304,24 +309,47 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadTraceLogs = useCallback(async () => {
+    const dayStart = new Date(traceDay + "T00:00:00.000Z").toISOString();
+    const dayEnd   = new Date(traceDay + "T23:59:59.999Z").toISOString();
     const { data } = await supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id")
       .eq("event_type", "auto_trade_run")
+      .gte("created_at", dayStart)
+      .lte("created_at", dayEnd)
       .order("created_at", { ascending: false })
-      .limit(20);
+      .limit(200);
     if (data) setTraceRuns(data as ComplianceEvent[]);
-  }, []);
+  }, [traceDay]);
 
-  const loadDecisionHistory = useCallback(async () => {
-    const { data } = await supabase
+  const loadDecisionHistory = useCallback(async (
+    dateFilter: "today" | "7d" | "30d" | "all" = "30d",
+    statusFilter: "all" | "filled" | "settled" = "all"
+  ) => {
+    let query = supabase
       .from("trades")
-      .select(
-        "id, ticker, market_question, side, action, price, amount, strategy, mode, status, pnl, notes, filled_price, created_at, settled_at"
-      )
-      .in("status", ["settled", "filled"])
+      .select("id, ticker, market_question, side, action, price, amount, strategy, mode, status, pnl, notes, filled_price, created_at, settled_at")
       .order("created_at", { ascending: false })
-      .limit(30);
+      .limit(50);
+
+    if (statusFilter === "filled") {
+      query = query.eq("status", "filled");
+    } else if (statusFilter === "settled") {
+      query = query.eq("status", "settled");
+    } else {
+      query = query.in("status", ["settled", "filled"]);
+    }
+
+    if (dateFilter === "today") {
+      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+      query = query.gte("created_at", todayStart.toISOString());
+    } else if (dateFilter === "7d") {
+      query = query.gte("created_at", new Date(Date.now() - 7 * 86400000).toISOString());
+    } else if (dateFilter === "30d") {
+      query = query.gte("created_at", new Date(Date.now() - 30 * 86400000).toISOString());
+    }
+
+    const { data } = await query;
     if (data) setDecisionTrades(data as Trade[]);
   }, []);
 
@@ -352,6 +380,7 @@ export default function ObservabilityPage() {
     // Event types that actually exist in compliance_log (verified from edge function source)
     const toolEventTypes = [
       "surface_scan_complete",
+      "auto_trade_run",
       "auto_trade_strategy_run",   // 1 LLM qualify call per strategy per run
       "auto_trade_strategy_error",
       "basket_completed",           // order sent to Kalshi (not "order_submitted")
@@ -476,7 +505,7 @@ export default function ObservabilityPage() {
     loadHeroStatus();
     loadHeroFeed();
     loadTraceLogs();
-    loadDecisionHistory();
+    loadDecisionHistory(decisionDateFilter, decisionStatusFilter);
     loadPerformance();
     loadComplianceLast30d();
     loadModelLatency();
@@ -492,7 +521,17 @@ export default function ObservabilityPage() {
     loadModelLatency,
     loadErrors,
     loadStrategies,
+    decisionDateFilter,
+    decisionStatusFilter,
   ]);
+
+  useEffect(() => {
+    loadTraceLogs();
+  }, [traceDay, loadTraceLogs]);
+
+  useEffect(() => {
+    loadDecisionHistory(decisionDateFilter, decisionStatusFilter);
+  }, [decisionDateFilter, decisionStatusFilter, loadDecisionHistory]);
 
   // Real-time + polling fallback
   useEffect(() => {
@@ -530,7 +569,7 @@ export default function ObservabilityPage() {
 
           // Prepend to trace list on new run
           if (ev.event_type === "auto_trade_run") {
-            setTraceRuns((prev) => [ev, ...prev.slice(0, 19)]);
+            setTraceRuns((prev) => [ev, ...prev.slice(0, 199)]);
             loadHeroStatus();
             loadComplianceLast30d(); // refresh tool counts
           }
@@ -551,7 +590,7 @@ export default function ObservabilityPage() {
         { event: "*", schema: "public", table: "trades" },
         () => {
           loadHeroStatus();
-          loadDecisionHistory();
+          loadDecisionHistory("30d", "all");
           loadPerformance();
           loadComplianceLast30d(); // trade count for cost section
         }
@@ -563,7 +602,7 @@ export default function ObservabilityPage() {
       loadHeroStatus();
       loadHeroFeed();
       loadTraceLogs();
-      loadDecisionHistory();
+      loadDecisionHistory("30d", "all");
       loadPerformance();
       loadComplianceLast30d();
       loadModelLatency();
@@ -665,6 +704,17 @@ export default function ObservabilityPage() {
   const avgTokensPerDecision = QUALIFY_INPUT_TOKENS + QUALIFY_OUTPUT_TOKENS;
   const costPerTrade =
     tradesLast30dCount > 0 ? (dailyLLMSpend * 30) / tradesLast30dCount : null;
+
+  // Cost per run
+  const autoTradeRunCount = toolCounts["auto_trade_run"] ?? 0;
+  const avgStrategiesPerRun = autoTradeRunCount > 0
+    ? llmCallsLast30d / autoTradeRunCount
+    : 0;
+  const costPerRun = avgStrategiesPerRun > 0
+    ? avgStrategiesPerRun *
+      ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M +
+       (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M)
+    : null;
 
   // Model usage stats (30d)
   const inputTokens30d = llmCallsLast30d * QUALIFY_INPUT_TOKENS;
@@ -841,255 +891,7 @@ export default function ObservabilityPage() {
           </div>
         </section>
 
-        {/* ── 2. Trace Logs ────────────────────────────────────────────── */}
-        <Section
-          title="Execution Traces"
-          action={
-            <a
-              href="https://cloud.langfuse.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
-            >
-              View in Langfuse
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          }
-        >
-          <div className="divide-y divide-border">
-            {traceRuns.length === 0 ? (
-              <div className="py-10 text-center text-sm text-muted-foreground">
-                No auto-trade runs found.
-              </div>
-            ) : (
-              traceRuns.map((run) => {
-                const isOpen = expandedTraces.has(run.id);
-                const children = traceChildren[run.id];
-                return (
-                  <div key={run.id}>
-                    <button
-                      onClick={() => toggleTrace(run)}
-                      className="w-full px-6 py-3 flex items-center gap-3 hover:bg-secondary/30 transition-colors text-left"
-                    >
-                      {isOpen ? (
-                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      )}
-                      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0 w-[140px]">
-                        {fmtDate(run.created_at)}
-                      </span>
-                      <span className="text-[12px] font-medium shrink-0">
-                        Auto-Trade Run
-                      </span>
-                      <span className="text-[11px] text-muted-foreground truncate flex-1 min-w-0">
-                        {run.message}
-                      </span>
-                    </button>
-                    {isOpen && (
-                      <div className="bg-secondary/20 divide-y divide-border/50">
-                        {!children ? (
-                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
-                            Loading…
-                          </div>
-                        ) : children.length === 0 ? (
-                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
-                            No child events within 90s.
-                          </div>
-                        ) : (
-                          children.map((child) => (
-                            <div
-                              key={child.id}
-                              className="px-10 py-2 flex items-start gap-2.5"
-                            >
-                              <span
-                                className={`mt-[5px] h-1.5 w-1.5 rounded-full shrink-0 ${
-                                  SEVERITY_DOT[child.severity] ??
-                                  "bg-muted-foreground/40"
-                                }`}
-                              />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span
-                                    className={`text-[11px] font-medium ${
-                                      SEVERITY_CLASSES[child.severity] ??
-                                      "text-muted-foreground"
-                                    }`}
-                                  >
-                                    {EVENT_TYPE_LABELS[child.event_type] ??
-                                      child.event_type}
-                                  </span>
-                                  <span className="text-[10px] text-muted-foreground/50 tabular-nums ml-auto shrink-0">
-                                    {fmtTime(child.created_at)}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
-                                  {child.message}
-                                </p>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </Section>
-
-        {/* ── 3. Decision History ──────────────────────────────────────── */}
-        <Section title="Decision History">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Time
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Market
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Action
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Size
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Strategy
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Entry
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    P&L
-                  </th>
-                  <th className="text-center px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Notes
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {decisionTrades.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={9}
-                      className="text-center py-12 text-sm text-muted-foreground"
-                    >
-                      No trades found.
-                    </td>
-                  </tr>
-                ) : (
-                  decisionTrades.map((t) => {
-                    const actionLabel = `${t.action?.toUpperCase()} ${t.side?.toUpperCase()}`;
-                    const isBullish =
-                      t.action === "buy" || t.side === "yes";
-                    const label =
-                      t.ticker ??
-                      (t.market_question
-                        ? t.market_question.slice(0, 40) +
-                          (t.market_question.length > 40 ? "…" : "")
-                        : "—");
-                    const fullQ = t.market_question ?? t.ticker ?? "";
-                    const hasPnl = t.pnl !== null;
-                    const pnl = t.pnl ?? 0;
-
-                    return (
-                      <tr
-                        key={t.id}
-                        onClick={() => setSelectedTrade(t)}
-                        className="hover:bg-secondary/30 transition-colors cursor-pointer"
-                      >
-                        <td className="px-6 py-2.5">
-                          <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">
-                            {fmtDate(t.created_at)}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 max-w-[200px]">
-                          <span
-                            className="text-[12px] text-foreground"
-                            title={fullQ}
-                          >
-                            {label}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span
-                            className={`text-[11px] font-semibold uppercase ${
-                              isBullish ? "text-emerald-500" : "text-red-500"
-                            }`}
-                          >
-                            {actionLabel}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            ${t.amount?.toFixed(2) ?? "—"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="text-[11px] text-muted-foreground">
-                            {t.strategy ?? "—"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {t.price}¢
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          {hasPnl ? (
-                            <span
-                              className={`text-[12px] font-semibold tabular-nums ${
-                                pnl >= 0 ? "text-emerald-500" : "text-red-500"
-                              }`}
-                            >
-                              {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              —
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2.5 text-center">
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] rounded-full font-normal"
-                          >
-                            {t.status}
-                          </Badge>
-                        </td>
-                        <td className="px-6 py-2.5 max-w-[180px]">
-                          {t.notes ? (
-                            <span
-                              className="text-[11px] text-muted-foreground truncate block"
-                              title={t.notes}
-                            >
-                              {t.notes.slice(0, 50)}
-                              {t.notes.length > 50 ? "…" : ""}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              —
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Section>
-
-        {/* ── 4. Performance ───────────────────────────────────────────── */}
+        {/* ── 2. Performance ───────────────────────────────────────────── */}
         <Section title="Performance">
           <div className="grid grid-cols-2 gap-0 divide-x divide-border">
 
@@ -1195,7 +997,7 @@ export default function ObservabilityPage() {
         {/* ── 5. Cost & Efficiency ─────────────────────────────────────── */}
         <Section title="Cost & Efficiency">
           <div className="p-6 space-y-6">
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-4 gap-4">
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
                   Daily LLM Spend
@@ -1232,6 +1034,21 @@ export default function ObservabilityPage() {
                 </p>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
                   {tradesLast30dCount} trades last 30d
+                </p>
+              </div>
+              <div className="rounded-xl border border-border p-4">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
+                  Cost / Run
+                </p>
+                <p className="text-xl font-bold tabular-nums">
+                  {costPerRun !== null
+                    ? costPerRun < 0.000001
+                      ? "<$0.000001"
+                      : `$${costPerRun.toFixed(6)}`
+                    : "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
                 </p>
               </div>
             </div>
@@ -1433,6 +1250,324 @@ export default function ObservabilityPage() {
                 </table>
               )}
             </div>
+          </div>
+        </Section>
+
+        {/* ── 5. Trace Logs ────────────────────────────────────────────── */}
+        <Section
+          title="Execution Traces"
+          action={
+            <div className="flex items-center gap-3">
+              {/* Day tabs */}
+              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                {[0, 1, 2, 3].map((daysAgo) => {
+                  const d = new Date();
+                  d.setDate(d.getDate() - daysAgo);
+                  const iso = d.toISOString().slice(0, 10);
+                  const label = daysAgo === 0 ? "Today" : daysAgo === 1 ? "Yesterday" : `${daysAgo}d ago`;
+                  return (
+                    <button
+                      key={iso}
+                      onClick={() => setTraceDay(iso)}
+                      className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium ${
+                        traceDay === iso
+                          ? "bg-card text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* Custom date */}
+              <input
+                type="date"
+                value={traceDay}
+                onChange={(e) => setTraceDay(e.target.value)}
+                className="text-[10px] bg-secondary border border-border rounded-lg px-2 py-1 text-muted-foreground"
+              />
+              {/* Langfuse link */}
+              <a
+                href="https://cloud.langfuse.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
+              >
+                Langfuse
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          }
+        >
+          <div className="divide-y divide-border">
+            {traceRuns.length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">
+                No auto-trade runs found.
+              </div>
+            ) : (
+              traceRuns.map((run) => {
+                const isOpen = expandedTraces.has(run.id);
+                const children = traceChildren[run.id];
+                return (
+                  <div key={run.id}>
+                    <button
+                      onClick={() => toggleTrace(run)}
+                      className="w-full px-6 py-3 flex items-center gap-3 hover:bg-secondary/30 transition-colors text-left"
+                    >
+                      {isOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      )}
+                      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0 w-[140px]">
+                        {fmtDate(run.created_at)}
+                      </span>
+                      <span className="text-[12px] font-medium shrink-0">
+                        Auto-Trade Run
+                      </span>
+                      <span className="text-[11px] text-muted-foreground truncate flex-1 min-w-0">
+                        {run.message}
+                      </span>
+                    </button>
+                    {isOpen && (
+                      <div className="bg-secondary/20 divide-y divide-border/50">
+                        {!children ? (
+                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
+                            Loading…
+                          </div>
+                        ) : children.length === 0 ? (
+                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
+                            No child events within 90s.
+                          </div>
+                        ) : (
+                          children.map((child) => (
+                            <div
+                              key={child.id}
+                              className="px-10 py-2 flex items-start gap-2.5"
+                            >
+                              <span
+                                className={`mt-[5px] h-1.5 w-1.5 rounded-full shrink-0 ${
+                                  SEVERITY_DOT[child.severity] ??
+                                  "bg-muted-foreground/40"
+                                }`}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`text-[11px] font-medium ${
+                                      SEVERITY_CLASSES[child.severity] ??
+                                      "text-muted-foreground"
+                                    }`}
+                                  >
+                                    {EVENT_TYPE_LABELS[child.event_type] ??
+                                      child.event_type}
+                                  </span>
+                                  <span className="text-[10px] text-muted-foreground/50 tabular-nums ml-auto shrink-0">
+                                    {fmtTime(child.created_at)}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
+                                  {child.message}
+                                </p>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </Section>
+
+        {/* ── 6. Decision History ──────────────────────────────────────── */}
+        <Section
+          title="Decision History"
+          action={
+            <div className="flex items-center gap-2">
+              {/* Date filter */}
+              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                {(["today", "7d", "30d", "all"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setDecisionDateFilter(f)}
+                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                      decisionDateFilter === f
+                        ? "bg-card text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+              {/* Status filter */}
+              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                {(["all", "filled", "settled"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setDecisionStatusFilter(f)}
+                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                      decisionStatusFilter === f
+                        ? "bg-card text-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+            </div>
+          }
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Time
+                  </th>
+                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Market
+                  </th>
+                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Action
+                  </th>
+                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Size
+                  </th>
+                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Strategy
+                  </th>
+                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Entry
+                  </th>
+                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    P&L
+                  </th>
+                  <th className="text-center px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Status
+                  </th>
+                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    Notes
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {decisionTrades.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={9}
+                      className="text-center py-12 text-sm text-muted-foreground"
+                    >
+                      No trades found.
+                    </td>
+                  </tr>
+                ) : (
+                  decisionTrades.map((t) => {
+                    const actionLabel = `${t.action?.toUpperCase()} ${t.side?.toUpperCase()}`;
+                    const isBullish =
+                      t.action === "buy" || t.side === "yes";
+                    const label =
+                      t.ticker ??
+                      (t.market_question
+                        ? t.market_question.slice(0, 40) +
+                          (t.market_question.length > 40 ? "…" : "")
+                        : "—");
+                    const fullQ = t.market_question ?? t.ticker ?? "";
+                    const hasPnl = t.pnl !== null;
+                    const pnl = t.pnl ?? 0;
+
+                    return (
+                      <tr
+                        key={t.id}
+                        onClick={() => setSelectedTrade(t)}
+                        className="hover:bg-secondary/30 transition-colors cursor-pointer"
+                      >
+                        <td className="px-6 py-2.5">
+                          <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">
+                            {fmtDate(t.created_at)}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 max-w-[200px]">
+                          <span
+                            className="text-[12px] text-foreground"
+                            title={fullQ}
+                          >
+                            {label}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span
+                            className={`text-[11px] font-semibold uppercase ${
+                              isBullish ? "text-emerald-500" : "text-red-500"
+                            }`}
+                          >
+                            {actionLabel}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            ${t.amount?.toFixed(2) ?? "—"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className="text-[11px] text-muted-foreground">
+                            {t.strategy ?? "—"}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {t.price}¢
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          {hasPnl ? (
+                            <span
+                              className={`text-[12px] font-semibold tabular-nums ${
+                                pnl >= 0 ? "text-emerald-500" : "text-red-500"
+                              }`}
+                            >
+                              {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">
+                              —
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2.5 text-center">
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] rounded-full font-normal"
+                          >
+                            {t.status}
+                          </Badge>
+                        </td>
+                        <td className="px-6 py-2.5 max-w-[180px]">
+                          {t.notes ? (
+                            <span
+                              className="text-[11px] text-muted-foreground truncate block"
+                              title={t.notes}
+                            >
+                              {t.notes.slice(0, 50)}
+                              {t.notes.length > 50 ? "…" : ""}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">
+                              —
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
           </div>
         </Section>
 
