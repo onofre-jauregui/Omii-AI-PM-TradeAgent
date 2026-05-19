@@ -64,9 +64,12 @@ export function PortfolioStats({
   const load = useCallback(async () => {
     setLoading(true);
 
+    // May 1 2026 — same cutoff as DashboardHero, excludes pre-calibration trades
+    const MAY_START = "2026-05-01T00:00:00.000Z";
+
     // PnL only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
     let settledQuery = supabase
-      .from("trades").select("pnl, mode").eq("status", "settled");
+      .from("trades").select("pnl, mode").eq("status", "settled").gte("settled_at", MAY_START);
     // Open positions: placed but not yet resolved
     let openQuery = supabase
       .from("trades").select("amount, mode").eq("status", "filled").is("settled_at", null);

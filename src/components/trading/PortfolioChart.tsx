@@ -35,10 +35,14 @@ export function PortfolioChart({
   const loadChartData = useCallback(async () => {
     setLoading(true);
 
+    // May 1 2026 — same cutoff as DashboardHero, excludes pre-calibration trades
+    const MAY_START = "2026-05-01T00:00:00.000Z";
+
     let q = supabase
       .from("trades")
       .select("created_at, amount, pnl, action, status, mode, strategy")
       .eq("status", "filled")
+      .gte("created_at", MAY_START)
       .order("created_at", { ascending: true });
 
     if (mode) q = q.eq("mode", mode);
