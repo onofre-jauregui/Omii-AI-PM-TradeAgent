@@ -35,12 +35,14 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const buildChartData = useCallback(async () => {
     setLoading(true);
 
-    // Fetch all filled trades with strategy info
+    // May 1 2026 cutoff + settled trades only — pnl is always 0 on filled trades
+    const MAY_START = "2026-05-01T00:00:00.000Z";
     let q = supabase
       .from("trades")
-      .select("strategy, strategy_id, pnl, amount, action, created_at, status, mode")
-      .eq("status", "filled")
-      .order("created_at", { ascending: true });
+      .select("strategy, strategy_id, pnl, settled_at, mode")
+      .eq("status", "settled")
+      .gte("settled_at", MAY_START)
+      .order("settled_at", { ascending: true });
     if (mode) q = q.eq("mode", mode);
     const { data: trades } = await q;
 
@@ -50,58 +52,48 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
       return;
     }
 
-    // Build per-strategy cumulative balance over time
+    // Cumulative P&L per strategy, starting from each strategy's starting_balance
     const stratBalances: Record<string, number> = {};
     for (const s of strategies) {
       stratBalances[s.id] = s.starting_balance;
     }
 
-    // Group trades by day
+    // Group settled trades by day (settled_at date)
     const dayMap = new Map<string, typeof trades>();
     for (const t of trades) {
-      const day = new Date(t.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const day = new Date((t.settled_at ?? "") + "T12:00:00Z").toLocaleDateString("en-US", {
+        month: "short", day: "numeric",
+      });
       if (!dayMap.has(day)) dayMap.set(day, []);
       dayMap.get(day)!.push(t);
     }
 
     const points: PerStrategyPoint[] = [];
 
-    // Start point
+    // Start point at each strategy's initial balance
     const startPoint: PerStrategyPoint = { date: "Start" };
-    for (const s of strategies) {
-      startPoint[s.id] = s.starting_balance;
-    }
+    for (const s of strategies) startPoint[s.id] = s.starting_balance;
     points.push(startPoint);
 
-    // Process each day
     for (const [day, dayTrades] of dayMap) {
       for (const t of dayTrades) {
-        // Primary: match by strategy_id. Fallback: name/id match for old trades without strategy_id.
         const matchedStrat = strategies.find(s =>
           t.strategy_id === s.id ||
           (!t.strategy_id && (t.strategy === s.name || t.strategy === s.id))
         );
         if (matchedStrat) {
-          const pnl = t.pnl || 0;
-          stratBalances[matchedStrat.id] += pnl;
-          if (t.action === "buy") {
-            stratBalances[matchedStrat.id] -= t.amount;
-          } else {
-            stratBalances[matchedStrat.id] += t.amount;
-          }
+          stratBalances[matchedStrat.id] += t.pnl || 0;
         }
       }
 
       const point: PerStrategyPoint = { date: day };
-      for (const s of strategies) {
-        point[s.id] = Math.round(stratBalances[s.id]);
-      }
+      for (const s of strategies) point[s.id] = Math.round(stratBalances[s.id] * 100) / 100;
       points.push(point);
     }
 
     setChartData(points);
     setLoading(false);
-  }, [strategies]);
+  }, [strategies, mode]);
 
   useEffect(() => {
     if (strategies.length > 0) {

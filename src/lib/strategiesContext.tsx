@@ -100,10 +100,13 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
 
   // Load per-strategy performance stats from trades
   const refreshStats = useCallback(async () => {
+    // May 1 2026 cutoff — same as all other dashboard components
+    const MAY_START = "2026-05-01T00:00:00.000Z";
     const { data: trades } = await supabase
       .from("trades")
       .select("strategy, strategy_id, pnl, status, amount")
-      .eq("status", "filled");
+      .eq("status", "settled")
+      .gte("settled_at", MAY_START);
 
     if (!trades) return;
 
