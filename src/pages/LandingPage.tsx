@@ -198,7 +198,7 @@ function HeroDashboardMockup() {
           <div className="h-3 w-3 rounded-full" style={{ background: "#febc2e" }} />
           <div className="h-3 w-3 rounded-full" style={{ background: "#28c840" }} />
         </div>
-        <span style={{ color: "#6e6e73", fontSize: 11, letterSpacing: "0.06em" }}>TradeAgent · Paper Mode</span>
+        <span style={{ color: "#6e6e73", fontSize: 11, letterSpacing: "0.06em" }}>TradeAgent</span>
         <div className="flex items-center gap-1.5">
           <span className="h-1.5 w-1.5 rounded-full animate-pulse-gentle" style={{ background: "#34d058" }} />
           <span style={{ color: "#34d058", fontSize: 11 }}>Live</span>
