@@ -75,7 +75,7 @@ export function PortfolioStats({
       .from("trades").select("amount, mode").eq("status", "filled").is("settled_at", null);
     // Starting balance from strategies table
     const strategiesQuery = supabase
-      .from("strategies").select("starting_balance").eq("active", true);
+      .from("strategies").select("starting_balance");
 
     if (mode) {
       settledQuery = settledQuery.eq("mode", mode);

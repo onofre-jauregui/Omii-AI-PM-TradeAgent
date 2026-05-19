@@ -141,11 +141,11 @@ export function DashboardHero({
         .from("trades")
         .select("id")
         .gte("created_at", todayISO),
-      // Starting balance = sum of strategy starting_balances (real paper capital allocated)
+      // Starting balance = sum of ALL strategy starting_balances (active or not — base must
+      // include deactivated strategies whose historical trades still count toward P&L)
       supabase
         .from("strategies")
-        .select("starting_balance")
-        .eq("active", true),
+        .select("starting_balance"),
       fetchKalshiMarkets(200),
     ]);
 
