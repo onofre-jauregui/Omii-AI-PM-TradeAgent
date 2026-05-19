@@ -111,6 +111,30 @@ const SEVERITY_DOT: Record<string, string> = {
   critical: "bg-red-500",
 };
 
+const ERROR_SUMMARIES: Record<string, string> = {
+  risk_check_failed: "The agent attempted a trade that failed pre-flight risk checks. The position was blocked before any order was submitted to Kalshi.",
+  position_limit_hit: "The agent reached the maximum number of concurrent open positions. New entries are blocked until existing positions settle or are exited.",
+  daily_loss_limit_hit: "Cumulative realized losses for the day exceeded the configured daily loss limit. All trading was halted for the remainder of the session.",
+  strategy_suspended_sharpe: "This strategy's Sharpe ratio dropped below the minimum threshold (−1.0) over its last 20 trades. It was automatically suspended for 24 hours.",
+  strategy_suspended_drawdown: "The strategy's drawdown exceeded the user-configured maximum. Automatically suspended for 24 hours to prevent further capital erosion.",
+  strategy_suspended_hitrate: "Win rate dropped more than 20 percentage points below the strategy's expected rate over 20 trades. Suspended for 72 hours.",
+  strategy_loss_streak: "The strategy recorded 5 or more consecutive losing trades. A soft warning was logged — no suspension triggered yet.",
+  memory_quarantined: "An agent memory entry's exposed confidence dropped below 0.30 after 10+ attributed trades. It has been removed from the LLM context window.",
+  auto_trade_strategy_error: "An unexpected error occurred inside a strategy execution block. The error was caught, logged, and the run continued with remaining strategies.",
+};
+
+const ERROR_RESOLUTIONS: Record<string, string> = {
+  risk_check_failed: "Review position sizing, max concurrent positions, and daily loss limits in the Risk Controls panel. If the trade was valid, consider relaxing the relevant limit.",
+  position_limit_hit: "Wait for open positions to settle naturally, or manually close positions via the Agent tab. Adjust the max concurrent positions setting if needed.",
+  daily_loss_limit_hit: "Trading will auto-resume the next day. If this is happening frequently, review strategy filters or reduce per-trade size.",
+  strategy_suspended_sharpe: "Wait for the 24-hour suspension to lift. Review recent losing trades in Decision History to identify the root cause before the strategy resumes.",
+  strategy_suspended_drawdown: "Strategy auto-resumes after 24 hours. Consider tightening entry criteria or reducing allocation to this strategy.",
+  strategy_suspended_hitrate: "72-hour suspension is active. Review whether market conditions have shifted and whether the strategy's signal logic needs updating.",
+  strategy_loss_streak: "Monitor the next few trades closely. If losses continue, the strategy will be suspended automatically. Consider pausing it manually if the edge looks gone.",
+  memory_quarantined: "No action needed — this is the self-correction system working. The memory had low predictive value and was removed. It can be re-promoted if confidence recovers.",
+  auto_trade_strategy_error: "Check the Supabase Edge Function logs for the full stack trace. Common causes: Kalshi API timeout, missing market data, or an unexpected null in signal data.",
+};
+
 const EVENT_TYPE_LABELS: Record<string, string> = {
   auto_trade_run: "Auto-Trade Run",
   auto_trade_strategy_run: "Strategy Run",
@@ -199,6 +223,8 @@ export default function ObservabilityPage() {
 
   // Decision history
   const [decisionTrades, setDecisionTrades] = useState<Trade[]>([]);
+  const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
+  const [selectedError, setSelectedError] = useState<ComplianceEvent | null>(null);
 
   // Performance
   const [allSettledTrades, setAllSettledTrades] = useState<Trade[]>([]);
@@ -208,6 +234,7 @@ export default function ObservabilityPage() {
   const [complianceLast30d, setComplianceLast30d] = useState<ComplianceEvent[]>([]);
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
+  const [avgCycleMs, setAvgCycleMs] = useState<number | null>(null);
 
   // Errors
   const [guardrailEvents, setGuardrailEvents] = useState<ComplianceEvent[]>(
@@ -365,6 +392,42 @@ export default function ObservabilityPage() {
     setToolCounts(counts);
   }, []);
 
+  const loadModelLatency = useCallback(async () => {
+    // Fetch last 8 auto_trade_run events
+    const { data: runs } = await supabase
+      .from("compliance_log")
+      .select("id, created_at")
+      .eq("event_type", "auto_trade_run")
+      .order("created_at", { ascending: false })
+      .limit(8);
+    if (!runs || runs.length === 0) return;
+
+    // For each run, find the last child event within 90s
+    const deltas: number[] = [];
+    await Promise.all(
+      runs.map(async (run) => {
+        const windowEnd = new Date(new Date(run.created_at).getTime() + 90_000).toISOString();
+        const { data: children } = await supabase
+          .from("compliance_log")
+          .select("created_at")
+          .gt("created_at", run.created_at)
+          .lte("created_at", windowEnd)
+          .neq("event_type", "auto_trade_run")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (children) {
+          const ms = new Date(children.created_at).getTime() - new Date(run.created_at).getTime();
+          if (ms > 0) deltas.push(ms);
+        }
+      })
+    );
+
+    if (deltas.length > 0) {
+      setAvgCycleMs(Math.round(deltas.reduce((s, v) => s + v, 0) / deltas.length));
+    }
+  }, []);
+
   const loadErrors = useCallback(async () => {
     const guardrailTypes = [
       "risk_check_failed",
@@ -384,13 +447,13 @@ export default function ObservabilityPage() {
         .select("id, created_at, event_type, severity, message, trade_id")
         .in("event_type", guardrailTypes)
         .order("created_at", { ascending: false })
-        .limit(25),
+        .limit(50),
       supabase
         .from("compliance_log")
         .select("id, created_at, event_type, severity, message, trade_id")
         .in("severity", ["error", "critical", "warning"])
         .order("created_at", { ascending: false })
-        .limit(20),
+        .limit(30),
     ]);
 
     if (guardrailRes.data) setGuardrailEvents(guardrailRes.data as ComplianceEvent[]);
@@ -416,6 +479,7 @@ export default function ObservabilityPage() {
     loadDecisionHistory();
     loadPerformance();
     loadComplianceLast30d();
+    loadModelLatency();
     loadErrors();
     loadStrategies();
   }, [
@@ -425,6 +489,7 @@ export default function ObservabilityPage() {
     loadDecisionHistory,
     loadPerformance,
     loadComplianceLast30d,
+    loadModelLatency,
     loadErrors,
     loadStrategies,
   ]);
@@ -501,6 +566,7 @@ export default function ObservabilityPage() {
       loadDecisionHistory();
       loadPerformance();
       loadComplianceLast30d();
+      loadModelLatency();
       loadErrors();
       loadStrategies();
     }, 2 * 60 * 1000);
@@ -516,6 +582,7 @@ export default function ObservabilityPage() {
     loadDecisionHistory,
     loadPerformance,
     loadComplianceLast30d,
+    loadModelLatency,
     loadErrors,
     loadStrategies,
   ]);
@@ -598,6 +665,14 @@ export default function ObservabilityPage() {
   const avgTokensPerDecision = QUALIFY_INPUT_TOKENS + QUALIFY_OUTPUT_TOKENS;
   const costPerTrade =
     tradesLast30dCount > 0 ? (dailyLLMSpend * 30) / tradesLast30dCount : null;
+
+  // Model usage stats (30d)
+  const inputTokens30d = llmCallsLast30d * QUALIFY_INPUT_TOKENS;
+  const outputTokens30d = llmCallsLast30d * QUALIFY_OUTPUT_TOKENS;
+  const totalSpend30d = dailyLLMSpend * 30;
+  const cycleLabel = avgCycleMs !== null
+    ? avgCycleMs >= 1000 ? `${(avgCycleMs / 1000).toFixed(1)}s` : `${avgCycleMs}ms`
+    : null;
 
   const tools = [
     {
@@ -928,7 +1003,8 @@ export default function ObservabilityPage() {
                     return (
                       <tr
                         key={t.id}
-                        className="hover:bg-secondary/30 transition-colors"
+                        onClick={() => setSelectedTrade(t)}
+                        className="hover:bg-secondary/30 transition-colors cursor-pointer"
                       >
                         <td className="px-6 py-2.5">
                           <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">
@@ -1161,6 +1237,57 @@ export default function ObservabilityPage() {
               </div>
             </div>
 
+            {/* Model usage */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">
+                  Model
+                </p>
+                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">
+                  gpt-4o-mini · OpenRouter
+                </span>
+              </div>
+              <div className="grid grid-cols-5 gap-3">
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
+                  <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">qualify decisions</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {inputTokens30d >= 1_000_000
+                      ? `${(inputTokens30d / 1_000_000).toFixed(2)}M`
+                      : `${(inputTokens30d / 1_000).toFixed(0)}K`}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {outputTokens30d >= 1_000_000
+                      ? `${(outputTokens30d / 1_000_000).toFixed(2)}M`
+                      : `${(outputTokens30d / 1_000).toFixed(0)}K`}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
+                  <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    ${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {cycleLabel ?? <span className="text-muted-foreground">—</span>}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
+                </div>
+              </div>
+            </div>
+
             {/* Tools table */}
             <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
@@ -1233,7 +1360,11 @@ export default function ObservabilityPage() {
                 <table className="w-full text-sm">
                   <tbody className="divide-y divide-border">
                     {guardrailEvents.map((ev) => (
-                      <tr key={ev.id} className="hover:bg-secondary/20 transition-colors">
+                      <tr
+                        key={ev.id}
+                        onClick={() => setSelectedError(ev)}
+                        className="hover:bg-secondary/20 transition-colors cursor-pointer"
+                      >
                         <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">
                           {fmtDate(ev.created_at)}
                         </td>
@@ -1273,7 +1404,11 @@ export default function ObservabilityPage() {
                 <table className="w-full text-sm">
                   <tbody className="divide-y divide-border">
                     {errorEvents.map((ev) => (
-                      <tr key={ev.id} className="hover:bg-secondary/20 transition-colors">
+                      <tr
+                        key={ev.id}
+                        onClick={() => setSelectedError(ev)}
+                        className="hover:bg-secondary/20 transition-colors cursor-pointer"
+                      >
                         <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">
                           {fmtDate(ev.created_at)}
                         </td>
@@ -1326,6 +1461,207 @@ export default function ObservabilityPage() {
 
       </div>
     </div>
+
+    {/* ── Trade Detail Panel ───────────────────────────────────────── */}
+    {selectedTrade && (
+      <div
+        className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        onClick={() => setSelectedTrade(null)}
+      >
+        <div
+          className="bg-card rounded-2xl apple-shadow w-full max-w-lg max-h-[90vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-border flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-muted-foreground mb-1">
+                {selectedTrade.strategy ?? "Manual"} · {fmtDate(selectedTrade.created_at)}
+              </p>
+              <h3 className="text-sm font-semibold leading-snug">
+                {selectedTrade.market_question ?? selectedTrade.ticker ?? "Trade Detail"}
+              </h3>
+            </div>
+            <button
+              onClick={() => setSelectedTrade(null)}
+              className="shrink-0 text-muted-foreground hover:text-foreground transition-colors text-lg leading-none mt-0.5"
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="px-6 py-5 space-y-5">
+            {/* Stats row */}
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                {
+                  label: "Action",
+                  value: `${selectedTrade.action?.toUpperCase()} ${selectedTrade.side?.toUpperCase()}`,
+                  cls: selectedTrade.action === "buy" || selectedTrade.side === "yes" ? "text-emerald-500" : "text-red-500",
+                },
+                { label: "Entry Price", value: `${selectedTrade.filled_price ?? selectedTrade.price}¢`, cls: "" },
+                { label: "Size", value: `$${selectedTrade.amount?.toFixed(2) ?? "—"}`, cls: "" },
+              ].map(({ label, value, cls }) => (
+                <div key={label} className="rounded-xl bg-secondary/40 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">{label}</p>
+                  <p className={`text-sm font-semibold tabular-nums ${cls || "text-foreground"}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* P&L + Status */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl bg-secondary/40 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">P&L</p>
+                {selectedTrade.pnl !== null ? (
+                  <p className={`text-lg font-bold tabular-nums ${selectedTrade.pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                    {selectedTrade.pnl >= 0 ? "+" : ""}${selectedTrade.pnl.toFixed(2)}
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Pending</p>
+                )}
+              </div>
+              <div className="rounded-xl bg-secondary/40 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Status</p>
+                <p className="text-sm font-semibold capitalize">{selectedTrade.status}</p>
+                {selectedTrade.settled_at && (
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    Settled {fmtDate(selectedTrade.settled_at)}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {/* Duration */}
+            {selectedTrade.settled_at && (
+              <div className="rounded-xl bg-secondary/40 p-3">
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Hold Duration</p>
+                <p className="text-sm font-medium text-foreground">
+                  {(() => {
+                    const ms = new Date(selectedTrade.settled_at).getTime() - new Date(selectedTrade.created_at).getTime();
+                    const h = Math.floor(ms / 3600000);
+                    const m = Math.floor((ms % 3600000) / 60000);
+                    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+                  })()}
+                </p>
+              </div>
+            )}
+
+            {/* Agent Reasoning */}
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Agent Reasoning</p>
+              {selectedTrade.notes ? (
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">
+                    {selectedTrade.notes}
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-muted-foreground italic">
+                    No reasoning captured for this trade. LLM trace available in{" "}
+                    <a href="https://cloud.langfuse.com" target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
+                      Langfuse ↗
+                    </a>
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* ── Error Detail Panel ───────────────────────────────────────── */}
+    {selectedError && (
+      <div
+        className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        onClick={() => setSelectedError(null)}
+      >
+        <div
+          className="bg-card rounded-2xl apple-shadow w-full max-w-lg max-h-[90vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-border flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                  selectedError.severity === "critical" || selectedError.severity === "error"
+                    ? "bg-red-500/10 text-red-500"
+                    : selectedError.severity === "warning"
+                    ? "bg-yellow-500/10 text-yellow-500"
+                    : "bg-secondary text-muted-foreground"
+                }`}>
+                  {selectedError.severity}
+                </span>
+                <span className="text-xs text-muted-foreground">{fmtDate(selectedError.created_at)}</span>
+              </div>
+              <h3 className="text-sm font-semibold">
+                {EVENT_TYPE_LABELS[selectedError.event_type] ?? selectedError.event_type}
+              </h3>
+            </div>
+            <button
+              onClick={() => setSelectedError(null)}
+              className="shrink-0 text-muted-foreground hover:text-foreground transition-colors text-lg leading-none mt-0.5"
+            >
+              ×
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="px-6 py-5 space-y-4">
+            {/* Raw message */}
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Event Message</p>
+              <div className="rounded-xl bg-secondary/40 p-4">
+                <p className="text-[12px] text-foreground leading-relaxed font-mono">
+                  {selectedError.message}
+                </p>
+              </div>
+            </div>
+
+            {/* Summary */}
+            {ERROR_SUMMARIES[selectedError.event_type] && (
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">What Happened</p>
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed">
+                    {ERROR_SUMMARIES[selectedError.event_type]}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Resolution */}
+            {ERROR_RESOLUTIONS[selectedError.event_type] ? (
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Possible Resolution</p>
+                <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed">
+                    {ERROR_RESOLUTIONS[selectedError.event_type]}
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Next Steps</p>
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-muted-foreground leading-relaxed">
+                    Check the{" "}
+                    <a href="https://cloud.langfuse.com" target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">
+                      Langfuse traces ↗
+                    </a>{" "}
+                    or Supabase Edge Function logs for more detail.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
   );
 }
 
