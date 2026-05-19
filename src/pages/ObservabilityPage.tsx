@@ -349,17 +349,17 @@ export default function ObservabilityPage() {
   const loadComplianceLast30d = useCallback(async () => {
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
-    // Fetch recent events for display (limited) + dedicated count queries per tool type
+    // Event types that actually exist in compliance_log (verified from edge function source)
     const toolEventTypes = [
       "surface_scan_complete",
-      "auto_trade_strategy_run",
+      "auto_trade_strategy_run",   // 1 LLM qualify call per strategy per run
       "auto_trade_strategy_error",
-      "order_submitted",
-      "order_filled",
+      "basket_completed",           // order sent to Kalshi (not "order_submitted")
+      "order_cancelled",
       "auto_settle_run",
       "auto_reflect_run",
-      "risk_check_passed",
-      "risk_check_failed",
+      "auto_trade_skipped",        // risk/filter guard blocks
+      "strategy_auto_halted",
     ];
 
     const [eventsRes, tradesCountRes, ...countResults] = await Promise.all([
@@ -371,12 +371,12 @@ export default function ObservabilityPage() {
         .limit(500),
       supabase
         .from("trades")
-        .select("id", { count: "exact", head: true })
+        .select("*", { count: "exact", head: true })
         .gte("created_at", since),
       ...toolEventTypes.map((et) =>
         supabase
           .from("compliance_log")
-          .select("id", { count: "exact", head: true })
+          .select("*", { count: "exact", head: true })
           .eq("event_type", et)
           .gte("created_at", since)
       ),
@@ -653,8 +653,8 @@ export default function ObservabilityPage() {
   // All trades (for count)
   const totalTradeCount = decisionTrades.length; // approximation from loaded batch
 
-  // Cost stats — use direct trade count (accurate) not proxy from compliance_log
-  const llmCallsLast30d = Math.round(tradesLast30dCount * 1.5); // includes rejected setups
+  // Cost stats — auto_trade_strategy_run is exactly 1 LLM qualify call per strategy per run
+  const llmCallsLast30d = toolCounts["auto_trade_strategy_run"] ?? 0;
   const dailyLLMSpend =
     llmCallsLast30d > 0
       ? (llmCallsLast30d *
@@ -683,15 +683,15 @@ export default function ObservabilityPage() {
     },
     {
       name: "Strategy Engine",
-      desc: "Evaluates signals per active strategy",
+      desc: "Evaluates signals per active strategy (1 LLM call each)",
       calls: toolCounts["auto_trade_strategy_run"] ?? 0,
       errors: toolCounts["auto_trade_strategy_error"] ?? 0,
     },
     {
       name: "Order Execution",
-      desc: "Submits orders to Kalshi REST API",
-      calls: toolCounts["order_submitted"] ?? 0,
-      errors: 0,
+      desc: "Submits basket orders to Kalshi REST API",
+      calls: toolCounts["basket_completed"] ?? 0,
+      errors: toolCounts["order_cancelled"] ?? 0,
     },
     {
       name: "Settlement Engine",
@@ -707,11 +707,9 @@ export default function ObservabilityPage() {
     },
     {
       name: "Risk Guard",
-      desc: "Checks position limits and daily loss caps",
-      calls:
-        (toolCounts["risk_check_passed"] ?? 0) +
-        (toolCounts["risk_check_failed"] ?? 0),
-      errors: toolCounts["risk_check_failed"] ?? 0,
+      desc: "Blocks trades that fail pre-flight checks",
+      calls: toolCounts["auto_trade_skipped"] ?? 0,
+      errors: toolCounts["strategy_auto_halted"] ?? 0,
     },
   ];
 
@@ -1251,7 +1249,7 @@ export default function ObservabilityPage() {
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
                   <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">qualify decisions</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
