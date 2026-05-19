@@ -417,7 +417,7 @@ serve(async (req) => {
           const sub = subscriptionByUserId.get(strategy.user_id) ?? null;
           const entitlement = checkEntitlement({
             subscription: sub,
-            strategy: strategy.id,
+            strategy: (strategy as any).template_id ?? strategy.id,
             mode: strategy.mode as "paper" | "live",
           });
           if (!entitlement.allowed) {
@@ -1429,6 +1429,7 @@ async function qualifySetup(
       headers: {
         "Authorization": `Bearer ${aiConfig.apiKey}`,
         "Content-Type": "application/json",
+        ...(aiConfig.provider === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
         ...(aiConfig.provider === "openrouter" ? { "HTTP-Referer": "https://omii-ai-pm-trade-agent.vercel.app" } : {}),
       },
       body: JSON.stringify({
@@ -1556,9 +1557,19 @@ async function resolveAiConfig(supabase: any): Promise<AiConfig | null> {
       provider: "openrouter",
     };
   }
-  if (anthropicKey) {
-    // Anthropic has a different chat completions shape — use OpenAI-compat endpoint via openrouter
-    // If only Anthropic key is available, skip (not OpenAI-compat without extra adapter)
+  if (anthropicKey && (preferredModel?.startsWith("claude-") || preferredModel?.startsWith("anthropic/"))) {
+    const modelId = preferredModel.startsWith("anthropic/")
+      ? preferredModel.replace("anthropic/", "")
+      : preferredModel;
+    return {
+      apiKey: anthropicKey,
+      baseUrl: "https://api.anthropic.com/v1",
+      model: modelId,
+      provider: "anthropic",
+    };
+  }
+  if (anthropicKey && !openaiKey) {
+    // Anthropic key present but no Claude model selected and no OpenAI key — no usable config
     return null;
   }
   if (openaiKey) {

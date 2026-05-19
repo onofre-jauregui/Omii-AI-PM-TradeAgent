@@ -16,14 +16,16 @@ import { useChat } from "@/lib/chatContext";
 import { supabase } from "@/integrations/supabase/client";
 
 const FALLBACK_MODELS = [
-  { id: "openai/gpt-4o-mini",               name: "GPT-4o Mini",       provider: "OpenAI"     },
-  { id: "openai/gpt-4o",                    name: "GPT-4o",            provider: "OpenAI"     },
-  { id: "anthropic/claude-sonnet-4-6",      name: "Claude Sonnet 4.6", provider: "Anthropic"  },
-  { id: "google/gemini-2.0-flash-001",      name: "Gemini 2.0 Flash",  provider: "Google"     },
-  { id: "meta-llama/llama-3.1-70b-instruct",name: "Llama 3.1 70B",    provider: "Meta"       },
+  { id: "openai/gpt-4.1",              name: "GPT-4.1",           provider: "OpenAI",    tier: "recommended" },
+  { id: "openai/gpt-4.1-mini",         name: "GPT-4.1 Mini",      provider: "OpenAI",    tier: "fast"        },
+  { id: "openai/gpt-4o",               name: "GPT-4o",            provider: "OpenAI",    tier: "smart"       },
+  { id: "openai/gpt-4o-mini",          name: "GPT-4o Mini",       provider: "OpenAI",    tier: "cheap"       },
+  { id: "google/gemini-2.5-pro",       name: "Gemini 2.5 Pro",    provider: "Google",    tier: "smart"       },
+  { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic", tier: "smart"       },
+  { id: "anthropic/claude-opus-4-7",   name: "Claude Opus 4.7",   provider: "Anthropic", tier: "premium"     },
 ];
 
-interface AIModel { id: string; name: string; provider: string; }
+interface AIModel { id: string; name: string; provider: string; tier?: string; }
 type Msg = { role: "user" | "assistant"; content: string };
 
 const LIST_MODELS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/list-ai-models`;
@@ -183,27 +185,11 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
           )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {/* Model selector — always visible */}
-          <Select value={selectedModel} onValueChange={async (id) => {
-            setSelectedModel(id);
-            const { data: { user } } = await supabase.auth.getUser();
-            if (user) supabase.from("api_keys").upsert({ user_id: user.id, provider: "model_agent", key_id: id }, { onConflict: "provider,user_id" });
-          }}>
-            <SelectTrigger className="h-7 rounded-full border-0 bg-secondary text-[11px] font-medium px-3 gap-1 min-w-0 max-w-[140px] whitespace-nowrap">
-              <Cpu className="h-3 w-3 shrink-0 text-muted-foreground" />
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="max-h-64">
-              {models.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
-                  <span className="flex items-center gap-1.5 text-xs">
-                    {m.name}
-                    <span className="text-[10px] text-muted-foreground">{m.provider}</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* Static model chip — non-interactive, shows active model */}
+          <div className="flex items-center gap-1 text-[10px] text-muted-foreground bg-secondary rounded-full px-2 py-1 shrink-0">
+            <Cpu className="h-3 w-3" />
+            <span className="truncate max-w-[80px]">{currentModel?.name ?? "GPT-4o Mini"}</span>
+          </div>
           <Badge variant="secondary" className={`text-[10px] rounded-full shrink-0 ${mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
             {mode === "live" ? "Live" : "Paper"}
           </Badge>
@@ -221,17 +207,52 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
       {/* Collapsible config — temperature + strategies + advanced prompt */}
       {configOpen && (
         <div className="border-b border-border bg-secondary/30 px-4 sm:px-5 py-4 space-y-3 shrink-0">
-          <div className="flex items-center gap-3">
-            <button onClick={loadModels} disabled={loadingModels} className="text-muted-foreground hover:text-foreground transition-colors shrink-0" title="Reload models">
-              {loadingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-            </button>
-            <div className="flex items-center gap-2 flex-1">
-              <Label className="text-xs text-muted-foreground shrink-0">Creativity</Label>
-              <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} className="flex-1" />
-              <span className="text-xs text-muted-foreground shrink-0">
-                {temperature[0] <= 0.2 ? "Precise" : temperature[0] <= 0.5 ? "Balanced" : temperature[0] <= 0.7 ? "Creative" : "Wild"}
-              </span>
+          {/* Model selector row */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Cpu className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <div>
+                  <Label className="text-xs text-foreground">Agent Model</Label>
+                  <p className="text-[10px] text-muted-foreground">Powers chat + auto-trading executor</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button onClick={loadModels} disabled={loadingModels} className="text-muted-foreground hover:text-foreground transition-colors" title="Reload models">
+                  {loadingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                </button>
+                <Select value={selectedModel} onValueChange={async (id) => {
+                  setSelectedModel(id);
+                  const { data: { user } } = await supabase.auth.getUser();
+                  if (user) await supabase.from("api_keys").upsert(
+                    { user_id: user.id, provider: "model_agent", key_id: id },
+                    { onConflict: "provider,user_id" }
+                  );
+                }}>
+                  <SelectTrigger className="h-8 rounded-xl text-xs w-[160px] shrink-0">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {models.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        <span className="flex items-center gap-2 text-xs">
+                          {m.name}
+                          <span className="text-[10px] text-muted-foreground">{m.provider}</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
+          </div>
+          {/* Creativity slider */}
+          <div className="flex items-center gap-2 flex-1">
+            <Label className="text-xs text-muted-foreground shrink-0">Creativity</Label>
+            <Slider value={temperature} onValueChange={setTemperature} max={1} step={0.05} className="flex-1" />
+            <span className="text-xs text-muted-foreground shrink-0">
+              {temperature[0] <= 0.2 ? "Precise" : temperature[0] <= 0.5 ? "Balanced" : temperature[0] <= 0.7 ? "Creative" : "Wild"}
+            </span>
           </div>
           {activeStrategies.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
