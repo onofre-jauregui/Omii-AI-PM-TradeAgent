@@ -20,6 +20,51 @@ const LLM_OUTPUT_PER_M = 0.60;
 const QUALIFY_INPUT_TOKENS = 1_200;
 const QUALIFY_OUTPUT_TOKENS = 50;
 
+// ── Failure Mode Details ───────────────────────────────────────────────────────
+
+const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string; resolution: string }> = {
+  api_timeout: {
+    title: "API Timeouts",
+    description: "LLM qualify calls or Kalshi market fetches exceeded their timeout window. The agent aborts the affected strategy and continues — no trade is blocked, but the market opportunity is missed.",
+    resolution: "Check OpenRouter and Kalshi API status pages. If timeouts are frequent, consider increasing QUALIFY_TIMEOUT_MS or adding retry logic. Sustained timeouts during market hours signal provider degradation.",
+  },
+  llm_rate_limit: {
+    title: "LLM Rate Limits",
+    description: "OpenRouter returned a 429 Too Many Requests. The qualify call failed and the strategy was skipped. Repeated rate limits mean the account RPM/TPM limit is too low for the current cron frequency.",
+    resolution: "Check your OpenRouter dashboard for current usage vs. plan limits. Upgrade the rate limit tier or increase the cron interval from 2min to 5min in the pg_cron schedule.",
+  },
+  cost_spike: {
+    title: "Cost Spike",
+    description: "LLM call rate in the last 6 hours is significantly above the 30-day hourly average. Could indicate a misconfigured cron schedule, a runaway retry loop, or an unusually active market session driving many concurrent signals.",
+    resolution: "Review execution traces to check if auto_trade_strategy_run frequency is abnormal. Verify the pg_cron schedule in Supabase. If it's legitimate market activity, no action needed.",
+  },
+  input_error: {
+    title: "Input / Parse Errors",
+    description: "Strategy execution produced unexpected input data — JSON parse failures, null/undefined signal fields, or schema mismatches. These are caught and logged but indicate upstream data quality issues.",
+    resolution: "Check the specific error messages below for which strategy and market produced the bad data. Common cause: Kalshi API returning partial market data during maintenance windows.",
+  },
+  pii_detected: {
+    title: "PII Detected",
+    description: "A compliance log message appears to contain personal identifiable information (email address or phone number pattern). This should never appear in operational logs and represents a data handling violation.",
+    resolution: "Identify the event and trace its source. Remove or sanitize the PII from any log store. Review the code path that produced the event and add input sanitization before logging.",
+  },
+  db_connection: {
+    title: "DB / Connection Errors",
+    description: "Supabase client returned a connection error, socket failure, or database-level error. Edge functions depend on the DB for trade state, risk rules, and memory injection — connection failures degrade all operations.",
+    resolution: "Check Supabase project status and connection pooler health. If persistent, review edge function database connection limits. Supabase free tier pauses after 7 days of inactivity.",
+  },
+  network_failure: {
+    title: "Network Failures",
+    description: "Outbound network requests from edge functions failed at the transport layer — DNS resolution failure, connection refused, or unreachable host. Distinct from API errors (4xx/5xx) which indicate the host was reached.",
+    resolution: "Check Deno Deploy / Supabase Edge Function network status. These are usually transient. If sustained, verify the target API domain hasn't changed and that no IP allowlisting is required.",
+  },
+  memory_pressure: {
+    title: "Memory Pressure",
+    description: "A significant portion of agent memories have been quarantined (exposed confidence below 0.30 threshold) or the total memory count is very high. High quarantine rates indicate the agent is learning conflicting lessons.",
+    resolution: "Review quarantined memories in the Agent Memory panel to understand which lessons were invalidated. Consider running compact-memory to merge and prune the memory graph. High quarantine rate often signals a strategy edge that has degraded.",
+  },
+};
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 interface ComplianceEvent {
@@ -292,6 +337,7 @@ export default function ObservabilityPage() {
   const [memoryTypeFilter, setMemoryTypeFilter] = useState<string>("all");
   const [memorySortBy, setMemorySortBy] = useState<"confidence" | "confirmations" | "newest">("confidence");
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
+  const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
 
   // Pulse
   useEffect(() => {
@@ -853,6 +899,36 @@ export default function ObservabilityPage() {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 
+  // Failure mode detection (pure, from existing state)
+  const failureModes = detectFailureModes(complianceLast30d, memories, toolCounts);
+
+  // 24h failure timeline — bucket all failure events by hour
+  const failureTimeline = (() => {
+    const now = Date.now();
+    const allFailureEvents = [
+      ...failureModes.api_timeout.events,
+      ...failureModes.llm_rate_limit.events,
+      ...failureModes.input_error.events,
+      ...failureModes.pii_detected.events,
+      ...failureModes.db_connection.events,
+      ...failureModes.network_failure.events,
+    ];
+    return Array.from({ length: 24 }, (_, i) => {
+      const hourStart = now - (23 - i) * 3_600_000;
+      const hourEnd = hourStart + 3_600_000;
+      const label = new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" });
+      return {
+        hour: label,
+        count: allFailureEvents.filter((e) => {
+          const t = new Date(e.created_at).getTime();
+          return t >= hourStart && t < hourEnd;
+        }).length,
+      };
+    });
+  })();
+
+  const totalFailures24h = Object.values(failureModes).reduce((s, m) => s + (m.events?.length ?? 0), 0);
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -1394,6 +1470,103 @@ export default function ObservabilityPage() {
           </div>
         </Section>
 
+        {/* ── System Failure Modes ────────────────────────────────────── */}
+        <Section
+          title="System Failure Modes"
+          action={
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              {totalFailures24h > 0
+                ? `${totalFailures24h} event${totalFailures24h !== 1 ? "s" : ""} · last 24h`
+                : "All clear · last 24h"}
+            </span>
+          }
+        >
+          <div className="p-6 space-y-5">
+            {/* 4×2 health card grid */}
+            <div className="grid grid-cols-4 gap-3">
+              {(
+                [
+                  "api_timeout",
+                  "llm_rate_limit",
+                  "cost_spike",
+                  "input_error",
+                  "pii_detected",
+                  "db_connection",
+                  "network_failure",
+                  "memory_pressure",
+                ] as const
+              ).map((key) => {
+                const mode = failureModes[key];
+                const detail = FAILURE_MODE_DETAILS[key];
+                const { status } = mode;
+                const dotLabel =
+                  status === "critical" ? "✖" :
+                  status === "warning"  ? "▲" :
+                  "●";
+                const dotText =
+                  status === "critical" ? "text-red-500" :
+                  status === "warning"  ? "text-yellow-500" :
+                  "text-emerald-500";
+                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
+
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setSelectedFailureMode(key)}
+                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">
+                        {detail.title}
+                      </p>
+                    </div>
+                    <p className="text-lg font-bold tabular-nums">
+                      {key === "cost_spike"
+                        ? (mode.extra ?? "—")
+                        : key === "memory_pressure"
+                        ? `${mode.count} quarant.`
+                        : `${mode.count}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {key === "cost_spike"
+                        ? `${mode.count} calls · last 6h`
+                        : key === "memory_pressure"
+                        ? mode.extra ?? ""
+                        : lastOccurrence}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* 24h failure timeline */}
+            {failureTimeline.some((h) => h.count > 0) && (
+              <div>
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
+                  24h Failure Timeline
+                </p>
+                <ResponsiveContainer width="100%" height={70}>
+                  <BarChart data={failureTimeline} barSize={10}>
+                    <XAxis
+                      dataKey="hour"
+                      tick={{ fontSize: 9 }}
+                      tickLine={false}
+                      axisLine={false}
+                      interval={3}
+                    />
+                    <Tooltip
+                      formatter={(v: number) => [v, "events"]}
+                      contentStyle={{ fontSize: 10, borderRadius: 6 }}
+                    />
+                    <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </Section>
+
         {/* ── 5. Trace Logs ────────────────────────────────────────────── */}
         <Section
           title="Execution Traces"
@@ -1889,6 +2062,96 @@ export default function ObservabilityPage() {
       </>
     )}
 
+    {/* ── Failure Mode Detail Panel ───────────────────────────────── */}
+    {selectedFailureMode && (() => {
+      const mode = failureModes[selectedFailureMode];
+      const detail = FAILURE_MODE_DETAILS[selectedFailureMode];
+      if (!detail || !mode) return null;
+      const { status } = mode;
+      return (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={() => setSelectedFailureMode(null)}
+        >
+          <div
+            className="bg-card rounded-2xl apple-shadow w-full max-w-lg max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-border flex items-start justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full ${
+                    status === "critical" ? "bg-red-500/10 text-red-500" :
+                    status === "warning"  ? "bg-yellow-500/10 text-yellow-500" :
+                    "bg-emerald-500/10 text-emerald-500"
+                  }`}>
+                    {status}
+                  </span>
+                  <span className="text-xs text-muted-foreground">last 24h</span>
+                </div>
+                <h3 className="text-sm font-semibold">{detail.title}</h3>
+              </div>
+              <button
+                onClick={() => setSelectedFailureMode(null)}
+                className="shrink-0 text-muted-foreground hover:text-foreground transition-colors text-lg leading-none mt-0.5"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">What This Means</p>
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed">{detail.description}</p>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Suggested Resolution</p>
+                <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed">{detail.resolution}</p>
+                </div>
+              </div>
+
+              {mode.events && mode.events.length > 0 && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">
+                    Recent Events ({mode.events.length})
+                  </p>
+                  <div className="rounded-xl bg-secondary/40 divide-y divide-border overflow-hidden">
+                    {mode.events.slice(0, 8).map((ev) => (
+                      <div key={ev.id} className="px-4 py-2.5">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>
+                            {ev.severity}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground ml-auto">{relativeTime(ev.created_at)}</span>
+                        </div>
+                        <p className="text-[11px] text-foreground leading-snug">{ev.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(selectedFailureMode === "cost_spike" || selectedFailureMode === "memory_pressure") && (
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-muted-foreground">
+                    {selectedFailureMode === "cost_spike"
+                      ? `${mode.count} strategy evaluations in the last 6h (${mode.extra ?? "—"} vs 30d avg per 6h window)`
+                      : `${mode.count} quarantined memories · ${failureModes.memory_pressure.extra ?? ""}`}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    })()}
+
     {/* ── Trade Detail Panel ───────────────────────────────────────── */}
 
     {selectedTrade && (
@@ -2092,6 +2355,118 @@ export default function ObservabilityPage() {
     )}
     </>
   );
+}
+
+// ── detectFailureModes ────────────────────────────────────────────────────────
+
+function detectFailureModes(
+  events: ComplianceEvent[],
+  memories: MemoryEntry[],
+  toolCounts: Record<string, number>
+): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
+  const now = Date.now();
+  const cutoff24h = now - 86_400_000;
+  const cutoff6h  = now - 21_600_000;
+
+  const last24h = events.filter((e) => new Date(e.created_at).getTime() >= cutoff24h);
+
+  const timeoutEvents = last24h.filter((e) =>
+    e.event_type === "api_timeout" ||
+    /timeout|aborted|AbortError|timed.?out/i.test(e.message)
+  );
+
+  const rateLimitEvents = last24h.filter((e) =>
+    e.event_type === "llm_rate_limit" ||
+    /\b429\b|rate.?limit|quota.?exceeded|too.?many.?request/i.test(e.message)
+  );
+
+  const dbEvents = last24h.filter((e) =>
+    /connection.?refused|ECONNREFUSED|socket|db.?error|database.?error|connection.?pool/i.test(e.message) &&
+    (e.severity === "error" || e.severity === "critical")
+  );
+
+  const networkEvents = last24h.filter((e) =>
+    /fetch.?failed|network.?error|ENETUNREACH|ETIMEDOUT|DNS|name.?resolution/i.test(e.message) &&
+    (e.severity === "error" || e.severity === "critical") &&
+    e.event_type !== "api_timeout"
+  );
+
+  const inputEvents = last24h.filter((e) =>
+    /parse.?error|unexpected.?token|invalid.?json|schema|validation.?error|cannot.?read|undefined.*null/i.test(e.message) &&
+    e.severity !== "info"
+  );
+
+  const piiEvents = last24h.filter((e) => {
+    const emailRe = /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/;
+    const phoneRe = /\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
+    return emailRe.test(e.message) || phoneRe.test(e.message);
+  });
+
+  const last6hRuns = events.filter(
+    (e) => e.event_type === "auto_trade_strategy_run" && new Date(e.created_at).getTime() >= cutoff6h
+  ).length;
+  const avg6hRuns30d = (toolCounts["auto_trade_strategy_run"] ?? 0) / (30 * 4);
+  const spikeRatio = avg6hRuns30d > 0 ? last6hRuns / avg6hRuns30d : null;
+
+  const quarantined = memories.filter((m) => !!m.quarantined_at);
+  const activeCount = memories.filter((m) => m.is_active && !m.quarantined_at).length;
+
+  function lastAt(evs: ComplianceEvent[]): string | null {
+    return evs.length > 0 ? evs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0].created_at : null;
+  }
+
+  return {
+    api_timeout: {
+      events: timeoutEvents,
+      count: timeoutEvents.length,
+      lastAt: lastAt(timeoutEvents),
+      status: timeoutEvents.length >= 5 ? "critical" : timeoutEvents.length >= 1 ? "warning" : "ok",
+    },
+    llm_rate_limit: {
+      events: rateLimitEvents,
+      count: rateLimitEvents.length,
+      lastAt: lastAt(rateLimitEvents),
+      status: rateLimitEvents.length >= 1 ? "critical" : "ok",
+    },
+    cost_spike: {
+      events: [],
+      count: last6hRuns,
+      lastAt: null,
+      extra: spikeRatio !== null ? `${spikeRatio.toFixed(1)}× avg` : "insufficient data",
+      status: spikeRatio !== null && spikeRatio > 4 ? "critical" : spikeRatio !== null && spikeRatio > 2 ? "warning" : "ok",
+    },
+    input_error: {
+      events: inputEvents,
+      count: inputEvents.length,
+      lastAt: lastAt(inputEvents),
+      status: inputEvents.length >= 10 ? "critical" : inputEvents.length >= 3 ? "warning" : "ok",
+    },
+    pii_detected: {
+      events: piiEvents,
+      count: piiEvents.length,
+      lastAt: lastAt(piiEvents),
+      status: piiEvents.length >= 1 ? "critical" : "ok",
+    },
+    db_connection: {
+      events: dbEvents,
+      count: dbEvents.length,
+      lastAt: lastAt(dbEvents),
+      status: dbEvents.length >= 3 ? "critical" : dbEvents.length >= 1 ? "warning" : "ok",
+    },
+    network_failure: {
+      events: networkEvents,
+      count: networkEvents.length,
+      lastAt: lastAt(networkEvents),
+      status: networkEvents.length >= 5 ? "critical" : networkEvents.length >= 1 ? "warning" : "ok",
+    },
+    memory_pressure: {
+      events: [],
+      count: quarantined.length,
+      lastAt: quarantined.length > 0 ? quarantined.sort((a, b) => new Date(b.quarantined_at!).getTime() - new Date(a.quarantined_at!).getTime())[0].quarantined_at : null,
+      extra: `${activeCount} active`,
+      status: quarantined.length >= 10 ? "critical" : quarantined.length >= 3 ? "warning" : "ok",
+    },
+  };
 }
 
 // ── StatCard ──────────────────────────────────────────────────────────────────

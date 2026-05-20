@@ -318,41 +318,28 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // ── Load active strategies scoped to eligible users ──────────────────────
-    // System strategies (user_id IS NULL) always run.
-    // User strategies only run if that user has an active/trialing subscription.
+    // ── Load active strategies ────────────────────────────────────────────────
+    // Paper strategies run for all users regardless of subscription (paper = free tier).
+    // Live strategies only run for active/trialing subscribers.
+    // checkEntitlement enforces the live vs paper gate per strategy below.
     const { data: activeSubscribers } = await supabase
       .from("subscriptions")
       .select("user_id, tier, status, max_trades_per_day, max_open_positions, max_position_usd, max_markets_watched")
       .in("status", ["active", "trialing"]);
 
-    const activeUserIds: string[] = (activeSubscribers || []).map((s: any) => s.user_id);
     const subscriptionByUserId = new Map<string, SubscriptionRow>(
       (activeSubscribers || []).map((s: any) => [s.user_id, s as SubscriptionRow])
     );
 
-    // Load system strategies (null user_id) + strategies for active subscribers
-    let strategyQuery = supabase
-      .from("strategies")
-      .select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
-      .eq("active", true)
-      .order("id");
-
-    if (activeUserIds.length > 0) {
-      // Supabase doesn't support OR with IS NULL directly, so we fetch both and merge
-      const [{ data: systemStrategies }, { data: userStrategies }] = await Promise.all([
-        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
-          .eq("active", true).is("user_id", null).order("id"),
-        supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
-          .eq("active", true).in("user_id", activeUserIds).order("id"),
-      ]);
-      var strategies = [...(systemStrategies || []), ...(userStrategies || [])];
-    } else {
-      const { data: systemStrategies } = await supabase
-        .from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
-        .eq("active", true).is("user_id", null).order("id");
-      var strategies = systemStrategies || [];
-    }
+    // Load all active user strategies. Paper users run free; live users need a subscription
+    // (enforced by checkEntitlement below). System strategies (user_id=null) are legacy/demo only.
+    const [{ data: systemStrategies }, { data: userStrategies }] = await Promise.all([
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+        .eq("active", true).is("user_id", null).order("id"),
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+        .eq("active", true).not("user_id", "is", null).order("id"),
+    ]);
+    const strategies = [...(systemStrategies || []), ...(userStrategies || [])];
 
     if (!strategies || strategies.length === 0) {
       return new Response(JSON.stringify({ skipped: true, reason: "No active strategies" }), {
@@ -970,7 +957,7 @@ async function runS002LongshotBias(
       note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
     });
 
-    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id);
+    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id, supabase);
     if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
 
     const tradeResp = await fetch(executeUrl, {
@@ -1236,7 +1223,7 @@ async function runS005WeatherEdge(
         ...(memoryBlock ? { strategy_memory: memoryBlock } : {}),
         note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
       });
-      const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id);
+      const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id, supabase);
       return { sig, qualified, reason };
     })
   ) : [];
@@ -1415,6 +1402,7 @@ async function qualifySetup(
   mode = "paper",
   traceId?: string,
   strategyId?: string,
+  supabaseClient?: any,
 ): Promise<{ qualified: boolean; reason: string }> {
   // Paper mode uses the same LLM gate as live — training must mirror production.
   // No bypass here; the only difference between paper and live is whether
@@ -1442,6 +1430,19 @@ async function qualifySetup(
     });
 
     if (!resp.ok) {
+      if (resp.status === 429 && supabaseClient) {
+        supabaseClient.from("compliance_log").insert({
+          event_type: "llm_rate_limit",
+          severity: "error",
+          message: `LLM rate limit hit (429) from ${aiConfig.provider} for strategy ${strategyId ?? "unknown"}`,
+          metadata: {
+            provider: aiConfig.provider,
+            model: aiConfig.model,
+            strategy_id: strategyId,
+            retry_after: resp.headers.get("retry-after"),
+          },
+        }).then().catch(() => {});
+      }
       return { qualified: false, reason: `AI API error: ${resp.status}` };
     }
 
@@ -1473,6 +1474,23 @@ async function qualifySetup(
     return { qualified, reason };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
+    const isTimeout = err instanceof Error && (err.name === "AbortError" || /timeout/i.test(err.message));
+    if (supabaseClient) {
+      supabaseClient.from("compliance_log").insert({
+        event_type: isTimeout ? "api_timeout" : "auto_trade_strategy_error",
+        severity: isTimeout ? "warning" : "error",
+        message: isTimeout
+          ? `LLM qualify call timed out after ${QUALIFY_TIMEOUT_MS}ms for strategy ${strategyId ?? "unknown"}`
+          : `LLM qualify call failed for strategy ${strategyId ?? "unknown"}: ${msg}`,
+        metadata: {
+          provider: aiConfig.provider,
+          model: aiConfig.model,
+          strategy_id: strategyId,
+          timeout_ms: QUALIFY_TIMEOUT_MS,
+          error_name: err instanceof Error ? err.name : "unknown",
+        },
+      }).then().catch(() => {});
+    }
     return { qualified: false, reason: `qualify call failed: ${msg}` };
   } finally {
     clearTimeout(timeoutId);

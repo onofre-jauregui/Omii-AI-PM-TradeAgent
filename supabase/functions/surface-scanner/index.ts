@@ -335,7 +335,24 @@ serve(async (req) => {
       const fetches = SERIES.map((s) =>
         fetch(`${KALSHI_BASE_URL}/markets?limit=30&status=open&series_ticker=${s}`)
           .then((r) => r.json())
-          .catch(() => ({ markets: [] }))
+          .catch((err: unknown) => {
+            if (supabase) {
+              const isTimeout = err instanceof Error &&
+                (err.name === "AbortError" || /timeout|network|fetch/i.test(err.message));
+              supabase.from("compliance_log").insert({
+                event_type: "api_timeout",
+                severity: "warning",
+                message: `Kalshi API fetch failed for series ${s}: ${err instanceof Error ? err.message : "unknown"}`,
+                metadata: {
+                  provider: "kalshi",
+                  series: s,
+                  is_timeout: isTimeout,
+                  error_name: err instanceof Error ? err.name : "unknown",
+                },
+              }).then().catch(() => {});
+            }
+            return { markets: [] };
+          })
       );
       const results = await Promise.all(fetches);
       for (const result of results) {
