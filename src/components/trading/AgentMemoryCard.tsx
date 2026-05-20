@@ -34,7 +34,7 @@ function confidenceBar(conf: number) {
   );
 }
 
-export function AgentMemoryCard() {
+export function AgentMemoryCard({ full = false }: { full?: boolean }) {
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -51,7 +51,7 @@ export function AgentMemoryCard() {
 
   useEffect(() => { load(); }, [load]);
 
-  const visible = expanded ? memories : memories.slice(0, 5);
+  const visible = full || expanded ? memories : memories.slice(0, 5);
 
   return (
     <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
@@ -95,7 +95,7 @@ export function AgentMemoryCard() {
             ))}
           </div>
 
-          {memories.length > 5 && (
+          {!full && memories.length > 5 && (
             <button
               onClick={() => setExpanded(e => !e)}
               className="w-full flex items-center justify-center gap-1.5 py-3 text-xs text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors border-t border-border"

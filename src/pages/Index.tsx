@@ -33,7 +33,7 @@ const TAB_LABELS: Record<Tab, string> = {
 const Index = () => {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [mode, setMode] = useState<Mode>("paper");
-  const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history">("chat");
+  const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history" | "memory">("chat");
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const navigate = useNavigate();
   const isMobile = useIsMobile();
@@ -174,7 +174,7 @@ const Index = () => {
               <DashboardHero mode={mode} onNavigate={handleNavigate} />
               <StrategyPerformance mode={mode} />
               <PortfolioOverview mode={mode} />
-              <AgentMemoryCard />
+              <TradeLog filterMode={mode} />
             </div>
           )}
 
@@ -187,7 +187,7 @@ const Index = () => {
                   { id: "chat",       label: "Chat"       },
                   { id: "strategies", label: "Strategies" },
                   { id: "risk",       label: "Risk"       },
-                  { id: "history",    label: "History"    },
+                  { id: "memory",     label: "Memory"     },
                 ] as const).map(({ id, label }) => (
                   <button
                     key={id}
@@ -205,7 +205,7 @@ const Index = () => {
               {agentSubTab === "chat"       && <AgentPanel mode={mode} />}
               {agentSubTab === "strategies" && <StrategiesPanel />}
               {agentSubTab === "risk"       && <RiskControlsPanel />}
-              {agentSubTab === "history"    && <TradeLog filterMode={mode} />}
+              {agentSubTab === "memory"     && <AgentMemoryCard full />}
             </div>
           )}
 
