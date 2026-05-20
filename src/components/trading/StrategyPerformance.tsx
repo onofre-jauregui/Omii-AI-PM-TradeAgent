@@ -35,8 +35,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const buildChartData = useCallback(async () => {
     setLoading(true);
 
-    // May 1 2026 cutoff + settled trades only — pnl is always 0 on filled trades
-    const MAY_START = "2026-05-01T00:00:00.000Z";
+    const MAY_START = "2026-04-22T00:00:00.000Z";
     let q = supabase
       .from("trades")
       .select("strategy, strategy_id, pnl, settled_at, mode")
