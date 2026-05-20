@@ -877,8 +877,10 @@ export default function ObservabilityPage() {
     : null;
 
   // Performance stats
+  const STARTING_CAPITAL = 2000; // $1k seeded per strategy (S-002 + S-005) at onboarding
   const settledCount = allSettledTrades.length;
   const totalPnl = allSettledTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+  const roi = (totalPnl / STARTING_CAPITAL) * 100;
   const wins = allSettledTrades.filter((t) => (t.pnl ?? 0) > 0).length;
   const winRate = settledCount > 0 ? (wins / settledCount) * 100 : null;
 
@@ -1175,13 +1177,15 @@ export default function ObservabilityPage() {
 
         {/* ── 1. KPI Hero ──────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-4">
-          {/* Total P&L */}
+          {/* ROI */}
           <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Total P&L</p>
-            <p className={`text-4xl font-bold tabular-nums ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
+            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Return on Capital</p>
+            <p className={`text-4xl font-bold tabular-nums ${roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {roi >= 0 ? "+" : ""}{roi.toFixed(2)}%
             </p>
-            <p className="text-[11px] text-muted-foreground">since Apr 22 · {settledCount} trades settled</p>
+            <p className="text-[11px] text-muted-foreground">
+              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} on ${STARTING_CAPITAL.toLocaleString()} · {settledCount} trades
+            </p>
           </div>
 
           {/* Win Rate */}
@@ -1213,12 +1217,17 @@ export default function ObservabilityPage() {
           <div className="px-6 pt-5 pb-2 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold">Portfolio Equity</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">Cumulative P&L since Apr 22, 2026</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Return on ${STARTING_CAPITAL.toLocaleString()} starting capital · since Apr 22, 2026</p>
             </div>
             {equityData.length > 0 && (
-              <span className={`text-sm font-bold tabular-nums ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
-              </span>
+              <div className="text-right">
+                <span className={`text-sm font-bold tabular-nums ${roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                  {roi >= 0 ? "+" : ""}{roi.toFixed(2)}%
+                </span>
+                <p className="text-[10px] text-muted-foreground tabular-nums">
+                  {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
+                </p>
+              </div>
             )}
           </div>
           {equityData.length < 2 ? (
@@ -1235,9 +1244,9 @@ export default function ObservabilityPage() {
                   </linearGradient>
                 </defs>
                 <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} width={48} />
+                <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `${((v / STARTING_CAPITAL) * 100).toFixed(1)}%`} width={52} />
                 <Tooltip
-                  formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
+                  formatter={(value: number) => [`${((value / STARTING_CAPITAL) * 100).toFixed(2)}% ($${value.toFixed(2)})`, "ROI"]}
                   contentStyle={{ fontSize: 11, borderRadius: 8 }}
                 />
                 <Area
