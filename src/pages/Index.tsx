@@ -14,7 +14,6 @@ import { TradeLog } from "@/components/trading/TradeLog";
 import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
-import { CompliancePanel } from "@/components/trading/CompliancePanel";
 import { AccountStatusCard } from "@/components/trading/AccountStatusCard";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -223,9 +222,8 @@ const Index = () => {
             <div className="space-y-6 apple-reveal">
               <ProfilePanel />
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-                <div className="lg:col-span-2 space-y-6">
+                <div className="lg:col-span-2">
                   <SettingsPanel />
-                  <CompliancePanel />
                 </div>
                 <div className="space-y-6">
                   <AccountStatusCard mode={mode} userEmail={userEmail} />
