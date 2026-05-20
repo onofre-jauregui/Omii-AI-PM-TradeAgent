@@ -351,6 +351,7 @@ export default function ObservabilityPage() {
 
   // 24h activity — dedicated server-side counts (not derived from capped array)
   const [runs24hCount, setRuns24hCount] = useState<number | null>(null);
+  const [runs6hCount, setRuns6hCount] = useState<number | null>(null);
   const [scans24hCount, setScans24hCount] = useState<number | null>(null);
   const [tradesFilled24hCount, setTradesFilled24hCount] = useState<number | null>(null);
   // 24h error events — for failure mode detection (error/warning only, last 24h, last 500)
@@ -585,16 +586,20 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadActivity24h = useCallback(async () => {
-    const since = new Date(Date.now() - 86_400_000).toISOString();
-    const [runsRes, scansRes, tradesRes] = await Promise.all([
+    const since24h = new Date(Date.now() - 86_400_000).toISOString();
+    const since6h  = new Date(Date.now() - 21_600_000).toISOString();
+    const [runsRes, runs6hRes, scansRes, tradesRes] = await Promise.all([
       supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "auto_trade_run").gte("created_at", since),
+        .eq("event_type", "auto_trade_run").gte("created_at", since24h),
       supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "surface_scan_complete").gte("created_at", since),
+        .eq("event_type", "auto_trade_strategy_run").gte("created_at", since6h),
+      supabase.from("compliance_log").select("*", { count: "exact", head: true })
+        .eq("event_type", "surface_scan_complete").gte("created_at", since24h),
       supabase.from("trades").select("*", { count: "exact", head: true })
-        .gte("created_at", since),
+        .gte("created_at", since24h),
     ]);
     setRuns24hCount(runsRes.count ?? 0);
+    setRuns6hCount(runs6hRes.count ?? 0);
     setScans24hCount(scansRes.count ?? 0);
     setTradesFilled24hCount(tradesRes.count ?? 0);
   }, []);
@@ -986,7 +991,7 @@ export default function ObservabilityPage() {
   // Filtered + sorted memories for the panel
   const filteredMemories = memories
     .filter((m) => {
-      if (memoryTypeFilter === "quarantined") return !!m.quarantined_at;
+      if (memoryTypeFilter === "quarantined") return !m.is_active || !!m.quarantined_at;
       if (memoryTypeFilter !== "all") return m.memory_type === memoryTypeFilter;
       return true;
     })
@@ -997,7 +1002,7 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
@@ -2287,11 +2292,11 @@ export default function ObservabilityPage() {
 function detectFailureModes(
   events: ComplianceEvent[],
   memories: MemoryEntry[],
-  toolCounts: Record<string, number>
+  toolCounts: Record<string, number>,
+  runs6hCount: number | null = null
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
-  const cutoff6h  = now - 21_600_000;
 
   const last24h = events.filter((e) => new Date(e.created_at).getTime() >= cutoff24h);
 
@@ -2327,11 +2332,10 @@ function detectFailureModes(
     return emailRe.test(e.message) || phoneRe.test(e.message);
   });
 
-  const last6hRuns = events.filter(
-    (e) => e.event_type === "auto_trade_strategy_run" && new Date(e.created_at).getTime() >= cutoff6h
-  ).length;
+  // runs6hCount comes from a dedicated server-side COUNT query — accurate even at high log volume
+  const last6hRuns = runs6hCount ?? 0;
   const avg6hRuns30d = (toolCounts["auto_trade_strategy_run"] ?? 0) / (30 * 4);
-  const spikeRatio = avg6hRuns30d > 0 ? last6hRuns / avg6hRuns30d : null;
+  const spikeRatio = (runs6hCount !== null && avg6hRuns30d > 0) ? last6hRuns / avg6hRuns30d : null;
 
   const quarantined = memories.filter((m) => !m.is_active || !!m.quarantined_at);
   const activeCount = memories.filter((m) => m.is_active && !m.quarantined_at).length;
