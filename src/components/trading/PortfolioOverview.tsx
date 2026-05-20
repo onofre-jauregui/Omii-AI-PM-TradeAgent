@@ -283,7 +283,7 @@ function PositionDetail({ pos, onClose }: { pos: Position; onClose: () => void }
   );
 }
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 5;
 
 export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
   const [positions, setPositions] = useState<Position[]>([]);

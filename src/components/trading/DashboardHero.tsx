@@ -125,7 +125,7 @@ export function DashboardHero({
     const todayISO = todayStart.toISOString();
     const MAY_START = "2026-04-22T00:00:00.000Z";
 
-    const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes] = await Promise.allSettled([
+    const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
         .from("trades")
@@ -151,6 +151,12 @@ export function DashboardHero({
         .from("strategies")
         .select("starting_balance"),
       fetchKalshiMarkets(200),
+      // Most recently placed trade (any status) — for "Last trade" chip
+      supabase
+        .from("trades")
+        .select("created_at")
+        .order("created_at", { ascending: false })
+        .limit(1),
     ]);
 
     const settledTrades = settledRes.status === "fulfilled" ? (settledRes.value.data ?? []) : [];
@@ -158,6 +164,7 @@ export function DashboardHero({
     const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
     const strategies = strategiesRes.status === "fulfilled" ? (strategiesRes.value.data ?? []) : [];
     const markets = marketsRes.status === "fulfilled" ? marketsRes.value : [];
+    const lastPlaced = lastPlacedRes.status === "fulfilled" ? (lastPlacedRes.value.data?.[0]?.created_at ?? null) : null;
 
     // Starting balance from DB — what was allocated when strategies were set up
     const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
@@ -230,7 +237,7 @@ export function DashboardHero({
       tradesToday,
       winStreak,
       marketsClosingToday,
-      lastTradeAt: modeTrades[0]?.settled_at ?? null,
+      lastTradeAt: lastPlaced,
       settledCount: modeTrades.length,
       chartPoints,
       loading: false,
