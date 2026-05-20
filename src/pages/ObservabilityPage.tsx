@@ -128,6 +128,7 @@ interface Strategy {
   mode: string;
   suspended_until: string | null;
   suspension_reason: string | null;
+  starting_balance: number | null;
 }
 
 interface EquityPoint {
@@ -485,7 +486,7 @@ export default function ObservabilityPage() {
   const loadPerformance = useCallback(async () => {
     const { data } = await supabase
       .from("trades")
-      .select("id, pnl, created_at, settled_at, status")
+      .select("id, pnl, created_at, settled_at, status, strategy_id")
       .eq("status", "settled")
       .gte("settled_at", "2026-04-22T00:00:00.000Z")
       .order("settled_at", { ascending: true });
@@ -662,7 +663,7 @@ export default function ObservabilityPage() {
   const loadStrategies = useCallback(async () => {
     const { data } = await supabase
       .from("strategies")
-      .select("id, name, active, mode, suspended_until, suspension_reason");
+      .select("id, name, active, mode, suspended_until, suspension_reason, starting_balance");
     if (data) setStrategies(data as Strategy[]);
   }, []);
 
@@ -877,10 +878,15 @@ export default function ObservabilityPage() {
     : null;
 
   // Performance stats
-  const STARTING_CAPITAL = 2000; // $1k seeded per strategy (S-002 + S-005) at onboarding
+  // Derive starting capital from strategies that actually traded — avoids per-user duplicate rows
+  const tradedStrategyIds = new Set(allSettledTrades.map((t) => t.strategy_id).filter(Boolean));
+  const strategyMap = new Map(strategies.map((s) => [s.id, s]));
+  const STARTING_CAPITAL = tradedStrategyIds.size > 0
+    ? Array.from(tradedStrategyIds).reduce((sum, sid) => sum + (strategyMap.get(sid!)?.starting_balance ?? 0), 0)
+    : strategies.filter((s) => s.active).reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
   const settledCount = allSettledTrades.length;
   const totalPnl = allSettledTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const roi = (totalPnl / STARTING_CAPITAL) * 100;
+  const roi = STARTING_CAPITAL > 0 ? (totalPnl / STARTING_CAPITAL) * 100 : 0;
   const wins = allSettledTrades.filter((t) => (t.pnl ?? 0) > 0).length;
   const winRate = settledCount > 0 ? (wins / settledCount) * 100 : null;
 
