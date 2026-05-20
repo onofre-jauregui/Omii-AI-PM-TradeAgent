@@ -86,8 +86,7 @@ interface OpenTrade {
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
 
-// May 1 2026 — only show calibrated trades; pre-May was development/uncalibrated
-const MAY_START = "2026-05-01T00:00:00.000Z";
+const MAY_START = "2026-04-22T00:00:00.000Z";
 
 async function fetchAll() {
   const [tradesRes, settledRes, openRes] = await Promise.all([
@@ -218,7 +217,7 @@ const ERA_CUTOFFS: Record<Era, string | null> = {
   mtd: "2026-05-01T00:00:00Z",
 };
 const ERA_LABELS: Record<Era, string> = {
-  all: "All time",
+  all: "Since Apr 22",
   redesign: "Post-redesign (May 7+)",
   mtd: "MTD (May 1+)",
 };
