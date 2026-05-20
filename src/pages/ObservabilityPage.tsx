@@ -588,7 +588,7 @@ export default function ObservabilityPage() {
 
   const loadMemories = useCallback(async () => {
     const { data } = await (supabase.from("agent_memory" as any) as any)
-      .select("id, memory_type, title, content, confidence, exposed_confidence, confirmations, contradictions, is_active, tags, strategy_id, source_type, scope, trade_sample_size, created_at, last_recalled_at, quarantined_at")
+      .select("*")
       .order("confidence", { ascending: false })
       .limit(200);
     if (data) setMemories(data as MemoryEntry[]);
@@ -985,6 +985,72 @@ export default function ObservabilityPage() {
 
       <div className="max-w-[1100px] mx-auto px-8 py-8 space-y-6">
 
+        {/* ── System Failure Modes (always visible, top of page) ────── */}
+        <Section
+          title="System Health"
+          action={
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              {totalFailures24h > 0
+                ? `${totalFailures24h} event${totalFailures24h !== 1 ? "s" : ""} · last 24h`
+                : "All clear · last 24h"} · {healthyCount}/{totalHealthChecks} healthy
+            </span>
+          }
+        >
+          <div className="p-6 space-y-5">
+            <div className="grid grid-cols-4 gap-3">
+              {(
+                [
+                  "api_timeout",
+                  "llm_rate_limit",
+                  "cost_spike",
+                  "input_error",
+                  "pii_detected",
+                  "db_connection",
+                  "network_failure",
+                  "memory_pressure",
+                ] as const
+              ).map((key) => {
+                const mode = failureModes[key];
+                const detail = FAILURE_MODE_DETAILS[key];
+                const { status: modeStatus } = mode;
+                const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
+                const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
+                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setSelectedFailureMode(key)}
+                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                    </div>
+                    <p className="text-lg font-bold tabular-nums">
+                      {key === "cost_spike" ? (mode.extra ?? "—") : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {key === "cost_spike" ? `${mode.count} calls · last 6h` : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+            {failureTimeline.some((h) => h.count > 0) && (
+              <div>
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline</p>
+                <ResponsiveContainer width="100%" height={70}>
+                  <BarChart data={failureTimeline} barSize={10}>
+                    <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
+                    <Tooltip formatter={(v: number) => [v, "events"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
+                    <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+        </Section>
+
         {/* ── 1. KPI Hero ──────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-4">
           {/* Total P&L */}
@@ -1100,7 +1166,8 @@ export default function ObservabilityPage() {
               <h2 className="text-sm font-semibold">Agent Intelligence</h2>
               <button
                 onClick={() => setMemoryPanelOpen(true)}
-                className="text-[11px] text-primary hover:opacity-80 transition-opacity"
+                className="text-[11px] hover:opacity-80 transition-opacity"
+                style={{ color: "#f97316" }}
               >
                 View All →
               </button>
@@ -1135,41 +1202,6 @@ export default function ObservabilityPage() {
                 {isAuthenticated === false ? "Sign in to view agent memory." : "Loading memory…"}
               </p>
             )}
-          </div>
-        </div>
-
-        {/* ── 4. System Health ─────────────────────────────────────────── */}
-        <div className="rounded-2xl bg-card apple-shadow px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <h2 className="text-sm font-semibold mr-3">System Health</h2>
-              {([
-                ["api_timeout", "API"],
-                ["llm_rate_limit", "LLM"],
-                ["db_connection", "Database"],
-                ["network_failure", "Network"],
-                ["cost_spike", "Cost"],
-                ["memory_pressure", "Memory"],
-                ["input_error", "Inputs"],
-                ["pii_detected", "PII"],
-              ] as const).map(([key, label]) => {
-                const m = failureModes[key];
-                const dot = m.status === "critical" ? "bg-red-500" : m.status === "warning" ? "bg-yellow-500" : "bg-emerald-500";
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setSelectedFailureMode(key)}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-secondary hover:bg-secondary/80 transition-colors"
-                  >
-                    <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-                    <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <span className="text-[10px] text-muted-foreground">
-              {healthyCount}/{totalHealthChecks} healthy
-            </span>
           </div>
         </div>
 
@@ -1518,72 +1550,6 @@ export default function ObservabilityPage() {
                     </table>
                   )}
                 </div>
-              </div>
-            </Section>
-
-            {/* System Failure Modes */}
-            <Section
-              title="System Failure Modes"
-              action={
-                <span className="text-[10px] text-muted-foreground tabular-nums">
-                  {totalFailures24h > 0
-                    ? `${totalFailures24h} event${totalFailures24h !== 1 ? "s" : ""} · last 24h`
-                    : "All clear · last 24h"}
-                </span>
-              }
-            >
-              <div className="p-6 space-y-5">
-                <div className="grid grid-cols-4 gap-3">
-                  {(
-                    [
-                      "api_timeout",
-                      "llm_rate_limit",
-                      "cost_spike",
-                      "input_error",
-                      "pii_detected",
-                      "db_connection",
-                      "network_failure",
-                      "memory_pressure",
-                    ] as const
-                  ).map((key) => {
-                    const mode = failureModes[key];
-                    const detail = FAILURE_MODE_DETAILS[key];
-                    const { status: modeStatus } = mode;
-                    const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
-                    const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
-                    const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => setSelectedFailureMode(key)}
-                        className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
-                      >
-                        <div className="flex items-center gap-1.5 mb-2">
-                          <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
-                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
-                        </div>
-                        <p className="text-lg font-bold tabular-nums">
-                          {key === "cost_spike" ? (mode.extra ?? "—") : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
-                        </p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">
-                          {key === "cost_spike" ? `${mode.count} calls · last 6h` : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-                {failureTimeline.some((h) => h.count > 0) && (
-                  <div>
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline</p>
-                    <ResponsiveContainer width="100%" height={70}>
-                      <BarChart data={failureTimeline} barSize={10}>
-                        <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
-                        <Tooltip formatter={(v: number) => [v, "events"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
-                        <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
               </div>
             </Section>
 
