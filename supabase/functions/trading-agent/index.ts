@@ -695,13 +695,19 @@ serve(async (req) => {
       `
 
 ## Kalshi Market Catalogue
+This catalogue lists known series — it is NOT exhaustive. Kalshi has hundreds of active series. When the user asks about an unknown ticker or series, use fetch_live_markets with a keyword to look it up. Never assume a market's nature from its ticker name alone — always trust the title and resolution criteria returned by the API.
+
+Known series (for reference only):
 - **KXHIGH[CITY]** — Daily high temperature (NY, CHI, LA, MIA, AUS, PHX, SEA, DAL). Settles at midnight local. Active strategies: S-002, S-005.
-- **KXFED** — Federal Reserve rate decisions (FOMC meetings). **HARD REJECTED** — confirmed zero liquidity in paper markets (agent memory conf=0.99).
-- **KXBTC** — Bitcoin price levels (daily/weekly). Monitor — no active strategy yet.
+- **KXFED** — Federal Reserve rate decisions. **HARD REJECTED** — zero liquidity confirmed.
+- **KXBTC** — Bitcoin price levels (daily/weekly).
 - **KXETH** — Ethereum price levels. **HARD REJECTED** — consistent losses confirmed.
-- **KXGDP / KXPAYROLLS / KXCPI** — US macro reports. High edge potential on consensus vs Kalshi divergence. No active strategy yet.
-- **KXNHL / KXNBA / KXMLB** — Sports outcomes. No active strategy.
-When the user asks about a market or event, map it to the relevant KXSERIES above. Use **search_web** for current news on any of these before trading.
+- **KXGDP / KXPAYROLLS / KXCPI** — US macro reports.
+- **KXNHL / KXNBA / KXMLB / KXNFL / KXMLS** — Sports outcomes (hockey, basketball, baseball, football, soccer).
+- **KXWCGAME** — FIFA World Cup game-by-game outcomes. Real professional soccer matches.
+- **KXPRES / KXSENATE** — US political elections and outcomes.
+
+**Critical rule**: If the user provides a market ticker, URL, or resolution criteria — fetch that market and trust what comes back. Never invent an explanation (e.g., "this is esports") without evidence from the fetched data. If the market title says "professional FIFA World Cup soccer game," it is that.
 
 ## Tool Workflow
 recall_lessons → fetch_signals → scan_surface → check_portfolio → execute → save_insight/reflect_on_trades
