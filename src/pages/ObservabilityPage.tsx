@@ -346,6 +346,8 @@ export default function ObservabilityPage() {
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [traceExpanded, setTraceExpanded] = useState(false);
+  const [tracePage, setTracePage] = useState(1);
 
   // Pulse
   useEffect(() => {
@@ -664,6 +666,8 @@ export default function ObservabilityPage() {
   ]);
 
   useEffect(() => {
+    setTracePage(1);
+    setTraceExpanded(false);
     loadTraceLogs();
   }, [traceDay, loadTraceLogs]);
 
@@ -989,6 +993,14 @@ export default function ObservabilityPage() {
   const healthyCount = Object.values(failureModes).filter((m) => m.status === "ok").length;
   const totalHealthChecks = Object.keys(failureModes).length;
 
+  // Trace pagination
+  const TRACE_PAGE_SIZE = 30;
+  const TRACE_INITIAL = 10;
+  const totalTracePages = traceExpanded ? Math.ceil(traceRuns.length / TRACE_PAGE_SIZE) : 1;
+  const traceSlice = traceExpanded
+    ? traceRuns.slice((tracePage - 1) * TRACE_PAGE_SIZE, tracePage * TRACE_PAGE_SIZE)
+    : traceRuns.slice(0, TRACE_INITIAL);
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -1250,7 +1262,111 @@ export default function ObservabilityPage() {
           </div>
         </div>
 
-        {/* ── 5. Recent Decisions ──────────────────────────────────────── */}
+        {/* ── 5. Cost & Efficiency ─────────────────────────────────────── */}
+        <Section title="Cost & Efficiency">
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-4 gap-4">
+              <div className="rounded-xl border border-border p-4">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Daily LLM Spend</p>
+                <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">gpt-4o-mini via OpenRouter</p>
+              </div>
+              <div className="rounded-xl border border-border p-4">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
+                <p className="text-xl font-bold tabular-nums">{avgTokensPerDecision.toLocaleString()}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  {QUALIFY_INPUT_TOKENS.toLocaleString()} in + {QUALIFY_OUTPUT_TOKENS} out
+                </p>
+              </div>
+              <div className="rounded-xl border border-border p-4">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost per Trade</p>
+                <p className="text-xl font-bold tabular-nums">
+                  {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">{tradesLast30dCount} trades last 30d</p>
+              </div>
+              <div className="rounded-xl border border-border p-4">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
+                <p className="text-xl font-bold tabular-nums">
+                  {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
+                </p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
+                </p>
+              </div>
+            </div>
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Model</p>
+                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">gpt-4o-mini · OpenRouter</span>
+              </div>
+              <div className="grid grid-cols-5 gap-3">
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
+                  <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {inputTokens30d >= 1_000_000 ? `${(inputTokens30d / 1_000_000).toFixed(2)}M` : `${(inputTokens30d / 1_000).toFixed(0)}K`}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {outputTokens30d >= 1_000_000 ? `${(outputTokens30d / 1_000_000).toFixed(2)}M` : `${(outputTokens30d / 1_000).toFixed(0)}K`}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
+                  <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {cycleLabel ?? <span className="text-muted-foreground">—</span>}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
+                </div>
+              </div>
+            </div>
+            <div>
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Agent Tools</p>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">Tool</th>
+                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">What it does</th>
+                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Calls (30d)</th>
+                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Errors (30d)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {tools.map((tool) => (
+                    <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
+                      <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
+                      <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
+                      <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
+                      <td className="py-2.5 text-right text-[12px] tabular-nums">
+                        {tool.errors > 0 ? (
+                          <span className="text-red-500">{tool.errors}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Section>
+
+        {/* ── 6. Recent Decisions ──────────────────────────────────────── */}
         <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
           <div className="px-6 py-4 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-semibold">Recent Decisions</h2>
@@ -1384,110 +1500,6 @@ export default function ObservabilityPage() {
                       </AreaChart>
                     </ResponsiveContainer>
                   )}
-                </div>
-              </div>
-            </Section>
-
-            {/* Cost & Efficiency */}
-            <Section title="Cost & Efficiency">
-              <div className="p-6 space-y-6">
-                <div className="grid grid-cols-4 gap-4">
-                  <div className="rounded-xl border border-border p-4">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Daily LLM Spend</p>
-                    <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">gpt-4o-mini via OpenRouter</p>
-                  </div>
-                  <div className="rounded-xl border border-border p-4">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
-                    <p className="text-xl font-bold tabular-nums">{avgTokensPerDecision.toLocaleString()}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {QUALIFY_INPUT_TOKENS.toLocaleString()} in + {QUALIFY_OUTPUT_TOKENS} out
-                    </p>
-                  </div>
-                  <div className="rounded-xl border border-border p-4">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost per Trade</p>
-                    <p className="text-xl font-bold tabular-nums">
-                      {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">{tradesLast30dCount} trades last 30d</p>
-                  </div>
-                  <div className="rounded-xl border border-border p-4">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
-                    <p className="text-xl font-bold tabular-nums">
-                      {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
-                    </p>
-                  </div>
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 mb-3">
-                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Model</p>
-                    <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">gpt-4o-mini · OpenRouter</span>
-                  </div>
-                  <div className="grid grid-cols-5 gap-3">
-                    <div className="rounded-xl border border-border p-3">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
-                      <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
-                    </div>
-                    <div className="rounded-xl border border-border p-3">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
-                      <p className="text-base font-bold tabular-nums">
-                        {inputTokens30d >= 1_000_000 ? `${(inputTokens30d / 1_000_000).toFixed(2)}M` : `${(inputTokens30d / 1_000).toFixed(0)}K`}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
-                    </div>
-                    <div className="rounded-xl border border-border p-3">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
-                      <p className="text-base font-bold tabular-nums">
-                        {outputTokens30d >= 1_000_000 ? `${(outputTokens30d / 1_000_000).toFixed(2)}M` : `${(outputTokens30d / 1_000).toFixed(0)}K`}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
-                    </div>
-                    <div className="rounded-xl border border-border p-3">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
-                      <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in</p>
-                    </div>
-                    <div className="rounded-xl border border-border p-3">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
-                      <p className="text-base font-bold tabular-nums">
-                        {cycleLabel ?? <span className="text-muted-foreground">—</span>}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
-                    </div>
-                  </div>
-                </div>
-                <div>
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Agent Tools</p>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">Tool</th>
-                        <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">What it does</th>
-                        <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Calls (30d)</th>
-                        <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Errors (30d)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border">
-                      {tools.map((tool) => (
-                        <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
-                          <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
-                          <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
-                          <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
-                          <td className="py-2.5 text-right text-[12px] tabular-nums">
-                            {tool.errors > 0 ? (
-                              <span className="text-red-500">{tool.errors}</span>
-                            ) : (
-                              <span className="text-muted-foreground">0</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
                 </div>
               </div>
             </Section>
@@ -1644,7 +1656,7 @@ export default function ObservabilityPage() {
                 {traceRuns.length === 0 ? (
                   <div className="py-10 text-center text-sm text-muted-foreground">No auto-trade runs found.</div>
                 ) : (
-                  traceRuns.map((run) => {
+                  traceSlice.map((run) => {
                     const isOpen = expandedTraces.has(run.id);
                     const children = traceChildren[run.id];
                     return (
@@ -1691,6 +1703,68 @@ export default function ObservabilityPage() {
                   })
                 )}
               </div>
+              {/* Trace expand / pagination controls */}
+              {traceRuns.length > TRACE_INITIAL && (
+                <div className="px-6 py-3 border-t border-border flex items-center gap-3">
+                  {!traceExpanded ? (
+                    <button
+                      onClick={() => { setTraceExpanded(true); setTracePage(1); }}
+                      className="text-[11px] font-medium hover:opacity-80 transition-opacity"
+                      style={{ color: "#f97316" }}
+                    >
+                      Show 30 ↓
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => setTraceExpanded(false)}
+                        className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        Collapse ↑
+                      </button>
+                      {totalTracePages > 1 && (
+                        <div className="flex items-center gap-1 ml-auto">
+                          <button
+                            onClick={() => setTracePage((p) => Math.max(1, p - 1))}
+                            disabled={tracePage === 1}
+                            className="text-[10px] px-2 py-1 rounded-lg bg-secondary hover:bg-secondary/80 transition-colors disabled:opacity-30 font-medium"
+                          >
+                            ←
+                          </button>
+                          {Array.from({ length: totalTracePages }, (_, i) => i + 1).map((p) => (
+                            <button
+                              key={p}
+                              onClick={() => setTracePage(p)}
+                              className={`text-[10px] px-2.5 py-1 rounded-lg transition-colors font-medium ${
+                                tracePage === p
+                                  ? "bg-card text-foreground shadow-sm border border-border"
+                                  : "bg-secondary text-muted-foreground hover:text-foreground"
+                              }`}
+                            >
+                              {p}
+                            </button>
+                          ))}
+                          <button
+                            onClick={() => setTracePage((p) => Math.min(totalTracePages, p + 1))}
+                            disabled={tracePage === totalTracePages}
+                            className="text-[10px] px-2 py-1 rounded-lg bg-secondary hover:bg-secondary/80 transition-colors disabled:opacity-30 font-medium"
+                          >
+                            →
+                          </button>
+                          <span className="text-[10px] text-muted-foreground ml-1">
+                            {(tracePage - 1) * TRACE_PAGE_SIZE + 1}–{Math.min(tracePage * TRACE_PAGE_SIZE, traceRuns.length)} of {traceRuns.length}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {!traceExpanded && (
+                    <span className="text-[10px] text-muted-foreground ml-auto">
+                      showing 10 of {traceRuns.length}
+                    </span>
+                  )}
+                </div>
+              )}
             </Section>
 
             {/* Decision History */}
