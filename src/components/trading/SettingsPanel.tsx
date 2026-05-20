@@ -134,13 +134,19 @@ export function SettingsPanel() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
-      await supabase.from("api_keys").upsert(
-        { provider: "model_agent", key_id: selectedModel, user_id: user.id, updated_at: new Date().toISOString() },
-        { onConflict: "user_id,provider" }
-      );
+      await supabase.from("api_keys").delete().eq("user_id", user.id).eq("provider", "model_agent");
+      const { error } = await supabase.from("api_keys").insert({
+        provider: "model_agent",
+        key_id: selectedModel,
+        encrypted_secret: selectedModel,
+        user_id: user.id,
+        updated_at: new Date().toISOString(),
+      });
+      if (error) throw error;
       setModelSaveStatus("success");
       setTimeout(() => setModelSaveStatus("idle"), 3000);
-    } catch {
+    } catch (err) {
+      console.error("Model save failed:", err);
       setModelSaveStatus("error");
     } finally {
       setModelSaving(false);
@@ -161,20 +167,27 @@ export function SettingsPanel() {
       ].filter(Boolean) as { provider: string; key_id: string; encrypted_secret: string }[];
 
       for (const key of keysToSave) {
-        await supabase.from("api_keys").upsert(
-          { ...key, user_id: user.id, updated_at: new Date().toISOString() },
-          { onConflict: "user_id,provider" }
-        );
+        // Delete existing row first so we can insert fresh without relying on a
+        // specific conflict constraint. Avoids silent upsert failures.
+        await supabase.from("api_keys").delete().eq("user_id", user.id).eq("provider", key.provider);
+        const { error } = await supabase.from("api_keys").insert({
+          ...key,
+          user_id: user.id,
+          updated_at: new Date().toISOString(),
+        });
+        if (error) throw error;
       }
+      // Update badge state directly — don't re-read from DB which would reset state
+      // on any timing issue with the just-written rows.
       setSavedProviders(prev => {
         const next = new Set(prev);
         keysToSave.forEach(k => next.add(k.provider));
         return next;
       });
-      await loadAll();
       setAiSaveStatus("success");
       setTimeout(() => setAiSaveStatus("idle"), 3000);
-    } catch {
+    } catch (err) {
+      console.error("AI key save failed:", err);
       setAiSaveStatus("error");
     } finally {
       setAiSaving(false);
