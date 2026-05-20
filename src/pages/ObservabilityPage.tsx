@@ -881,6 +881,14 @@ export default function ObservabilityPage() {
   // All trades (for count)
   const totalTradeCount = decisionTrades.length; // approximation from loaded batch
 
+  // Active model — must be declared before cost calculations that reference it
+  const modelInfo = (activeModel && MODEL_COSTS[activeModel]) ? MODEL_COSTS[activeModel] : DEFAULT_MODEL_INFO;
+  const modelLabel = modelInfo.label;
+  const modelProviderLabel = modelInfo.provider;
+  const LLM_INPUT_PER_M = modelInfo.input;
+  const LLM_OUTPUT_PER_M = modelInfo.output;
+  const unknownModel = !!activeModel && !MODEL_COSTS[activeModel];
+
   // Cost stats — auto_trade_strategy_run is exactly 1 LLM qualify call per strategy per run
   const llmCallsLast30d = toolCounts["auto_trade_strategy_run"] ?? 0;
   const dailyLLMSpend =
@@ -912,14 +920,6 @@ export default function ObservabilityPage() {
   const cycleLabel = avgCycleMs !== null
     ? avgCycleMs >= 1000 ? `${(avgCycleMs / 1000).toFixed(1)}s` : `${avgCycleMs}ms`
     : null;
-
-  // Active model — read from DB, fall back to default
-  const modelInfo = (activeModel && MODEL_COSTS[activeModel]) ? MODEL_COSTS[activeModel] : DEFAULT_MODEL_INFO;
-  const modelLabel = modelInfo.label;
-  const modelProviderLabel = modelInfo.provider;
-  const LLM_INPUT_PER_M = modelInfo.input;
-  const LLM_OUTPUT_PER_M = modelInfo.output;
-  const unknownModel = !!activeModel && !MODEL_COSTS[activeModel];
 
   const primaryMode = strategies[0]?.mode ?? "paper";
 
