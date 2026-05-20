@@ -7,9 +7,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
-  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2,
+  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, AlertTriangle,
 } from "lucide-react";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useStrategies, type Strategy } from "@/lib/strategiesContext";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -185,6 +185,89 @@ function StrategyDetailModal({
 }
 
 // ─── Main panel ───────────────────────────────────────────────────────────────
+// ─── Trading Mode Panel ───────────────────────────────────────────────────────
+function TradingModePanel() {
+  const { strategies, updateStrategy } = useStrategies();
+  // pendingLive: strategy id waiting for confirmation tap; cleared after 5s
+  const [pendingLive, setPendingLive] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPending = () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    setPendingLive(null);
+  };
+
+  const handleToggle = (id: string, currentMode: "paper" | "live") => {
+    if (currentMode === "live") {
+      // Safe direction: live → paper, no confirmation needed
+      clearPending();
+      updateStrategy(id, { mode: "paper" });
+    } else if (pendingLive === id) {
+      // Second tap: commit paper → live
+      clearPending();
+      updateStrategy(id, { mode: "live" });
+    } else {
+      // First tap: set pending, start 5s timeout
+      clearPending();
+      setPendingLive(id);
+      timerRef.current = setTimeout(() => setPendingLive(null), 5000);
+    }
+  };
+
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+
+  const liveCount = strategies.filter(s => s.mode === "live").length;
+  const paperCount = strategies.filter(s => s.mode === "paper").length;
+
+  return (
+    <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+        <p className="text-xs font-medium text-foreground">Trading Mode</p>
+        <p className="text-[11px] text-muted-foreground tabular-nums">
+          {liveCount > 0 && <span className="text-loss font-medium">{liveCount} live</span>}
+          {liveCount > 0 && paperCount > 0 && <span className="text-muted-foreground"> · </span>}
+          {paperCount > 0 && <span>{paperCount} paper</span>}
+        </p>
+      </div>
+      <div className="divide-y divide-border">
+        {strategies.map(strat => {
+          const isLive = strat.mode === "live";
+          const isPending = pendingLive === strat.id;
+          return (
+            <div key={strat.id} className="px-5 py-3">
+              <div className="flex items-center gap-3">
+                <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-1.5 shrink-0">
+                  {strat.id}
+                </Badge>
+                <p className="text-sm text-foreground flex-1 min-w-0 truncate">{strat.name}</p>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className={`text-xs ${!isLive ? "text-primary font-medium" : "text-muted-foreground"}`}>
+                    Paper
+                  </span>
+                  <Switch
+                    checked={isLive}
+                    onCheckedChange={() => handleToggle(strat.id, strat.mode)}
+                    className={isLive ? "data-[state=checked]:bg-loss" : ""}
+                  />
+                  <span className={`text-xs ${isLive ? "text-loss font-medium" : "text-muted-foreground"}`}>
+                    Live
+                  </span>
+                </div>
+              </div>
+              {isPending && (
+                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-warning bg-warning/10 rounded-lg px-3 py-1.5">
+                  <AlertTriangle className="h-3 w-3 shrink-0" />
+                  Real money — tap Live again to confirm
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function StrategiesPanel() {
   const { strategies, strategyStats, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
   const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null);
@@ -236,6 +319,8 @@ export function StrategiesPanel() {
           <Plus className="h-4 w-4" /> New Strategy
         </Button>
       </div>
+
+      <TradingModePanel />
 
       <div className="grid md:grid-cols-2 gap-4">
         {strategies.map((strat) => {
