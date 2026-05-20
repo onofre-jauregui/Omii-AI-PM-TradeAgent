@@ -22,8 +22,7 @@ interface PortfolioChartProps {
   label?: string;
 }
 
-// May 1 2026 — same cutoff as all other dashboard components
-const MAY_START = "2026-05-01T00:00:00.000Z";
+const MAY_START = "2026-04-22T00:00:00.000Z";
 const FALLBACK_STARTING_BALANCE = 2_500;
 
 export function PortfolioChart({
