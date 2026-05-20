@@ -37,12 +37,13 @@ const FETCH_MARKETS_TOOL = {
   function: {
     name: "fetch_live_markets",
     description:
-      "Fetch current live event contract markets from Kalshi with real prices, volumes, and order book data. Use this to get fresh market data before making trading decisions.",
+      "Fetch current live event contract markets from Kalshi with real prices, volumes, and order book data. Use this to get fresh market data before making trading decisions. Use 'keyword' to search by any topic — team names, player names, event names, country names, etc.",
     parameters: {
       type: "object",
       properties: {
-        limit: { type: "number", description: "Number of markets to fetch (default 10)" },
-        category: { type: "string", description: "Filter by category (e.g. 'economics', 'politics', 'crypto')" },
+        limit: { type: "number", description: "Number of markets to fetch (default 20)" },
+        category: { type: "string", description: "Filter by Kalshi series ticker (e.g. 'KXFED', 'KXMLB', 'KXNBA')" },
+        keyword: { type: "string", description: "Free-text search across all Kalshi markets by title/topic. Examples: 'Mexico', 'soccer', 'Trump', 'Bitcoin', 'Lakers'. Use this when the user asks about a specific team, event, or topic." },
       },
     },
   },
@@ -870,30 +871,30 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
 
             let allMarkets: any[] = [];
 
-            if (args.category) {
-              // Category-specific fetch (series_ticker)
+            if (args.keyword) {
+              // Free-text keyword search across all Kalshi markets
+              const encoded = encodeURIComponent(args.keyword);
+              const url = `${kalshiBase}/markets?limit=50&status=open&search=${encoded}`;
+              const res = await fetch(url);
+              const data = await res.json();
+              allMarkets = (data.markets || []).map(parseMarket);
+            } else if (args.category) {
+              // Series ticker fetch
               const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 60)}&status=open&series_ticker=${args.category}`;
               const res = await fetch(url);
               const data = await res.json();
               allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
-              // Parallel fetch from known active Kalshi series.
-              // The default /markets endpoint returns only MVE multi-leg parlay
-              // markets with zero liquidity, so we target specific series where
-              // real event contracts trade. The /events endpoint does NOT return
-              // inline markets, so it is NOT used here.
+              // Parallel fetch from known active Kalshi series across all categories.
               const series = [
-                "KXFED",       // Federal Reserve rate decisions (most liquid ~50¢)
-                "KXGDP",       // US GDP growth (~50¢)
-                "KXPAYROLLS",  // Monthly jobs report
-                "KXCPI",       // CPI inflation
-                "KXINX",       // S&P 500 price range
-                "KXBTC",       // Bitcoin price range
-                "KXETH",       // Ethereum price range
-                "KXNHL",       // NHL hockey
-                "KXNBA",       // NBA basketball
-                "KXMLB",       // MLB baseball
-                "KXCHCUTS",    // Challenger job cuts
+                // Economics
+                "KXFED", "KXGDP", "KXPAYROLLS", "KXCPI", "KXINX", "KXCHCUTS",
+                // Crypto
+                "KXBTC", "KXETH",
+                // Sports
+                "KXNHL", "KXNBA", "KXMLB", "KXNFL", "KXMLS", "KXSOCCER",
+                // Politics / News
+                "KXPRES", "KXSENATE",
               ];
 
               const fetches = series.map(s =>
@@ -909,21 +910,16 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
                 }
               }
 
-              // Deduplicate by ticker
+              // Deduplicate and sort by volume
               const seen = new Set<string>();
-              allMarkets = allMarkets.filter(m => {
-                if (seen.has(m.ticker)) return false;
-                seen.add(m.ticker);
-                return true;
-              });
-
-              // Sort by volume descending so most-traded markets surface first
-              allMarkets.sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
+              allMarkets = allMarkets
+                .filter(m => { if (seen.has(m.ticker)) return false; seen.add(m.ticker); return true; })
+                .sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
             }
 
             const finalMarkets = allMarkets.slice(0, limit);
             if (finalMarkets.length === 0) {
-              toolResult = JSON.stringify({ markets: [], note: "No liquid markets found. Kalshi may have limited activity right now. Try again later or specify a category like 'KXBTC' for Bitcoin or 'KXINX' for S&P 500." });
+              toolResult = JSON.stringify({ markets: [], note: `No markets found${args.keyword ? ` for "${args.keyword}"` : ""}. Kalshi may not have active markets on this topic right now.` });
             } else {
               toolResult = JSON.stringify({ markets: finalMarkets, total_found: allMarkets.length });
             }
