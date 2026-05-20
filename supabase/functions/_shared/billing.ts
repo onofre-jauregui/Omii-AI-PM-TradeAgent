@@ -177,6 +177,12 @@ export function checkEntitlement(
 ): EntitlementCheckResult {
   const limits = resolveLimits(input.subscription);
 
+  // Paper trading requires no subscription — it's the free-tier hook.
+  // Strategy gating and live-trading checks are irrelevant for simulated trades.
+  if (input.mode === "paper") {
+    return { allowed: true, limits };
+  }
+
   // Subscription must be active or trialing
   if (input.subscription && !isSubscriptionActive(input.subscription.status)) {
     return {

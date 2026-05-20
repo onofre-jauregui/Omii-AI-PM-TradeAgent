@@ -338,6 +338,7 @@ export default function ObservabilityPage() {
   const [memorySortBy, setMemorySortBy] = useState<"confidence" | "confirmations" | "newest">("confidence");
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
 
   // Pulse
   useEffect(() => {
@@ -929,6 +930,20 @@ export default function ObservabilityPage() {
 
   const totalFailures24h = Object.values(failureModes).reduce((s, m) => s + (m.events?.length ?? 0), 0);
 
+  const cutoff24h = Date.now() - 86_400_000;
+  const events24h = complianceLast30d.filter(
+    (e) => new Date(e.created_at).getTime() >= cutoff24h
+  );
+  const runsToday = events24h.filter((e) => e.event_type === "auto_trade_run").length;
+  const scansToday = events24h.filter((e) => e.event_type === "surface_scan_complete").length;
+  const tradesFilledToday = events24h.filter((e) => e.event_type === "basket_completed").length +
+    (primaryMode !== "live"
+      ? decisionTrades.filter((t) => new Date(t.created_at).getTime() >= cutoff24h).length
+      : 0);
+  const latestMemory = activeMemories[0] ?? null;
+  const healthyCount = Object.values(failureModes).filter((m) => m.status === "ok").length;
+  const totalHealthChecks = Object.keys(failureModes).length;
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -968,944 +983,840 @@ export default function ObservabilityPage() {
         </div>
       )}
 
-      <div className="max-w-[1100px] mx-auto px-8 py-6 space-y-6">
+      <div className="max-w-[1100px] mx-auto px-8 py-8 space-y-6">
 
-        {/* ── 1. Hero — Live Agent Status ──────────────────────────────── */}
-        <section className="rounded-2xl bg-card apple-shadow overflow-hidden">
-          <div className="grid grid-cols-3 divide-x divide-border">
+        {/* ── 1. KPI Hero ──────────────────────────────────────────────── */}
+        <div className="grid grid-cols-3 gap-4">
+          {/* Total P&L */}
+          <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Total P&L</p>
+            <p className={`text-4xl font-bold tabular-nums ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-muted-foreground">since Apr 22 · {settledCount} trades settled</p>
+          </div>
 
-            {/* LEFT: Status chip */}
-            <div className="px-6 py-5 flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                <span className={`h-3 w-3 rounded-full shrink-0 ${status.dot}`} />
-                <span className={`text-2xl font-bold ${status.color}`}>
-                  {status.label}
-                </span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {minsAgo !== null
-                  ? `Last heartbeat: ${minsAgo}m ago`
-                  : "No heartbeat recorded"}
-              </p>
-              <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground bg-secondary px-2 py-0.5 rounded-full w-fit">
-                Mode: Paper
+          {/* Win Rate */}
+          <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Win Rate</p>
+            <p className={`text-4xl font-bold tabular-nums ${winRate !== null && winRate >= 55 ? "text-emerald-500" : winRate !== null && winRate >= 40 ? "text-yellow-500" : "text-muted-foreground"}`}>
+              {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              {settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
+            </p>
+          </div>
+
+          {/* Agent Status */}
+          <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
+            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Agent Status</p>
+            <div className="flex items-center gap-2.5 mt-1">
+              <span className={`h-3.5 w-3.5 rounded-full shrink-0 ${status.dot}`} />
+              <p className={`text-4xl font-bold ${status.color}`}>{status.label}</p>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {minsAgo !== null ? `Last run: ${minsAgo}m ago · ${primaryMode} mode` : "No heartbeat recorded"}
+            </p>
+          </div>
+        </div>
+
+        {/* ── 2. Equity Curve ──────────────────────────────────────────── */}
+        <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+          <div className="px-6 pt-5 pb-2 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold">Portfolio Equity</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">Cumulative P&L since Apr 22, 2026</p>
+            </div>
+            {equityData.length > 0 && (
+              <span className={`text-sm font-bold tabular-nums ${totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
               </span>
+            )}
+          </div>
+          {equityData.length < 2 ? (
+            <div className="h-[220px] flex items-center justify-center text-sm text-muted-foreground">
+              Not enough data yet.
             </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={equityData} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
+                <defs>
+                  <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} width={48} />
+                <Tooltip
+                  formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
+                  contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="cumPnl"
+                  stroke="hsl(var(--primary))"
+                  fill="url(#pnlGradient)"
+                  strokeWidth={2}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
 
-            {/* MIDDLE: Open positions + Today P&L */}
-            <div className="px-6 py-5 flex flex-col justify-center gap-4">
-              <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">
-                  Open Positions
-                </p>
-                <p className="text-xl font-bold tabular-nums">
-                  {openPositionCount}
-                  <span className="text-sm font-normal text-muted-foreground ml-1.5">
-                    (${openPositionValue.toFixed(0)})
-                  </span>
-                </p>
-              </div>
-              <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-0.5">
-                  Today's P&L
-                </p>
-                <p
-                  className={`text-xl font-bold tabular-nums ${
-                    todayPnl >= 0 ? "text-emerald-500" : "text-red-500"
-                  }`}
-                >
+        {/* ── 3. Operational Summary | Agent Intelligence ───────────── */}
+        <div className="grid grid-cols-2 gap-4">
+
+          {/* Left: Operational Summary */}
+          <div className="rounded-2xl bg-card apple-shadow px-6 py-5">
+            <h2 className="text-sm font-semibold mb-4">Last 24 Hours</h2>
+            <div className="grid grid-cols-2 gap-4">
+              {[
+                { label: "Cron Runs", value: runsToday.toLocaleString(), sub: "every 2 min" },
+                { label: "Markets Scanned", value: scansToday.toLocaleString(), sub: "surface scans" },
+                { label: "Trades Placed", value: tradesFilledToday.toString(), sub: primaryMode + " mode" },
+                { label: "Open Positions", value: openPositionCount.toString(), sub: `$${openPositionValue.toFixed(0)} at risk` },
+              ].map(({ label, value, sub }) => (
+                <div key={label}>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{label}</p>
+                  <p className="text-2xl font-bold tabular-nums">{value}</p>
+                  <p className="text-[10px] text-muted-foreground">{sub}</p>
+                </div>
+              ))}
+            </div>
+            {todayPnl !== 0 && (
+              <div className="mt-4 pt-4 border-t border-border flex items-center justify-between">
+                <span className="text-[11px] text-muted-foreground">Today's P&L</span>
+                <span className={`text-sm font-bold tabular-nums ${todayPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                   {todayPnl >= 0 ? "+" : ""}${todayPnl.toFixed(2)}
-                </p>
-              </div>
-            </div>
-
-            {/* RIGHT: Real-time ticker */}
-            <div className="px-6 py-5 flex flex-col gap-1 overflow-hidden">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1 shrink-0">
-                Recent Events
-              </p>
-              <div className="space-y-1 overflow-hidden">
-                {heroFeed.slice(0, 10).map((ev) => (
-                  <div
-                    key={ev.id}
-                    className={`flex items-center gap-2 transition-colors duration-700 ${
-                      newEventIds.has(ev.id) ? "text-emerald-500" : ""
-                    }`}
-                  >
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                        SEVERITY_DOT[ev.severity] ?? "bg-muted-foreground/40"
-                      }`}
-                    />
-                    <span className="text-[11px] truncate flex-1 min-w-0">
-                      {EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground/60 tabular-nums shrink-0">
-                      {relativeTime(ev.created_at)}
-                    </span>
-                  </div>
-                ))}
-                {heroFeed.length === 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    Waiting for events…
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ── 2. Performance ───────────────────────────────────────────── */}
-        <Section title="Performance">
-          <div className="grid grid-cols-2 gap-0 divide-x divide-border">
-
-            {/* Stat cards 2×2 */}
-            <div className="p-6 grid grid-cols-2 gap-4">
-              <StatCard
-                label="Total P&L"
-                value={
-                  <span
-                    className={
-                      totalPnl >= 0 ? "text-emerald-500" : "text-red-500"
-                    }
-                  >
-                    {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
-                  </span>
-                }
-              />
-              <StatCard
-                label="Win Rate"
-                value={
-                  winRate !== null ? (
-                    <span
-                      className={
-                        winRate >= 55
-                          ? "text-emerald-500"
-                          : winRate >= 40
-                          ? "text-yellow-500"
-                          : "text-red-500"
-                      }
-                    >
-                      {winRate.toFixed(0)}%
-                    </span>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )
-                }
-                sub={settledCount > 0 ? `${wins}/${settledCount} settled` : undefined}
-              />
-              <StatCard
-                label="Total Trades"
-                value={<span>{settledCount}</span>}
-                sub="settled"
-              />
-              <StatCard
-                label="Avg Duration"
-                value={
-                  avgDurationHours !== null ? (
-                    <span>{avgDurationHours.toFixed(1)}h</span>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )
-                }
-                sub="entry → settle"
-              />
-            </div>
-
-            {/* Equity curve */}
-            <div className="p-6">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
-                Equity Curve
-              </p>
-              {equityData.length < 2 ? (
-                <div className="h-[200px] flex items-center justify-center text-sm text-muted-foreground">
-                  Not enough data yet.
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height={200}>
-                  <AreaChart data={equityData}>
-                    <XAxis
-                      dataKey="date"
-                      tick={{ fontSize: 10 }}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 10 }}
-                      tickLine={false}
-                      axisLine={false}
-                      tickFormatter={(v) => `$${v}`}
-                    />
-                    <Tooltip
-                      formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
-                      contentStyle={{
-                        fontSize: 11,
-                        borderRadius: 8,
-                      }}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="cumPnl"
-                      stroke="hsl(var(--primary))"
-                      fill="hsl(var(--primary))"
-                      fillOpacity={0.1}
-                      strokeWidth={1.5}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-        </Section>
-
-        {/* ── Agent Memory ────────────────────────────────────────────── */}
-        <Section
-          title="Agent Memory"
-          action={
-            <button
-              onClick={() => setMemoryPanelOpen(true)}
-              className="text-xs text-primary hover:opacity-80 transition-opacity font-medium"
-            >
-              View All →
-            </button>
-          }
-        >
-          <div className="px-6 py-4">
-            {memories.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-2">
-                {isAuthenticated === false ? "Sign in to view agent memory." : "Loading…"}
-              </p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-4">
-                {/* Total active */}
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl font-bold tabular-nums">{activeMemories.length}</span>
-                  <span className="text-xs text-muted-foreground">active</span>
-                </div>
-                {quarantinedMemories.length > 0 && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg font-semibold tabular-nums text-red-500">{quarantinedMemories.length}</span>
-                    <span className="text-xs text-muted-foreground">quarantined</span>
-                  </div>
-                )}
-                {avgConfidence !== null && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg font-semibold tabular-nums">{(avgConfidence * 100).toFixed(0)}%</span>
-                    <span className="text-xs text-muted-foreground">avg confidence</span>
-                  </div>
-                )}
-                {/* Type pills */}
-                <div className="flex flex-wrap gap-1.5 ml-2">
-                  {Object.entries(memoryTypeCounts).map(([type, count]) => (
-                    <button
-                      key={type}
-                      onClick={() => { setMemoryTypeFilter(type); setMemoryPanelOpen(true); }}
-                      className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors hover:opacity-80 ${MEMORY_TYPE_COLORS[type] ?? "bg-secondary text-muted-foreground"}`}
-                    >
-                      {MEMORY_TYPE_LABELS[type] ?? type} {count}
-                    </button>
-                  ))}
-                </div>
+                </span>
               </div>
             )}
           </div>
-        </Section>
 
-        {/* ── 5. Cost & Efficiency ─────────────────────────────────────── */}
-        <Section title="Cost & Efficiency">
-          <div className="p-6 space-y-6">
-            <div className="grid grid-cols-4 gap-4">
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
-                  Daily LLM Spend
-                </p>
-                <p className="text-xl font-bold tabular-nums">
-                  ${dailyLLMSpend.toFixed(4)}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  gpt-4o-mini via OpenRouter
-                </p>
+          {/* Right: Agent Intelligence */}
+          <div className="rounded-2xl bg-card apple-shadow px-6 py-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold">Agent Intelligence</h2>
+              <button
+                onClick={() => setMemoryPanelOpen(true)}
+                className="text-[11px] text-primary hover:opacity-80 transition-opacity"
+              >
+                View All →
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">Active Lessons</p>
+                <p className="text-2xl font-bold tabular-nums">{activeMemories.length}</p>
+                <p className="text-[10px] text-muted-foreground">{quarantinedMemories.length} quarantined</p>
               </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
-                  Tokens / Decision
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">Avg Confidence</p>
+                <p className={`text-2xl font-bold tabular-nums ${avgConfidence !== null && avgConfidence >= 0.6 ? "text-emerald-500" : avgConfidence !== null && avgConfidence >= 0.4 ? "text-yellow-500" : "text-muted-foreground"}`}>
+                  {avgConfidence !== null ? `${(avgConfidence * 100).toFixed(0)}%` : "—"}
                 </p>
-                <p className="text-xl font-bold tabular-nums">
-                  {avgTokensPerDecision.toLocaleString()}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {QUALIFY_INPUT_TOKENS.toLocaleString()} in +{" "}
-                  {QUALIFY_OUTPUT_TOKENS} out
-                </p>
-              </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
-                  Cost per Trade
-                </p>
-                <p className="text-xl font-bold tabular-nums">
-                  {costPerTrade !== null
-                    ? costPerTrade < 0.0001
-                      ? "<$0.0001"
-                      : `$${costPerTrade.toFixed(4)}`
-                    : "—"}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {tradesLast30dCount} trades last 30d
-                </p>
-              </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">
-                  Cost / Run
-                </p>
-                <p className="text-xl font-bold tabular-nums">
-                  {costPerRun !== null
-                    ? costPerRun < 0.000001
-                      ? "<$0.000001"
-                      : `$${costPerRun.toFixed(6)}`
-                    : "—"}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
-                </p>
+                <p className="text-[10px] text-muted-foreground">across all memory types</p>
               </div>
             </div>
-
-            {/* Model usage */}
-            <div>
-              <div className="flex items-center gap-2 mb-3">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">
-                  Model
-                </p>
-                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">
-                  gpt-4o-mini · OpenRouter
-                </span>
+            {latestMemory && (
+              <div className="rounded-xl bg-secondary/40 px-4 py-3">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${MEMORY_TYPE_COLORS[latestMemory.memory_type] ?? "bg-secondary text-muted-foreground"}`}>
+                    {MEMORY_TYPE_LABELS[latestMemory.memory_type] ?? latestMemory.memory_type}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground ml-auto">{(latestMemory.confidence * 100).toFixed(0)}% confidence</span>
+                </div>
+                <p className="text-[12px] font-medium leading-snug line-clamp-2">{latestMemory.title}</p>
               </div>
-              <div className="grid grid-cols-5 gap-3">
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
-                  <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
-                </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
-                  <p className="text-base font-bold tabular-nums">
-                    {inputTokens30d >= 1_000_000
-                      ? `${(inputTokens30d / 1_000_000).toFixed(2)}M`
-                      : `${(inputTokens30d / 1_000).toFixed(0)}K`}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
-                </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
-                  <p className="text-base font-bold tabular-nums">
-                    {outputTokens30d >= 1_000_000
-                      ? `${(outputTokens30d / 1_000_000).toFixed(2)}M`
-                      : `${(outputTokens30d / 1_000).toFixed(0)}K`}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
-                </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
-                  <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    ${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in
-                  </p>
-                </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
-                  <p className="text-base font-bold tabular-nums">
-                    {cycleLabel ?? <span className="text-muted-foreground">—</span>}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Tools table */}
-            <div>
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
-                Agent Tools
+            )}
+            {!latestMemory && (
+              <p className="text-xs text-muted-foreground">
+                {isAuthenticated === false ? "Sign in to view agent memory." : "Loading memory…"}
               </p>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">
-                      Tool
-                    </th>
-                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">
-                      What it does
-                    </th>
-                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">
-                      Calls (30d)
-                    </th>
-                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">
-                      Errors (30d)
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {tools.map((tool) => (
-                    <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
-                      <td className="py-2.5 text-[12px] font-medium">
-                        {tool.name}
-                      </td>
-                      <td className="py-2.5 text-[11px] text-muted-foreground">
-                        {tool.desc}
-                      </td>
-                      <td className="py-2.5 text-right text-[12px] tabular-nums">
-                        {tool.calls.toLocaleString()}
-                      </td>
-                      <td className="py-2.5 text-right text-[12px] tabular-nums">
-                        {tool.errors > 0 ? (
-                          <span className="text-red-500">{tool.errors}</span>
-                        ) : (
-                          <span className="text-muted-foreground">0</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            )}
           </div>
-        </Section>
+        </div>
 
-        {/* ── 6. Errors & Rough Edges ──────────────────────────────────── */}
-        <Section
-          title="Errors & Rough Edges"
-          action={
-            <span className="text-[10px] text-muted-foreground italic">
-              not hidden — this is how the system learns
-            </span>
-          }
-        >
-          <div className="divide-y divide-border">
-            {/* Guardrails fired */}
-            <div className="px-6 py-4">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
-                Guardrails Fired
-              </p>
-              {guardrailEvents.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-2">
-                  No guardrail events.
-                </p>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody className="divide-y divide-border">
-                    {guardrailEvents.map((ev) => (
-                      <tr
-                        key={ev.id}
-                        onClick={() => setSelectedError(ev)}
-                        className="hover:bg-secondary/20 transition-colors cursor-pointer"
-                      >
-                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">
-                          {fmtDate(ev.created_at)}
-                        </td>
-                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">
-                          {EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}
-                        </td>
-                        <td className="py-2 text-[11px] text-muted-foreground flex-1">
-                          {ev.message}
-                        </td>
-                        <td className="py-2 text-right pl-4">
-                          <span
-                            className={`text-[10px] font-medium ${
-                              SEVERITY_CLASSES[ev.severity] ??
-                              "text-muted-foreground"
-                            }`}
-                          >
-                            {ev.severity}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            {/* Recent errors */}
-            <div className="px-6 py-4">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">
-                Warnings &amp; Errors
-              </p>
-              {errorEvents.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-2">
-                  No warnings or errors in the log.
-                </p>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody className="divide-y divide-border">
-                    {errorEvents.map((ev) => (
-                      <tr
-                        key={ev.id}
-                        onClick={() => setSelectedError(ev)}
-                        className="hover:bg-secondary/20 transition-colors cursor-pointer"
-                      >
-                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">
-                          {fmtDate(ev.created_at)}
-                        </td>
-                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">
-                          {EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}
-                        </td>
-                        <td className="py-2 text-[11px] text-muted-foreground flex-1">
-                          {ev.message}
-                        </td>
-                        <td className="py-2 text-right pl-4">
-                          <span
-                            className={`text-[10px] font-medium ${
-                              SEVERITY_CLASSES[ev.severity] ??
-                              "text-muted-foreground"
-                            }`}
-                          >
-                            {ev.severity}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
-        </Section>
-
-        {/* ── System Failure Modes ────────────────────────────────────── */}
-        <Section
-          title="System Failure Modes"
-          action={
-            <span className="text-[10px] text-muted-foreground tabular-nums">
-              {totalFailures24h > 0
-                ? `${totalFailures24h} event${totalFailures24h !== 1 ? "s" : ""} · last 24h`
-                : "All clear · last 24h"}
-            </span>
-          }
-        >
-          <div className="p-6 space-y-5">
-            {/* 4×2 health card grid */}
-            <div className="grid grid-cols-4 gap-3">
-              {(
-                [
-                  "api_timeout",
-                  "llm_rate_limit",
-                  "cost_spike",
-                  "input_error",
-                  "pii_detected",
-                  "db_connection",
-                  "network_failure",
-                  "memory_pressure",
-                ] as const
-              ).map((key) => {
-                const mode = failureModes[key];
-                const detail = FAILURE_MODE_DETAILS[key];
-                const { status } = mode;
-                const dotLabel =
-                  status === "critical" ? "✖" :
-                  status === "warning"  ? "▲" :
-                  "●";
-                const dotText =
-                  status === "critical" ? "text-red-500" :
-                  status === "warning"  ? "text-yellow-500" :
-                  "text-emerald-500";
-                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
-
+        {/* ── 4. System Health ─────────────────────────────────────────── */}
+        <div className="rounded-2xl bg-card apple-shadow px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-sm font-semibold mr-3">System Health</h2>
+              {([
+                ["api_timeout", "API"],
+                ["llm_rate_limit", "LLM"],
+                ["db_connection", "Database"],
+                ["network_failure", "Network"],
+                ["cost_spike", "Cost"],
+                ["memory_pressure", "Memory"],
+                ["input_error", "Inputs"],
+                ["pii_detected", "PII"],
+              ] as const).map(([key, label]) => {
+                const m = failureModes[key];
+                const dot = m.status === "critical" ? "bg-red-500" : m.status === "warning" ? "bg-yellow-500" : "bg-emerald-500";
                 return (
                   <button
                     key={key}
                     onClick={() => setSelectedFailureMode(key)}
-                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-secondary hover:bg-secondary/80 transition-colors"
                   >
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">
-                        {detail.title}
-                      </p>
-                    </div>
-                    <p className="text-lg font-bold tabular-nums">
-                      {key === "cost_spike"
-                        ? (mode.extra ?? "—")
-                        : key === "memory_pressure"
-                        ? `${mode.count} quarant.`
-                        : `${mode.count}`}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {key === "cost_spike"
-                        ? `${mode.count} calls · last 6h`
-                        : key === "memory_pressure"
-                        ? mode.extra ?? ""
-                        : lastOccurrence}
-                    </p>
+                    <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                    <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
                   </button>
                 );
               })}
             </div>
+            <span className="text-[10px] text-muted-foreground">
+              {healthyCount}/{totalHealthChecks} healthy
+            </span>
+          </div>
+        </div>
 
-            {/* 24h failure timeline */}
-            {failureTimeline.some((h) => h.count > 0) && (
-              <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
-                  24h Failure Timeline
-                </p>
-                <ResponsiveContainer width="100%" height={70}>
-                  <BarChart data={failureTimeline} barSize={10}>
-                    <XAxis
-                      dataKey="hour"
-                      tick={{ fontSize: 9 }}
-                      tickLine={false}
-                      axisLine={false}
-                      interval={3}
-                    />
-                    <Tooltip
-                      formatter={(v: number) => [v, "events"]}
-                      contentStyle={{ fontSize: 10, borderRadius: 6 }}
-                    />
-                    <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+        {/* ── 5. Recent Decisions ──────────────────────────────────────── */}
+        <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+          <div className="px-6 py-4 border-b border-border flex items-center justify-between">
+            <h2 className="text-sm font-semibold">Recent Decisions</h2>
+            <button
+              onClick={() => setShowDetails(true)}
+              className="text-[11px] text-primary hover:opacity-80 transition-opacity"
+            >
+              Full history →
+            </button>
+          </div>
+          <div className="p-4 grid grid-cols-3 gap-3">
+            {decisionTrades.slice(0, 6).map((t) => {
+              const pnl = t.pnl ?? 0;
+              const hasPnl = t.pnl !== null;
+              const isBullish = t.action === "buy" || t.side === "yes";
+              const label = t.market_question
+                ? t.market_question.slice(0, 80) + (t.market_question.length > 80 ? "…" : "")
+                : t.ticker ?? "—";
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setSelectedTrade(t)}
+                  className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-full ${isBullish ? "bg-emerald-500/10 text-emerald-500" : "bg-red-500/10 text-red-500"}`}>
+                      {t.action?.toUpperCase()} {t.side?.toUpperCase()}
+                    </span>
+                    {hasPnl && (
+                      <span className={`text-[11px] font-bold tabular-nums ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                        {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[12px] font-medium leading-snug text-foreground line-clamp-2 mb-2">{label}</p>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-muted-foreground">{t.strategy ?? "—"}</span>
+                    <span className="text-muted-foreground/40 text-[10px]">·</span>
+                    <span className="text-[10px] text-muted-foreground">{fmtDate(t.created_at)}</span>
+                  </div>
+                </button>
+              );
+            })}
+            {decisionTrades.length === 0 && (
+              <div className="col-span-3 py-8 text-center text-sm text-muted-foreground">No trades found.</div>
             )}
           </div>
-        </Section>
+        </div>
 
-        {/* ── 5. Trace Logs ────────────────────────────────────────────── */}
-        <Section
-          title="Execution Traces"
-          action={
-            <div className="flex items-center gap-3">
-              {/* Day tabs */}
-              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
-                {[0, 1, 2, 3].map((daysAgo) => {
-                  const d = new Date();
-                  d.setDate(d.getDate() - daysAgo);
-                  const iso = d.toISOString().slice(0, 10);
-                  const label = daysAgo === 0 ? "Today" : daysAgo === 1 ? "Yesterday" : `${daysAgo}d ago`;
-                  return (
-                    <button
-                      key={iso}
-                      onClick={() => setTraceDay(iso)}
-                      className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium ${
-                        traceDay === iso
-                          ? "bg-card text-foreground shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
+        {/* ── 6. System Details toggle ─────────────────────────────────── */}
+        <button
+          onClick={() => setShowDetails((v) => !v)}
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border border-border text-[11px] font-medium text-muted-foreground hover:bg-secondary/30 transition-colors"
+        >
+          {showDetails ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {showDetails ? "Hide" : "Show"} System Details
+          <span className="ml-1 text-[10px] opacity-60">
+            cost · errors · traces · decision history · agent memory
+          </span>
+        </button>
+
+        {/* ── 7. System Details (all existing technical sections) ──────── */}
+        {showDetails && (
+          <div className="space-y-6">
+
+            {/* Performance (detailed) */}
+            <Section title="Performance">
+              <div className="grid grid-cols-2 gap-0 divide-x divide-border">
+                <div className="p-6 grid grid-cols-2 gap-4">
+                  <StatCard
+                    label="Total P&L"
+                    value={
+                      <span className={totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}>
+                        {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
+                      </span>
+                    }
+                  />
+                  <StatCard
+                    label="Win Rate"
+                    value={
+                      winRate !== null ? (
+                        <span className={winRate >= 55 ? "text-emerald-500" : winRate >= 40 ? "text-yellow-500" : "text-red-500"}>
+                          {winRate.toFixed(0)}%
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )
+                    }
+                    sub={settledCount > 0 ? `${wins}/${settledCount} settled` : undefined}
+                  />
+                  <StatCard
+                    label="Total Trades"
+                    value={<span>{settledCount}</span>}
+                    sub="settled"
+                  />
+                  <StatCard
+                    label="Avg Duration"
+                    value={
+                      avgDurationHours !== null ? (
+                        <span>{avgDurationHours.toFixed(1)}h</span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )
+                    }
+                    sub="entry → settle"
+                  />
+                </div>
+                <div className="p-6">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Equity Curve</p>
+                  {equityData.length < 2 ? (
+                    <div className="h-[200px] flex items-center justify-center text-sm text-muted-foreground">
+                      Not enough data yet.
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <AreaChart data={equityData}>
+                        <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+                        <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} />
+                        <Tooltip
+                          formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
+                          contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="cumPnl"
+                          stroke="hsl(var(--primary))"
+                          fill="hsl(var(--primary))"
+                          fillOpacity={0.1}
+                          strokeWidth={1.5}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
               </div>
-              {/* Custom date */}
-              <input
-                type="date"
-                value={traceDay}
-                onChange={(e) => setTraceDay(e.target.value)}
-                className="text-[10px] bg-secondary border border-border rounded-lg px-2 py-1 text-muted-foreground"
+            </Section>
+
+            {/* Cost & Efficiency */}
+            <Section title="Cost & Efficiency">
+              <div className="p-6 space-y-6">
+                <div className="grid grid-cols-4 gap-4">
+                  <div className="rounded-xl border border-border p-4">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Daily LLM Spend</p>
+                    <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">gpt-4o-mini via OpenRouter</p>
+                  </div>
+                  <div className="rounded-xl border border-border p-4">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
+                    <p className="text-xl font-bold tabular-nums">{avgTokensPerDecision.toLocaleString()}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {QUALIFY_INPUT_TOKENS.toLocaleString()} in + {QUALIFY_OUTPUT_TOKENS} out
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-border p-4">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost per Trade</p>
+                    <p className="text-xl font-bold tabular-nums">
+                      {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">{tradesLast30dCount} trades last 30d</p>
+                  </div>
+                  <div className="rounded-xl border border-border p-4">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
+                    <p className="text-xl font-bold tabular-nums">
+                      {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
+                    </p>
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Model</p>
+                    <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">gpt-4o-mini · OpenRouter</span>
+                  </div>
+                  <div className="grid grid-cols-5 gap-3">
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
+                      <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {inputTokens30d >= 1_000_000 ? `${(inputTokens30d / 1_000_000).toFixed(2)}M` : `${(inputTokens30d / 1_000).toFixed(0)}K`}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {outputTokens30d >= 1_000_000 ? `${(outputTokens30d / 1_000_000).toFixed(2)}M` : `${(outputTokens30d / 1_000).toFixed(0)}K`}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
+                      <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {cycleLabel ?? <span className="text-muted-foreground">—</span>}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Agent Tools</p>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">Tool</th>
+                        <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">What it does</th>
+                        <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Calls (30d)</th>
+                        <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Errors (30d)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {tools.map((tool) => (
+                        <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
+                          <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
+                          <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
+                          <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
+                          <td className="py-2.5 text-right text-[12px] tabular-nums">
+                            {tool.errors > 0 ? (
+                              <span className="text-red-500">{tool.errors}</span>
+                            ) : (
+                              <span className="text-muted-foreground">0</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </Section>
+
+            {/* Agent Memory summary section */}
+            <Section
+              title="Agent Memory"
+              action={
+                <button
+                  onClick={() => setMemoryPanelOpen(true)}
+                  className="text-xs text-primary hover:opacity-80 transition-opacity font-medium"
+                >
+                  View All →
+                </button>
+              }
+            >
+              <div className="px-6 py-4">
+                {memories.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-2">
+                    {isAuthenticated === false ? "Sign in to view agent memory." : "Loading…"}
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-2xl font-bold tabular-nums">{activeMemories.length}</span>
+                      <span className="text-xs text-muted-foreground">active</span>
+                    </div>
+                    {quarantinedMemories.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg font-semibold tabular-nums text-red-500">{quarantinedMemories.length}</span>
+                        <span className="text-xs text-muted-foreground">quarantined</span>
+                      </div>
+                    )}
+                    {avgConfidence !== null && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg font-semibold tabular-nums">{(avgConfidence * 100).toFixed(0)}%</span>
+                        <span className="text-xs text-muted-foreground">avg confidence</span>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap gap-1.5 ml-2">
+                      {Object.entries(memoryTypeCounts).map(([type, count]) => (
+                        <button
+                          key={type}
+                          onClick={() => { setMemoryTypeFilter(type); setMemoryPanelOpen(true); }}
+                          className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors hover:opacity-80 ${MEMORY_TYPE_COLORS[type] ?? "bg-secondary text-muted-foreground"}`}
+                        >
+                          {MEMORY_TYPE_LABELS[type] ?? type} {count}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {/* Errors & Rough Edges */}
+            <Section
+              title="Errors & Rough Edges"
+              action={
+                <span className="text-[10px] text-muted-foreground italic">
+                  not hidden — this is how the system learns
+                </span>
+              }
+            >
+              <div className="divide-y divide-border">
+                <div className="px-6 py-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Guardrails Fired</p>
+                  {guardrailEvents.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">No guardrail events.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <tbody className="divide-y divide-border">
+                        {guardrailEvents.map((ev) => (
+                          <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
+                            <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
+                            <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
+                            <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
+                            <td className="py-2 text-right pl-4">
+                              <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div className="px-6 py-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Warnings &amp; Errors</p>
+                  {errorEvents.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">No warnings or errors in the log.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <tbody className="divide-y divide-border">
+                        {errorEvents.map((ev) => (
+                          <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
+                            <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
+                            <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
+                            <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
+                            <td className="py-2 text-right pl-4">
+                              <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </Section>
+
+            {/* System Failure Modes */}
+            <Section
+              title="System Failure Modes"
+              action={
+                <span className="text-[10px] text-muted-foreground tabular-nums">
+                  {totalFailures24h > 0
+                    ? `${totalFailures24h} event${totalFailures24h !== 1 ? "s" : ""} · last 24h`
+                    : "All clear · last 24h"}
+                </span>
+              }
+            >
+              <div className="p-6 space-y-5">
+                <div className="grid grid-cols-4 gap-3">
+                  {(
+                    [
+                      "api_timeout",
+                      "llm_rate_limit",
+                      "cost_spike",
+                      "input_error",
+                      "pii_detected",
+                      "db_connection",
+                      "network_failure",
+                      "memory_pressure",
+                    ] as const
+                  ).map((key) => {
+                    const mode = failureModes[key];
+                    const detail = FAILURE_MODE_DETAILS[key];
+                    const { status: modeStatus } = mode;
+                    const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
+                    const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
+                    const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedFailureMode(key)}
+                        className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                        </div>
+                        <p className="text-lg font-bold tabular-nums">
+                          {key === "cost_spike" ? (mode.extra ?? "—") : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          {key === "cost_spike" ? `${mode.count} calls · last 6h` : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+                {failureTimeline.some((h) => h.count > 0) && (
+                  <div>
+                    <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline</p>
+                    <ResponsiveContainer width="100%" height={70}>
+                      <BarChart data={failureTimeline} barSize={10}>
+                        <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
+                        <Tooltip formatter={(v: number) => [v, "events"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
+                        <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {/* Execution Traces */}
+            <Section
+              title="Execution Traces"
+              action={
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                    {[0, 1, 2, 3].map((daysAgo) => {
+                      const d = new Date();
+                      d.setDate(d.getDate() - daysAgo);
+                      const iso = d.toISOString().slice(0, 10);
+                      const label = daysAgo === 0 ? "Today" : daysAgo === 1 ? "Yesterday" : `${daysAgo}d ago`;
+                      return (
+                        <button
+                          key={iso}
+                          onClick={() => setTraceDay(iso)}
+                          className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium ${
+                            traceDay === iso ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    type="date"
+                    value={traceDay}
+                    onChange={(e) => setTraceDay(e.target.value)}
+                    className="text-[10px] bg-secondary border border-border rounded-lg px-2 py-1 text-muted-foreground"
+                  />
+                  <a
+                    href="https://cloud.langfuse.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
+                  >
+                    Langfuse
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+              }
+            >
+              <div className="divide-y divide-border">
+                {traceRuns.length === 0 ? (
+                  <div className="py-10 text-center text-sm text-muted-foreground">No auto-trade runs found.</div>
+                ) : (
+                  traceRuns.map((run) => {
+                    const isOpen = expandedTraces.has(run.id);
+                    const children = traceChildren[run.id];
+                    return (
+                      <div key={run.id}>
+                        <button
+                          onClick={() => toggleTrace(run)}
+                          className="w-full px-6 py-3 flex items-center gap-3 hover:bg-secondary/30 transition-colors text-left"
+                        >
+                          {isOpen ? (
+                            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          ) : (
+                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          )}
+                          <span className="text-[11px] text-muted-foreground tabular-nums shrink-0 w-[140px]">{fmtDate(run.created_at)}</span>
+                          <span className="text-[12px] font-medium shrink-0">Auto-Trade Run</span>
+                          <span className="text-[11px] text-muted-foreground truncate flex-1 min-w-0">{run.message}</span>
+                        </button>
+                        {isOpen && (
+                          <div className="bg-secondary/20 divide-y divide-border/50">
+                            {!children ? (
+                              <div className="px-10 py-2 text-[11px] text-muted-foreground">Loading…</div>
+                            ) : children.length === 0 ? (
+                              <div className="px-10 py-2 text-[11px] text-muted-foreground">No child events within 90s.</div>
+                            ) : (
+                              children.map((child) => (
+                                <div key={child.id} className="px-10 py-2 flex items-start gap-2.5">
+                                  <span className={`mt-[5px] h-1.5 w-1.5 rounded-full shrink-0 ${SEVERITY_DOT[child.severity] ?? "bg-muted-foreground/40"}`} />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-[11px] font-medium ${SEVERITY_CLASSES[child.severity] ?? "text-muted-foreground"}`}>
+                                        {EVENT_TYPE_LABELS[child.event_type] ?? child.event_type}
+                                      </span>
+                                      <span className="text-[10px] text-muted-foreground/50 tabular-nums ml-auto shrink-0">{fmtTime(child.created_at)}</span>
+                                    </div>
+                                    <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">{child.message}</p>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </Section>
+
+            {/* Decision History */}
+            <Section
+              title="Decision History"
+              action={
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                    {(["today", "7d", "30d", "all"] as const).map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setDecisionDateFilter(f)}
+                        className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                          decisionDateFilter === f ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                    {(["all", "filled", "settled"] as const).map((f) => (
+                      <button
+                        key={f}
+                        onClick={() => setDecisionStatusFilter(f)}
+                        className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                          decisionStatusFilter === f ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              }
+            >
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border">
+                      <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">Time</th>
+                      <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Market</th>
+                      <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Action</th>
+                      <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Size</th>
+                      <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Strategy</th>
+                      <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Entry</th>
+                      <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">P&L</th>
+                      <th className="text-center px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Status</th>
+                      <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {decisionTrades.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="text-center py-12 text-sm text-muted-foreground">No trades found.</td>
+                      </tr>
+                    ) : (
+                      decisionTrades.map((t) => {
+                        const actionLabel = `${t.action?.toUpperCase()} ${t.side?.toUpperCase()}`;
+                        const isBullish = t.action === "buy" || t.side === "yes";
+                        const label = t.ticker ?? (t.market_question ? t.market_question.slice(0, 40) + (t.market_question.length > 40 ? "…" : "") : "—");
+                        const fullQ = t.market_question ?? t.ticker ?? "";
+                        const hasPnl = t.pnl !== null;
+                        const pnl = t.pnl ?? 0;
+                        return (
+                          <tr key={t.id} onClick={() => setSelectedTrade(t)} className="hover:bg-secondary/30 transition-colors cursor-pointer">
+                            <td className="px-6 py-2.5">
+                              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">{fmtDate(t.created_at)}</span>
+                            </td>
+                            <td className="px-3 py-2.5 max-w-[200px]">
+                              <span className="text-[12px] text-foreground" title={fullQ}>{label}</span>
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <span className={`text-[11px] font-semibold uppercase ${isBullish ? "text-emerald-500" : "text-red-500"}`}>{actionLabel}</span>
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <span className="text-[11px] tabular-nums text-muted-foreground">${t.amount?.toFixed(2) ?? "—"}</span>
+                            </td>
+                            <td className="px-3 py-2.5">
+                              <span className="text-[11px] text-muted-foreground">{t.strategy ?? "—"}</span>
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              <span className="text-[11px] tabular-nums text-muted-foreground">{t.price}¢</span>
+                            </td>
+                            <td className="px-3 py-2.5 text-right">
+                              {hasPnl ? (
+                                <span className={`text-[12px] font-semibold tabular-nums ${pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                                  {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-muted-foreground">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-center">
+                              <Badge variant="secondary" className="text-[10px] rounded-full font-normal">{t.status}</Badge>
+                            </td>
+                            <td className="px-6 py-2.5 max-w-[180px]">
+                              {t.notes ? (
+                                <span className="text-[11px] text-muted-foreground truncate block" title={t.notes}>
+                                  {t.notes.slice(0, 50)}{t.notes.length > 50 ? "…" : ""}
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-muted-foreground">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Section>
+
+            {/* System Health pills (bottom row) */}
+            <div className="flex items-center gap-3 pb-4">
+              <SystemPill
+                label="Trading Mode"
+                value={primaryMode.charAt(0).toUpperCase() + primaryMode.slice(1)}
+                valueClass={primaryMode === "live" ? "text-emerald-500" : "text-yellow-500"}
               />
-              {/* Langfuse link */}
+              <SystemPill label="LLM" value="gpt-4o-mini via OpenRouter" />
+              <SystemPill label="Functions" value="7 edge functions" />
               <a
                 href="https://cloud.langfuse.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
+                className="flex items-center gap-1 text-xs bg-secondary px-3 py-1.5 rounded-full hover:bg-secondary/80 transition-colors"
               >
-                Langfuse
-                <ExternalLink className="h-3 w-3" />
+                <span className="text-muted-foreground">Langfuse:</span>
+                <span className="font-medium">LLM traces ↗</span>
               </a>
             </div>
-          }
-        >
-          <div className="divide-y divide-border">
-            {traceRuns.length === 0 ? (
-              <div className="py-10 text-center text-sm text-muted-foreground">
-                No auto-trade runs found.
-              </div>
-            ) : (
-              traceRuns.map((run) => {
-                const isOpen = expandedTraces.has(run.id);
-                const children = traceChildren[run.id];
-                return (
-                  <div key={run.id}>
-                    <button
-                      onClick={() => toggleTrace(run)}
-                      className="w-full px-6 py-3 flex items-center gap-3 hover:bg-secondary/30 transition-colors text-left"
-                    >
-                      {isOpen ? (
-                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                      )}
-                      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0 w-[140px]">
-                        {fmtDate(run.created_at)}
-                      </span>
-                      <span className="text-[12px] font-medium shrink-0">
-                        Auto-Trade Run
-                      </span>
-                      <span className="text-[11px] text-muted-foreground truncate flex-1 min-w-0">
-                        {run.message}
-                      </span>
-                    </button>
-                    {isOpen && (
-                      <div className="bg-secondary/20 divide-y divide-border/50">
-                        {!children ? (
-                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
-                            Loading…
-                          </div>
-                        ) : children.length === 0 ? (
-                          <div className="px-10 py-2 text-[11px] text-muted-foreground">
-                            No child events within 90s.
-                          </div>
-                        ) : (
-                          children.map((child) => (
-                            <div
-                              key={child.id}
-                              className="px-10 py-2 flex items-start gap-2.5"
-                            >
-                              <span
-                                className={`mt-[5px] h-1.5 w-1.5 rounded-full shrink-0 ${
-                                  SEVERITY_DOT[child.severity] ??
-                                  "bg-muted-foreground/40"
-                                }`}
-                              />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span
-                                    className={`text-[11px] font-medium ${
-                                      SEVERITY_CLASSES[child.severity] ??
-                                      "text-muted-foreground"
-                                    }`}
-                                  >
-                                    {EVENT_TYPE_LABELS[child.event_type] ??
-                                      child.event_type}
-                                  </span>
-                                  <span className="text-[10px] text-muted-foreground/50 tabular-nums ml-auto shrink-0">
-                                    {fmtTime(child.created_at)}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-muted-foreground mt-0.5 leading-relaxed">
-                                  {child.message}
-                                </p>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
+
           </div>
-        </Section>
+        )}
 
-        {/* ── 6. Decision History ──────────────────────────────────────── */}
-        <Section
-          title="Decision History"
-          action={
-            <div className="flex items-center gap-2">
-              {/* Date filter */}
-              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
-                {(["today", "7d", "30d", "all"] as const).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setDecisionDateFilter(f)}
-                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
-                      decisionDateFilter === f
-                        ? "bg-card text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-              {/* Status filter */}
-              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
-                {(["all", "filled", "settled"] as const).map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setDecisionStatusFilter(f)}
-                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
-                      decisionStatusFilter === f
-                        ? "bg-card text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-            </div>
-          }
-        >
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Time
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Market
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Action
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Size
-                  </th>
-                  <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Strategy
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Entry
-                  </th>
-                  <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    P&L
-                  </th>
-                  <th className="text-center px-3 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Status
-                  </th>
-                  <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">
-                    Notes
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {decisionTrades.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={9}
-                      className="text-center py-12 text-sm text-muted-foreground"
-                    >
-                      No trades found.
-                    </td>
-                  </tr>
-                ) : (
-                  decisionTrades.map((t) => {
-                    const actionLabel = `${t.action?.toUpperCase()} ${t.side?.toUpperCase()}`;
-                    const isBullish =
-                      t.action === "buy" || t.side === "yes";
-                    const label =
-                      t.ticker ??
-                      (t.market_question
-                        ? t.market_question.slice(0, 40) +
-                          (t.market_question.length > 40 ? "…" : "")
-                        : "—");
-                    const fullQ = t.market_question ?? t.ticker ?? "";
-                    const hasPnl = t.pnl !== null;
-                    const pnl = t.pnl ?? 0;
-
-                    return (
-                      <tr
-                        key={t.id}
-                        onClick={() => setSelectedTrade(t)}
-                        className="hover:bg-secondary/30 transition-colors cursor-pointer"
-                      >
-                        <td className="px-6 py-2.5">
-                          <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">
-                            {fmtDate(t.created_at)}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 max-w-[200px]">
-                          <span
-                            className="text-[12px] text-foreground"
-                            title={fullQ}
-                          >
-                            {label}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span
-                            className={`text-[11px] font-semibold uppercase ${
-                              isBullish ? "text-emerald-500" : "text-red-500"
-                            }`}
-                          >
-                            {actionLabel}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            ${t.amount?.toFixed(2) ?? "—"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="text-[11px] text-muted-foreground">
-                            {t.strategy ?? "—"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          <span className="text-[11px] tabular-nums text-muted-foreground">
-                            {t.price}¢
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-right">
-                          {hasPnl ? (
-                            <span
-                              className={`text-[12px] font-semibold tabular-nums ${
-                                pnl >= 0 ? "text-emerald-500" : "text-red-500"
-                              }`}
-                            >
-                              {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              —
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2.5 text-center">
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] rounded-full font-normal"
-                          >
-                            {t.status}
-                          </Badge>
-                        </td>
-                        <td className="px-6 py-2.5 max-w-[180px]">
-                          {t.notes ? (
-                            <span
-                              className="text-[11px] text-muted-foreground truncate block"
-                              title={t.notes}
-                            >
-                              {t.notes.slice(0, 50)}
-                              {t.notes.length > 50 ? "…" : ""}
-                            </span>
-                          ) : (
-                            <span className="text-[11px] text-muted-foreground">
-                              —
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Section>
-
-        {/* ── 7. System Health ─────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 pb-4">
-          <SystemPill
-            label="Trading Mode"
-            value={primaryMode.charAt(0).toUpperCase() + primaryMode.slice(1)}
-            valueClass={
-              primaryMode === "live" ? "text-emerald-500" : "text-yellow-500"
-            }
-          />
-          <SystemPill label="LLM" value="gpt-4o-mini via OpenRouter" />
-          <SystemPill label="Functions" value="7 edge functions" />
-          <a
-            href="https://cloud.langfuse.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 text-xs bg-secondary px-3 py-1.5 rounded-full hover:bg-secondary/80 transition-colors"
-          >
-            <span className="text-muted-foreground">Langfuse:</span>
-            <span className="font-medium">LLM traces ↗</span>
-          </a>
-        </div>
 
       </div>
     </div>
