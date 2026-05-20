@@ -646,11 +646,14 @@ serve(async (req) => {
     }
 
     // ── Load recent trade performance summary ──
+    // P&L only exists on settled trades; filled trades always have pnl=0
+    const MAY_START = "2026-05-01T00:00:00.000Z";
     const { data: recentFilledTrades } = await supabase
       .from("trades")
-      .select("ticker, side, action, price, amount, pnl, strategy, created_at")
-      .eq("status", "filled")
-      .order("created_at", { ascending: false })
+      .select("ticker, side, action, price, amount, pnl, strategy, settled_at")
+      .eq("status", "settled")
+      .gte("settled_at", MAY_START)
+      .order("settled_at", { ascending: false })
       .limit(20);
 
     let performanceBlock = "";
@@ -662,11 +665,11 @@ serve(async (req) => {
       performanceBlock = `\n\n## Recent Performance (last ${recentFilledTrades.length} trades)\n- Total P&L: $${totalPnl.toFixed(2)}\n- Wins: ${wins} | Losses: ${losses} | Neutral: ${neutral}\n- Win rate: ${recentFilledTrades.length > 0 ? ((wins / recentFilledTrades.length) * 100).toFixed(0) : 0}%\nUse reflect_on_trades to analyze patterns in these results.\n`;
     }
 
-    // ── Check for unreflected trades ──
+    // ── Check for unreflected settled trades ──
     const { data: unreflectedTrades } = await supabase
       .from("trades")
       .select("id")
-      .eq("status", "filled")
+      .eq("status", "settled")
       .not("id", "in", `(SELECT trade_id FROM trade_reflections)`)
       .limit(1);
 
@@ -999,10 +1002,13 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
         // ── check_portfolio ──
         else if (fnName === "check_portfolio") {
           try {
+            // Settled trades carry real P&L; show most recent settled for accurate stats
             const { data: recentTrades } = await supabase
               .from("trades")
-              .select("ticker, side, action, price, amount, pnl, strategy, status, created_at")
-              .order("created_at", { ascending: false })
+              .select("ticker, side, action, price, amount, pnl, strategy, status, settled_at")
+              .eq("status", "settled")
+              .gte("settled_at", "2026-05-01T00:00:00.000Z")
+              .order("settled_at", { ascending: false })
               .limit(10);
 
             const { data: openPositions } = await supabase
@@ -1043,9 +1049,10 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
             const limit = args.limit || 20;
             let query = supabase
               .from("trades")
-              .select("id, ticker, side, action, price, amount, pnl, strategy, strategy_id, status, created_at")
-              .eq("status", "filled")
-              .order("created_at", { ascending: false })
+              .select("id, ticker, side, action, price, amount, pnl, strategy, strategy_id, status, settled_at")
+              .eq("status", "settled")
+              .gte("settled_at", "2026-05-01T00:00:00.000Z")
+              .order("settled_at", { ascending: false })
               .limit(limit);
 
             if (args.strategyId) query = query.eq("strategy_id", args.strategyId);
