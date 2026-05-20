@@ -491,13 +491,19 @@ export default function ObservabilityPage() {
       .order("settled_at", { ascending: true });
     if (data) {
       setAllSettledTrades(data as Trade[]);
-      // Build equity curve
+      // Build equity curve — one point per day (aggregate trades settled on same day)
+      const dailyPnl = new Map<string, number>();
+      for (const t of (data as Trade[])) {
+        if (!t.settled_at) continue;
+        const day = t.settled_at.slice(0, 10); // YYYY-MM-DD key for stable sort
+        dailyPnl.set(day, (dailyPnl.get(day) ?? 0) + (t.pnl ?? 0));
+      }
       let cum = 0;
-      const pts: EquityPoint[] = (data as Trade[])
-        .filter((t) => t.settled_at)
-        .map((t) => {
-          cum += t.pnl ?? 0;
-          return { date: fmtShortDate(t.settled_at!), cumPnl: parseFloat(cum.toFixed(2)) };
+      const pts: EquityPoint[] = Array.from(dailyPnl.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([day, pnl]) => {
+          cum += pnl;
+          return { date: fmtShortDate(day + "T12:00:00Z"), cumPnl: parseFloat(cum.toFixed(2)) };
         });
       setEquityData(pts);
     }
@@ -1228,7 +1234,7 @@ export default function ObservabilityPage() {
                     <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
                 <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} width={48} />
                 <Tooltip
                   formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
