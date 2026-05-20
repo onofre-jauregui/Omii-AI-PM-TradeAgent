@@ -190,9 +190,6 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
             <Cpu className="h-3 w-3" />
             <span className="truncate max-w-[80px]">{currentModel?.name ?? "GPT-4o Mini"}</span>
           </div>
-          <Badge variant="secondary" className={`text-[10px] rounded-full shrink-0 ${mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"}`}>
-            {mode === "live" ? "Live" : "Paper"}
-          </Badge>
           <button
             onClick={() => setConfigOpen(o => !o)}
             className="flex items-center gap-0.5 text-muted-foreground hover:text-foreground transition-colors rounded-lg p-1.5 hover:bg-secondary shrink-0"
