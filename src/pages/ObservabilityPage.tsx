@@ -13,12 +13,39 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-// ── Cost constants (from CostReport) ──────────────────────────────────────────
-
-const LLM_INPUT_PER_M = 0.15;
-const LLM_OUTPUT_PER_M = 0.60;
+// ── Token counts (estimated from qualify prompt structure) ────────────────────
 const QUALIFY_INPUT_TOKENS = 1_200;
 const QUALIFY_OUTPUT_TOKENS = 50;
+
+// ── Model cost lookup (per million tokens) ────────────────────────────────────
+// Key = model identifier as stored in api_keys.key_id / as sent to OpenRouter
+interface ModelInfo { label: string; provider: string; input: number; output: number }
+const MODEL_COSTS: Record<string, ModelInfo> = {
+  // OpenRouter-routed models (prefix "openai/" etc)
+  "openai/gpt-4o-mini":                  { label: "gpt-4o-mini",          provider: "OpenRouter", input: 0.15,  output: 0.60  },
+  "openai/gpt-4o":                        { label: "gpt-4o",               provider: "OpenRouter", input: 2.50,  output: 10.00 },
+  "openai/gpt-4-turbo":                   { label: "gpt-4-turbo",          provider: "OpenRouter", input: 10.00, output: 30.00 },
+  "anthropic/claude-3-5-haiku":           { label: "claude-3.5-haiku",     provider: "OpenRouter", input: 0.80,  output: 4.00  },
+  "anthropic/claude-3-5-haiku-20241022":  { label: "claude-3.5-haiku",     provider: "OpenRouter", input: 0.80,  output: 4.00  },
+  "anthropic/claude-3-5-sonnet":          { label: "claude-3.5-sonnet",    provider: "OpenRouter", input: 3.00,  output: 15.00 },
+  "anthropic/claude-3-5-sonnet-20241022": { label: "claude-3.5-sonnet",    provider: "OpenRouter", input: 3.00,  output: 15.00 },
+  "anthropic/claude-sonnet-4-6":          { label: "claude-sonnet-4.6",    provider: "OpenRouter", input: 3.00,  output: 15.00 },
+  "anthropic/claude-opus-4-7":            { label: "claude-opus-4.7",      provider: "OpenRouter", input: 15.00, output: 75.00 },
+  "anthropic/claude-haiku-4-5":           { label: "claude-haiku-4.5",     provider: "OpenRouter", input: 0.80,  output: 4.00  },
+  "google/gemini-flash-1.5":              { label: "gemini-1.5-flash",     provider: "OpenRouter", input: 0.075, output: 0.30  },
+  "google/gemini-pro-1.5":                { label: "gemini-1.5-pro",       provider: "OpenRouter", input: 1.25,  output: 5.00  },
+  "google/gemini-2.0-flash":              { label: "gemini-2.0-flash",     provider: "OpenRouter", input: 0.10,  output: 0.40  },
+  // Direct Anthropic (no prefix)
+  "claude-3-5-haiku-20241022":            { label: "claude-3.5-haiku",     provider: "Anthropic",  input: 0.80,  output: 4.00  },
+  "claude-3-5-sonnet-20241022":           { label: "claude-3.5-sonnet",    provider: "Anthropic",  input: 3.00,  output: 15.00 },
+  "claude-sonnet-4-6":                    { label: "claude-sonnet-4.6",    provider: "Anthropic",  input: 3.00,  output: 15.00 },
+  "claude-opus-4-7":                      { label: "claude-opus-4.7",      provider: "Anthropic",  input: 15.00, output: 75.00 },
+  "claude-haiku-4-5":                     { label: "claude-haiku-4.5",     provider: "Anthropic",  input: 0.80,  output: 4.00  },
+  // Direct OpenAI (no prefix)
+  "gpt-4o-mini":                          { label: "gpt-4o-mini",          provider: "OpenAI",     input: 0.15,  output: 0.60  },
+  "gpt-4o":                               { label: "gpt-4o",               provider: "OpenAI",     input: 2.50,  output: 10.00 },
+};
+const DEFAULT_MODEL_INFO: ModelInfo = { label: "gpt-4o-mini", provider: "OpenRouter", input: 0.15, output: 0.60 };
 
 // ── Failure Mode Details ───────────────────────────────────────────────────────
 
@@ -348,6 +375,7 @@ export default function ObservabilityPage() {
   const [showDetails, setShowDetails] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(false);
   const [tracePage, setTracePage] = useState(1);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
 
   // Pulse
   useEffect(() => {
@@ -630,6 +658,15 @@ export default function ObservabilityPage() {
     if (data) setMemories(data as MemoryEntry[]);
   }, []);
 
+  const loadActiveModel = useCallback(async () => {
+    const { data } = await supabase
+      .from("api_keys")
+      .select("key_id")
+      .eq("provider", "model_agent")
+      .maybeSingle();
+    if (data?.key_id) setActiveModel(data.key_id as string);
+  }, []);
+
   // Session check + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -648,6 +685,7 @@ export default function ObservabilityPage() {
     loadErrors();
     loadStrategies();
     loadMemories();
+    loadActiveModel();
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -661,6 +699,7 @@ export default function ObservabilityPage() {
     loadErrors,
     loadStrategies,
     loadMemories,
+    loadActiveModel,
     decisionDateFilter,
     decisionStatusFilter,
   ]);
@@ -753,6 +792,7 @@ export default function ObservabilityPage() {
       loadErrors();
       loadStrategies();
       loadMemories();
+      loadActiveModel();
     }, 2 * 60 * 1000);
 
     return () => {
@@ -772,6 +812,7 @@ export default function ObservabilityPage() {
     loadErrors,
     loadStrategies,
     loadMemories,
+    loadActiveModel,
   ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
@@ -871,6 +912,14 @@ export default function ObservabilityPage() {
   const cycleLabel = avgCycleMs !== null
     ? avgCycleMs >= 1000 ? `${(avgCycleMs / 1000).toFixed(1)}s` : `${avgCycleMs}ms`
     : null;
+
+  // Active model — read from DB, fall back to default
+  const modelInfo = (activeModel && MODEL_COSTS[activeModel]) ? MODEL_COSTS[activeModel] : DEFAULT_MODEL_INFO;
+  const modelLabel = modelInfo.label;
+  const modelProviderLabel = modelInfo.provider;
+  const LLM_INPUT_PER_M = modelInfo.input;
+  const LLM_OUTPUT_PER_M = modelInfo.output;
+  const unknownModel = !!activeModel && !MODEL_COSTS[activeModel];
 
   const primaryMode = strategies[0]?.mode ?? "paper";
 
@@ -1269,7 +1318,7 @@ export default function ObservabilityPage() {
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Daily LLM Spend</p>
                 <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">gpt-4o-mini via OpenRouter</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">{modelLabel} via {modelProviderLabel}</p>
               </div>
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
@@ -1298,7 +1347,10 @@ export default function ObservabilityPage() {
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Model</p>
-                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">gpt-4o-mini · OpenRouter</span>
+                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">
+                  {modelLabel} · {modelProviderLabel}
+                  {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
+                </span>
               </div>
               <div className="grid grid-cols-5 gap-3">
                 <div className="rounded-xl border border-border p-3">
@@ -1424,136 +1476,13 @@ export default function ObservabilityPage() {
           {showDetails ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           {showDetails ? "Hide" : "Show"} System Details
           <span className="ml-1 text-[10px] opacity-60">
-            cost · errors · traces · decision history · agent memory
+            errors · traces · decision history
           </span>
         </button>
 
         {/* ── 7. System Details (all existing technical sections) ──────── */}
         {showDetails && (
           <div className="space-y-6">
-
-            {/* Performance (detailed) */}
-            <Section title="Performance">
-              <div className="grid grid-cols-2 gap-0 divide-x divide-border">
-                <div className="p-6 grid grid-cols-2 gap-4">
-                  <StatCard
-                    label="Total P&L"
-                    value={
-                      <span className={totalPnl >= 0 ? "text-emerald-500" : "text-red-500"}>
-                        {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
-                      </span>
-                    }
-                  />
-                  <StatCard
-                    label="Win Rate"
-                    value={
-                      winRate !== null ? (
-                        <span className={winRate >= 55 ? "text-emerald-500" : winRate >= 40 ? "text-yellow-500" : "text-red-500"}>
-                          {winRate.toFixed(0)}%
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )
-                    }
-                    sub={settledCount > 0 ? `${wins}/${settledCount} settled` : undefined}
-                  />
-                  <StatCard
-                    label="Total Trades"
-                    value={<span>{settledCount}</span>}
-                    sub="settled"
-                  />
-                  <StatCard
-                    label="Avg Duration"
-                    value={
-                      avgDurationHours !== null ? (
-                        <span>{avgDurationHours.toFixed(1)}h</span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )
-                    }
-                    sub="entry → settle"
-                  />
-                </div>
-                <div className="p-6">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Equity Curve</p>
-                  {equityData.length < 2 ? (
-                    <div className="h-[200px] flex items-center justify-center text-sm text-muted-foreground">
-                      Not enough data yet.
-                    </div>
-                  ) : (
-                    <ResponsiveContainer width="100%" height={200}>
-                      <AreaChart data={equityData}>
-                        <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
-                        <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${v}`} />
-                        <Tooltip
-                          formatter={(value: number) => [`$${value.toFixed(2)}`, "Cum. P&L"]}
-                          contentStyle={{ fontSize: 11, borderRadius: 8 }}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="cumPnl"
-                          stroke="hsl(var(--primary))"
-                          fill="hsl(var(--primary))"
-                          fillOpacity={0.1}
-                          strokeWidth={1.5}
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
-              </div>
-            </Section>
-
-            {/* Agent Memory summary section */}
-            <Section
-              title="Agent Memory"
-              action={
-                <button
-                  onClick={() => setMemoryPanelOpen(true)}
-                  className="text-xs text-primary hover:opacity-80 transition-opacity font-medium"
-                >
-                  View All →
-                </button>
-              }
-            >
-              <div className="px-6 py-4">
-                {memories.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-2">
-                    {isAuthenticated === false ? "Sign in to view agent memory." : "Loading…"}
-                  </p>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <span className="text-2xl font-bold tabular-nums">{activeMemories.length}</span>
-                      <span className="text-xs text-muted-foreground">active</span>
-                    </div>
-                    {quarantinedMemories.length > 0 && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg font-semibold tabular-nums text-red-500">{quarantinedMemories.length}</span>
-                        <span className="text-xs text-muted-foreground">quarantined</span>
-                      </div>
-                    )}
-                    {avgConfidence !== null && (
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg font-semibold tabular-nums">{(avgConfidence * 100).toFixed(0)}%</span>
-                        <span className="text-xs text-muted-foreground">avg confidence</span>
-                      </div>
-                    )}
-                    <div className="flex flex-wrap gap-1.5 ml-2">
-                      {Object.entries(memoryTypeCounts).map(([type, count]) => (
-                        <button
-                          key={type}
-                          onClick={() => { setMemoryTypeFilter(type); setMemoryPanelOpen(true); }}
-                          className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors hover:opacity-80 ${MEMORY_TYPE_COLORS[type] ?? "bg-secondary text-muted-foreground"}`}
-                        >
-                          {MEMORY_TYPE_LABELS[type] ?? type} {count}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </Section>
 
             {/* Errors & Rough Edges */}
             <Section
@@ -1886,7 +1815,7 @@ export default function ObservabilityPage() {
                 value={primaryMode.charAt(0).toUpperCase() + primaryMode.slice(1)}
                 valueClass={primaryMode === "live" ? "text-emerald-500" : "text-yellow-500"}
               />
-              <SystemPill label="LLM" value="gpt-4o-mini via OpenRouter" />
+              <SystemPill label="LLM" value={`${modelLabel} via ${modelProviderLabel}`} />
               <SystemPill label="Functions" value="7 edge functions" />
               <a
                 href="https://cloud.langfuse.com"
