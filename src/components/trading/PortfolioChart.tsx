@@ -41,8 +41,7 @@ export function PortfolioChart({
     // Get starting balance from strategies table (same source as DashboardHero)
     const { data: strategyRows } = await supabase
       .from("strategies")
-      .select("starting_balance")
-      .eq("active", true);
+      .select("starting_balance");
 
     const balance = strategyRows && strategyRows.length > 0
       ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
