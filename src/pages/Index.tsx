@@ -14,6 +14,7 @@ import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { AccountStatusCard } from "@/components/trading/AccountStatusCard";
+import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot } from "lucide-react";
@@ -173,6 +174,7 @@ const Index = () => {
               <DashboardHero mode={mode} onNavigate={handleNavigate} />
               <StrategyPerformance mode={mode} />
               <PortfolioOverview mode={mode} />
+              <AgentMemoryCard />
             </div>
           )}
 
