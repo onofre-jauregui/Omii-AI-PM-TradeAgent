@@ -203,14 +203,20 @@ export function DashboardHero({
       if (!day) continue;
       byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
     }
+    // Fill every calendar date Apr 22 → today so the chart is continuous
     let cum = startingBalance;
-    const chartPoints: ChartPoint[] = [{ date: "start", value: startingBalance }];
-    for (const day of Object.keys(byDay).sort()) {
-      cum += byDay[day];
+    const chartPoints: ChartPoint[] = [];
+    const cursor = new Date("2026-04-22T12:00:00Z");
+    const today = new Date();
+    today.setUTCHours(12, 0, 0, 0);
+    while (cursor <= today) {
+      const key = cursor.toISOString().slice(0, 10);
+      cum += byDay[key] ?? 0;
       chartPoints.push({
-        date: new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        date: cursor.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
         value: Math.round(cum * 100) / 100,
       });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
 
     setStats({
