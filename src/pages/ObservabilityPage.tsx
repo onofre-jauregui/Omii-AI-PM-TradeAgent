@@ -129,6 +129,7 @@ interface Strategy {
   suspended_until: string | null;
   suspension_reason: string | null;
   starting_balance: number | null;
+  user_id: string | null;
 }
 
 interface EquityPoint {
@@ -313,6 +314,7 @@ function Section({
 export default function ObservabilityPage() {
   const [liveIndicator, setLiveIndicator] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
 
   // Hero state
   const [lastRunAt, setLastRunAt] = useState<string | null>(null);
@@ -663,7 +665,7 @@ export default function ObservabilityPage() {
   const loadStrategies = useCallback(async () => {
     const { data } = await supabase
       .from("strategies")
-      .select("id, name, active, mode, suspended_until, suspension_reason, starting_balance");
+      .select("id, name, active, mode, suspended_until, suspension_reason, starting_balance, user_id");
     if (data) setStrategies(data as Strategy[]);
   }, []);
 
@@ -688,6 +690,7 @@ export default function ObservabilityPage() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsAuthenticated(!!session);
+      setUserId(session?.user?.id ?? null);
     });
 
     loadHeroStatus();
@@ -878,15 +881,19 @@ export default function ObservabilityPage() {
     : null;
 
   // Performance stats
-  // Derive starting capital from strategies that actually traded — avoids per-user duplicate rows
+  // Filter to the current user's strategies — avoids summing starting_balance across all tenants.
+  // Falls back to active strategies if unauthenticated (public view).
+  const userStrategies = userId
+    ? strategies.filter((s) => s.user_id === userId)
+    : strategies.filter((s) => s.active);
   const tradedStrategyIds = new Set(allSettledTrades.map((t) => t.strategy_id).filter(Boolean));
-  const strategyMap = new Map(strategies.map((s) => [s.id, s]));
+  const strategyMap = new Map(userStrategies.map((s) => [s.id, s]));
   const STARTING_CAPITAL = tradedStrategyIds.size > 0
     ? Array.from(tradedStrategyIds).reduce((sum, sid) => sum + (strategyMap.get(sid!)?.starting_balance ?? 0), 0)
-    : strategies.filter((s) => s.active).reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
+    : userStrategies.reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
   const settledCount = allSettledTrades.length;
   const totalPnl = allSettledTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const roi = STARTING_CAPITAL > 0 ? (totalPnl / STARTING_CAPITAL) * 100 : 0;
+  const roi = STARTING_CAPITAL > 0 ? (totalPnl / STARTING_CAPITAL) * 100 : null;
   const wins = allSettledTrades.filter((t) => (t.pnl ?? 0) > 0).length;
   const winRate = settledCount > 0 ? (wins / settledCount) * 100 : null;
 
@@ -1186,11 +1193,11 @@ export default function ObservabilityPage() {
           {/* ROI */}
           <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
             <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Return on Capital</p>
-            <p className={`text-4xl font-bold tabular-nums ${roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {roi >= 0 ? "+" : ""}{roi.toFixed(2)}%
+            <p className={`text-4xl font-bold tabular-nums ${roi === null ? "text-muted-foreground" : roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+              {roi === null ? "—" : `${roi >= 0 ? "+" : ""}${roi.toFixed(2)}%`}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)} on ${STARTING_CAPITAL.toLocaleString()} · {settledCount} trades
+              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}{STARTING_CAPITAL > 0 ? ` on $${STARTING_CAPITAL.toLocaleString()}` : ""} · {settledCount} trades
             </p>
           </div>
 
@@ -1223,9 +1230,11 @@ export default function ObservabilityPage() {
           <div className="px-6 pt-5 pb-2 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold">Portfolio Equity</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">Return on ${STARTING_CAPITAL.toLocaleString()} starting capital · since Apr 22, 2026</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {STARTING_CAPITAL > 0 ? `Return on $${STARTING_CAPITAL.toLocaleString()} starting capital · ` : ""}since Apr 22, 2026
+              </p>
             </div>
-            {equityData.length > 0 && (
+            {equityData.length > 0 && roi !== null && (
               <div className="text-right">
                 <span className={`text-sm font-bold tabular-nums ${roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
                   {roi >= 0 ? "+" : ""}{roi.toFixed(2)}%
