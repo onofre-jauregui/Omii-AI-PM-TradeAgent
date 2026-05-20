@@ -1002,7 +1002,7 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, runs24hCount);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
@@ -2071,7 +2071,7 @@ export default function ObservabilityPage() {
                 <div className="rounded-xl bg-secondary/40 p-4">
                   <p className="text-[12px] text-muted-foreground">
                     {selectedFailureMode === "cost_spike"
-                      ? `${mode.count} strategy evaluations in the last 6h (${mode.extra ?? "—"} vs 30d avg per 6h window)`
+                      ? `${mode.count} strategy evaluations in the last 6h (${mode.extra ?? "—"} per 6h window)`
                       : `${mode.count} quarantined memories · ${failureModes.memory_pressure.extra ?? ""}`}
                   </p>
                 </div>
@@ -2293,7 +2293,8 @@ function detectFailureModes(
   events: ComplianceEvent[],
   memories: MemoryEntry[],
   toolCounts: Record<string, number>,
-  runs6hCount: number | null = null
+  runs6hCount: number | null = null,
+  runs24hCount: number | null = null
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
@@ -2332,10 +2333,11 @@ function detectFailureModes(
     return emailRe.test(e.message) || phoneRe.test(e.message);
   });
 
-  // runs6hCount comes from a dedicated server-side COUNT query — accurate even at high log volume
+  // runs6hCount and runs24hCount come from dedicated server-side COUNT queries
+  // Baseline uses last-24h ÷ 4 (not 30d total) — 30d average understates activity for newer systems
   const last6hRuns = runs6hCount ?? 0;
-  const avg6hRuns30d = (toolCounts["auto_trade_strategy_run"] ?? 0) / (30 * 4);
-  const spikeRatio = (runs6hCount !== null && avg6hRuns30d > 0) ? last6hRuns / avg6hRuns30d : null;
+  const avg6hRuns = runs24hCount !== null ? runs24hCount / 4 : (toolCounts["auto_trade_strategy_run"] ?? 0) / (30 * 4);
+  const spikeRatio = (runs6hCount !== null && runs24hCount !== null && avg6hRuns > 0) ? last6hRuns / avg6hRuns : null;
 
   const quarantined = memories.filter((m) => !m.is_active || !!m.quarantined_at);
   const activeCount = memories.filter((m) => m.is_active && !m.quarantined_at).length;
@@ -2361,7 +2363,7 @@ function detectFailureModes(
       events: [],
       count: last6hRuns,
       lastAt: null,
-      extra: spikeRatio !== null ? `${spikeRatio.toFixed(1)}× avg` : "insufficient data",
+      extra: spikeRatio !== null ? `${spikeRatio.toFixed(1)}× 24h avg` : "insufficient data",
       status: spikeRatio !== null && spikeRatio > 4 ? "critical" : spikeRatio !== null && spikeRatio > 2 ? "warning" : "ok",
     },
     input_error: {
