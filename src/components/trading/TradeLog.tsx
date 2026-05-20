@@ -119,7 +119,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
           <div className="flex items-center gap-2">
             <Clock className="h-4 w-4 text-muted-foreground" />
             <h3 className="text-sm font-medium">
-              {filterMode === "paper" ? "Paper" : filterMode === "live" ? "Live" : ""} Trade History
+              {filterMode === "live" ? "Live " : ""}Trade History
             </h3>
             {!loading && (
               <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">
