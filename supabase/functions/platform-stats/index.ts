@@ -21,23 +21,26 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Starting balance from active strategies — source of truth, not hardcoded
+    // Starting balance from ALL strategies — include inactive ones whose trades still count
     const { data: strategies } = await supabase
       .from("strategies")
       .select("starting_balance")
-      .eq("user_id", CANONICAL_USER_ID)
-      .eq("active", true);
+      .eq("user_id", CANONICAL_USER_ID);
 
     const startingBalance = (strategies ?? []).reduce(
       (sum: number, s: any) => sum + (s.starting_balance ?? 0),
       0
-    ) || 2500; // fallback if no active strategies yet
+    ) || 2500; // fallback if no strategies yet
+
+    // May 1 cutoff matches dashboard — excludes pre-calibration development trades
+    const MAY_START = "2026-05-01T00:00:00.000Z";
 
     const { data: trades, error } = await supabase
       .from("trades")
       .select("ticker, side, amount, pnl, settled_at, created_at")
       .eq("status", "settled")
       .eq("user_id", CANONICAL_USER_ID)
+      .gte("settled_at", MAY_START)
       .order("settled_at", { ascending: true });
 
     if (error) {

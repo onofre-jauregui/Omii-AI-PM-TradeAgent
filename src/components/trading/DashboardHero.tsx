@@ -165,7 +165,7 @@ export function DashboardHero({
     const totalPnl = modeTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
     const portfolioValue = startingBalance + totalPnl;
     const totalReturnPct = startingBalance > 0
-      ? parseFloat(((totalPnl / startingBalance) * 100).toFixed(2))
+      ? parseFloat(((totalPnl / startingBalance) * 100).toFixed(1))
       : 0;
 
     // Today's P&L — trades that settled today
