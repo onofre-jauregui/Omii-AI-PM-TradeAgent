@@ -4,8 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Sidebar } from "@/components/trading/Sidebar";
 import { BottomNav } from "@/components/trading/BottomNav";
 import { DashboardHero } from "@/components/trading/DashboardHero";
-import { PortfolioChart } from "@/components/trading/PortfolioChart";
-import { PortfolioOverview, PortfolioStats } from "@/components/trading/PortfolioOverview";
+import { PortfolioOverview } from "@/components/trading/PortfolioOverview";
 import { StrategyPerformance } from "@/components/trading/StrategyPerformance";
 import { MarketsPanel } from "@/components/trading/MarketsPanel";
 import { StrategiesPanel } from "@/components/trading/StrategiesPanel";
@@ -172,8 +171,6 @@ const Index = () => {
           {activeTab === "dashboard" && (
             <div className="space-y-6 apple-reveal">
               <DashboardHero mode={mode} onNavigate={handleNavigate} />
-              {!isMobile && <PortfolioStats mode={mode} />}
-              <PortfolioChart mode={mode} />
               <StrategyPerformance mode={mode} />
               <PortfolioOverview mode={mode} />
             </div>

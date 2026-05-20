@@ -1,8 +1,11 @@
 import { Bot, Clock, Zap, MessageSquare, TrendingUp, ArrowUpRight } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
+import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchKalshiMarkets } from "@/lib/kalshiApi";
+
+interface ChartPoint { date: string; value: number; }
 
 interface HeroStats {
   startingBalance: number;
@@ -17,6 +20,7 @@ interface HeroStats {
   marketsClosingToday: number;
   lastTradeAt: string | null;
   settledCount: number;
+  chartPoints: ChartPoint[];
   loading: boolean;
 }
 
@@ -111,6 +115,7 @@ export function DashboardHero({
     marketsClosingToday: 0,
     lastTradeAt: null,
     settledCount: 0,
+    chartPoints: [],
     loading: true,
   });
 
@@ -191,6 +196,23 @@ export function DashboardHero({
       return t > Date.now() && t < cutoff;
     }).length;
 
+    // Build equity curve from settled trades (modeTrades is descending — sort ascending for chart)
+    const byDay: Record<string, number> = {};
+    for (const t of modeTrades) {
+      const day = (t.settled_at ?? "").slice(0, 10);
+      if (!day) continue;
+      byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
+    }
+    let cum = startingBalance;
+    const chartPoints: ChartPoint[] = [{ date: "start", value: startingBalance }];
+    for (const day of Object.keys(byDay).sort()) {
+      cum += byDay[day];
+      chartPoints.push({
+        date: new Date(day + "T12:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+        value: Math.round(cum * 100) / 100,
+      });
+    }
+
     setStats({
       startingBalance,
       portfolioValue,
@@ -204,6 +226,7 @@ export function DashboardHero({
       marketsClosingToday,
       lastTradeAt: modeTrades[0]?.settled_at ?? null,
       settledCount: modeTrades.length,
+      chartPoints,
       loading: false,
     });
   }, [mode]);
@@ -266,6 +289,32 @@ export function DashboardHero({
             </span>
           )}
         </div>
+
+        {/* Equity sparkline */}
+        {stats.chartPoints.length > 2 && (
+          <div className="my-3 -mx-1">
+            <ResponsiveContainer width="100%" height={110}>
+              <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="heroGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.18} />
+                    <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <YAxis domain={["auto", "auto"]} hide />
+                <Area
+                  type="monotone"
+                  dataKey="value"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={1.5}
+                  fill="url(#heroGradient)"
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
 
         {/* Stats grid */}
         <div className="grid grid-cols-4 gap-2 mb-4">
