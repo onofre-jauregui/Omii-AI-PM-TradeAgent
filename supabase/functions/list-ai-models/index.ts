@@ -206,10 +206,13 @@ serve(async (req) => {
     }
 
     // ── Anthropic (no list endpoint — hardcode latest) ─────────
+    // Add direct Anthropic models when: (a) we have an API key AND (b) no Anthropic
+    // models made it through OpenRouter (either no OR key, or OR has Anthropic blocked).
     const antKey = keyMap["anthropic"] || Deno.env.get("ANTHROPIC_API_KEY");
-    if (antKey && !orKey) {
+    const anthropicAlreadyInList = allModels.some(m => m.id.startsWith("anthropic/"));
+    if (antKey && !anthropicAlreadyInList) {
       allModels.push(
-        { id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "Anthropic" },
+        { id: "claude-opus-4-7", name: "Claude Opus 4.7", provider: "Anthropic" },
         { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "Anthropic" },
         { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "Anthropic" }
       );
