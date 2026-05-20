@@ -159,13 +159,13 @@ function buildChartPath(points: DailyCumulative[]): { fill: string; line: string
 function HeroDashboardMockup() {
   const [stats, setStats] = useState<PlatformStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [spYtd, setSpYtd] = useState<number | null>(null);
 
   useEffect(() => {
     const STATS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/platform-stats`;
     fetch(STATS_URL)
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data: PlatformStats) => {
-        // Use live data only if we got meaningful results; otherwise fall back
         if (data && typeof data.totalPnl === "number") {
           setStats(data);
         } else {
@@ -174,10 +174,26 @@ function HeroDashboardMockup() {
       })
       .catch(() => setStats(FALLBACK_STATS))
       .finally(() => setLoading(false));
+
+    // S&P 500 YTD return — Jan 1 2026 to today
+    const jan1 = 1735689600; // 2026-01-01 UTC
+    const now = Math.floor(Date.now() / 1000);
+    fetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&period1=${jan1}&period2=${now}&corsDomain=finance.yahoo.com`
+    )
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data) => {
+        const closes: number[] = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+        const valid = closes.filter((c) => c != null);
+        if (valid.length >= 2) {
+          setSpYtd(((valid[valid.length - 1] - valid[0]) / valid[0]) * 100);
+        }
+      })
+      .catch(() => {/* show "—" gracefully */});
   }, []);
 
   const s = stats ?? FALLBACK_STATS;
-  const portfolio = (2500 + s.totalPnl).toFixed(2);
+  const roiPct = ((s.totalPnl / 2500) * 100).toFixed(1);
   const { fill: chartFill, line: chartLine } = buildChartPath(s.dailyCumulative);
 
   return (
@@ -221,8 +237,8 @@ function HeroDashboardMockup() {
           ))
         ) : (
           [
-            { label: "Portfolio", value: `$${portfolio}`, sub: "", color: "#f5f5f7" },
-            { label: `P&L Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+$${s.totalPnl.toFixed(2)}`, sub: `+${((s.totalPnl / 2500) * 100).toFixed(1)}%`, color: "#34d058" },
+            { label: `Return Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+${roiPct}%`, sub: `+$${s.totalPnl.toFixed(2)} P&L`, color: "#34d058" },
+            { label: "vs S&P 500 YTD", value: spYtd != null ? `${spYtd >= 0 ? "+" : ""}${spYtd.toFixed(1)}%` : "—", sub: "Jan 1 → today", color: spYtd != null && spYtd >= 0 ? "#34d058" : spYtd != null ? "#ff453a" : "#6e6e73" },
             { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
           ].map((stat) => (

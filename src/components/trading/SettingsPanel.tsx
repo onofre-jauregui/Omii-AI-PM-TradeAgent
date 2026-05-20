@@ -136,7 +136,7 @@ export function SettingsPanel() {
       if (!user) throw new Error("Not authenticated");
       await supabase.from("api_keys").upsert(
         { provider: "model_agent", key_id: selectedModel, user_id: user.id, updated_at: new Date().toISOString() },
-        { onConflict: "provider" }
+        { onConflict: "user_id,provider" }
       );
       setModelSaveStatus("success");
       setTimeout(() => setModelSaveStatus("idle"), 3000);
@@ -150,6 +150,8 @@ export function SettingsPanel() {
   const handleSaveAiKeys = async () => {
     setAiSaving(true);
     setAiSaveStatus("idle");
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setAiSaveStatus("error"); setAiSaving(false); return; }
     try {
       const keysToSave = [
         aiKeys.openrouter ? { provider: "openrouter", key_id: "default", encrypted_secret: aiKeys.openrouter } : null,
@@ -160,10 +162,15 @@ export function SettingsPanel() {
 
       for (const key of keysToSave) {
         await supabase.from("api_keys").upsert(
-          { ...key, updated_at: new Date().toISOString() },
-          { onConflict: "provider" }
+          { ...key, user_id: user.id, updated_at: new Date().toISOString() },
+          { onConflict: "user_id,provider" }
         );
       }
+      setSavedProviders(prev => {
+        const next = new Set(prev);
+        keysToSave.forEach(k => next.add(k.provider));
+        return next;
+      });
       await loadAll();
       setAiSaveStatus("success");
       setTimeout(() => setAiSaveStatus("idle"), 3000);
@@ -187,6 +194,7 @@ export function SettingsPanel() {
       });
       const json = await resp.json();
       if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
+      setSavedProviders(prev => new Set([...prev, "kalshi_live"]));
       await loadAll();
       setKalshiSaveStatus("success");
       setTimeout(() => setKalshiSaveStatus("idle"), 3000);
@@ -206,57 +214,7 @@ export function SettingsPanel() {
     "bg-secondary text-muted-foreground";
 
   return (
-    <div className="space-y-8 apple-reveal">
-      <div>
-        <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>Settings</h2>
-        <p className="text-sm text-muted-foreground mt-1">Manage your account, AI model, and API credentials.</p>
-      </div>
-
-      {/* ── Profile identity ─────────────────────────────────────── */}
-      <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
-        <div className="px-6 py-5 flex items-center gap-4 border-b border-border">
-          <Avatar className="h-14 w-14 shrink-0">
-            {profileAvatar && <AvatarImage src={profileAvatar} />}
-            <AvatarFallback className="bg-secondary text-foreground text-lg font-light">
-              {profileName.slice(0, 2).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <p className="font-medium text-foreground truncate">{profileName}</p>
-              <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${tierColor(subscriptionTier)}`}>
-                {tierLabel(subscriptionTier)}
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground truncate mt-0.5">{profileEmail}</p>
-          </div>
-          {(subscriptionTier === "free" || !subscriptionTier) && (
-            <Button variant="outline" size="sm" className="rounded-full gap-1.5 text-xs shrink-0" onClick={() => navigate("/billing")}>
-              <Zap className="h-3 w-3" /> Upgrade
-            </Button>
-          )}
-        </div>
-        <div className="px-6 py-5">
-          <div className="flex gap-3 items-end">
-            <div className="flex-1 space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Display Name</Label>
-              <Input
-                value={profileName}
-                onChange={(e) => setProfileName(e.target.value)}
-                className="rounded-xl border border-border bg-secondary/50 text-sm"
-              />
-            </div>
-            <Button className="rounded-full gap-2 text-sm shrink-0" onClick={handleSaveProfile} disabled={profileSaving}>
-              {profileSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {profileSaving ? "Saving…" : "Save"}
-            </Button>
-          </div>
-          <p className="text-[10px] text-muted-foreground mt-3">
-            To update your photo, go to the <span className="text-foreground">Profile</span> tab and click your avatar.
-          </p>
-        </div>
-      </div>
-
+    <div className="space-y-6">
       {/* ── Default AI Model ─────────────────────────────────────── */}
       <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
         <div className="px-6 py-4 border-b border-border">
