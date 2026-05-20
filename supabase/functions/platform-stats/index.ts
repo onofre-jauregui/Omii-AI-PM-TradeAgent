@@ -32,15 +32,15 @@ serve(async (req) => {
       0
     ) || 2500; // fallback if no strategies yet
 
-    // May 1 cutoff matches dashboard — excludes pre-calibration development trades
-    const MAY_START = "2026-05-01T00:00:00.000Z";
+    // Apr 22 cutoff — excludes pre-calibration development trades
+    const TRACK_RECORD_START = "2026-04-22T00:00:00.000Z";
 
     const { data: trades, error } = await supabase
       .from("trades")
       .select("ticker, side, amount, pnl, settled_at, created_at")
       .eq("status", "settled")
       .eq("user_id", CANONICAL_USER_ID)
-      .gte("settled_at", MAY_START)
+      .gte("settled_at", TRACK_RECORD_START)
       .order("settled_at", { ascending: true });
 
     if (error) {
