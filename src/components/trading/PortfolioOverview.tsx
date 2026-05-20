@@ -174,7 +174,7 @@ export function PortfolioStats({
           value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
           valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
         />
-        <StatCard icon={BarChart3} label="Open Positions" value={`${stats.openPositionCount}`} />
+        <StatCard icon={BarChart3} label="Total Trades" value={`${stats.totalTrades}`} />
       </div>
     );
   }
