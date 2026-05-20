@@ -1,5 +1,5 @@
 import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2, Wallet } from "lucide-react";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string)?.trim();
@@ -60,9 +60,10 @@ export function PortfolioStats({
     winRate: 0, openPositionCount: 0, totalTrades: 0,
   });
   const [loading, setLoading] = useState(true);
+  const initialized = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    if (!initialized.current) setLoading(true);
 
     // May 1 2026 — same cutoff as DashboardHero, excludes pre-calibration trades
     const MAY_START = "2026-05-01T00:00:00.000Z";
@@ -125,6 +126,7 @@ export function PortfolioStats({
       totalTrades: (settledTrades ?? []).length,
     });
     setLoading(false);
+    initialized.current = true;
   }, [mode]);
 
   useEffect(() => {
@@ -155,7 +157,7 @@ export function PortfolioStats({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard
           icon={Wallet}
-          label="Paper Balance"
+          label="Portfolio Balance"
           value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
           sub={`Started at $${effectiveStartingBalance.toLocaleString()}`}
         />
@@ -208,9 +210,10 @@ export function PortfolioStats({
 export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
+  const initialized = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    if (!initialized.current) setLoading(true);
     let q = supabase
       .from("trades")
       .select("*")
@@ -222,6 +225,7 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
     const { data } = await q;
     setPositions((data ?? []) as Position[]);
     setLoading(false);
+    initialized.current = true;
   }, [mode]);
 
   useEffect(() => {
@@ -247,13 +251,13 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
         <div className="flex items-center gap-2 mb-4">
           <Clock className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-sm font-medium text-muted-foreground">
-            {mode === "paper" ? "Open Paper Positions" : "Active Positions"}
+            {mode === "paper" ? "Open Positions" : "Active Positions"}
           </h3>
         </div>
         {positions.length === 0 ? (
           <p className="text-sm text-muted-foreground py-8 text-center">
             {mode === "paper"
-              ? "No open paper positions. Use the Demo agent to start paper trading."
+              ? "No open positions. The agent will enter positions during the next scan cycle."
               : "No open positions. Use the Live Agent to start trading."}
           </p>
         ) : (

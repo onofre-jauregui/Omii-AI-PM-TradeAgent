@@ -209,7 +209,14 @@ export function DashboardHero({
     });
   }, [mode]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    const ch = supabase
+      .channel("dashboard-hero-rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [load]);
 
   const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;
@@ -223,7 +230,7 @@ export function DashboardHero({
         {/* Top row: label + status */}
         <div className="flex items-center justify-between mb-3">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
-            {mode === "paper" ? "Paper Portfolio" : "Live Portfolio"}
+            {mode === "paper" ? "Portfolio" : "Live Portfolio"}
           </p>
           <AgentStatusBadge />
         </div>
