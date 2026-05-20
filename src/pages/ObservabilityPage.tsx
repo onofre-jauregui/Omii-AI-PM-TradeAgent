@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import {
   AreaChart,
   Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   Tooltip,
@@ -59,6 +61,26 @@ interface Strategy {
 interface EquityPoint {
   date: string;
   cumPnl: number;
+}
+
+interface MemoryEntry {
+  id: string;
+  memory_type: string;
+  title: string;
+  content: string;
+  confidence: number;
+  exposed_confidence: number | null;
+  confirmations: number;
+  contradictions: number;
+  is_active: boolean;
+  tags: string[] | null;
+  strategy_id: string | null;
+  source_type: string;
+  scope: string | null;
+  trade_sample_size: number;
+  created_at: string;
+  last_recalled_at: string | null;
+  quarantined_at: string | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -177,6 +199,20 @@ function agentStatus(lastRunAt: string | null): {
   return { label: "Stale", color: "text-red-500", dot: "bg-red-500" };
 }
 
+const MEMORY_TYPE_COLORS: Record<string, string> = {
+  lesson:           "bg-blue-500/10 text-blue-500",
+  pattern:          "bg-purple-500/10 text-purple-500",
+  mistake:          "bg-red-500/10 text-red-500",
+  success:          "bg-emerald-500/10 text-emerald-500",
+  market_note:      "bg-yellow-500/10 text-yellow-500",
+  strategy_insight: "bg-orange-500/10 text-orange-500",
+};
+
+const MEMORY_TYPE_LABELS: Record<string, string> = {
+  lesson: "Lesson", pattern: "Pattern", mistake: "Mistake",
+  success: "Success", market_note: "Market Note", strategy_insight: "Strategy Insight",
+};
+
 // ── Section wrapper ────────────────────────────────────────────────────────────
 
 function Section({
@@ -249,6 +285,13 @@ export default function ObservabilityPage() {
 
   // System health
   const [strategies, setStrategies] = useState<Strategy[]>([]);
+
+  // Memory
+  const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
+  const [memoryTypeFilter, setMemoryTypeFilter] = useState<string>("all");
+  const [memorySortBy, setMemorySortBy] = useState<"confidence" | "confirmations" | "newest">("confidence");
+  const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
 
   // Pulse
   useEffect(() => {
@@ -496,6 +539,14 @@ export default function ObservabilityPage() {
     if (data) setStrategies(data as Strategy[]);
   }, []);
 
+  const loadMemories = useCallback(async () => {
+    const { data } = await (supabase.from("agent_memory" as any) as any)
+      .select("id, memory_type, title, content, confidence, exposed_confidence, confirmations, contradictions, is_active, tags, strategy_id, source_type, scope, trade_sample_size, created_at, last_recalled_at, quarantined_at")
+      .order("confidence", { ascending: false })
+      .limit(200);
+    if (data) setMemories(data as MemoryEntry[]);
+  }, []);
+
   // Session check + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -511,6 +562,7 @@ export default function ObservabilityPage() {
     loadModelLatency();
     loadErrors();
     loadStrategies();
+    loadMemories();
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -521,6 +573,7 @@ export default function ObservabilityPage() {
     loadModelLatency,
     loadErrors,
     loadStrategies,
+    loadMemories,
     decisionDateFilter,
     decisionStatusFilter,
   ]);
@@ -608,6 +661,7 @@ export default function ObservabilityPage() {
       loadModelLatency();
       loadErrors();
       loadStrategies();
+      loadMemories();
     }, 2 * 60 * 1000);
 
     return () => {
@@ -624,6 +678,7 @@ export default function ObservabilityPage() {
     loadModelLatency,
     loadErrors,
     loadStrategies,
+    loadMemories,
   ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
@@ -724,6 +779,8 @@ export default function ObservabilityPage() {
     ? avgCycleMs >= 1000 ? `${(avgCycleMs / 1000).toFixed(1)}s` : `${avgCycleMs}ms`
     : null;
 
+  const primaryMode = strategies[0]?.mode ?? "paper";
+
   const tools = [
     {
       name: "Market Scanner",
@@ -739,9 +796,9 @@ export default function ObservabilityPage() {
     },
     {
       name: "Order Execution",
-      desc: "Submits basket orders to Kalshi REST API",
-      calls: toolCounts["basket_completed"] ?? 0,
-      errors: toolCounts["order_cancelled"] ?? 0,
+      desc: primaryMode === "live" ? "Basket orders submitted to Kalshi" : "Trades placed (paper — basket_completed fires in live mode)",
+      calls: tradesLast30dCount,
+      errors: toolCounts["basket_aborted"] ?? 0,
     },
     {
       name: "Settlement Engine",
@@ -763,7 +820,38 @@ export default function ObservabilityPage() {
     },
   ];
 
-  const primaryMode = strategies[0]?.mode ?? "paper";
+  // Memory derived stats
+  const activeMemories = memories.filter((m) => m.is_active && !m.quarantined_at);
+  const quarantinedMemories = memories.filter((m) => m.quarantined_at);
+  const avgConfidence = activeMemories.length > 0
+    ? activeMemories.reduce((s, m) => s + m.confidence, 0) / activeMemories.length
+    : null;
+  const memoryTypeCounts = activeMemories.reduce<Record<string, number>>((acc, m) => {
+    acc[m.memory_type] = (acc[m.memory_type] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  // Confidence histogram buckets for the panel chart
+  const confBuckets = [
+    { range: "0–0.2", count: memories.filter((m) => m.confidence < 0.2).length },
+    { range: "0.2–0.4", count: memories.filter((m) => m.confidence >= 0.2 && m.confidence < 0.4).length },
+    { range: "0.4–0.6", count: memories.filter((m) => m.confidence >= 0.4 && m.confidence < 0.6).length },
+    { range: "0.6–0.8", count: memories.filter((m) => m.confidence >= 0.6 && m.confidence < 0.8).length },
+    { range: "0.8–1.0", count: memories.filter((m) => m.confidence >= 0.8).length },
+  ];
+
+  // Filtered + sorted memories for the panel
+  const filteredMemories = memories
+    .filter((m) => {
+      if (memoryTypeFilter === "quarantined") return !!m.quarantined_at;
+      if (memoryTypeFilter !== "all") return m.memory_type === memoryTypeFilter;
+      return true;
+    })
+    .sort((a, b) => {
+      if (memorySortBy === "confidence") return b.confidence - a.confidence;
+      if (memorySortBy === "confirmations") return b.confirmations - a.confirmations;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -991,6 +1079,59 @@ export default function ObservabilityPage() {
                 </ResponsiveContainer>
               )}
             </div>
+          </div>
+        </Section>
+
+        {/* ── Agent Memory ────────────────────────────────────────────── */}
+        <Section
+          title="Agent Memory"
+          action={
+            <button
+              onClick={() => setMemoryPanelOpen(true)}
+              className="text-xs text-primary hover:opacity-80 transition-opacity font-medium"
+            >
+              View All →
+            </button>
+          }
+        >
+          <div className="px-6 py-4">
+            {memories.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-2">
+                {isAuthenticated === false ? "Sign in to view agent memory." : "Loading…"}
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-center gap-4">
+                {/* Total active */}
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl font-bold tabular-nums">{activeMemories.length}</span>
+                  <span className="text-xs text-muted-foreground">active</span>
+                </div>
+                {quarantinedMemories.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-semibold tabular-nums text-red-500">{quarantinedMemories.length}</span>
+                    <span className="text-xs text-muted-foreground">quarantined</span>
+                  </div>
+                )}
+                {avgConfidence !== null && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg font-semibold tabular-nums">{(avgConfidence * 100).toFixed(0)}%</span>
+                    <span className="text-xs text-muted-foreground">avg confidence</span>
+                  </div>
+                )}
+                {/* Type pills */}
+                <div className="flex flex-wrap gap-1.5 ml-2">
+                  {Object.entries(memoryTypeCounts).map(([type, count]) => (
+                    <button
+                      key={type}
+                      onClick={() => { setMemoryTypeFilter(type); setMemoryPanelOpen(true); }}
+                      className={`text-[10px] font-medium px-2 py-0.5 rounded-full transition-colors hover:opacity-80 ${MEMORY_TYPE_COLORS[type] ?? "bg-secondary text-muted-foreground"}`}
+                    >
+                      {MEMORY_TYPE_LABELS[type] ?? type} {count}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </Section>
 
@@ -1595,6 +1736,158 @@ export default function ObservabilityPage() {
 
       </div>
     </div>
+
+    {/* ── Agent Memory Panel ──────────────────────────────────────── */}
+    {memoryPanelOpen && (
+      <>
+        {/* Backdrop */}
+        <div
+          className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm"
+          onClick={() => setMemoryPanelOpen(false)}
+        />
+        {/* Panel */}
+        <div className="fixed right-0 top-0 h-full w-full max-w-[640px] z-50 bg-card border-l border-border flex flex-col overflow-hidden">
+          {/* Panel header */}
+          <div className="px-6 py-4 border-b border-border flex items-center justify-between shrink-0">
+            <div>
+              <h2 className="text-sm font-semibold">Agent Memory</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {activeMemories.length} active · {quarantinedMemories.length} quarantined · {memories.length} total
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <a
+                href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity"
+              >
+                Open in Supabase
+                <ExternalLink className="h-3 w-3" />
+              </a>
+              <button
+                onClick={() => setMemoryPanelOpen(false)}
+                className="text-muted-foreground hover:text-foreground transition-colors text-xl leading-none"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          {/* Confidence histogram */}
+          {confBuckets.some((b) => b.count > 0) && (
+            <div className="px-6 pt-4 pb-2 shrink-0">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Confidence Distribution</p>
+              <ResponsiveContainer width="100%" height={60}>
+                <BarChart data={confBuckets} barSize={24}>
+                  <XAxis dataKey="range" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} />
+                  <Tooltip formatter={(v: number) => [v, "memories"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
+                  <Bar dataKey="count" fill="hsl(var(--primary))" fillOpacity={0.7} radius={[3, 3, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Filter + sort bar */}
+          <div className="px-6 py-3 border-b border-border flex items-center gap-2 flex-wrap shrink-0">
+            <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5 flex-wrap">
+              {(["all", "lesson", "pattern", "mistake", "success", "market_note", "quarantined"] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setMemoryTypeFilter(f)}
+                  className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                    memoryTypeFilter === f
+                      ? "bg-card text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {f === "market_note" ? "Market Note" : f}
+                </button>
+              ))}
+            </div>
+            <select
+              value={memorySortBy}
+              onChange={(e) => setMemorySortBy(e.target.value as "confidence" | "confirmations" | "newest")}
+              className="text-[10px] bg-secondary border border-border rounded-lg px-2 py-1 text-muted-foreground ml-auto"
+            >
+              <option value="confidence">Sort: Confidence</option>
+              <option value="confirmations">Sort: Confirmations</option>
+              <option value="newest">Sort: Newest</option>
+            </select>
+          </div>
+
+          {/* Memory list */}
+          <div className="flex-1 overflow-y-auto divide-y divide-border">
+            {filteredMemories.length === 0 ? (
+              <div className="py-12 text-center text-sm text-muted-foreground">No memories match this filter.</div>
+            ) : (
+              filteredMemories.map((mem) => {
+                const isExpanded = expandedMemoryId === mem.id;
+                const conf = mem.confidence;
+                return (
+                  <div key={mem.id} className="px-6 py-4">
+                    {/* Top row */}
+                    <div className="flex items-start gap-2 mb-2">
+                      <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${MEMORY_TYPE_COLORS[mem.memory_type] ?? "bg-secondary text-muted-foreground"}`}>
+                        {MEMORY_TYPE_LABELS[mem.memory_type] ?? mem.memory_type}
+                      </span>
+                      {mem.quarantined_at && (
+                        <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">quarantined</span>
+                      )}
+                      <span className="text-[11px] text-muted-foreground ml-auto shrink-0 tabular-nums">
+                        {mem.confirmations}✓ {mem.contradictions}✗
+                      </span>
+                    </div>
+                    {/* Title + confidence */}
+                    <button
+                      onClick={() => setExpandedMemoryId(isExpanded ? null : mem.id)}
+                      className="w-full text-left"
+                    >
+                      <p className="text-[13px] font-medium leading-snug mb-1.5">{mem.title}</p>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: `${conf * 100}%`,
+                              backgroundColor: conf >= 0.6 ? "hsl(var(--primary))" : conf >= 0.4 ? "#eab308" : "#ef4444",
+                            }}
+                          />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                          {(conf * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                    </button>
+                    {/* Expanded content */}
+                    {isExpanded && (
+                      <div className="mt-3 space-y-2">
+                        <div className="rounded-lg bg-secondary/40 p-3">
+                          <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">{mem.content}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                          {mem.scope && <span>scope: {mem.scope}</span>}
+                          {mem.trade_sample_size > 0 && <span>sample: {mem.trade_sample_size} trades</span>}
+                          {mem.last_recalled_at && <span>recalled: {relativeTime(mem.last_recalled_at)}</span>}
+                          <span>created: {fmtDate(mem.created_at)}</span>
+                        </div>
+                        {mem.tags && mem.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {mem.tags.map((tag) => (
+                              <span key={tag} className="text-[10px] bg-secondary px-1.5 py-0.5 rounded-full">{tag}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      </>
+    )}
 
     {/* ── Trade Detail Panel ───────────────────────────────────────── */}
 
