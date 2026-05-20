@@ -1,6 +1,6 @@
 import { Bot, Clock, Zap, MessageSquare, TrendingUp, ArrowUpRight } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
-import { Area, AreaChart, ResponsiveContainer, YAxis } from "recharts";
+import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchKalshiMarkets } from "@/lib/kalshiApi";
@@ -293,14 +293,21 @@ export function DashboardHero({
         {/* Equity sparkline */}
         {stats.chartPoints.length > 2 && (
           <div className="my-3 -mx-1">
-            <ResponsiveContainer width="100%" height={110}>
-              <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+            <ResponsiveContainer width="100%" height={120}>
+              <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
                 <defs>
                   <linearGradient id="heroGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.18} />
                     <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                   </linearGradient>
                 </defs>
+                <XAxis
+                  dataKey="date"
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 10 }}
+                  interval="preserveStartEnd"
+                />
                 <YAxis domain={["auto", "auto"]} hide />
                 <Area
                   type="monotone"
