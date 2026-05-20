@@ -322,6 +322,13 @@ export default function ObservabilityPage() {
   const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
   const [avgCycleMs, setAvgCycleMs] = useState<number | null>(null);
 
+  // 24h activity — dedicated server-side counts (not derived from capped array)
+  const [runs24hCount, setRuns24hCount] = useState<number | null>(null);
+  const [scans24hCount, setScans24hCount] = useState<number | null>(null);
+  const [tradesFilled24hCount, setTradesFilled24hCount] = useState<number | null>(null);
+  // 24h error events — for failure mode detection (error/warning only, last 24h, last 500)
+  const [errors24h, setErrors24h] = useState<ComplianceEvent[]>([]);
+
   // Errors
   const [guardrailEvents, setGuardrailEvents] = useState<ComplianceEvent[]>(
     []
@@ -547,6 +554,33 @@ export default function ObservabilityPage() {
     }
   }, []);
 
+  const loadActivity24h = useCallback(async () => {
+    const since = new Date(Date.now() - 86_400_000).toISOString();
+    const [runsRes, scansRes, tradesRes] = await Promise.all([
+      supabase.from("compliance_log").select("*", { count: "exact", head: true })
+        .eq("event_type", "auto_trade_run").gte("created_at", since),
+      supabase.from("compliance_log").select("*", { count: "exact", head: true })
+        .eq("event_type", "surface_scan_complete").gte("created_at", since),
+      supabase.from("trades").select("*", { count: "exact", head: true })
+        .gte("created_at", since),
+    ]);
+    setRuns24hCount(runsRes.count ?? 0);
+    setScans24hCount(scansRes.count ?? 0);
+    setTradesFilled24hCount(tradesRes.count ?? 0);
+  }, []);
+
+  const loadErrors24h = useCallback(async () => {
+    const since = new Date(Date.now() - 86_400_000).toISOString();
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("id, created_at, event_type, severity, message, trade_id")
+      .gte("created_at", since)
+      .in("severity", ["error", "warning", "critical"])
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (data) setErrors24h(data as ComplianceEvent[]);
+  }, []);
+
   const loadErrors = useCallback(async () => {
     const guardrailTypes = [
       "risk_check_failed",
@@ -607,6 +641,8 @@ export default function ObservabilityPage() {
     loadPerformance();
     loadComplianceLast30d();
     loadModelLatency();
+    loadActivity24h();
+    loadErrors24h();
     loadErrors();
     loadStrategies();
     loadMemories();
@@ -618,6 +654,8 @@ export default function ObservabilityPage() {
     loadPerformance,
     loadComplianceLast30d,
     loadModelLatency,
+    loadActivity24h,
+    loadErrors24h,
     loadErrors,
     loadStrategies,
     loadMemories,
@@ -706,6 +744,8 @@ export default function ObservabilityPage() {
       loadPerformance();
       loadComplianceLast30d();
       loadModelLatency();
+      loadActivity24h();
+      loadErrors24h();
       loadErrors();
       loadStrategies();
       loadMemories();
@@ -723,6 +763,8 @@ export default function ObservabilityPage() {
     loadPerformance,
     loadComplianceLast30d,
     loadModelLatency,
+    loadActivity24h,
+    loadErrors24h,
     loadErrors,
     loadStrategies,
     loadMemories,
@@ -869,7 +911,8 @@ export default function ObservabilityPage() {
 
   // Memory derived stats
   const activeMemories = memories.filter((m) => m.is_active && !m.quarantined_at);
-  const quarantinedMemories = memories.filter((m) => m.quarantined_at);
+  // agent_memory uses is_active:false instead of a quarantined_at column
+  const quarantinedMemories = memories.filter((m) => !m.is_active || !!m.quarantined_at);
   const avgConfidence = activeMemories.length > 0
     ? activeMemories.reduce((s, m) => s + m.confidence, 0) / activeMemories.length
     : null;
@@ -900,8 +943,8 @@ export default function ObservabilityPage() {
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 
-  // Failure mode detection (pure, from existing state)
-  const failureModes = detectFailureModes(complianceLast30d, memories, toolCounts);
+  // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
@@ -934,12 +977,14 @@ export default function ObservabilityPage() {
   const events24h = complianceLast30d.filter(
     (e) => new Date(e.created_at).getTime() >= cutoff24h
   );
-  const runsToday = events24h.filter((e) => e.event_type === "auto_trade_run").length;
-  const scansToday = events24h.filter((e) => e.event_type === "surface_scan_complete").length;
-  const tradesFilledToday = events24h.filter((e) => e.event_type === "basket_completed").length +
+  const runsToday = runs24hCount ?? events24h.filter((e) => e.event_type === "auto_trade_run").length;
+  const scansToday = scans24hCount ?? events24h.filter((e) => e.event_type === "surface_scan_complete").length;
+  const tradesFilledToday = tradesFilled24hCount ?? (
+    events24h.filter((e) => e.event_type === "basket_completed").length +
     (primaryMode !== "live"
       ? decisionTrades.filter((t) => new Date(t.created_at).getTime() >= cutoff24h).length
-      : 0);
+      : 0)
+  );
   const latestMemory = activeMemories[0] ?? null;
   const healthyCount = Object.values(failureModes).filter((m) => m.status === "ok").length;
   const totalHealthChecks = Object.keys(failureModes).length;
@@ -2285,7 +2330,7 @@ function detectFailureModes(
   const avg6hRuns30d = (toolCounts["auto_trade_strategy_run"] ?? 0) / (30 * 4);
   const spikeRatio = avg6hRuns30d > 0 ? last6hRuns / avg6hRuns30d : null;
 
-  const quarantined = memories.filter((m) => !!m.quarantined_at);
+  const quarantined = memories.filter((m) => !m.is_active || !!m.quarantined_at);
   const activeCount = memories.filter((m) => m.is_active && !m.quarantined_at).length;
 
   function lastAt(evs: ComplianceEvent[]): string | null {
