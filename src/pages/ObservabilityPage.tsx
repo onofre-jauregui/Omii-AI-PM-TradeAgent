@@ -351,6 +351,7 @@ export default function ObservabilityPage() {
 
   // 24h activity — dedicated server-side counts (not derived from capped array)
   const [runs24hCount, setRuns24hCount] = useState<number | null>(null);
+  const [stratRuns24hCount, setStratRuns24hCount] = useState<number | null>(null);
   const [runs6hCount, setRuns6hCount] = useState<number | null>(null);
   const [scans24hCount, setScans24hCount] = useState<number | null>(null);
   const [tradesFilled24hCount, setTradesFilled24hCount] = useState<number | null>(null);
@@ -588,9 +589,12 @@ export default function ObservabilityPage() {
   const loadActivity24h = useCallback(async () => {
     const since24h = new Date(Date.now() - 86_400_000).toISOString();
     const since6h  = new Date(Date.now() - 21_600_000).toISOString();
-    const [runsRes, runs6hRes, scansRes, tradesRes] = await Promise.all([
+    // stratRuns24hRes and runs6hRes use the same event type — spike ratio is apples-to-apples
+    const [runsRes, stratRuns24hRes, stratRuns6hRes, scansRes, tradesRes] = await Promise.all([
       supabase.from("compliance_log").select("*", { count: "exact", head: true })
         .eq("event_type", "auto_trade_run").gte("created_at", since24h),
+      supabase.from("compliance_log").select("*", { count: "exact", head: true })
+        .eq("event_type", "auto_trade_strategy_run").gte("created_at", since24h),
       supabase.from("compliance_log").select("*", { count: "exact", head: true })
         .eq("event_type", "auto_trade_strategy_run").gte("created_at", since6h),
       supabase.from("compliance_log").select("*", { count: "exact", head: true })
@@ -599,7 +603,8 @@ export default function ObservabilityPage() {
         .gte("created_at", since24h),
     ]);
     setRuns24hCount(runsRes.count ?? 0);
-    setRuns6hCount(runs6hRes.count ?? 0);
+    setStratRuns24hCount(stratRuns24hRes.count ?? 0);
+    setRuns6hCount(stratRuns6hRes.count ?? 0);
     setScans24hCount(scansRes.count ?? 0);
     setTradesFilled24hCount(tradesRes.count ?? 0);
   }, []);
@@ -1002,7 +1007,7 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, runs24hCount);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
