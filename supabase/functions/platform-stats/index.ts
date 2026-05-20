@@ -7,6 +7,9 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, OPTIONS",
 };
 
+// Public landing page stats are scoped to the founding account — single verified track record.
+const CANONICAL_USER_ID = "ea207ba1-b7a9-4a7b-96bc-922e922d627d";
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
@@ -18,11 +21,23 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // Starting balance from active strategies — source of truth, not hardcoded
+    const { data: strategies } = await supabase
+      .from("strategies")
+      .select("starting_balance")
+      .eq("user_id", CANONICAL_USER_ID)
+      .eq("active", true);
+
+    const startingBalance = (strategies ?? []).reduce(
+      (sum: number, s: any) => sum + (s.starting_balance ?? 0),
+      0
+    ) || 2500; // fallback if no active strategies yet
+
     const { data: trades, error } = await supabase
       .from("trades")
       .select("ticker, side, amount, pnl, settled_at, created_at")
       .eq("status", "settled")
-      .gt("created_at", "2026-04-22T00:00:00.000Z")
+      .eq("user_id", CANONICAL_USER_ID)
       .order("settled_at", { ascending: true });
 
     if (error) {
@@ -34,13 +49,12 @@ serve(async (req) => {
 
     const rows = trades ?? [];
 
-    // Aggregate stats
     const tradeCount = rows.length;
     const wins = rows.filter((t: any) => (t.pnl ?? 0) > 0).length;
     const winRate = tradeCount > 0 ? (wins / tradeCount) * 100 : 0;
     const totalPnl = rows.reduce((sum: number, t: any) => sum + (t.pnl ?? 0), 0);
 
-    // Build daily cumulative P&L from settled_at date
+    // Daily cumulative P&L bucketed by settled_at date
     const dailyMap: Record<string, number> = {};
     for (const t of rows) {
       const dateStr = (t.settled_at ?? t.created_at ?? "").slice(0, 10);
@@ -57,7 +71,6 @@ serve(async (req) => {
 
     const startDate = sortedDates[0] ?? "2026-04-23";
 
-    // Last 3 settled trades (most recent first)
     const recent = [...rows]
       .reverse()
       .slice(0, 3)
@@ -74,6 +87,7 @@ serve(async (req) => {
         winRate: Math.round(winRate * 10) / 10,
         tradeCount,
         startDate,
+        startingBalance,
         dailyCumulative,
         recentTrades: recent,
       }),

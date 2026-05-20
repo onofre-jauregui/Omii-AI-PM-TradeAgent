@@ -86,6 +86,7 @@ interface PlatformStats {
   winRate: number;
   tradeCount: number;
   startDate: string;
+  startingBalance: number;
   dailyCumulative: DailyCumulative[];
   recentTrades: RecentTrade[];
 }
@@ -96,6 +97,7 @@ const FALLBACK_STATS: PlatformStats = {
   winRate: 81.3,
   tradeCount: 150,
   startDate: "2026-04-23",
+  startingBalance: 2500,
   dailyCumulative: [
     { date: "2026-04-23", cumPnl: 130.92 },
     { date: "2026-04-24", cumPnl: 246.27 },
@@ -119,7 +121,7 @@ const FALLBACK_STATS: PlatformStats = {
   ],
 };
 
-function buildChartPath(points: DailyCumulative[]): { fill: string; line: string } {
+function buildChartPath(points: DailyCumulative[], startingBalance: number): { fill: string; line: string } {
   if (points.length < 2) {
     return {
       fill: "M0,85 L800,85 L800,85 L0,85 Z",
@@ -127,8 +129,7 @@ function buildChartPath(points: DailyCumulative[]): { fill: string; line: string
     };
   }
 
-  const STARTING_BALANCE = 2500;
-  const portfolioValues = points.map((p) => STARTING_BALANCE + p.cumPnl);
+  const portfolioValues = points.map((p) => startingBalance + p.cumPnl);
   const maxVal = Math.max(...portfolioValues);
   const minVal = Math.min(...portfolioValues);
   const range = maxVal - minVal || 1;
@@ -159,7 +160,6 @@ function buildChartPath(points: DailyCumulative[]): { fill: string; line: string
 function HeroDashboardMockup() {
   const [stats, setStats] = useState<PlatformStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [spYtd, setSpYtd] = useState<number | null>(null);
 
   useEffect(() => {
     const STATS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/platform-stats`;
@@ -174,27 +174,11 @@ function HeroDashboardMockup() {
       })
       .catch(() => setStats(FALLBACK_STATS))
       .finally(() => setLoading(false));
-
-    // S&P 500 YTD return — Jan 1 2026 to today
-    const jan1 = 1735689600; // 2026-01-01 UTC
-    const now = Math.floor(Date.now() / 1000);
-    fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&period1=${jan1}&period2=${now}&corsDomain=finance.yahoo.com`
-    )
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((data) => {
-        const closes: number[] = data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
-        const valid = closes.filter((c) => c != null);
-        if (valid.length >= 2) {
-          setSpYtd(((valid[valid.length - 1] - valid[0]) / valid[0]) * 100);
-        }
-      })
-      .catch(() => {/* show "—" gracefully */});
   }, []);
 
   const s = stats ?? FALLBACK_STATS;
-  const roiPct = ((s.totalPnl / 2500) * 100).toFixed(1);
-  const { fill: chartFill, line: chartLine } = buildChartPath(s.dailyCumulative);
+  const roiPct = ((s.totalPnl / s.startingBalance) * 100).toFixed(1);
+  const { fill: chartFill, line: chartLine } = buildChartPath(s.dailyCumulative, s.startingBalance);
 
   return (
     <div
@@ -238,7 +222,7 @@ function HeroDashboardMockup() {
         ) : (
           [
             { label: `Return Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+${roiPct}%`, sub: `+$${s.totalPnl.toFixed(2)} P&L`, color: "#34d058" },
-            { label: "vs S&P 500 YTD", value: spYtd != null ? `${spYtd >= 0 ? "+" : ""}${spYtd.toFixed(1)}%` : "—", sub: "Jan 1 → today", color: spYtd != null && spYtd >= 0 ? "#34d058" : spYtd != null ? "#ff453a" : "#6e6e73" },
+            { label: `P&L Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+$${s.totalPnl.toFixed(2)}`, sub: `${s.tradeCount} settled trades`, color: "#34d058" },
             { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
           ].map((stat) => (
@@ -811,26 +795,6 @@ export default function LandingPage() {
             </a>
           </div>
 
-          {/* Trust pills */}
-          <div className="flex flex-wrap items-center justify-center gap-3" style={{ marginBottom: 64 }}>
-            {["Free to start", "No funds custody", "Paper mode by default"].map((label) => (
-              <div
-                key={label}
-                className="inline-flex items-center gap-1.5"
-                style={{
-                  background: "#f5f5f7",
-                  borderRadius: 980,
-                  padding: "6px 12px",
-                  fontSize: 13,
-                  color: "#1d1d1f",
-                }}
-              >
-                <Check style={{ width: 12, height: 12, color: "#0071e3" }} />
-                {label}
-              </div>
-            ))}
-          </div>
-
           {/* Product mockup */}
           <div className="flex justify-center">
             <HeroDashboardMockup />
@@ -934,11 +898,11 @@ export default function LandingPage() {
                 >
                   {/* Large ghost number */}
                   <div
-                    className="pointer-events-none absolute right-4 top-2 select-none"
+                    className="pointer-events-none absolute right-4 bottom-2 select-none"
                     style={{
-                      fontSize: 120,
+                      fontSize: 100,
                       fontWeight: 700,
-                      color: "#f5f5f7",
+                      color: "rgba(0,0,0,0.06)",
                       lineHeight: 1,
                     }}
                   >
