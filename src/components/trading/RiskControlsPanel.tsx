@@ -4,7 +4,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
-import { Shield, Save, Loader2, CheckCircle, AlertCircle, Wallet } from "lucide-react";
+import { Shield, Save, Loader2, CheckCircle, AlertCircle, Wallet, OctagonX, Play } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useStrategies } from "@/lib/strategiesContext";
@@ -26,6 +26,47 @@ export function RiskControlsPanel() {
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
+  // Global kill switch state
+  const [isHalted, setIsHalted] = useState(false);
+  const [haltReason, setHaltReason] = useState<string | null>(null);
+  const [riskStateId, setRiskStateId] = useState<string | null>(null);
+  const [haltToggling, setHaltToggling] = useState(false);
+
+  const loadRiskState = useCallback(async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const { data } = await supabase
+      .from("risk_state")
+      .select("id, is_trading_halted, halt_reason")
+      .eq("date", today)
+      .maybeSingle();
+    if (data) {
+      setIsHalted(data.is_trading_halted ?? false);
+      setHaltReason(data.halt_reason ?? null);
+      setRiskStateId(data.id);
+    }
+  }, []);
+
+  const handleToggleHalt = async () => {
+    setHaltToggling(true);
+    const today = new Date().toISOString().slice(0, 10);
+    const next = !isHalted;
+    const payload = {
+      is_trading_halted: next,
+      halt_reason: next ? "Manually paused by user" : null,
+      updated_at: new Date().toISOString(),
+    };
+    if (riskStateId) {
+      await supabase.from("risk_state").update(payload).eq("id", riskStateId);
+    } else {
+      // No row for today yet — insert one
+      const { data } = await supabase.from("risk_state").insert({ ...payload, date: today }).select("id").single();
+      if (data) setRiskStateId(data.id);
+    }
+    setIsHalted(next);
+    setHaltReason(next ? "Manually paused by user" : null);
+    setHaltToggling(false);
+  };
+
   const loadAll = useCallback(async () => {
     const { data } = await supabase.from("risk_settings").select("*").single();
     if (data) {
@@ -41,7 +82,7 @@ export function RiskControlsPanel() {
     }
   }, []);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => { loadAll(); loadRiskState(); }, [loadAll, loadRiskState]);
 
   // Sync budget inputs when strategies load
   useEffect(() => {
@@ -98,6 +139,51 @@ export function RiskControlsPanel() {
 
   return (
     <div className="rounded-2xl bg-card apple-shadow overflow-hidden apple-reveal">
+
+      {/* ── Global Kill Switch ───────────────────────────── */}
+      <div className={`px-5 py-4 border-b border-border transition-colors ${isHalted ? "bg-loss/8" : ""}`}>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
+              isHalted ? "bg-loss/15" : "bg-profit/15"
+            }`}>
+              {isHalted
+                ? <OctagonX className="h-4 w-4 text-loss" />
+                : <Play className="h-4 w-4 text-profit" />
+              }
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                {isHalted ? "Trading Paused" : "Agent Active"}
+              </p>
+              <p className="text-[11px] text-muted-foreground truncate">
+                {isHalted
+                  ? (haltReason ?? "All new trades blocked until resumed")
+                  : "Agent is running — all strategies executing normally"}
+              </p>
+            </div>
+          </div>
+          <Button
+            variant={isHalted ? "outline" : "destructive"}
+            size="sm"
+            className={`shrink-0 rounded-full gap-1.5 text-xs font-medium ${
+              isHalted
+                ? "border-profit text-profit hover:bg-profit/10"
+                : "bg-loss hover:bg-loss/90 text-white border-0"
+            }`}
+            onClick={handleToggleHalt}
+            disabled={haltToggling}
+          >
+            {haltToggling
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : isHalted
+                ? <Play className="h-3.5 w-3.5" />
+                : <OctagonX className="h-3.5 w-3.5" />
+            }
+            {isHalted ? "Resume Trading" : "Pause All Trading"}
+          </Button>
+        </div>
+      </div>
 
       {/* ── Agent Budget ────────────────────────────────── */}
       <div className="px-5 py-4 border-b border-border flex items-center gap-2">
