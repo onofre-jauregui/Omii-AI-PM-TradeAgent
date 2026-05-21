@@ -8,6 +8,7 @@ import {
   Area,
   BarChart,
   Bar,
+  Cell,
   LineChart,
   Line,
   XAxis,
@@ -1259,7 +1260,8 @@ export default function ObservabilityPage() {
         const t = new Date(e.created_at).getTime();
         return t >= hourStart && t < hourEnd;
       });
-      return { hour: label, count: events.length, events };
+      // barValue: actual failure count when red, fixed 1 when green (uniform height for clean hours)
+      return { hour: label, count: events.length, events, barValue: events.length > 0 ? events.length : 1 };
     });
   })();
 
@@ -1519,27 +1521,43 @@ export default function ObservabilityPage() {
                 );
               })()}
             </div>
-            {failureTimeline.some((h) => h.count > 0) && (
-              <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline <span className="normal-case tracking-normal opacity-60 lowercase">· click a bar to see events</span></p>
-                <ResponsiveContainer width="100%" height={70}>
-                  <BarChart data={failureTimeline} barSize={10}>
-                    <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
-                    <Tooltip formatter={(v: number) => [v, "events"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
-                    <Bar
-                      dataKey="count"
-                      fill="#ef4444"
-                      fillOpacity={0.7}
-                      radius={[2, 2, 0, 0]}
-                      style={{ cursor: "pointer" }}
-                      onClick={(data: any) => {
-                        if (data.count > 0) setSelectedTimelineHour({ label: data.hour, events: data.events });
-                      }}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
+            <div>
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
+                24h Uptime
+                <span className="normal-case tracking-normal opacity-60 lowercase"> · green = clean · red = failures · click red bars for details</span>
+              </p>
+              <ResponsiveContainer width="100%" height={70}>
+                <BarChart data={failureTimeline} barSize={10}>
+                  <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
+                  <YAxis hide domain={[0, "auto"]} />
+                  <Tooltip
+                    contentStyle={{ fontSize: 10, borderRadius: 6 }}
+                    formatter={(_: any, __: any, props: any) => {
+                      const entry = props?.payload;
+                      return entry?.count > 0
+                        ? [`${entry.count} failure event${entry.count !== 1 ? "s" : ""}`, "Failures"]
+                        : ["No failures", "Status"];
+                    }}
+                  />
+                  <Bar
+                    dataKey="barValue"
+                    radius={[2, 2, 0, 0]}
+                    style={{ cursor: "pointer" }}
+                    onClick={(data: any) => {
+                      if (data.count > 0) setSelectedTimelineHour({ label: data.hour, events: data.events });
+                    }}
+                  >
+                    {failureTimeline.map((entry, index) => (
+                      <Cell
+                        key={index}
+                        fill={entry.count > 0 ? "#ef4444" : "#22c55e"}
+                        fillOpacity={entry.count > 0 ? 0.75 : 0.45}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         </Section>
 
