@@ -430,11 +430,15 @@ serve(async (req) => {
           }
         }
 
-        // ── Global position cap from user's risk_settings ─────────────────────
-        // Checked here (pre-flight) so no execute-trade calls fire when the user is at their limit.
+        // ── Global risk gates from user's risk_settings ───────────────────────
+        // Both checks run pre-flight so no execute-trade calls fire when a limit is reached.
+        // max_open_positions: concurrent position cap (weighted by near/far term)
+        // max_daily_trades:   total trades placed today across ALL strategies for this user
         let userRisk: any = null;
         if (strategy.user_id) {
           userRisk = await fetchUserRiskSettings(supabase, strategy.user_id);
+
+          // Open position cap
           const openPositions = await countOpenPositions(supabase, undefined, 7, strategy.user_id);
           if (openPositions.totalCount >= userRisk.max_open_positions) {
             await supabase.from("compliance_log").insert({
@@ -451,6 +455,27 @@ serve(async (req) => {
               status: "skipped",
               action: "risk_blocked",
               details: `max_open_positions (${userRisk.max_open_positions}) reached — ${openPositions.totalCount} open`,
+            });
+            continue;
+          }
+
+          // Global daily trade cap (set via Risk tab — allocates across all strategies)
+          const maxDailyTrades = userRisk.max_daily_trades ?? 30;
+          const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { count: dailyTradeCount } = await supabase
+            .from("trades")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", strategy.user_id)
+            .gte("created_at", dayAgo);
+
+          if ((dailyTradeCount ?? 0) >= maxDailyTrades) {
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              action: "risk_blocked",
+              details: `Global daily trade cap reached: ${dailyTradeCount}/${maxDailyTrades} trades today (set in Risk Controls)`,
             });
             continue;
           }
@@ -635,26 +660,6 @@ async function runS001SurfaceArb(
   const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
   const MAX_LEGS_PER_EVENT = 3;
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  const DAILY_TRADE_CAP = 20; // max trades this strategy can place in any 24h window
-
-  // Rate limit: check how many trades this strategy has placed today.
-  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count: dailyCount } = await supabase
-    .from("trades")
-    .select("id", { count: "exact", head: true })
-    .eq("strategy_id", strategy.id)
-    .gte("created_at", dayAgo);
-
-  if ((dailyCount ?? 0) >= DAILY_TRADE_CAP) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "skipped",
-      action: "rate_limited",
-      details: `Daily trade cap reached: ${dailyCount}/${DAILY_TRADE_CAP} trades in last 24h`,
-    };
-  }
 
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
   // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
@@ -833,26 +838,6 @@ async function runS002LongshotBias(
   // requires >91% win rate to break even — the longshot bias (~5pp edge) isn't enough.
   // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
   const AMOUNT_PER_TRADE = 20;
-  const DAILY_TRADE_CAP_S002 = 15;
-
-  // Rate limit: check how many trades this strategy has placed today.
-  const dayAgo202 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count: dailyCount202 } = await supabase
-    .from("trades")
-    .select("id", { count: "exact", head: true })
-    .eq("strategy_id", strategy.id)
-    .gte("created_at", dayAgo202);
-
-  if ((dailyCount202 ?? 0) >= DAILY_TRADE_CAP_S002) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "skipped",
-      action: "rate_limited",
-      details: `Daily trade cap reached: ${dailyCount202}/${DAILY_TRADE_CAP_S002} trades in last 24h`,
-    };
-  }
 
   // Time-based auto-exit: close NO positions expiring within 12h to stop
   // holding losers to full resolution (-91¢ each). Strategy instructions say
@@ -1118,26 +1103,6 @@ async function runS005WeatherEdge(
   const maxPositionUsd = config?.max_position_usd ?? 30;
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
-  const DAILY_TRADE_CAP_S005 = 10;
-
-  // Rate limit: check how many trades this strategy has placed today.
-  const dayAgo505 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { count: dailyCount505 } = await supabase
-    .from("trades")
-    .select("id", { count: "exact", head: true })
-    .eq("strategy_id", strategy.id)
-    .gte("created_at", dayAgo505);
-
-  if ((dailyCount505 ?? 0) >= DAILY_TRADE_CAP_S005) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "skipped",
-      action: "rate_limited",
-      details: `Daily trade cap reached: ${dailyCount505}/${DAILY_TRADE_CAP_S005} trades in last 24h`,
-    };
-  }
 
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const { data: rawSignals } = await applySignalTenantFilter(

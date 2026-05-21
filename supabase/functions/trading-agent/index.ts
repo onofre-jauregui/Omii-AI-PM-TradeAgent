@@ -543,8 +543,21 @@ serve(async (req) => {
       });
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey
-    );
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // Resolve the calling user from their session JWT so agent trades are attributed correctly.
+    // This mirrors the resolveTenant pattern in execute-trade/tenant.ts.
+    let userId: string | null = null;
+    const authHeader = req.headers.get("Authorization") || req.headers.get("authorization");
+    if (authHeader?.toLowerCase().startsWith("bearer ")) {
+      const jwt = authHeader.slice(7).trim();
+      if (jwt && jwt !== supabaseKey) {
+        try {
+          const { data } = await supabase.auth.getUser(jwt);
+          if (data?.user?.id) userId = data.user.id;
+        } catch { /* non-fatal — fall back to null */ }
+      }
+    }
 
     // ── Load API keys ──
     const { data: keyRows } = await supabase
@@ -958,6 +971,7 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
                 strategyId: args.strategyId || null,
                 orderType: args.orderType || "limit",
                 mode,
+                user_id: userId,
                 notes: `Agent trade: ${args.reasoning}`,
                 expectedOutcome: args.expectedOutcome || null,
                 confidenceLevel: args.confidenceLevel || null,
@@ -1234,6 +1248,7 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
                 alert_id: args.alert_id || null,
                 legs: args.legs,
                 mode,
+                user_id: userId,
                 expected_edge_cents: args.expected_edge_cents || 0,
                 reasoning: args.reasoning || "",
               }),

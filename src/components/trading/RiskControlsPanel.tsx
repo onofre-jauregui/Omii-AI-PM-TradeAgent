@@ -19,6 +19,7 @@ export function RiskControlsPanel() {
     maxDrawdown:      [20],
     maxPositionSize:  [500],
     maxOpenPositions: [10],
+    maxDailyTrades:   [30],
     autoStopLoss:     true,
     stopLossPct:      [15],
     defaultOrderType: "limit",
@@ -78,6 +79,7 @@ export function RiskControlsPanel() {
         maxDrawdown:      [data.max_drawdown_pct],
         maxPositionSize:  [data.max_position_size],
         maxOpenPositions: [data.max_open_positions],
+        maxDailyTrades:   [data.max_daily_trades ?? 30],
         autoStopLoss:     data.auto_stop_loss,
         stopLossPct:      [data.stop_loss_pct],
         defaultOrderType: data.default_order_type,
@@ -109,6 +111,7 @@ export function RiskControlsPanel() {
         max_drawdown_pct:   riskSettings.maxDrawdown[0],
         max_position_size:  riskSettings.maxPositionSize[0],
         max_open_positions: riskSettings.maxOpenPositions[0],
+        max_daily_trades:   riskSettings.maxDailyTrades[0],
         auto_stop_loss:     riskSettings.autoStopLoss,
         stop_loss_pct:      riskSettings.stopLossPct[0],
         default_order_type: riskSettings.defaultOrderType,
@@ -282,6 +285,18 @@ export function RiskControlsPanel() {
                 onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxOpenPositions: v }))}
                 max={50} step={1}
               />
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label className="text-sm text-muted-foreground">Max Daily Trades</Label>
+                <span className="text-sm font-medium tabular-nums">{riskSettings.maxDailyTrades[0]}</span>
+              </div>
+              <Slider
+                value={riskSettings.maxDailyTrades}
+                onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxDailyTrades: v }))}
+                min={5} max={200} step={5}
+              />
+              <p className="text-[10px] text-muted-foreground">Global cap across all strategies — agent allocates the budget</p>
             </div>
             <div className="flex items-center justify-between py-1">
               <div>
