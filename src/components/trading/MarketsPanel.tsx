@@ -159,7 +159,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchKalshiMarketsByCategory(allSeries, category, 30);
+      const result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
       cache.current.set(category, { markets: result, fetchedAt: Date.now() });
       setMarkets(result);
       setLastUpdated(new Date());
@@ -181,6 +181,29 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
       if (refreshTimer.current) clearInterval(refreshTimer.current);
     };
   }, [activeCategory, fetchCategory]);
+
+  // Background pre-warm: after active tab loads, silently fetch the next 3 tabs
+  useEffect(() => {
+    const idx = FIXED_CATEGORIES.indexOf(activeCategory);
+    const toWarm = FIXED_CATEGORIES.slice(idx + 1, idx + 4);
+    let cancelled = false;
+    const warmNext = async () => {
+      for (const cat of toWarm) {
+        if (cancelled) return;
+        const cached = cache.current.get(cat);
+        if (!cached || Date.now() - cached.fetchedAt > 30_000) {
+          // Don't await — fire and forget, stagger by 1s to avoid hammering the proxy
+          await new Promise(r => setTimeout(r, 1000));
+          if (cancelled) return;
+          fetchCategory(cat);
+        }
+      }
+    };
+    // Wait for the active tab to likely finish loading before starting background fetches
+    const t = setTimeout(warmNext, 2000);
+    return () => { cancelled = true; clearTimeout(t); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCategory]);
 
   // Reset visible count when search or horizon changes
   useEffect(() => { setVisibleCount(50); }, [search, horizon, sortBy]);

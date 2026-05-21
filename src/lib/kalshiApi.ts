@@ -347,13 +347,13 @@ export async function fetchKalshiMarketsByCategory(
   // Resolve our display name to Kalshi's API category name
   const apiCategory = CATEGORY_API_NAME[category] ?? category;
 
-  // Fetch up to 25 active series for this category
+  // Fetch up to 12 active series for this category — more than this adds latency with little benefit
   let seriesList: KalshiSeries[] = [];
   try {
     const data = await kalshiProxyGet("series", {
       status: "active",
       category: apiCategory,
-      limit: "25",
+      limit: "12",
     });
     seriesList = (data.series ?? []).map((s: any) => ({
       ticker: s.ticker ?? "",
