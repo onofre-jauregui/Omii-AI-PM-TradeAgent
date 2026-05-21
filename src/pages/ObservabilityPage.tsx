@@ -1004,19 +1004,19 @@ export default function ObservabilityPage() {
     : null;
 
   // Performance stats
-  // Filter to the current user's strategies — avoids summing starting_balance across all tenants.
-  // Falls back to active strategies if unauthenticated (public view).
-  const userStrategies = userId
-    ? strategies.filter((s) => s.user_id === userId)
-    : strategies.filter((s) => s.active);
+  // viewUserId = specific user selected; null = platform view (all users) or own account (non-admin)
+  const relevantStrategies = isAdmin
+    ? (viewUserId ? strategies.filter((s) => s.user_id === viewUserId) : strategies)
+    : (userId ? strategies.filter((s) => s.user_id === userId) : strategies.filter((s) => s.active));
   const tradedStrategyIds = new Set(allSettledTrades.map((t) => t.strategy_id).filter(Boolean));
-  const strategyMap = new Map(userStrategies.map((s) => [s.id, s]));
+  const strategyMap = new Map(relevantStrategies.map((s) => [s.id, s]));
   const STARTING_CAPITAL = tradedStrategyIds.size > 0
     ? Array.from(tradedStrategyIds).reduce((sum, sid) => sum + (strategyMap.get(sid!)?.starting_balance ?? 0), 0)
-    : userStrategies.reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
+    : relevantStrategies.reduce((sum, s) => sum + (s.starting_balance ?? 0), 0);
   const settledCount = allSettledTrades.length;
   const totalPnl = allSettledTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-  const roi = STARTING_CAPITAL > 0 ? (totalPnl / STARTING_CAPITAL) * 100 : null;
+  // ROI is only meaningful for a single user — hide in admin platform view
+  const roi = (STARTING_CAPITAL > 0 && (!isAdmin || viewUserId !== null)) ? (totalPnl / STARTING_CAPITAL) * 100 : null;
   const wins = allSettledTrades.filter((t) => (t.pnl ?? 0) > 0).length;
   const winRate = settledCount > 0 ? (wins / settledCount) * 100 : null;
 
