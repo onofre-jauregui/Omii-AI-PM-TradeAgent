@@ -462,34 +462,34 @@ function FAQSection() {
 // ── Feature cards data ────────────────────────────────────────────────────────
 const FEATURES = [
   {
-    icon: TrendingUp,
-    title: "Real exchange, regulated",
-    body: "Every trade executes on Kalshi — a CFTC-licensed venue. All trades are logged and timestamped on a federally supervised exchange, giving you a verifiable record that holds up.",
+    icon: Bot,
+    title: "Multi-agent architecture",
+    body: "A coordinated system of specialized agents — signal scanner, qualifier, executor, settler — running continuously on Kalshi, a CFTC-licensed exchange. Every trade is logged on a federally supervised venue.",
+  },
+  {
+    icon: Activity,
+    title: "Full observability",
+    body: "Every agent action is traced end-to-end. LLM calls, tool invocations, latency, and token costs are all tracked. You can see exactly what the system did, why, and what it cost.",
   },
   {
     icon: BarChart2,
     title: "Three-tier risk controls",
-    body: "Set a total portfolio limit, a per-strategy allocation, and a per-trade max. The engine enforces all three on every order — no overrides, no exceptions.",
+    body: "Set a total portfolio cap, a per-strategy allocation, and a per-trade max. All three are enforced server-side on every order — no client-side workarounds, no overrides.",
   },
   {
     icon: Shield,
-    title: "Your keys, your funds",
-    body: "API keys are encrypted with AES-256 before storage. Trading-only scope means withdrawals are impossible through us. Revoke access from Kalshi instantly, anytime.",
+    title: "Security by default",
+    body: "API keys are encrypted with AES-256 before storage. All inputs are validated at the boundary. Rate limiting is enforced across every endpoint. Withdrawals are impossible through us by design.",
   },
   {
-    icon: Brain,
-    title: "Gets smarter every trade",
-    body: "After each settled position the agent reflects on what happened, updates its memory, and adjusts confidence on future setups. The longer it runs, the sharper it gets.",
+    icon: Lock,
+    title: "Compliance built in",
+    body: "Full residency audit logs on every trade. Human-in-the-loop controls let you pause or override the agent at any time. Nothing executes without a traceable, timestamped record.",
   },
   {
     icon: Zap,
-    title: "14 built-in agent tools",
-    body: "Scan markets, execute trades, build strategies, review performance, and recall past lessons — all from a single chat interface. No dashboards to dig through.",
-  },
-  {
-    icon: Activity,
-    title: "Paper mode, always on",
-    body: "Run the full system on live market prices with simulated funds. No Kalshi account, no real money, no commitment — until you decide you're ready.",
+    title: "14 tools. Two modes.",
+    body: "The agent scans markets, executes trades, builds strategies, and reviews its own performance — across paper and live modes. Switch when you're ready. The track record carries over.",
   },
 ];
 
@@ -935,10 +935,10 @@ export default function LandingPage() {
                 marginBottom: 12,
               }}
             >
-              Everything included. Nothing to manage.
+              The infrastructure is handled.
             </h2>
             <p style={{ fontSize: 19, color: "#6e6e73", maxWidth: 560, margin: "0 auto" }}>
-              Regulated exchange. Encrypted keys. Risk controls. A self-improving agent. All running the moment you sign up.
+              Architecture, observability, risk, compliance, security — production-grade from day one.
             </p>
           </Reveal>
 
