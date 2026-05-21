@@ -1,7 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
 /**
  * surface-scanner: Cross-market consistency scanner for Kalshi prediction markets.
@@ -330,34 +329,42 @@ serve(async (req) => {
 
     if (incomingMarkets && Array.isArray(incomingMarkets) && incomingMarkets.length > 0) {
       rawMarkets = incomingMarkets;
-    } else {
-      // Fetch more markets for better cross-market coverage
-      const fetches = SERIES.map((s) =>
-        fetch(`${KALSHI_BASE_URL}/markets?limit=30&status=open&series_ticker=${s}`)
-          .then((r) => r.json())
-          .catch((err: unknown) => {
-            if (supabase) {
-              const isTimeout = err instanceof Error &&
-                (err.name === "AbortError" || /timeout|network|fetch/i.test(err.message));
-              supabase.from("compliance_log").insert({
-                event_type: "api_timeout",
-                severity: "warning",
-                message: `Kalshi API fetch failed for series ${s}: ${err instanceof Error ? err.message : "unknown"}`,
-                metadata: {
-                  provider: "kalshi",
-                  series: s,
-                  is_timeout: isTimeout,
-                  error_name: err instanceof Error ? err.name : "unknown",
-                },
-              }).then().catch(() => {});
-            }
-            return { markets: [] };
-          })
-      );
-      const results = await Promise.all(fetches);
-      for (const result of results) {
-        for (const m of result.markets || []) rawMarkets.push(m);
+    } else if (supabase) {
+      // Read from cache written by market-data-fetcher (runs every 5 min).
+      // Never call Kalshi directly here — that's what caused the 429 rate-limit errors.
+      const { data: cacheRows, error: cacheErr } = await supabase
+        .from("kalshi_markets_cache")
+        .select("market_data, fetched_at")
+        .in("series_ticker", SERIES);
+
+      if (cacheErr) {
+        console.error("surface-scanner: cache read error:", cacheErr.message);
       }
+
+      if (!cacheRows || cacheRows.length === 0) {
+        return new Response(
+          JSON.stringify({
+            alerts: [],
+            total_markets_scanned: 0,
+            note: "Market cache is empty — market-data-fetcher has not run yet or is failing.",
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      // Warn if cache data is stale (older than 15 min)
+      const oldestMs = Math.min(...cacheRows.map((r) => new Date(r.fetched_at).getTime()));
+      const ageMinutes = (Date.now() - oldestMs) / 60000;
+      if (ageMinutes > 15 && supabase) {
+        supabase.from("compliance_log").insert({
+          event_type: "cache_stale",
+          severity: "warning",
+          message: `surface-scanner: market cache is ${Math.round(ageMinutes)}m old — market-data-fetcher may be failing`,
+          metadata: { oldest_fetched_at: new Date(oldestMs).toISOString() },
+        }).then().catch(() => {});
+      }
+
+      for (const row of cacheRows) rawMarkets.push(row.market_data as RawMarket);
     }
 
     // ── Parse and deduplicate ─────────────────────────────────────────────────

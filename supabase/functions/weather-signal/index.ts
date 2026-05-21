@@ -1,7 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import {
   computeBucketProbabilities,
   computeEdge,
@@ -47,8 +46,9 @@ function parseTempBucket(ticker: string, title: string): { low: number; high: nu
 }
 
 /**
- * Fetch Kalshi weather markets for a location and upsert into
- * weather_markets_cache. Called when the cache is empty for today.
+ * Sync Kalshi weather markets from kalshi_markets_cache into weather_markets_cache.
+ * Called when the weather cache is empty for today. Reads from the shared market
+ * cache (written by market-data-fetcher) rather than calling Kalshi directly.
  * Returns the number of rows successfully synced.
  */
 async function syncWeatherMarkets(
@@ -56,18 +56,15 @@ async function syncWeatherMarkets(
   loc: (typeof WEATHER_LOCATIONS)[number],
   forecastDate: string,
 ): Promise<number> {
-  let resp: Response;
-  try {
-    resp = await fetch(
-      `${KALSHI_BASE_URL}/markets?limit=50&status=open&series_ticker=${loc.kalshiSeries}`,
-    );
-  } catch {
-    return 0;
-  }
-  if (!resp.ok) return 0;
+  // Read from the shared cache populated by market-data-fetcher.
+  const { data: cacheRows, error: cacheErr } = await supabase
+    .from("kalshi_markets_cache")
+    .select("market_data")
+    .eq("series_ticker", loc.kalshiSeries);
 
-  const data = await resp.json().catch(() => ({}));
-  const markets: any[] = data.markets || [];
+  if (cacheErr || !cacheRows || cacheRows.length === 0) return 0;
+
+  const markets: any[] = cacheRows.map((r) => r.market_data);
 
   let synced = 0;
   for (const m of markets) {

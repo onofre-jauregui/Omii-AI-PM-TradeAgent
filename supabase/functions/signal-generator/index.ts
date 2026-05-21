@@ -1,7 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
 /**
  * signal-generator: Systematic, quantitative signal scoring for Kalshi markets.
@@ -237,17 +236,24 @@ serve(async (req) => {
 
     if (incomingMarkets && Array.isArray(incomingMarkets) && incomingMarkets.length > 0) {
       rawMarkets = incomingMarkets;
-    } else {
+    } else if (supabase) {
+      // Read from cache written by market-data-fetcher. Never call Kalshi directly.
       const targetSeries = category ? [category] : SERIES;
-      const fetches = targetSeries.map((s) =>
-        fetch(`${KALSHI_BASE_URL}/markets?limit=25&status=open&series_ticker=${s}`)
-          .then((r) => r.json())
-          .catch(() => ({ markets: [] }))
-      );
-      const results = await Promise.all(fetches);
-      for (const result of results) {
-        for (const m of result.markets || []) rawMarkets.push(m);
+      const { data: cacheRows, error: cacheErr } = await supabase
+        .from("kalshi_markets_cache")
+        .select("market_data")
+        .in("series_ticker", targetSeries);
+
+      if (cacheErr) console.error("signal-generator: cache read error:", cacheErr.message);
+
+      if (!cacheRows || cacheRows.length === 0) {
+        return new Response(
+          JSON.stringify({ signals: [], total_scored: 0, note: "Market cache is empty — market-data-fetcher has not run yet or is failing." }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
       }
+
+      for (const row of cacheRows) rawMarkets.push(row.market_data as RawMarket);
     }
 
     // ── Filter to liquid markets ──────────────────────────────────────────────

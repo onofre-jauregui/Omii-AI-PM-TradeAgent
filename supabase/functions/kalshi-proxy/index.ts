@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { generateAuthHeaders, KALSHI_BASE_URL, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 
 serve(async (req) => {
@@ -55,7 +55,7 @@ serve(async (req) => {
       if (body) fetchOptions.body = body;
     }
 
-    const response = await fetch(kalshiUrl.toString(), fetchOptions);
+    const response = await fetchWithRetry(kalshiUrl.toString(), fetchOptions);
     const data = await response.json();
 
     if (!response.ok) {

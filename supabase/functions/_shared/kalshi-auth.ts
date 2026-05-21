@@ -117,3 +117,24 @@ export async function getKalshiCredentials(
 }
 
 export const KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
+
+/**
+ * Fetch with exponential backoff on 429 responses.
+ * Retries up to maxRetries times before returning the final response.
+ * All other status codes are returned immediately.
+ */
+export async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  maxRetries = 3,
+  baseDelayMs = 1000,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429 || attempt === maxRetries) return res;
+    const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
+    await new Promise((r) => setTimeout(r, delay));
+  }
+  // TypeScript requires a return; the loop always returns before here.
+  throw new Error("fetchWithRetry: exhausted retries");
+}
