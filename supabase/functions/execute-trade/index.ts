@@ -527,7 +527,7 @@ serve(async (req) => {
 async function updateRiskState(
   supabase: any,
   userId: string | null,
-  pnlChange: number
+  _pnlChange: number  // kept for API compat — daily_pnl now computed from settled trades directly
 ) {
   const today = new Date().toISOString().split("T")[0];
 
@@ -541,6 +541,18 @@ async function updateRiskState(
     ? await positionQuery.eq("user_id", userId)
     : await positionQuery.is("user_id", null);
 
+  // Compute today's settled P&L directly — pnlChange was always passed as 0 (bug fix).
+  // Querying settled trades is the only accurate source; incremental tracking drifts.
+  const settledQuery = supabase
+    .from("trades")
+    .select("pnl")
+    .eq("status", "settled")
+    .gte("settled_at", `${today}T00:00:00.000Z`);
+  const { data: todaySettled } = userId
+    ? await settledQuery.eq("user_id", userId)
+    : await settledQuery.is("user_id", null);
+  const actualDailyPnl = (todaySettled ?? []).reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
+
   // Get current risk state for this tenant
   const stateQuery = supabase.from("risk_state").select("*").eq("date", today);
   const { data: current } = userId
@@ -548,15 +560,13 @@ async function updateRiskState(
     : await stateQuery.is("user_id", null).maybeSingle();
 
   if (current) {
-    const newPnl = current.daily_pnl + pnlChange;
     const currentPeak = current.peak_portfolio_value || 0;
-    // Peak grows whenever running P&L improves, never shrinks
-    const newPeak = newPnl > currentPeak ? newPnl : currentPeak;
+    const newPeak = actualDailyPnl > currentPeak ? actualDailyPnl : currentPeak;
     const updateQuery = supabase.from("risk_state").update({
-      daily_pnl: newPnl,
+      daily_pnl: actualDailyPnl,
       daily_trades: current.daily_trades + 1,
       open_position_count: openPositionCount || 0,
-      max_drawdown_today: Math.min(current.max_drawdown_today || 0, newPnl),
+      max_drawdown_today: Math.min(current.max_drawdown_today || 0, actualDailyPnl),
       peak_portfolio_value: newPeak,
       updated_at: new Date().toISOString(),
     }).eq("date", today);
@@ -569,10 +579,10 @@ async function updateRiskState(
     await supabase.from("risk_state").insert({
       user_id: userId,
       date: today,
-      daily_pnl: pnlChange,
+      daily_pnl: actualDailyPnl,
       daily_trades: 1,
       open_position_count: openPositionCount || 0,
-      max_drawdown_today: Math.min(0, pnlChange),
+      max_drawdown_today: Math.min(0, actualDailyPnl),
     });
   }
 }

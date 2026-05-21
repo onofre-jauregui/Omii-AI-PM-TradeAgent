@@ -68,7 +68,10 @@ export function RiskControlsPanel() {
   };
 
   const loadAll = useCallback(async () => {
-    const { data } = await supabase.from("risk_settings").select("*").single();
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
+    const { data } = await supabase.from("risk_settings").select("*")
+      .eq("user_id", userId).maybeSingle();
     if (data) {
       setRiskSettings({
         maxDailyLoss:     [data.max_daily_loss],
@@ -97,8 +100,11 @@ export function RiskControlsPanel() {
     setSaving(true);
     setSaveStatus("idle");
     try {
-      // Save risk settings
+      // Save risk settings scoped to current user
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id ?? "";
       const riskPayload = {
+        user_id:            userId,
         max_daily_loss:     riskSettings.maxDailyLoss[0],
         max_drawdown_pct:   riskSettings.maxDrawdown[0],
         max_position_size:  riskSettings.maxPositionSize[0],
@@ -108,7 +114,8 @@ export function RiskControlsPanel() {
         default_order_type: riskSettings.defaultOrderType,
         updated_at: new Date().toISOString(),
       };
-      const { data: existing } = await supabase.from("risk_settings").select("id").single();
+      const { data: existing } = await supabase.from("risk_settings").select("id")
+        .eq("user_id", userId).maybeSingle();
       if (existing) {
         await supabase.from("risk_settings").update(riskPayload).eq("id", existing.id);
       } else {

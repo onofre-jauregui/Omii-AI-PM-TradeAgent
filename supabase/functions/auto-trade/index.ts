@@ -152,6 +152,17 @@ function applySignalTenantFilter(query: any, userId: string | null | undefined):
   return query;
 }
 
+// Cache risk_settings per user for the duration of one auto-trade run (avoids N queries for N strategies).
+const riskSettingsCache = new Map<string, any>();
+async function fetchUserRiskSettings(supabase: any, userId: string): Promise<any> {
+  if (riskSettingsCache.has(userId)) return riskSettingsCache.get(userId);
+  const { data } = await supabase.from("risk_settings").select("*")
+    .eq("user_id", userId).maybeSingle();
+  const settings = data ?? { max_open_positions: 10, max_position_size: 500, max_daily_loss: 500, max_drawdown_pct: 20 };
+  riskSettingsCache.set(userId, settings);
+  return settings;
+}
+
 async function countOpenPositions(
   supabase: any,
   strategyId?: string,
@@ -419,6 +430,32 @@ serve(async (req) => {
           }
         }
 
+        // ── Global position cap from user's risk_settings ─────────────────────
+        // Checked here (pre-flight) so no execute-trade calls fire when the user is at their limit.
+        let userRisk: any = null;
+        if (strategy.user_id) {
+          userRisk = await fetchUserRiskSettings(supabase, strategy.user_id);
+          const openPositions = await countOpenPositions(supabase, undefined, 7, strategy.user_id);
+          if (openPositions.totalCount >= userRisk.max_open_positions) {
+            await supabase.from("compliance_log").insert({
+              event_type: "risk_check_failed",
+              severity: "warning",
+              message: `Strategy ${strategy.id} skipped: max_open_positions (${userRisk.max_open_positions}) reached — currently ${openPositions.totalCount} open`,
+              metadata: { strategy_id: strategy.id, open: openPositions.totalCount, limit: userRisk.max_open_positions },
+              user_id: strategy.user_id,
+            });
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              action: "risk_blocked",
+              details: `max_open_positions (${userRisk.max_open_positions}) reached — ${openPositions.totalCount} open`,
+            });
+            continue;
+          }
+        }
+
         let result: StrategyResult;
         // Route by template_id (user strategies) with fallback to id (system strategies).
         const templateId = (strategy as any).template_id ?? strategy.id;
@@ -426,9 +463,9 @@ serve(async (req) => {
         if (templateId === "S-001") {
           result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
         } else if (templateId === "S-002") {
-          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk);
         } else if (templateId === "S-005") {
-          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk);
         } else {
           // Unknown strategy — hard reject. All strategies require an explicit handler.
           // This prevents a bad strategy_config row from triggering unguarded LLM usage.
@@ -598,6 +635,26 @@ async function runS001SurfaceArb(
   const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
   const MAX_LEGS_PER_EVENT = 3;
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const DAILY_TRADE_CAP = 20; // max trades this strategy can place in any 24h window
+
+  // Rate limit: check how many trades this strategy has placed today.
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { count: dailyCount } = await supabase
+    .from("trades")
+    .select("id", { count: "exact", head: true })
+    .eq("strategy_id", strategy.id)
+    .gte("created_at", dayAgo);
+
+  if ((dailyCount ?? 0) >= DAILY_TRADE_CAP) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "skipped",
+      action: "rate_limited",
+      details: `Daily trade cap reached: ${dailyCount}/${DAILY_TRADE_CAP} trades in last 24h`,
+    };
+  }
 
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
   // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
@@ -767,13 +824,35 @@ async function runS002LongshotBias(
   supabaseUrl: string,
   supabaseKey: string,
   runId?: string,
+  userRisk?: any,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
-  const MAX_S002_POSITIONS = 12; // Hard cap: max concurrent longshot positions
+  // User's limit takes precedence; 12 is the strategy-level ceiling (longshot needs diversification)
+  const MAX_S002_POSITIONS = Math.min(12, userRisk?.max_open_positions ?? 12);
   // 8-11¢ YES range: EV is positive here. Below 8¢, the payout ratio (win ~9¢, lose ~91¢)
   // requires >91% win rate to break even — the longshot bias (~5pp edge) isn't enough.
   // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
   const AMOUNT_PER_TRADE = 20;
+  const DAILY_TRADE_CAP_S002 = 15;
+
+  // Rate limit: check how many trades this strategy has placed today.
+  const dayAgo202 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { count: dailyCount202 } = await supabase
+    .from("trades")
+    .select("id", { count: "exact", head: true })
+    .eq("strategy_id", strategy.id)
+    .gte("created_at", dayAgo202);
+
+  if ((dailyCount202 ?? 0) >= DAILY_TRADE_CAP_S002) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "skipped",
+      action: "rate_limited",
+      details: `Daily trade cap reached: ${dailyCount202}/${DAILY_TRADE_CAP_S002} trades in last 24h`,
+    };
+  }
 
   // Time-based auto-exit: close NO positions expiring within 12h to stop
   // holding losers to full resolution (-91¢ each). Strategy instructions say
@@ -1032,12 +1111,33 @@ async function runS005WeatherEdge(
   supabaseUrl: string,
   supabaseKey: string,
   runId?: string,
+  userRisk?: any,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 15; // raised from 8¢ — weather needs bigger edge
   const maxPositionUsd = config?.max_position_usd ?? 30;
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
+  const DAILY_TRADE_CAP_S005 = 10;
+
+  // Rate limit: check how many trades this strategy has placed today.
+  const dayAgo505 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { count: dailyCount505 } = await supabase
+    .from("trades")
+    .select("id", { count: "exact", head: true })
+    .eq("strategy_id", strategy.id)
+    .gte("created_at", dayAgo505);
+
+  if ((dailyCount505 ?? 0) >= DAILY_TRADE_CAP_S005) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "skipped",
+      action: "rate_limited",
+      details: `Daily trade cap reached: ${dailyCount505}/${DAILY_TRADE_CAP_S005} trades in last 24h`,
+    };
+  }
 
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const { data: rawSignals } = await applySignalTenantFilter(
@@ -1073,7 +1173,8 @@ async function runS005WeatherEdge(
   }
 
   const positions = await countOpenPositions(supabase, undefined, 7, strategy.user_id ?? null);
-  const slotsAvailable = Math.max(0, 1000 - positions.weightedCost);
+  const maxPositions = userRisk?.max_open_positions ?? 10;
+  const slotsAvailable = Math.max(0, maxPositions - positions.totalCount);
   if (slotsAvailable === 0) {
     return {
       strategy_id: strategy.id,
@@ -1081,7 +1182,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `Portfolio full: weighted ${positions.weightedCost.toFixed(1)}/1000 (near: ${positions.nearTermCount}, far: ${positions.farTermCount})`,
+      details: `Portfolio full: ${positions.totalCount}/${maxPositions} open positions (near: ${positions.nearTermCount}, far: ${positions.farTermCount})`,
     };
   }
 
