@@ -93,6 +93,11 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
     description: "A significant portion of agent memories have been quarantined (exposed confidence below 0.30 threshold) or the total memory count is very high. High quarantine rates indicate the agent is learning conflicting lessons.",
     resolution: "Review quarantined memories in the Agent Memory panel to understand which lessons were invalidated. Consider running compact-memory to merge and prune the memory graph. High quarantine rate often signals a strategy edge that has degraded.",
   },
+  execution_gap: {
+    title: "Execution Gaps",
+    description: "A gap of more than 5 minutes was detected between consecutive auto_trade_run or auto_trade_skipped events. The cron fires every 30 seconds — gaps longer than 5 minutes indicate the edge function crashed or timed out mid-execution without logging a completion event.",
+    resolution: "Check Supabase Edge Function logs for the gap window. Common causes: edge function timeout (functions have a 60s limit by default), stale lock that wasn't released on crash (LOCK_STALE_MS=5min), or a transient Supabase cold-start. If gaps recur, add a try/finally block to the auto-trade function to guarantee the lock is released even on error.",
+  },
 };
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -266,14 +271,14 @@ function agentStatus(lastRunAt: string | null): {
   if (!lastRunAt)
     return { label: "Stale", color: "text-red-500", dot: "bg-red-500" };
   const minsAgo = (Date.now() - new Date(lastRunAt).getTime()) / 60000;
-  if (minsAgo < 5)
+  if (minsAgo < 8)
     return {
       label: "Running",
       color: "text-emerald-500",
       dot: "bg-emerald-500",
     };
-  if (minsAgo < 20)
-    return { label: "Idle", color: "text-yellow-500", dot: "bg-yellow-500" };
+  if (minsAgo < 240)
+    return { label: "Healthy", color: "text-emerald-400", dot: "bg-emerald-400" };
   return { label: "Stale", color: "text-red-500", dot: "bg-red-500" };
 }
 
@@ -373,6 +378,8 @@ export default function ObservabilityPage() {
   const [rateLimitCount24h, setRateLimitCount24h] = useState<number | null>(null);
   // Surface scan durations for market data pull latency
   const [scanDurations, setScanDurations] = useState<number[]>([]);
+  // Execution gap detection — gaps > 5 min between auto_trade_run/skipped events
+  const [gapEvents, setGapEvents] = useState<{ from: string; to: string; gapMins: number }[]>([]);
 
   // Errors
   const [guardrailEvents, setGuardrailEvents] = useState<ComplianceEvent[]>(
@@ -844,6 +851,27 @@ export default function ObservabilityPage() {
     setScanDurations(durations);
   }, []);
 
+  // Intentionally no uid filter — the trading agent is global (one cron, not per-user).
+  // Gaps in auto_trade_run/skipped represent edge function crashes, not user-specific issues.
+  const loadExecutionGaps = useCallback(async () => {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("created_at")
+      .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
+      .gte("created_at", since)
+      .order("created_at", { ascending: true });
+    if (!data || data.length < 2) { setGapEvents([]); return; }
+    const gaps: { from: string; to: string; gapMins: number }[] = [];
+    for (let i = 1; i < data.length; i++) {
+      const prev = new Date(data[i - 1].created_at).getTime();
+      const curr = new Date(data[i].created_at).getTime();
+      const gapMins = (curr - prev) / 60000;
+      if (gapMins > 5) gaps.push({ from: data[i - 1].created_at, to: data[i].created_at, gapMins });
+    }
+    setGapEvents(gaps);
+  }, []);
+
   // Session check + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -874,6 +902,7 @@ export default function ObservabilityPage() {
     loadActiveModel();
     loadLatencyData(null);
     loadSurfaceScanLatency(null);
+    loadExecutionGaps();
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -890,6 +919,7 @@ export default function ObservabilityPage() {
     loadActiveModel,
     loadLatencyData,
     loadSurfaceScanLatency,
+    loadExecutionGaps,
     loadUserList,
     decisionDateFilter,
     decisionStatusFilter,
@@ -921,6 +951,7 @@ export default function ObservabilityPage() {
     loadMemories(viewUserId);
     loadLatencyData(viewUserId);
     loadSurfaceScanLatency(viewUserId);
+    loadExecutionGaps();
   }, [viewUserId, isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Real-time + polling fallback
@@ -1004,6 +1035,7 @@ export default function ObservabilityPage() {
       loadActiveModel();
       loadLatencyData();
       loadSurfaceScanLatency();
+      loadExecutionGaps();
     }, 2 * 60 * 1000);
 
     return () => {
@@ -1026,6 +1058,7 @@ export default function ObservabilityPage() {
     loadActiveModel,
     loadLatencyData,
     loadSurfaceScanLatency,
+    loadExecutionGaps,
   ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
@@ -1223,7 +1256,7 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
@@ -1472,6 +1505,27 @@ export default function ObservabilityPage() {
                   </button>
                 );
               })}
+              {/* Execution Gaps — only shown when gaps exist; hidden when system is clean */}
+              {failureModes["execution_gap"].status !== "ok" && (() => {
+                const mode = failureModes["execution_gap"];
+                const detail = FAILURE_MODE_DETAILS["execution_gap"];
+                const { status: modeStatus } = mode;
+                const dotLabel = modeStatus === "critical" ? "✖" : "▲";
+                const dotText = modeStatus === "critical" ? "text-red-500" : "text-yellow-500";
+                return (
+                  <button
+                    onClick={() => setSelectedFailureMode("execution_gap")}
+                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                    </div>
+                    <p className="text-lg font-bold tabular-nums">{mode.count} gap{mode.count !== 1 ? "s" : ""}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">{mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—")}</p>
+                  </button>
+                );
+              })()}
             </div>
             {failureTimeline.some((h) => h.count > 0) && (
               <div>
@@ -2502,6 +2556,22 @@ export default function ObservabilityPage() {
                   </p>
                 </div>
               )}
+              {selectedFailureMode === "execution_gap" && gapEvents.length > 0 && (
+                <div>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Gap Windows ({gapEvents.length})</p>
+                  <div className="rounded-xl bg-secondary/40 divide-y divide-border overflow-hidden">
+                    {gapEvents.map((g, i) => (
+                      <div key={i} className="px-4 py-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[11px] font-semibold tabular-nums text-yellow-500">{Math.round(g.gapMins)} min gap</p>
+                          <p className="text-[10px] text-muted-foreground">{relativeTime(g.to)}</p>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{fmtDate(g.from)} → {fmtDate(g.to)}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2744,7 +2814,8 @@ function detectFailureModes(
   toolCounts: Record<string, number>,
   runs6hCount: number | null = null,
   runs24hCount: number | null = null,
-  rateLimitCount?: number
+  rateLimitCount?: number,
+  gaps: { from: string; to: string; gapMins: number }[] = []
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
@@ -2856,6 +2927,15 @@ function detectFailureModes(
         : null,
       extra: `${activeCount} active`,
       status: quarantined.length >= 20 ? "critical" : quarantined.length >= 5 ? "warning" : "ok",
+    },
+    execution_gap: {
+      events: [],
+      count: gaps.length,
+      lastAt: gaps.length > 0 ? gaps[gaps.length - 1].to : null,
+      extra: gaps.length > 0
+        ? `max ${Math.round(Math.max(...gaps.map((g) => g.gapMins)))} min`
+        : undefined,
+      status: gaps.length === 0 ? "ok" : gaps.some((g) => g.gapMins > 30) ? "critical" : "warning",
     },
   };
 }

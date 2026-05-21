@@ -33,13 +33,34 @@ function timeAgo(iso: string) {
 }
 
 function AgentStatusBadge() {
+  const [lastRun, setLastRun] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    supabase
+      .from("compliance_log")
+      .select("created_at")
+      .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => setLastRun(data?.created_at ?? null));
+  }, []);
+
+  if (lastRun === undefined) return null;
+
+  const minsAgo = lastRun ? (Date.now() - new Date(lastRun).getTime()) / 60000 : Infinity;
+  const isStale = minsAgo > 240;
+  const colorClass = isStale ? "text-yellow-500 bg-yellow-500/10" : "text-profit bg-profit/10";
+  const dotClass = isStale ? "bg-yellow-500" : "bg-profit";
+  const label = isStale ? "Agent · Stale" : "Your Agent · Active";
+
   return (
-    <div className="flex items-center gap-1.5 text-[11px] font-medium text-profit bg-profit/10 px-2.5 py-1 rounded-full shrink-0">
+    <div className={`flex items-center gap-1.5 text-[11px] font-medium ${colorClass} px-2.5 py-1 rounded-full shrink-0`}>
       <span className="relative flex h-1.5 w-1.5">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-profit opacity-75" />
-        <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-profit" />
+        {!isStale && <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${dotClass} opacity-75`} />}
+        <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${dotClass}`} />
       </span>
-      Your Agent · Active
+      {label}
     </div>
   );
 }
