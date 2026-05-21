@@ -89,10 +89,14 @@ interface OpenTrade {
 const MAY_START = "2026-04-22T00:00:00.000Z";
 
 async function fetchAll() {
+  const { data: { user } } = await supabase.auth.getUser();
+  const userId = user?.id ?? "";
+
   const [tradesRes, settledRes, openRes] = await Promise.all([
     supabase
       .from("trades")
       .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
+      .eq("user_id", userId)
       .eq("mode", "paper")
       .in("status", ["filled", "settled"])
       .gte("created_at", MAY_START)
@@ -100,6 +104,7 @@ async function fetchAll() {
     supabase
       .from("trades")
       .select("ticker, market_question, side, price, amount, pnl, resolution, settled_at, strategy, created_at")
+      .eq("user_id", userId)
       .eq("mode", "paper")
       .eq("status", "settled")
       .gte("settled_at", MAY_START)
@@ -108,6 +113,7 @@ async function fetchAll() {
     supabase
       .from("trades")
       .select("id, ticker, market_question, side, price, amount, strategy, filled_at")
+      .eq("user_id", userId)
       .eq("mode", "paper")
       .eq("status", "filled")
       .is("settled_at", null)

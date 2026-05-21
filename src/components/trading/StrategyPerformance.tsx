@@ -36,10 +36,13 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
     setLoading(true);
 
     const MAY_START = "2026-04-22T00:00:00.000Z";
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
     let q = supabase
       .from("trades")
       .select("strategy, strategy_id, pnl, settled_at, mode")
       .eq("status", "settled")
+      .eq("user_id", userId)
       .gte("settled_at", MAY_START)
       .order("settled_at", { ascending: true });
     if (mode) q = q.eq("mode", mode);

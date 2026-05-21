@@ -125,12 +125,16 @@ export function DashboardHero({
     const todayISO = todayStart.toISOString();
     const MAY_START = "2026-04-22T00:00:00.000Z";
 
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id;
+
     const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
         .from("trades")
         .select("pnl, settled_at, mode")
         .eq("status", "settled")
+        .eq("user_id", userId ?? "")
         .gte("settled_at", MAY_START)
         .order("settled_at", { ascending: false })
         .limit(500),
@@ -139,22 +143,26 @@ export function DashboardHero({
         .from("trades")
         .select("id")
         .eq("status", "filled")
+        .eq("user_id", userId ?? "")
         .is("settled_at", null),
       // Trades placed today (for activity count)
       supabase
         .from("trades")
         .select("id")
+        .eq("user_id", userId ?? "")
         .gte("created_at", todayISO),
       // Starting balance = sum of ALL strategy starting_balances (active or not — base must
       // include deactivated strategies whose historical trades still count toward P&L)
       supabase
         .from("strategies")
-        .select("starting_balance"),
+        .select("starting_balance")
+        .eq("user_id", userId ?? ""),
       fetchKalshiMarkets(200),
       // Most recently placed trade (any status) — for "Last trade" chip
       supabase
         .from("trades")
         .select("created_at")
+        .eq("user_id", userId ?? "")
         .order("created_at", { ascending: false })
         .limit(1),
     ]);

@@ -71,15 +71,18 @@ export function PortfolioStats({
 
     const MAY_START = "2026-04-22T00:00:00.000Z";
 
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
+
     // PnL only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
     let settledQuery = supabase
-      .from("trades").select("pnl, mode").eq("status", "settled").gte("settled_at", MAY_START);
+      .from("trades").select("pnl, mode").eq("status", "settled").eq("user_id", userId).gte("settled_at", MAY_START);
     // Open positions: placed but not yet resolved
     let openQuery = supabase
-      .from("trades").select("amount, mode").eq("status", "filled").is("settled_at", null);
+      .from("trades").select("amount, mode").eq("status", "filled").eq("user_id", userId).is("settled_at", null);
     // Starting balance from strategies table
     const strategiesQuery = supabase
-      .from("strategies").select("starting_balance");
+      .from("strategies").select("starting_balance").eq("user_id", userId);
 
     if (mode) {
       settledQuery = settledQuery.eq("mode", mode);
@@ -294,11 +297,14 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
 
   const load = useCallback(async () => {
     if (!initialized.current) setLoading(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
     let q = supabase
       .from("trades")
       .select("*")
       .eq("status", "filled")
       .eq("action", "buy")
+      .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(100);
     if (mode) q = q.eq("mode", mode);

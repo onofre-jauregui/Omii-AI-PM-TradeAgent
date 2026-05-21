@@ -55,9 +55,12 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
 
   // Load strategies from DB
   const loadStrategies = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
     const { data, error } = await supabase
       .from("strategies")
       .select("*")
+      .eq("user_id", userId)
       .order("created_at", { ascending: true });
 
     if (!error && data) {
@@ -101,10 +104,13 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
   // Load per-strategy performance stats from trades
   const refreshStats = useCallback(async () => {
     const MAY_START = "2026-04-22T00:00:00.000Z";
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id ?? "";
     const { data: trades } = await supabase
       .from("trades")
       .select("strategy, strategy_id, pnl, status, amount")
       .eq("status", "settled")
+      .eq("user_id", userId)
       .gte("settled_at", MAY_START);
 
     if (!trades) return;
