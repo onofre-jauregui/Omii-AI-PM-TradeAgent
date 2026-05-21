@@ -208,10 +208,10 @@ function HeroDashboardMockup() {
       <div style={{ height: 1, background: "rgba(255,255,255,0.06)", margin: "0 24px" }} />
 
       {/* Stats row */}
-      <div className="grid grid-cols-4 gap-0 px-6 pt-5">
+      <div className="grid grid-cols-3 gap-0 px-6 pt-5">
         {loading ? (
           // Skeleton state
-          Array.from({ length: 4 }).map((_, i) => (
+          Array.from({ length: 3 }).map((_, i) => (
             <div key={i} className="px-3 first:pl-0">
               <div className="h-2 w-14 rounded animate-pulse mb-2" style={{ background: "rgba(255,255,255,0.08)" }} />
               <div className="h-5 w-20 rounded animate-pulse mb-1" style={{ background: "rgba(255,255,255,0.10)" }} />
@@ -221,8 +221,7 @@ function HeroDashboardMockup() {
         ) : (
           [
             { label: `Return Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+${roiPct}%`, sub: "cumulative ROI", color: "#34d058" },
-            { label: "Settled Trades", value: s.tradeCount.toString(), sub: `since ${s.startDate.slice(5).replace("-", "/")}`, color: "#f5f5f7" },
-            { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
+            { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: "", color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
           ].map((stat) => (
             <div key={stat.label} className="px-3 first:pl-0">
