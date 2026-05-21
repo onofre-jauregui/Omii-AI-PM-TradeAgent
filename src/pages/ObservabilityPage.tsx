@@ -411,6 +411,7 @@ export default function ObservabilityPage() {
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
   const [clearingMemory, setClearingMemory] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  const [showFullHistory, setShowFullHistory] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(false);
   const [tracePage, setTracePage] = useState(1);
   const [activeModel, setActiveModel] = useState<string | null>(null);
@@ -1175,7 +1176,7 @@ export default function ObservabilityPage() {
     },
     {
       name: "Order Execution",
-      desc: "Trades placed (paper simulation)",
+      desc: "Executes orders to Kalshi",
       calls: tradesLast30dCount,
       errors: toolCounts["basket_aborted"] ?? 0,
     },
@@ -1729,9 +1730,7 @@ export default function ObservabilityPage() {
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
                 <p className="text-xl font-bold tabular-nums">{avgTokensPerDecision.toLocaleString()}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {QUALIFY_INPUT_TOKENS.toLocaleString()} in + {QUALIFY_OUTPUT_TOKENS} out
-                </p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">est. per qualify call</p>
               </div>
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost per Trade</p>
@@ -1758,7 +1757,7 @@ export default function ObservabilityPage() {
                   {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
                 </span>
               </div>
-              <div className="grid grid-cols-5 gap-3">
+              <div className="grid grid-cols-4 gap-3">
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
                   <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
@@ -1782,13 +1781,6 @@ export default function ObservabilityPage() {
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
                   <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in</p>
-                </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg cycle</p>
-                  <p className="text-base font-bold tabular-nums">
-                    {cycleLabel ?? <span className="text-muted-foreground">—</span>}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">run → last event</p>
                 </div>
               </div>
             </div>
@@ -1849,13 +1841,13 @@ export default function ObservabilityPage() {
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">95th pct run</p>
             </div>
-            {/* Fill latency */}
+            {/* Avg Cycle */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Fill Latency</p>
-              <p className={`text-2xl font-bold tabular-nums ${fillIsPaper ? "text-emerald-500" : avgFillLatencyMs === null ? "text-muted-foreground" : avgFillLatencyMs < 120_000 ? "text-emerald-500" : avgFillLatencyMs < 600_000 ? "text-yellow-500" : "text-red-500"}`}>
-                {fillIsPaper ? "Instant" : fmtMs(avgFillLatencyMs)}
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Avg Cycle</p>
+              <p className={`text-2xl font-bold tabular-nums ${avgCycleMs === null ? "text-muted-foreground" : avgCycleMs < 8000 ? "text-emerald-500" : avgCycleMs < 20000 ? "text-yellow-500" : "text-red-500"}`}>
+                {cycleLabel ?? "—"}
               </p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">order → fill avg</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">run → last event avg</p>
             </div>
             {/* Settlement */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
@@ -1905,7 +1897,7 @@ export default function ObservabilityPage() {
           <div className="px-6 py-4 border-b border-border flex items-center justify-between">
             <h2 className="text-sm font-semibold">Recent Decisions</h2>
             <button
-              onClick={() => setShowDetails(true)}
+              onClick={() => setShowFullHistory(true)}
               className="text-[11px] text-primary hover:opacity-80 transition-opacity"
             >
               Full history →
@@ -2577,6 +2569,148 @@ export default function ObservabilityPage() {
         </div>
       );
     })()}
+
+    {/* ── Full Trade History Modal ────────────────────────── */}
+    {showFullHistory && (
+      <div
+        className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 backdrop-blur-sm"
+        onClick={() => setShowFullHistory(false)}
+      >
+        <div
+          className="bg-card w-full max-w-5xl mx-auto my-6 rounded-2xl apple-shadow flex flex-col overflow-hidden"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-border flex items-center justify-between shrink-0">
+            <div>
+              <h3 className="text-sm font-semibold">Trade History</h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{decisionTrades.length} trades · {decisionDateFilter === "all" ? "all time" : `last ${decisionDateFilter}`}</p>
+            </div>
+            <div className="flex items-center gap-3">
+              {/* Date filter */}
+              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                {(["today", "7d", "30d", "all"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setDecisionDateFilter(f)}
+                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                      decisionDateFilter === f ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+              {/* Status filter */}
+              <div className="flex items-center bg-secondary rounded-full p-0.5 gap-0.5">
+                {(["all", "filled", "settled"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setDecisionStatusFilter(f)}
+                    className={`text-[10px] px-2.5 py-1 rounded-full transition-colors font-medium capitalize ${
+                      decisionStatusFilter === f ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => setShowFullHistory(false)}
+                className="text-muted-foreground hover:text-foreground transition-colors text-lg leading-none"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+
+          {/* Table body — scrollable */}
+          <div className="overflow-y-auto flex-1">
+            {decisionTrades.length === 0 ? (
+              <div className="py-20 text-center text-sm text-muted-foreground">No trades found.</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-card border-b border-border z-10">
+                  <tr>
+                    <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground whitespace-nowrap">Time</th>
+                    <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Market</th>
+                    <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Direction</th>
+                    <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Size</th>
+                    <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Entry</th>
+                    <th className="text-left px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Strategy</th>
+                    <th className="text-right px-3 py-2.5 text-[11px] font-medium text-muted-foreground">P&L</th>
+                    <th className="text-center px-3 py-2.5 text-[11px] font-medium text-muted-foreground">Outcome</th>
+                    <th className="text-left px-6 py-2.5 text-[11px] font-medium text-muted-foreground">Notes</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {decisionTrades.map((t) => {
+                    const isBullish = t.action === "buy" || t.side === "yes";
+                    const hasPnl = t.pnl !== null;
+                    const pnl = t.pnl ?? 0;
+                    const won = t.status === "settled" && pnl > 0;
+                    const lost = t.status === "settled" && pnl <= 0;
+                    const label = t.market_question ?? t.ticker ?? "—";
+                    const shortLabel = label.length > 60 ? label.slice(0, 60) + "…" : label;
+                    return (
+                      <tr
+                        key={t.id}
+                        onClick={() => { setSelectedTrade(t); setShowFullHistory(false); }}
+                        className="hover:bg-secondary/30 transition-colors cursor-pointer"
+                      >
+                        <td className="px-6 py-2.5 whitespace-nowrap">
+                          <span className="text-[11px] text-muted-foreground tabular-nums">{fmtDate(t.created_at)}</span>
+                        </td>
+                        <td className="px-3 py-2.5 max-w-[260px]">
+                          <span className="text-[12px] text-foreground" title={label}>{shortLabel}</span>
+                        </td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">
+                          <span className={`text-[11px] font-semibold uppercase ${isBullish ? "text-emerald-500" : "text-red-500"}`}>
+                            {t.action?.toUpperCase()} {t.side?.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <span className="text-[11px] tabular-nums text-muted-foreground">${t.amount?.toFixed(2) ?? "—"}</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <span className="text-[11px] tabular-nums text-muted-foreground">{t.price}¢</span>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <span className="text-[11px] text-muted-foreground">{t.strategy ?? "—"}</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          {hasPnl ? (
+                            <span className={`text-[12px] font-semibold tabular-nums ${pnl > 0 ? "text-emerald-500" : "text-red-500"}`}>
+                              {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2.5 text-center">
+                          {t.status === "settled" ? (
+                            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${won ? "bg-emerald-500/10 text-emerald-500" : "bg-red-500/10 text-red-500"}`}>
+                              {won ? "Won" : "Lost"}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">{t.status}</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-2.5 max-w-[200px]">
+                          <span className="text-[11px] text-muted-foreground truncate block" title={t.notes ?? undefined}>
+                            {t.notes ? (t.notes.length > 60 ? t.notes.slice(0, 60) + "…" : t.notes) : "—"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* ── Trade Detail Panel ───────────────────────────────────────── */}
 
