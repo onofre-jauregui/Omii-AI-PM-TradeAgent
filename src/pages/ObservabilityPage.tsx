@@ -717,6 +717,7 @@ export default function ObservabilityPage() {
   // (e.g. surface_scan_complete warns when it finds alerts — that's expected behavior, not an error)
   const operationalEventTypes = [
     "surface_scan_complete",
+    "health_check_run",
     "auto_trade_run",
     "auto_trade_strategy_run",
     "auto_trade_skipped",
@@ -790,7 +791,7 @@ export default function ObservabilityPage() {
       .select("created_at, metadata")
       .eq("event_type", "auto_trade_strategy_run")
       .order("created_at", { ascending: false })
-      .limit(200);
+      .limit(2000);
     if (uid) q = q.eq("user_id", uid);
     const { data } = await q;
     if (data) {
@@ -806,21 +807,41 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadSurfaceScanLatency = useCallback(async (uid?: string | null) => {
-    let q = supabase
+    // surface_scan_complete metadata doesn't include elapsed_seconds.
+    // Derive scan duration from auto_trade_run → surface_scan_complete time delta —
+    // the scan is the first step in each run, so the delta is the scan latency.
+    let runsQ = supabase
       .from("compliance_log")
-      .select("created_at, metadata")
-      .eq("event_type", "surface_scan_complete")
+      .select("id, created_at")
+      .eq("event_type", "auto_trade_run")
       .order("created_at", { ascending: false })
-      .limit(100);
-    if (uid) q = q.eq("user_id", uid);
-    const { data } = await q;
-    if (data) {
-      setScanDurations(
-        data
-          .map((e: any) => parseFloat(e.metadata?.elapsed_seconds ?? "0"))
-          .filter((s) => s > 0)
-      );
-    }
+      .limit(50);
+    if (uid) runsQ = runsQ.eq("user_id", uid);
+    const { data: runs } = await runsQ;
+    if (!runs || runs.length === 0) return;
+
+    const durations: number[] = [];
+    await Promise.all(
+      runs.map(async (run) => {
+        const windowEnd = new Date(new Date(run.created_at).getTime() + 60_000).toISOString();
+        let scanQ = supabase
+          .from("compliance_log")
+          .select("created_at")
+          .eq("event_type", "surface_scan_complete")
+          .gte("created_at", run.created_at)
+          .lte("created_at", windowEnd)
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (uid) scanQ = (scanQ as any).eq("user_id", uid);
+        const { data: scan } = await scanQ;
+        if (scan) {
+          const s = (new Date((scan as any).created_at).getTime() - new Date(run.created_at).getTime()) / 1000;
+          if (s > 0 && s < 60) durations.push(s);
+        }
+      })
+    );
+    setScanDurations(durations);
   }, []);
 
   // Session check + initial load
@@ -1265,14 +1286,16 @@ export default function ObservabilityPage() {
   const p50CycleS = sortedDurations.length > 0 ? percentile(sortedDurations, 50) : null;
   const p95CycleS = sortedDurations.length > 0 ? percentile(sortedDurations, 95) : null;
 
+  // Paper trades set filled_at ≈ created_at simultaneously; use abs to handle floating-point skew,
+  // then treat values < 2s as paper-instant (live fills take seconds to minutes via Kalshi).
   const fillLatenciesMs = allSettledTrades
     .filter((t) => t.filled_at && t.created_at)
-    .map((t) => new Date(t.filled_at!).getTime() - new Date(t.created_at).getTime())
-    .filter((ms) => ms >= 0);
+    .map((t) => Math.abs(new Date(t.filled_at!).getTime() - new Date(t.created_at).getTime()));
   const avgFillLatencyMs =
     fillLatenciesMs.length > 0
       ? fillLatenciesMs.reduce((s, v) => s + v, 0) / fillLatenciesMs.length
       : null;
+  const fillIsPaper = avgFillLatencyMs !== null && avgFillLatencyMs < 2000;
 
   const settlementLatenciesMs = allSettledTrades
     .filter((t) => t.settled_at && t.filled_at)
@@ -1388,7 +1411,6 @@ export default function ObservabilityPage() {
                     <span className="flex items-center gap-2">
                       <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block shrink-0" />
                       <span>{u.id === userId ? "Your account" : `User ${u.id.slice(0, 8)}…`}</span>
-                      <span className="text-muted-foreground text-[10px] ml-1">{u.strategyCount} strat</span>
                     </span>
                   </SelectItem>
                 ))}
@@ -1496,9 +1518,7 @@ export default function ObservabilityPage() {
               {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {isPlatformView
-                ? `${settledCount} total across all accounts`
-                : settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
+              {settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
             </p>
           </div>
 
@@ -1789,10 +1809,10 @@ export default function ObservabilityPage() {
             {/* Fill latency */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Fill Latency</p>
-              <p className={`text-2xl font-bold tabular-nums ${avgFillLatencyMs === null ? "text-muted-foreground" : avgFillLatencyMs < 120_000 ? "text-emerald-500" : avgFillLatencyMs < 600_000 ? "text-yellow-500" : "text-red-500"}`}>
-                {fmtMs(avgFillLatencyMs)}
+              <p className={`text-2xl font-bold tabular-nums ${fillIsPaper ? "text-emerald-500" : avgFillLatencyMs === null ? "text-muted-foreground" : avgFillLatencyMs < 120_000 ? "text-emerald-500" : avgFillLatencyMs < 600_000 ? "text-yellow-500" : "text-red-500"}`}>
+                {fillIsPaper ? "Instant" : fmtMs(avgFillLatencyMs)}
               </p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">order → fill avg</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">{fillIsPaper ? "paper mode" : "order → fill avg"}</p>
             </div>
             {/* Settlement */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
@@ -1886,15 +1906,8 @@ export default function ObservabilityPage() {
           </div>
         </div>
 
-        {/* ── 7. Errors & Rough Edges — always visible, first-responder view ── */}
-        <Section
-          title="Errors & Rough Edges"
-          action={
-            <span className="text-[10px] text-muted-foreground italic">
-              not hidden — this is how the system learns
-            </span>
-          }
-        >
+        {/* ── 7. Errors — always visible, first-responder view ── */}
+        <Section title="Errors">
           <div className="divide-y divide-border">
             <div className="px-6 py-4">
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Guardrails Fired</p>
