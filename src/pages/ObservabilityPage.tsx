@@ -266,13 +266,13 @@ function agentStatus(lastRunAt: string | null): {
   if (!lastRunAt)
     return { label: "Stale", color: "text-red-500", dot: "bg-red-500" };
   const minsAgo = (Date.now() - new Date(lastRunAt).getTime()) / 60000;
-  if (minsAgo < 3)
+  if (minsAgo < 5)
     return {
       label: "Running",
       color: "text-emerald-500",
       dot: "bg-emerald-500",
     };
-  if (minsAgo < 15)
+  if (minsAgo < 20)
     return { label: "Idle", color: "text-yellow-500", dot: "bg-yellow-500" };
   return { label: "Stale", color: "text-red-500", dot: "bg-red-500" };
 }
@@ -369,6 +369,10 @@ export default function ObservabilityPage() {
   const [tradesFilled24hCount, setTradesFilled24hCount] = useState<number | null>(null);
   // 24h error events — for failure mode detection (error/warning only, last 24h, last 500)
   const [errors24h, setErrors24h] = useState<ComplianceEvent[]>([]);
+  // Dedicated rate limit count — catches events logged at any severity
+  const [rateLimitCount24h, setRateLimitCount24h] = useState<number | null>(null);
+  // Surface scan durations for market data pull latency
+  const [scanDurations, setScanDurations] = useState<number[]>([]);
 
   // Errors
   const [guardrailEvents, setGuardrailEvents] = useState<ComplianceEvent[]>(
@@ -674,9 +678,19 @@ export default function ObservabilityPage() {
       .in("severity", ["error", "warning", "critical"])
       .order("created_at", { ascending: false })
       .limit(500);
-    if (uid) q = q.eq("user_id", uid);
-    const { data } = await q;
+    // Dedicated rate limit count — no severity filter so we catch gracefully-handled 429s logged as info
+    let rlQ = supabase
+      .from("compliance_log")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", since)
+      .or("event_type.eq.llm_rate_limit,message.ilike.%429%,message.ilike.%rate limit%");
+    if (uid) {
+      q = q.eq("user_id", uid);
+      rlQ = rlQ.eq("user_id", uid);
+    }
+    const [{ data }, { count: rlCount }] = await Promise.all([q, rlQ]);
     if (data) setErrors24h(data as ComplianceEvent[]);
+    setRateLimitCount24h(rlCount ?? 0);
   }, []);
 
   const loadErrors = useCallback(async (uid?: string | null) => {
@@ -779,6 +793,24 @@ export default function ObservabilityPage() {
     }
   }, []);
 
+  const loadSurfaceScanLatency = useCallback(async (uid?: string | null) => {
+    let q = supabase
+      .from("compliance_log")
+      .select("created_at, metadata")
+      .eq("event_type", "surface_scan_complete")
+      .order("created_at", { ascending: false })
+      .limit(100);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
+    if (data) {
+      setScanDurations(
+        data
+          .map((e: any) => parseFloat(e.metadata?.elapsed_seconds ?? "0"))
+          .filter((s) => s > 0)
+      );
+    }
+  }, []);
+
   // Session check + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -808,6 +840,7 @@ export default function ObservabilityPage() {
     loadMemories(null);
     loadActiveModel();
     loadLatencyData(null);
+    loadSurfaceScanLatency(null);
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -823,6 +856,7 @@ export default function ObservabilityPage() {
     loadMemories,
     loadActiveModel,
     loadLatencyData,
+    loadSurfaceScanLatency,
     loadUserList,
     decisionDateFilter,
     decisionStatusFilter,
@@ -853,6 +887,7 @@ export default function ObservabilityPage() {
     loadStrategies(viewUserId);
     loadMemories(viewUserId);
     loadLatencyData(viewUserId);
+    loadSurfaceScanLatency(viewUserId);
   }, [viewUserId, isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Real-time + polling fallback
@@ -935,6 +970,7 @@ export default function ObservabilityPage() {
       loadMemories();
       loadActiveModel();
       loadLatencyData();
+      loadSurfaceScanLatency();
     }, 2 * 60 * 1000);
 
     return () => {
@@ -956,6 +992,7 @@ export default function ObservabilityPage() {
     loadMemories,
     loadActiveModel,
     loadLatencyData,
+    loadSurfaceScanLatency,
   ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
@@ -996,6 +1033,8 @@ export default function ObservabilityPage() {
   );
 
   // ── Derived stats ─────────────────────────────────────────────────────────
+
+  const isPlatformView = isAdmin && viewUserId === null;
 
   const status = agentStatus(lastRunAt);
 
@@ -1151,7 +1190,7 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined);
 
   // 24h failure timeline — bucket all failure events by hour
   const failureTimeline = (() => {
@@ -1231,6 +1270,11 @@ export default function ObservabilityPage() {
     settlementLatenciesMs.length > 0
       ? settlementLatenciesMs.reduce((s, v) => s + v, 0) / settlementLatenciesMs.length
       : null;
+
+  // Surface scan latency
+  const avgScanS = scanDurations.length > 0
+    ? scanDurations.reduce((s, v) => s + v, 0) / scanDurations.length
+    : null;
 
   // Trace pagination
   const TRACE_PAGE_SIZE = 30;
@@ -1401,7 +1445,9 @@ export default function ObservabilityPage() {
               {roi === null ? "—" : `${roi >= 0 ? "+" : ""}${roi.toFixed(2)}%`}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}{STARTING_CAPITAL > 0 ? ` on $${STARTING_CAPITAL.toLocaleString()}` : ""} · {settledCount} trades
+              {isPlatformView
+                ? `aggregated · ${userList.length} accounts`
+                : `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}${STARTING_CAPITAL > 0 ? ` on $${STARTING_CAPITAL.toLocaleString()}` : ""} · ${settledCount} trades`}
             </p>
           </div>
 
@@ -1412,7 +1458,9 @@ export default function ObservabilityPage() {
               {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
+              {isPlatformView
+                ? `${settledCount} total across all accounts`
+                : settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
             </p>
           </div>
 
@@ -1429,13 +1477,13 @@ export default function ObservabilityPage() {
           </div>
         </div>
 
-        {/* ── 2. Equity Curve ──────────────────────────────────────────── */}
-        <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+        {/* ── 2. Equity Curve — hidden in platform view (meaningless across users) */}
+        {!isPlatformView && <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
           <div className="px-6 pt-5 pb-2 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold">Portfolio Equity</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {STARTING_CAPITAL > 0 ? `Return on $${STARTING_CAPITAL.toLocaleString()} starting capital · ` : ""}since Apr 22, 2026
+                Cumulative P&L · settled trades
               </p>
             </div>
             {equityData.length > 0 && roi !== null && (
@@ -1478,7 +1526,7 @@ export default function ObservabilityPage() {
               </AreaChart>
             </ResponsiveContainer>
           )}
-        </div>
+        </div>}
 
         {/* ── 3. Operational Summary | Agent Intelligence ───────────── */}
         <div className="grid grid-cols-2 gap-4">
@@ -1491,7 +1539,7 @@ export default function ObservabilityPage() {
                 { label: "Cron Runs", value: runsToday.toLocaleString(), sub: "every 2 min" },
                 { label: "Markets Scanned", value: scansToday.toLocaleString(), sub: "surface scans" },
                 { label: "Trades Placed", value: tradesFilledToday.toString(), sub: primaryMode + " mode" },
-                { label: "Open Positions", value: openPositionCount.toString(), sub: `$${openPositionValue.toFixed(0)} at risk` },
+                { label: "Open Positions", value: openPositionCount.toString(), sub: isPlatformView ? "across all accounts" : `$${openPositionValue.toFixed(0)} at risk` },
               ].map(({ label, value, sub }) => (
                 <div key={label}>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-0.5">{label}</p>
@@ -1500,7 +1548,7 @@ export default function ObservabilityPage() {
                 </div>
               ))}
             </div>
-            {todayPnl !== 0 && (
+            {!isPlatformView && todayPnl !== 0 && (
               <div className="mt-4 pt-4 border-t border-border flex items-center justify-between">
                 <span className="text-[11px] text-muted-foreground">Today's P&L</span>
                 <span className={`text-sm font-bold tabular-nums ${todayPnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
@@ -1669,8 +1717,8 @@ export default function ObservabilityPage() {
             <p className="text-xs text-muted-foreground mt-0.5">Strategy execution · order fill · settlement · last 200 runs</p>
           </div>
 
-          {/* 4 KPI cards */}
-          <div className="grid grid-cols-4 gap-0 border-t" style={{ borderColor: "#2e2720" }}>
+          {/* 5 KPI cards */}
+          <div className="grid grid-cols-5 gap-0 border-t" style={{ borderColor: "#2e2720" }}>
             {/* p50 */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p50 Cycle</p>
@@ -1696,12 +1744,20 @@ export default function ObservabilityPage() {
               <p className="text-[10px] text-muted-foreground mt-0.5">order → fill avg</p>
             </div>
             {/* Settlement */}
-            <div className="px-6 py-4">
+            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Settlement</p>
               <p className="text-2xl font-bold tabular-nums text-muted-foreground">
                 {fmtMs(avgSettlementMs)}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">fill → resolve avg</p>
+            </div>
+            {/* Market Scan */}
+            <div className="px-6 py-4">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Market Scan</p>
+              <p className={`text-2xl font-bold tabular-nums ${avgScanS === null ? "text-muted-foreground" : avgScanS <= 5 ? "text-emerald-500" : avgScanS <= 15 ? "text-yellow-500" : "text-red-500"}`}>
+                {avgScanS !== null ? `${avgScanS.toFixed(1)}s` : "—"}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">surface scan avg</p>
             </div>
           </div>
 
@@ -1743,7 +1799,7 @@ export default function ObservabilityPage() {
           <div className="p-4 grid grid-cols-3 gap-3">
             {decisionTrades.slice(0, 6).map((t) => {
               const pnl = t.pnl ?? 0;
-              const hasPnl = t.pnl !== null;
+              const hasPnl = t.pnl !== null && t.pnl !== 0 && t.status === "settled";
               const isBullish = t.action === "buy" || t.side === "yes";
               const label = t.market_question
                 ? t.market_question.slice(0, 80) + (t.market_question.length > 80 ? "…" : "")
@@ -1779,7 +1835,62 @@ export default function ObservabilityPage() {
           </div>
         </div>
 
-        {/* ── 6. System Details toggle ─────────────────────────────────── */}
+        {/* ── 7. Errors & Rough Edges — always visible, first-responder view ── */}
+        <Section
+          title="Errors & Rough Edges"
+          action={
+            <span className="text-[10px] text-muted-foreground italic">
+              not hidden — this is how the system learns
+            </span>
+          }
+        >
+          <div className="divide-y divide-border">
+            <div className="px-6 py-4">
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Guardrails Fired</p>
+              {guardrailEvents.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">No guardrail events.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <tbody className="divide-y divide-border">
+                    {guardrailEvents.map((ev) => (
+                      <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
+                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
+                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
+                        <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
+                        <td className="py-2 text-right pl-4">
+                          <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="px-6 py-4">
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Warnings &amp; Errors</p>
+              {errorEvents.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">No warnings or errors in the log.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <tbody className="divide-y divide-border">
+                    {errorEvents.map((ev) => (
+                      <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
+                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
+                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
+                        <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
+                        <td className="py-2 text-right pl-4">
+                          <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </Section>
+
+        {/* ── System Details toggle ─────────────────────────────────── */}
         <button
           onClick={() => setShowDetails((v) => !v)}
           className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border border-border text-[11px] font-medium text-muted-foreground hover:bg-secondary/30 transition-colors"
@@ -1787,68 +1898,13 @@ export default function ObservabilityPage() {
           {showDetails ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           {showDetails ? "Hide" : "Show"} System Details
           <span className="ml-1 text-[10px] opacity-60">
-            errors · traces · decision history
+            traces · decision history
           </span>
         </button>
 
-        {/* ── 7. System Details (all existing technical sections) ──────── */}
+        {/* ── System Details (deep-dive technical sections) ──────── */}
         {showDetails && (
           <div className="space-y-6">
-
-            {/* Errors & Rough Edges */}
-            <Section
-              title="Errors & Rough Edges"
-              action={
-                <span className="text-[10px] text-muted-foreground italic">
-                  not hidden — this is how the system learns
-                </span>
-              }
-            >
-              <div className="divide-y divide-border">
-                <div className="px-6 py-4">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Guardrails Fired</p>
-                  {guardrailEvents.length === 0 ? (
-                    <p className="text-xs text-muted-foreground py-2">No guardrail events.</p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <tbody className="divide-y divide-border">
-                        {guardrailEvents.map((ev) => (
-                          <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
-                            <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
-                            <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
-                            <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
-                            <td className="py-2 text-right pl-4">
-                              <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-                <div className="px-6 py-4">
-                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Warnings &amp; Errors</p>
-                  {errorEvents.length === 0 ? (
-                    <p className="text-xs text-muted-foreground py-2">No warnings or errors in the log.</p>
-                  ) : (
-                    <table className="w-full text-sm">
-                      <tbody className="divide-y divide-border">
-                        {errorEvents.map((ev) => (
-                          <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
-                            <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
-                            <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
-                            <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
-                            <td className="py-2 text-right pl-4">
-                              <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-            </Section>
 
             {/* Execution Traces */}
             <Section
@@ -2623,7 +2679,8 @@ function detectFailureModes(
   memories: MemoryEntry[],
   toolCounts: Record<string, number>,
   runs6hCount: number | null = null,
-  runs24hCount: number | null = null
+  runs24hCount: number | null = null,
+  rateLimitCount?: number
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
@@ -2684,9 +2741,10 @@ function detectFailureModes(
     },
     llm_rate_limit: {
       events: rateLimitEvents,
-      count: rateLimitEvents.length,
+      // Use dedicated server-side count when available — catches events logged at any severity
+      count: rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length,
       lastAt: lastAt(rateLimitEvents),
-      status: rateLimitEvents.length >= 1 ? "critical" : "ok",
+      status: (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 1 ? "critical" : "ok",
     },
     cost_spike: {
       events: [],
@@ -2722,9 +2780,18 @@ function detectFailureModes(
     memory_pressure: {
       events: [],
       count: quarantined.length,
-      lastAt: quarantined.length > 0 ? quarantined.sort((a, b) => new Date(b.quarantined_at!).getTime() - new Date(a.quarantined_at!).getTime())[0].quarantined_at : null,
+      lastAt: quarantined.length > 0
+        ? (() => {
+            const sorted = [...quarantined].sort((a, b) => {
+              const aT = new Date(a.quarantined_at ?? a.created_at).getTime();
+              const bT = new Date(b.quarantined_at ?? b.created_at).getTime();
+              return bT - aT;
+            });
+            return sorted[0]?.quarantined_at ?? sorted[0]?.created_at ?? null;
+          })()
+        : null,
       extra: `${activeCount} active`,
-      status: quarantined.length >= 10 ? "critical" : quarantined.length >= 3 ? "warning" : "ok",
+      status: quarantined.length >= 20 ? "critical" : quarantined.length >= 5 ? "warning" : "ok",
     },
   };
 }
