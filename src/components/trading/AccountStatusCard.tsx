@@ -101,7 +101,7 @@ export function AccountStatusCard({ mode = "paper", userEmail }: Props) {
             ) : (
               <>
                 <Circle className="h-3 w-3 text-muted-foreground" />
-                <span className="text-sm text-muted-foreground">Paper mode only</span>
+                <span className="text-sm text-muted-foreground">Not connected</span>
               </>
             )}
           </div>

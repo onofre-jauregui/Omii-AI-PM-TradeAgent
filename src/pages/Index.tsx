@@ -219,15 +219,12 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-6 apple-reveal">
-              <ProfilePanel />
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-                <div className="lg:col-span-2">
-                  <SettingsPanel />
-                </div>
-                <div className="space-y-6">
-                  <AccountStatusCard mode={mode} userEmail={userEmail} />
-                </div>
+              {/* Profile identity left, Agent & Account right */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                <ProfilePanel />
+                <AccountStatusCard mode={mode} userEmail={userEmail} />
               </div>
+              <SettingsPanel />
             </div>
           )}
 
