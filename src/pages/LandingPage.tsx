@@ -937,7 +937,7 @@ export default function LandingPage() {
               The system.
             </h2>
             <p style={{ fontSize: 19, color: "#6e6e73", maxWidth: 560, margin: "0 auto" }}>
-              Architecture, observability, risk, compliance, security — production-grade from day one.
+              Architecture, observability, risk, compliance, security.
             </p>
           </Reveal>
 
