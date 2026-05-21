@@ -325,6 +325,7 @@ export default function ObservabilityPage() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const userIdRef = useRef<string | null>(null); // stable ref for realtime/poll closures
+  const viewUserIdRef = useRef<string | null>(null); // tracks viewUserId for RT/poll closures
   const [isAdmin, setIsAdmin] = useState(false);
   const [viewUserId, setViewUserId] = useState<string | null>(null); // null = platform view
   const [userList, setUserList] = useState<{ id: string; strategyCount: number }[]>([]);
@@ -574,19 +575,15 @@ export default function ObservabilityPage() {
       .from("trades")
       .select("*", { count: "exact", head: true })
       .gte("created_at", since);
-    if (uid) {
-      eventsQ = eventsQ.eq("user_id", uid);
-      tradesQ = tradesQ.eq("user_id", uid);
-    }
+    // All compliance_log tool events are system-level (user_id = NULL); only trades are per-user.
+    if (uid) tradesQ = tradesQ.eq("user_id", uid);
 
     const toolCountQueries = toolEventTypes.map((et) => {
-      let q = supabase
+      return supabase
         .from("compliance_log")
         .select("*", { count: "exact", head: true })
         .eq("event_type", et)
         .gte("created_at", since);
-      if (uid) q = q.eq("user_id", uid);
-      return q;
     });
 
     const [eventsRes, tradesCountRes, ...countResults] = await Promise.all([
@@ -613,7 +610,7 @@ export default function ObservabilityPage() {
       .eq("event_type", "auto_trade_run")
       .order("created_at", { ascending: false })
       .limit(8);
-    if (uid) runsQ = runsQ.eq("user_id", uid);
+    // auto_trade_run is system-level (user_id = NULL) — no uid filter
     const { data: runs } = await runsQ;
     if (!runs || runs.length === 0) return;
 
@@ -658,13 +655,10 @@ export default function ObservabilityPage() {
     let tradesQ = supabase.from("trades").select("*", { count: "exact", head: true })
       .gte("created_at", since24h);
 
-    if (uid) {
-      runsQ = runsQ.eq("user_id", uid);
-      stratRuns24hQ = stratRuns24hQ.eq("user_id", uid);
-      stratRuns6hQ = stratRuns6hQ.eq("user_id", uid);
-      scansQ = scansQ.eq("user_id", uid);
-      tradesQ = tradesQ.eq("user_id", uid);
-    }
+    // Cron events (auto_trade_run, auto_trade_strategy_run, surface_scan_complete) are
+    // system-level with user_id = NULL — never filter them by uid.
+    // Only trades are per-user.
+    if (uid) tradesQ = tradesQ.eq("user_id", uid);
 
     // stratRuns24hRes and runs6hRes use the same event type — spike ratio is apples-to-apples
     const [runsRes, stratRuns24hRes, stratRuns6hRes, scansRes, tradesRes] = await Promise.all([
@@ -693,9 +687,10 @@ export default function ObservabilityPage() {
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
       .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
+    // Include both user-specific errors (user_id = uid) and system-level errors (user_id = NULL)
     if (uid) {
-      q = q.eq("user_id", uid);
-      rlQ = rlQ.eq("user_id", uid);
+      q = q.or(`user_id.eq.${uid},user_id.is.null`);
+      rlQ = rlQ.or(`user_id.eq.${uid},user_id.is.null`);
     }
     const [{ data }, { count: rlCount }] = await Promise.all([q, rlQ]);
     if (data) setErrors24h(data as ComplianceEvent[]);
@@ -739,9 +734,10 @@ export default function ObservabilityPage() {
       .not("event_type", "in", `(${operationalEventTypes.join(",")})`)
       .order("created_at", { ascending: false })
       .limit(30);
+    // Include both user-specific events (user_id = uid) and system-level events (user_id = NULL)
     if (uid) {
-      guardrailQ = guardrailQ.eq("user_id", uid);
-      errorQ = errorQ.eq("user_id", uid);
+      guardrailQ = guardrailQ.or(`user_id.eq.${uid},user_id.is.null`);
+      errorQ = errorQ.or(`user_id.eq.${uid},user_id.is.null`);
     }
 
     const [guardrailRes, errorRes] = await Promise.all([guardrailQ, errorQ]);
@@ -802,7 +798,7 @@ export default function ObservabilityPage() {
       .gte("created_at", since7d)
       .order("created_at", { ascending: false })
       .limit(10000);
-    if (uid) q = q.eq("user_id", uid);
+    // auto_trade_strategy_run is system-level (user_id = NULL) — no uid filter
     const { data } = await q;
     if (data) {
       setStratRunDurations(
@@ -826,7 +822,7 @@ export default function ObservabilityPage() {
       .eq("event_type", "auto_trade_run")
       .order("created_at", { ascending: false })
       .limit(50);
-    if (uid) runsQ = runsQ.eq("user_id", uid);
+    // auto_trade_run and surface_scan_complete are system-level (user_id = NULL) — no uid filter
     const { data: runs } = await runsQ;
     if (!runs || runs.length === 0) return;
 
@@ -884,94 +880,62 @@ export default function ObservabilityPage() {
     setGapEvents(gaps);
   }, []);
 
-  // Session check + initial load
+  // Single data-load coordinator — all loaders go through here so there is exactly one
+  // authority deciding what uid to use. Syncs viewUserIdRef for RT/poll closures.
+  const loadAll = useCallback((uid: string | null) => {
+    viewUserIdRef.current = uid;
+    loadHeroStatus(uid);
+    loadHeroFeed(uid);
+    loadPerformance(uid);
+    loadComplianceLast30d(uid);
+    loadModelLatency(uid);
+    loadActivity24h(uid);
+    loadErrors24h(uid);
+    loadErrors(uid);
+    loadStrategies(uid);
+    loadMemories(uid);
+    loadLatencyData(uid);
+    loadSurfaceScanLatency(uid);
+    loadExecutionGaps();
+    loadActiveModel();
+  }, [
+    loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
+    loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
+    loadMemories, loadLatencyData, loadSurfaceScanLatency, loadExecutionGaps, loadActiveModel,
+  ]);
+
+  // Session init — fires once on mount. Gets userId for profile display + populates user list.
+  // No data fetching here — loadAll handles that via the viewUserId effect below.
+  // isAdmin is set to true immediately: AdminRoute in App.tsx already verified is_admin before
+  // rendering this page, so the second DB query is redundant.
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setIsAuthenticated(!!session);
       const uid = session?.user?.id ?? null;
       setUserId(uid);
       userIdRef.current = uid;
-
-      // Load all data scoped to the authenticated user (or null for unauthenticated).
-      // Admins get platform-wide data after the admin check below resolves.
-      const userUid = uid; // non-null for logged-in users, null for public/unauthenticated
-      loadHeroStatus(userUid);
-      loadHeroFeed(userUid);
-      loadTraceLogs(userUid);
-      loadDecisionHistory(decisionDateFilter, decisionStatusFilter, userUid);
-      loadPerformance(userUid);
-      loadComplianceLast30d(userUid);
-      loadModelLatency(userUid);
-      loadActivity24h(userUid);
-      loadErrors24h(userUid);
-      loadErrors(userUid);
-      loadStrategies(userUid);
-      loadMemories(userUid);
-      loadLatencyData(userUid);
-      loadSurfaceScanLatency(userUid);
-      loadExecutionGaps();
-
-      if (uid) {
-        supabase.from("profiles").select("is_admin").eq("id", uid).maybeSingle()
-          .then(({ data }) => {
-            const admin = (data as any)?.is_admin ?? false;
-            setIsAdmin(admin);
-            if (admin) loadUserList();
-          });
-      }
+      setIsAuthenticated(!!session);
+      setIsAdmin(true);
+      if (uid) loadUserList();
     });
+  }, [loadUserList]);
 
-    loadActiveModel();
-  }, [
-    loadHeroStatus,
-    loadHeroFeed,
-    loadTraceLogs,
-    loadDecisionHistory,
-    loadPerformance,
-    loadComplianceLast30d,
-    loadModelLatency,
-    loadActivity24h,
-    loadErrors24h,
-    loadErrors,
-    loadStrategies,
-    loadMemories,
-    loadActiveModel,
-    loadLatencyData,
-    loadSurfaceScanLatency,
-    loadExecutionGaps,
-    loadUserList,
-    decisionDateFilter,
-    decisionStatusFilter,
-  ]);
+  // Single data load authority — fires on mount (viewUserId starts null = platform view)
+  // and on every user-switcher change. Replaces the old mount load + admin effect.
+  useEffect(() => {
+    loadAll(viewUserId);
+  }, [viewUserId, loadAll]);
 
+  // Trace log effect — has its own filter state (traceDay) so stays independent
   useEffect(() => {
     setTracePage(1);
     setTraceExpanded(false);
     loadTraceLogs(viewUserId);
   }, [traceDay, viewUserId, loadTraceLogs]);
 
+  // Decision history effect — has its own filter state so stays independent
   useEffect(() => {
     loadDecisionHistory(decisionDateFilter, decisionStatusFilter, viewUserId);
   }, [decisionDateFilter, decisionStatusFilter, viewUserId, loadDecisionHistory]);
-
-  // Re-fetch all data when admin switches user view
-  useEffect(() => {
-    if (!isAdmin) return; // only fires for admin
-    loadHeroStatus(viewUserId);
-    loadHeroFeed(viewUserId);
-    loadTraceLogs(viewUserId);
-    loadPerformance(viewUserId);
-    loadComplianceLast30d(viewUserId);
-    loadModelLatency(viewUserId);
-    loadActivity24h(viewUserId);
-    loadErrors24h(viewUserId);
-    loadErrors(viewUserId);
-    loadStrategies(viewUserId);
-    loadMemories(viewUserId);
-    loadLatencyData(viewUserId);
-    loadSurfaceScanLatency(viewUserId);
-    loadExecutionGaps();
-  }, [viewUserId, isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Real-time + polling fallback
   useEffect(() => {
@@ -1010,18 +974,16 @@ export default function ObservabilityPage() {
           // Prepend to trace list on new run
           if (ev.event_type === "auto_trade_run") {
             setTraceRuns((prev) => [ev, ...prev.slice(0, 199)]);
-            loadHeroStatus(userIdRef.current);
-            loadComplianceLast30d(userIdRef.current); // refresh tool counts
+            loadHeroStatus(viewUserIdRef.current);
+            loadComplianceLast30d(viewUserIdRef.current);
           }
 
-          // Refresh errors section on any error/guardrail event
           if (ERROR_EVENTS.has(ev.event_type) || ev.severity === "error" || ev.severity === "critical" || ev.severity === "warning") {
-            loadErrors(userIdRef.current);
+            loadErrors(viewUserIdRef.current);
           }
 
-          // Refresh strategy health on suspension/resume
           if (STRATEGY_SUSPENSION_EVENTS.has(ev.event_type)) {
-            loadStrategies(userIdRef.current);
+            loadStrategies(viewUserIdRef.current);
           }
         }
       )
@@ -1029,56 +991,22 @@ export default function ObservabilityPage() {
         "postgres_changes",
         { event: "*", schema: "public", table: "trades" },
         () => {
-          loadHeroStatus(userIdRef.current);
-          loadDecisionHistory("30d", "all", userIdRef.current);
-          loadPerformance(userIdRef.current);
-          loadComplianceLast30d(userIdRef.current); // trade count for cost section
+          loadHeroStatus(viewUserIdRef.current);
+          loadDecisionHistory("30d", "all", viewUserIdRef.current);
+          loadPerformance(viewUserIdRef.current);
+          loadComplianceLast30d(viewUserIdRef.current);
         }
       )
       .subscribe();
 
-    // 2-minute polling fallback — catches anything real-time misses
-    const poll = setInterval(() => {
-      loadHeroStatus(userIdRef.current);
-      loadHeroFeed(userIdRef.current);
-      loadTraceLogs(userIdRef.current);
-      loadDecisionHistory("30d", "all", userIdRef.current);
-      loadPerformance(userIdRef.current);
-      loadComplianceLast30d(userIdRef.current);
-      loadModelLatency(userIdRef.current);
-      loadActivity24h(userIdRef.current);
-      loadErrors24h(userIdRef.current);
-      loadErrors(userIdRef.current);
-      loadStrategies(userIdRef.current);
-      loadMemories(userIdRef.current);
-      loadActiveModel();
-      loadLatencyData(userIdRef.current);
-      loadSurfaceScanLatency(userIdRef.current);
-      loadExecutionGaps();
-    }, 2 * 60 * 1000);
+    // 2-minute polling fallback — uses viewUserIdRef so it always matches the current view
+    const poll = setInterval(() => loadAll(viewUserIdRef.current), 2 * 60 * 1000);
 
     return () => {
       supabase.removeChannel(channel);
       clearInterval(poll);
     };
-  }, [
-    loadHeroStatus,
-    loadHeroFeed,
-    loadTraceLogs,
-    loadDecisionHistory,
-    loadPerformance,
-    loadComplianceLast30d,
-    loadModelLatency,
-    loadActivity24h,
-    loadErrors24h,
-    loadErrors,
-    loadStrategies,
-    loadMemories,
-    loadActiveModel,
-    loadLatencyData,
-    loadSurfaceScanLatency,
-    loadExecutionGaps,
-  ]);
+  }, [loadAll, loadHeroStatus, loadDecisionHistory, loadErrors, loadStrategies, loadPerformance, loadComplianceLast30d]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
 
