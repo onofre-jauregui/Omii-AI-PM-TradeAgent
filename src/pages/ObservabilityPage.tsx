@@ -53,10 +53,15 @@ const DEFAULT_MODEL_INFO: ModelInfo = { label: "gpt-4o-mini", provider: "OpenRou
 // ── Failure Mode Details ───────────────────────────────────────────────────────
 
 const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string; resolution: string }> = {
-  api_timeout: {
-    title: "API Timeouts",
-    description: "LLM qualify calls or Kalshi market fetches exceeded their timeout window. The agent aborts the affected strategy and continues — no trade is blocked, but the market opportunity is missed.",
-    resolution: "Check OpenRouter and Kalshi API status pages. If timeouts are frequent, consider increasing QUALIFY_TIMEOUT_MS or adding retry logic. Sustained timeouts during market hours signal provider degradation.",
+  llm_timeout: {
+    title: "LLM API Timeout",
+    description: "The qualify call to OpenRouter/Anthropic exceeded 15 seconds and was aborted. The strategy is skipped for this run — market opportunity missed, no trade blocked.",
+    resolution: "Check OpenRouter status (status.openrouter.ai). If sustained, increase QUALIFY_TIMEOUT_MS in the edge function or switch to a faster model (gpt-4o-mini is fastest).",
+  },
+  kalshi_timeout: {
+    title: "Kalshi API Timeout",
+    description: "A request to the Kalshi REST API timed out — market data fetch or order submission. The surface scanner or order executor aborted the call.",
+    resolution: "Check Kalshi status. Kalshi maintenance windows happen weekly. If orders are timing out, reduce basket size or add retry logic in execute-basket.",
   },
   llm_rate_limit: {
     title: "LLM Rate Limits",
@@ -68,10 +73,15 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
     description: "LLM call rate in the last 6 hours is significantly above the 30-day hourly average. Could indicate a misconfigured cron schedule, a runaway retry loop, or an unusually active market session driving many concurrent signals.",
     resolution: "Review execution traces to check if auto_trade_strategy_run frequency is abnormal. Verify the pg_cron schedule in Supabase. If it's legitimate market activity, no action needed.",
   },
-  input_error: {
-    title: "Input / Parse Errors",
-    description: "Strategy execution produced unexpected input data — JSON parse failures, null/undefined signal fields, or schema mismatches. These are caught and logged but indicate upstream data quality issues.",
-    resolution: "Check the specific error messages below for which strategy and market produced the bad data. Common cause: Kalshi API returning partial market data during maintenance windows.",
+  exchange_error: {
+    title: "Exchange Data Errors",
+    description: "Kalshi API returned malformed or schema-mismatched market data. Usually caused by Kalshi maintenance windows or API field changes.",
+    resolution: "Check Kalshi API changelog. These are usually transient. If sustained, a market field may have been renamed — compare error against current Kalshi API spec.",
+  },
+  strategy_error: {
+    title: "Strategy Code Errors",
+    description: "A strategy threw an unhandled exception — null/undefined field access, JSON parse failure, or schema mismatch in the qualify prompt.",
+    resolution: "Check the specific error message below. Common cause: strategy accessing a market field that can be null (closeTime, yes_ask, no_bid). Add null guards.",
   },
   pii_detected: {
     title: "PII Detected",
@@ -399,6 +409,7 @@ export default function ObservabilityPage() {
   const [memorySortBy, setMemorySortBy] = useState<"confidence" | "confirmations" | "newest">("confidence");
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
+  const [clearingMemory, setClearingMemory] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(false);
   const [tracePage, setTracePage] = useState(1);
@@ -1209,9 +1220,11 @@ export default function ObservabilityPage() {
   const failureTimeline = (() => {
     const now = Date.now();
     const allFailureEvents = [
-      ...failureModes.api_timeout.events,
+      ...failureModes.llm_timeout.events,
+      ...failureModes.kalshi_timeout.events,
       ...failureModes.llm_rate_limit.events,
-      ...failureModes.input_error.events,
+      ...failureModes.exchange_error.events,
+      ...failureModes.strategy_error.events,
       ...failureModes.pii_detected.events,
       ...failureModes.db_connection.events,
       ...failureModes.network_failure.events,
@@ -1291,6 +1304,13 @@ export default function ObservabilityPage() {
   const avgScanS = scanDurations.length > 0
     ? scanDurations.reduce((s, v) => s + v, 0) / scanDurations.length
     : null;
+
+  // Execution gap log URL helper — links to Supabase Edge Function logs with ±5 min buffer
+  const gapLogsUrl = (from: string, to: string) => {
+    const start = new Date(new Date(from).getTime() - 5 * 60_000).toISOString();
+    const end = new Date(new Date(to).getTime() + 5 * 60_000).toISOString();
+    return `https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/logs/edge-functions?iso_timestamp_start=${encodeURIComponent(start)}&iso_timestamp_end=${encodeURIComponent(end)}`;
+  };
 
   // Trace pagination
   const TRACE_PAGE_SIZE = 30;
@@ -1418,10 +1438,12 @@ export default function ObservabilityPage() {
             <div className="grid grid-cols-4 gap-3">
               {(
                 [
-                  "api_timeout",
+                  "llm_timeout",
+                  "kalshi_timeout",
                   "llm_rate_limit",
                   "cost_spike",
-                  "input_error",
+                  "exchange_error",
+                  "strategy_error",
                   "pii_detected",
                   "db_connection",
                   "network_failure",
@@ -1445,10 +1467,14 @@ export default function ObservabilityPage() {
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
                     </div>
                     <p className="text-lg font-bold tabular-nums">
-                      {key === "cost_spike" ? (mode.extra ?? "—") : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
+                      {key === "cost_spike"
+                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
+                        : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {key === "cost_spike" ? `${mode.count} calls · last 6h` : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
+                      {key === "cost_spike"
+                        ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
+                        : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
                     </p>
                   </button>
                 );
@@ -2467,11 +2493,36 @@ export default function ObservabilityPage() {
                       ? `${mode.count} strategy evaluations in the last 6h (${mode.extra ?? "—"} per 6h window)`
                       : `${mode.count} quarantined memories · ${failureModes.memory_pressure.extra ?? ""}`}
                   </p>
+                  {selectedFailureMode === "memory_pressure" && (
+                    <button
+                      disabled={clearingMemory}
+                      onClick={async () => {
+                        setClearingMemory(true);
+                        const { data: { session } } = await supabase.auth.getSession();
+                        await fetch(
+                          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
+                          { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
+                        ).catch(() => {});
+                        setClearingMemory(false);
+                        loadAll(viewUserId);
+                        setSelectedFailureMode(null);
+                      }}
+                      className="w-full mt-3 py-2.5 rounded-xl bg-red-500/10 text-red-400 text-xs font-medium hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                    >
+                      {clearingMemory ? "Running compact-memory…" : "Clear Quarantine — Run compact-memory"}
+                    </button>
+                  )}
                 </div>
               )}
               {selectedFailureMode === "execution_gap" && gapEvents.length > 0 && (
                 <div>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Gap Windows ({gapEvents.length})</p>
+                  <div className="rounded-xl bg-yellow-500/10 border border-yellow-500/20 p-3 mb-3">
+                    <p className="text-[11px] text-yellow-400 leading-relaxed">
+                      Gaps = edge function ran but logged nothing. The crash happened before any DB write.
+                      Only Supabase Edge Function logs can reveal the cause.
+                    </p>
+                  </div>
                   <div className="rounded-xl bg-secondary/40 divide-y divide-border overflow-hidden">
                     {gapEvents.map((g, i) => (
                       <div key={i} className="px-4 py-2.5">
@@ -2479,7 +2530,17 @@ export default function ObservabilityPage() {
                           <p className="text-[11px] font-semibold tabular-nums text-yellow-500">{Math.round(g.gapMins)} min gap</p>
                           <p className="text-[10px] text-muted-foreground">{relativeTime(g.to)}</p>
                         </div>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">{fmtDate(g.from)} → {fmtDate(g.to)}</p>
+                        <div className="flex items-center justify-between mt-0.5">
+                          <p className="text-[10px] text-muted-foreground">{fmtDate(g.from)} → {fmtDate(g.to)}</p>
+                          <a
+                            href={gapLogsUrl(g.from, g.to)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-[10px] text-primary hover:opacity-80 transition-opacity shrink-0 ml-2"
+                          >
+                            View logs →
+                          </a>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2859,9 +2920,13 @@ function detectFailureModes(
 
   const last24h = events.filter((e) => new Date(e.created_at).getTime() >= cutoff24h);
 
-  const timeoutEvents = last24h.filter((e) =>
-    e.event_type === "api_timeout" ||
-    /timeout|aborted|AbortError|timed.?out/i.test(e.message)
+  const llmTimeoutEvents = last24h.filter((e) =>
+    (e.event_type === "api_timeout" && /llm|qualify|openrouter|anthropic|openai/i.test(e.message)) ||
+    /llm.*timed?\s*out|qualify.*timeout/i.test(e.message)
+  );
+  const kalshiTimeoutEvents = last24h.filter((e) =>
+    (e.event_type === "api_timeout" && /kalshi|GET.*market|series|portfolio/i.test(e.message)) ||
+    /kalshi.*timed?\s*out|kalshi.*timeout/i.test(e.message)
   );
 
   const rateLimitEvents = last24h.filter((e) =>
@@ -2880,8 +2945,15 @@ function detectFailureModes(
     e.event_type !== "api_timeout"
   );
 
-  const inputEvents = last24h.filter((e) =>
-    /parse.?error|unexpected.?token|invalid.?json|schema|validation.?error|cannot.?read|undefined.*null/i.test(e.message) &&
+  const exchangeErrorEvents = last24h.filter((e) =>
+    /parse.?error|unexpected.?token|invalid.?json|schema|validation/i.test(e.message) &&
+    /kalshi|market.?data|GET.*market|series|closeTime|yes_ask|no_bid/i.test(e.message) &&
+    e.severity !== "info"
+  );
+  const strategyErrorEvents = last24h.filter((e) =>
+    (e.event_type === "auto_trade_strategy_error" ||
+      (/parse.?error|unexpected.?token|invalid.?json|cannot.?read|undefined.*null/i.test(e.message) &&
+       !/kalshi|market.?data|GET.*market/i.test(e.message))) &&
     e.severity !== "info"
   );
 
@@ -2905,11 +2977,17 @@ function detectFailureModes(
   }
 
   return {
-    api_timeout: {
-      events: timeoutEvents,
-      count: timeoutEvents.length,
-      lastAt: lastAt(timeoutEvents),
-      status: timeoutEvents.length >= 5 ? "critical" : timeoutEvents.length >= 1 ? "warning" : "ok",
+    llm_timeout: {
+      events: llmTimeoutEvents,
+      count: llmTimeoutEvents.length,
+      lastAt: lastAt(llmTimeoutEvents),
+      status: llmTimeoutEvents.length >= 5 ? "critical" : llmTimeoutEvents.length >= 1 ? "warning" : "ok",
+    },
+    kalshi_timeout: {
+      events: kalshiTimeoutEvents,
+      count: kalshiTimeoutEvents.length,
+      lastAt: lastAt(kalshiTimeoutEvents),
+      status: kalshiTimeoutEvents.length >= 5 ? "critical" : kalshiTimeoutEvents.length >= 1 ? "warning" : "ok",
     },
     llm_rate_limit: {
       events: rateLimitEvents,
@@ -2925,11 +3003,17 @@ function detectFailureModes(
       extra: spikeRatio !== null ? `${spikeRatio.toFixed(1)}× 24h avg` : "insufficient data",
       status: spikeRatio !== null && spikeRatio > 4 ? "critical" : spikeRatio !== null && spikeRatio > 2 ? "warning" : "ok",
     },
-    input_error: {
-      events: inputEvents,
-      count: inputEvents.length,
-      lastAt: lastAt(inputEvents),
-      status: inputEvents.length >= 10 ? "critical" : inputEvents.length >= 3 ? "warning" : "ok",
+    exchange_error: {
+      events: exchangeErrorEvents,
+      count: exchangeErrorEvents.length,
+      lastAt: lastAt(exchangeErrorEvents),
+      status: exchangeErrorEvents.length >= 10 ? "critical" : exchangeErrorEvents.length >= 3 ? "warning" : "ok",
+    },
+    strategy_error: {
+      events: strategyErrorEvents,
+      count: strategyErrorEvents.length,
+      lastAt: lastAt(strategyErrorEvents),
+      status: strategyErrorEvents.length >= 10 ? "critical" : strategyErrorEvents.length >= 3 ? "warning" : "ok",
     },
     pii_detected: {
       events: piiEvents,
