@@ -106,6 +106,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("volume");
   const [horizon, setHorizon] = useState<Horizon>("any");
+  const [visibleCount, setVisibleCount] = useState(50);
 
   const [selectedMarket, setSelectedMarket] = useState<ParsedMarket | null>(null);
   const [tradeMarket, setTradeMarket] = useState<ParsedMarket | null>(null);
@@ -158,7 +159,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
+      const result = await fetchKalshiMarketsByCategory(allSeries, category, 30);
       cache.current.set(category, { markets: result, fetchedAt: Date.now() });
       setMarkets(result);
       setLastUpdated(new Date());
@@ -180,6 +181,9 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
       if (refreshTimer.current) clearInterval(refreshTimer.current);
     };
   }, [activeCategory, fetchCategory]);
+
+  // Reset visible count when search or horizon changes
+  useEffect(() => { setVisibleCount(50); }, [search, horizon, sortBy]);
 
   const filtered = useMemo(() => {
     let list = markets;
@@ -228,6 +232,7 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
             onClick={() => {
               setActiveCategory(cat);
               setSearch("");
+              setVisibleCount(50);
             }}
             className={cn(
               "shrink-0 px-4 py-3 text-sm font-medium transition-all duration-150 border-b-2 -mb-px whitespace-nowrap",
@@ -340,18 +345,29 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filtered.map((market) => (
-            <KalshiMarketCard
-              key={market.id}
-              market={market}
-              signal={signalMap.get(market.ticker)}
-              position={positionMap.get(market.ticker)}
-              onDetail={() => setSelectedMarket(market)}
-              onTrade={(side) => { setTradeInitialSide(side); setTradeMarket(market); }}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filtered.slice(0, visibleCount).map((market) => (
+              <KalshiMarketCard
+                key={market.id}
+                market={market}
+                signal={signalMap.get(market.ticker)}
+                position={positionMap.get(market.ticker)}
+                onDetail={() => setSelectedMarket(market)}
+                onTrade={(side) => { setTradeInitialSide(side); setTradeMarket(market); }}
+              />
+            ))}
+          </div>
+          {filtered.length > visibleCount && (
+            <button
+              onClick={() => setVisibleCount(c => c + 50)}
+              className="mt-5 w-full py-3 rounded-2xl border border-border bg-card text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+            >
+              Show {Math.min(50, filtered.length - visibleCount)} more
+              <span className="ml-1.5 text-xs opacity-60">({filtered.length - visibleCount} remaining)</span>
+            </button>
+          )}
+        </>
       )}
 
       {/* Market detail modal */}
