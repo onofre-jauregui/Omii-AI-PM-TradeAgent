@@ -600,10 +600,10 @@ async function runS001SurfaceArb(
   const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
 
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
-  // Covers KXINX (S&P 500), KXBTC, and KXETH — all are bracket markets where
-  // structural mispricing is direction-agnostic. Sports/weather tickers excluded below.
+  // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
+  // is direction-agnostic. KXETH excluded (confirmed money-loser). Sports/weather excluded.
   // Prioritise by edge descending so highest-confidence violations execute first.
-  const ALLOWED_PREFIXES = ["KXINX", "KXBTC", "KXETH"];
+  const ALLOWED_PREFIXES = ["KXINX", "KXBTC"];
   const { data: rawAlerts } = await supabase
     .from("surface_alerts")
     .select("*")
@@ -625,7 +625,7 @@ async function runS001SurfaceArb(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No fresh bracket-sum violations on KXINX/KXBTC/KXETH (surface-scanner must run first)",
+      details: "No fresh bracket-sum violations on KXINX/KXBTC (surface-scanner must run first)",
     };
   }
 

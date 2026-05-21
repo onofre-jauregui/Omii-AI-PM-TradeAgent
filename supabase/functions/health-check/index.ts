@@ -14,6 +14,8 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 const SILENCE_HOURS = 4;
 const WIN_RATE_FLOOR = 0.70;
 const WIN_RATE_SAMPLE = 20;
+const VOLUME_SPIKE_MULTIPLIER = 3;   // alert if last-hour trades > 3x prior-day hourly avg
+const BLOCKED_SERIES = ["KXETH"];    // series that must never appear in trades
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -113,8 +115,55 @@ serve(async (req) => {
       }
     }
 
-    // ── 3. Suspended strategy check ───────────────────────────────────
-    const suspended = (activeStrategies || []).filter(
+    // ── 3. Volume spike check ─────────────────────────────────────────
+    // Compare last-hour trade count against 24h prior hourly average.
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { count: lastHourCount } = await supabase
+      .from("trades")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", oneHourAgo);
+
+    const { count: priorDayCount } = await supabase
+      .from("trades")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", twentyFourHoursAgo)
+      .lt("created_at", oneHourAgo);
+
+    const priorHourlyAvg = (priorDayCount ?? 0) / 23; // 23 hours prior to the last hour
+    if ((lastHourCount ?? 0) > 5 && priorHourlyAvg > 0 && (lastHourCount ?? 0) > priorHourlyAvg * VOLUME_SPIKE_MULTIPLIER) {
+      alerts.push(
+        `🚨 <b>[TradeAgent] Volume Spike</b>\n` +
+        `Last hour: ${lastHourCount} trades\n` +
+        `Prior 23h hourly avg: ${priorHourlyAvg.toFixed(1)}\n` +
+        `Ratio: ${((lastHourCount ?? 0) / priorHourlyAvg).toFixed(1)}x — check cron schedule and strategy loop.`
+      );
+    }
+
+    // ── 4. Blocked series check ───────────────────────────────────────
+    // Alert immediately if any blocked series appears in recent trades.
+    const { data: blockedTrades } = await supabase
+      .from("trades")
+      .select("ticker, strategy_id, created_at")
+      .gte("created_at", oneHourAgo)
+      .limit(100);
+
+    const violations = (blockedTrades ?? []).filter((t: any) =>
+      BLOCKED_SERIES.some(prefix => (t.ticker as string).startsWith(prefix))
+    );
+    if (violations.length > 0) {
+      const sample = violations.slice(0, 3).map((t: any) => t.ticker).join(", ");
+      alerts.push(
+        `🚫 <b>[TradeAgent] Blocked Series Trading</b>\n` +
+        `${violations.length} trade(s) on blocked series in last hour.\n` +
+        `Sample: ${sample}\n` +
+        `Blocked series: ${BLOCKED_SERIES.join(", ")} — fix ALLOWED_PREFIXES in auto-trade immediately.`
+      );
+    }
+
+    // ── 5. Suspended strategy check ───────────────────────────────────
+    const suspended = (activeStrategies ?? []).filter(
       (s) => s.suspended_until && new Date(s.suspended_until) > now
     );
     if (suspended.length > 0) {
