@@ -221,8 +221,8 @@ function HeroDashboardMockup() {
           ))
         ) : (
           [
-            { label: `Return Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+${roiPct}%`, sub: `+$${s.totalPnl.toFixed(2)} P&L`, color: "#34d058" },
-            { label: `P&L Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+$${s.totalPnl.toFixed(2)}`, sub: `${s.tradeCount} settled trades`, color: "#34d058" },
+            { label: `Return Since ${s.startDate.slice(5).replace("-", "/")}`, value: `+${roiPct}%`, sub: "cumulative ROI", color: "#34d058" },
+            { label: "Settled Trades", value: s.tradeCount.toString(), sub: `since ${s.startDate.slice(5).replace("-", "/")}`, color: "#f5f5f7" },
             { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: `${s.tradeCount} settled trades`, color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
           ].map((stat) => (
@@ -463,34 +463,34 @@ function FAQSection() {
 // ── Feature cards data ────────────────────────────────────────────────────────
 const FEATURES = [
   {
-    icon: Brain,
-    title: "Shared memory pool",
-    body: "Every trade teaches the network. The more users, the sharper the signal.",
-  },
-  {
-    icon: Shield,
-    title: "AES-256 encryption",
-    body: "Your Kalshi key is encrypted at rest. We can't withdraw your funds. Revoke access instantly.",
+    icon: TrendingUp,
+    title: "Real exchange, regulated",
+    body: "Every trade executes on Kalshi — a CFTC-licensed venue. All trades are logged and timestamped on a federally supervised exchange, giving you a verifiable record that holds up.",
   },
   {
     icon: BarChart2,
     title: "Three-tier risk controls",
-    body: "Set total budget, per-strategy allocation, and per-trade max. The engine enforces all three.",
+    body: "Set a total portfolio limit, a per-strategy allocation, and a per-trade max. The engine enforces all three on every order — no overrides, no exceptions.",
   },
   {
-    icon: Activity,
-    title: "Paper mode always available",
-    body: "Simulate on live prices indefinitely. No real money until you choose to go live.",
+    icon: Shield,
+    title: "Your keys, your funds",
+    body: "API keys are encrypted with AES-256 before storage. Trading-only scope means withdrawals are impossible through us. Revoke access from Kalshi instantly, anytime.",
+  },
+  {
+    icon: Brain,
+    title: "Gets smarter every trade",
+    body: "After each settled position the agent reflects on what happened, updates its memory, and adjusts confidence on future setups. The longer it runs, the sharper it gets.",
   },
   {
     icon: Zap,
-    title: "14 agent tools",
-    body: "The agent can create strategies, scan markets, execute trades, and review its own performance — from a single chat.",
+    title: "14 built-in agent tools",
+    body: "Scan markets, execute trades, build strategies, review performance, and recall past lessons — all from a single chat interface. No dashboards to dig through.",
   },
   {
-    icon: TrendingUp,
-    title: "Real exchange, regulated",
-    body: "Kalshi is CFTC-licensed. Every trade executes on a federally supervised venue.",
+    icon: Activity,
+    title: "Paper mode, always on",
+    body: "Run the full system on live market prices with simulated funds. No Kalshi account, no real money, no commitment — until you decide you're ready.",
   },
 ];
 
@@ -724,7 +724,7 @@ export default function LandingPage() {
                 letterSpacing: "0.08em",
               }}
             >
-              Introducing TradeAgent
+              TradeAgent
             </span>
           </div>
 
@@ -777,7 +777,7 @@ export default function LandingPage() {
                 textDecoration: "none",
               }}
             >
-              Start free — paper mode
+              Start free
               <ArrowRight style={{ width: 16, height: 16 }} />
             </Link>
             <a
@@ -956,10 +956,10 @@ export default function LandingPage() {
                 marginBottom: 12,
               }}
             >
-              Community intelligence. Real edge.
+              Everything included. Nothing to manage.
             </h2>
             <p style={{ fontSize: 19, color: "#6e6e73", maxWidth: 560, margin: "0 auto" }}>
-              Built with the controls serious traders need and the automation everyone wants.
+              Regulated exchange. Encrypted keys. Risk controls. A self-improving agent. All running the moment you sign up.
             </p>
           </Reveal>
 
