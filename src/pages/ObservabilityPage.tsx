@@ -7,6 +7,8 @@ import {
   Area,
   BarChart,
   Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   Tooltip,
@@ -118,6 +120,7 @@ interface Trade {
   notes: string | null;
   filled_price: number | null;
   created_at: string;
+  filled_at: string | null;
   settled_at: string | null;
 }
 
@@ -352,6 +355,8 @@ export default function ObservabilityPage() {
   const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
   const [avgCycleMs, setAvgCycleMs] = useState<number | null>(null);
 
+  const [stratRunDurations, setStratRunDurations] = useState<{ ts: number; seconds: number }[]>([]);
+
   // 24h activity — dedicated server-side counts (not derived from capped array)
   const [runs24hCount, setRuns24hCount] = useState<number | null>(null);
   const [stratRuns24hCount, setStratRuns24hCount] = useState<number | null>(null);
@@ -488,7 +493,7 @@ export default function ObservabilityPage() {
   const loadPerformance = useCallback(async () => {
     const { data } = await supabase
       .from("trades")
-      .select("id, pnl, created_at, settled_at, status, strategy_id")
+      .select("id, pnl, created_at, filled_at, settled_at, status, strategy_id")
       .eq("status", "settled")
       .gte("settled_at", "2026-04-22T00:00:00.000Z")
       .order("settled_at", { ascending: true });
@@ -686,6 +691,25 @@ export default function ObservabilityPage() {
     if (data?.key_id) setActiveModel(data.key_id as string);
   }, []);
 
+  const loadLatencyData = useCallback(async () => {
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("created_at, metadata")
+      .eq("event_type", "auto_trade_strategy_run")
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (data) {
+      setStratRunDurations(
+        data
+          .map((e: any) => ({
+            ts: new Date(e.created_at).getTime(),
+            seconds: parseFloat(e.metadata?.elapsed_seconds ?? "0"),
+          }))
+          .filter((d) => d.seconds > 0)
+      );
+    }
+  }, []);
+
   // Session check + initial load
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -706,6 +730,7 @@ export default function ObservabilityPage() {
     loadStrategies();
     loadMemories();
     loadActiveModel();
+    loadLatencyData();
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -720,6 +745,7 @@ export default function ObservabilityPage() {
     loadStrategies,
     loadMemories,
     loadActiveModel,
+    loadLatencyData,
     decisionDateFilter,
     decisionStatusFilter,
   ]);
@@ -813,6 +839,7 @@ export default function ObservabilityPage() {
       loadStrategies();
       loadMemories();
       loadActiveModel();
+      loadLatencyData();
     }, 2 * 60 * 1000);
 
     return () => {
@@ -833,6 +860,7 @@ export default function ObservabilityPage() {
     loadStrategies,
     loadMemories,
     loadActiveModel,
+    loadLatencyData,
   ]);
 
   // ── Trace expand ──────────────────────────────────────────────────────────
@@ -1072,6 +1100,42 @@ export default function ObservabilityPage() {
   const latestMemory = activeMemories[0] ?? null;
   const healthyCount = Object.values(failureModes).filter((m) => m.status === "ok").length;
   const totalHealthChecks = Object.keys(failureModes).length;
+
+  // Latency derived stats
+  const latencyNow = Date.now();
+  const latencyTrend = Array.from({ length: 24 }, (_, i) => {
+    const hourStart = latencyNow - (23 - i) * 3_600_000;
+    const hourEnd = hourStart + 3_600_000;
+    const bucket = stratRunDurations
+      .filter((d) => d.ts >= hourStart && d.ts < hourEnd)
+      .map((d) => d.seconds);
+    return {
+      hour: new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" }),
+      avg: bucket.length > 0 ? bucket.reduce((s, v) => s + v, 0) / bucket.length : null,
+    };
+  });
+
+  const sortedDurations = [...stratRunDurations.map((d) => d.seconds)].sort((a, b) => a - b);
+  const p50CycleS = sortedDurations.length > 0 ? percentile(sortedDurations, 50) : null;
+  const p95CycleS = sortedDurations.length > 0 ? percentile(sortedDurations, 95) : null;
+
+  const fillLatenciesMs = allSettledTrades
+    .filter((t) => t.filled_at && t.created_at)
+    .map((t) => new Date(t.filled_at!).getTime() - new Date(t.created_at).getTime())
+    .filter((ms) => ms >= 0);
+  const avgFillLatencyMs =
+    fillLatenciesMs.length > 0
+      ? fillLatenciesMs.reduce((s, v) => s + v, 0) / fillLatenciesMs.length
+      : null;
+
+  const settlementLatenciesMs = allSettledTrades
+    .filter((t) => t.settled_at && t.filled_at)
+    .map((t) => new Date(t.settled_at!).getTime() - new Date(t.filled_at!).getTime())
+    .filter((ms) => ms >= 0);
+  const avgSettlementMs =
+    settlementLatenciesMs.length > 0
+      ? settlementLatenciesMs.reduce((s, v) => s + v, 0) / settlementLatenciesMs.length
+      : null;
 
   // Trace pagination
   const TRACE_PAGE_SIZE = 30;
@@ -1457,6 +1521,73 @@ export default function ObservabilityPage() {
             </div>
           </div>
         </Section>
+
+        {/* ── Latency ──────────────────────────────────────────────────── */}
+        <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+          <div className="px-6 pt-5 pb-4">
+            <h2 className="text-sm font-semibold">Latency</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Strategy execution · order fill · settlement · last 200 runs</p>
+          </div>
+
+          {/* 4 KPI cards */}
+          <div className="grid grid-cols-4 gap-0 border-t" style={{ borderColor: "#2e2720" }}>
+            {/* p50 */}
+            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p50 Cycle</p>
+              <p className={`text-2xl font-bold tabular-nums ${p50CycleS === null ? "text-muted-foreground" : p50CycleS <= 3 ? "text-emerald-500" : p50CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
+                {fmtSeconds(p50CycleS)}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">median run</p>
+            </div>
+            {/* p95 */}
+            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p95 Cycle</p>
+              <p className={`text-2xl font-bold tabular-nums ${p95CycleS === null ? "text-muted-foreground" : p95CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
+                {fmtSeconds(p95CycleS)}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">95th pct run</p>
+            </div>
+            {/* Fill latency */}
+            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Fill Latency</p>
+              <p className={`text-2xl font-bold tabular-nums ${avgFillLatencyMs === null ? "text-muted-foreground" : avgFillLatencyMs < 120_000 ? "text-emerald-500" : avgFillLatencyMs < 600_000 ? "text-yellow-500" : "text-red-500"}`}>
+                {fmtMs(avgFillLatencyMs)}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">order → fill avg</p>
+            </div>
+            {/* Settlement */}
+            <div className="px-6 py-4">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Settlement</p>
+              <p className="text-2xl font-bold tabular-nums text-muted-foreground">
+                {fmtMs(avgSettlementMs)}
+              </p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">fill → resolve avg</p>
+            </div>
+          </div>
+
+          {/* 24h latency trend */}
+          <div className="px-6 pt-4 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
+            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 24h (avg per hour, seconds)</p>
+            <ResponsiveContainer width="100%" height={100}>
+              <LineChart data={latencyTrend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={5} />
+                <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={28} tickFormatter={(v) => `${v}s`} />
+                <Tooltip
+                  formatter={(value: number | null) => [value !== null ? `${value.toFixed(2)}s` : "—", "Avg duration"]}
+                  contentStyle={{ fontSize: 10, borderRadius: 6 }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="avg"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={1.5}
+                  dot={false}
+                  connectNulls={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
 
         {/* ── 6. Recent Decisions ──────────────────────────────────────── */}
         <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
@@ -2320,6 +2451,29 @@ export default function ObservabilityPage() {
     )}
     </>
   );
+}
+
+// ── Latency helpers ───────────────────────────────────────────────────────────
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)];
+}
+
+function fmtSeconds(s: number | null): string {
+  if (s === null) return "—";
+  if (s < 60) return `${s.toFixed(1)}s`;
+  return `${(s / 60).toFixed(1)}m`;
+}
+
+function fmtMs(ms: number | null): string {
+  if (ms === null) return "—";
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(0)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
 }
 
 // ── detectFailureModes ────────────────────────────────────────────────────────
