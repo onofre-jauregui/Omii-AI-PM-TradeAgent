@@ -794,14 +794,14 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadLatencyData = useCallback(async (uid?: string | null) => {
-    const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let q = supabase
       .from("compliance_log")
       .select("created_at, metadata")
       .eq("event_type", "auto_trade_strategy_run")
-      .gte("created_at", since48h)
+      .gte("created_at", since7d)
       .order("created_at", { ascending: false })
-      .limit(5000);
+      .limit(10000);
     if (uid) q = q.eq("user_id", uid);
     const { data } = await q;
     if (data) {
@@ -865,12 +865,21 @@ export default function ObservabilityPage() {
       .gte("created_at", since)
       .order("created_at", { ascending: true });
     if (!data || data.length < 2) { setGapEvents([]); return; }
+    // Compute median inter-run interval to set a dynamic threshold (3× median).
+    // This avoids false alarms when the cron schedule changes (e.g. hourly vs 30s).
+    const intervals: number[] = [];
+    for (let i = 1; i < data.length; i++) {
+      intervals.push((new Date(data[i].created_at).getTime() - new Date(data[i - 1].created_at).getTime()) / 60000);
+    }
+    const sorted = [...intervals].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const threshold = Math.max(15, median * 3); // at least 15 min, or 3× median cadence
     const gaps: { from: string; to: string; gapMins: number }[] = [];
     for (let i = 1; i < data.length; i++) {
       const prev = new Date(data[i - 1].created_at).getTime();
       const curr = new Date(data[i].created_at).getTime();
       const gapMins = (curr - prev) / 60000;
-      if (gapMins > 5) gaps.push({ from: data[i - 1].created_at, to: data[i].created_at, gapMins });
+      if (gapMins > threshold) gaps.push({ from: data[i - 1].created_at, to: data[i].created_at, gapMins });
     }
     setGapEvents(gaps);
   }, []);
@@ -1313,14 +1322,15 @@ export default function ObservabilityPage() {
 
   // Latency derived stats
   const latencyNow = Date.now();
-  const latencyTrend = Array.from({ length: 48 }, (_, i) => {
-    const hourStart = latencyNow - (47 - i) * 3_600_000;
-    const hourEnd = hourStart + 3_600_000;
+  // 7-day chart: 28 buckets of 6h each → covers full week with readable labels
+  const latencyTrend = Array.from({ length: 28 }, (_, i) => {
+    const bucketStart = latencyNow - (27 - i) * 6 * 3_600_000;
+    const bucketEnd = bucketStart + 6 * 3_600_000;
     const bucket = stratRunDurations
-      .filter((d) => d.ts >= hourStart && d.ts < hourEnd)
+      .filter((d) => d.ts >= bucketStart && d.ts < bucketEnd)
       .map((d) => d.seconds);
     return {
-      hour: new Date(hourStart).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" }),
+      hour: new Date(bucketStart).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" }),
       avg: bucket.length > 0 ? bucket.reduce((s, v) => s + v, 0) / bucket.length : null,
     };
   });
@@ -1579,9 +1589,6 @@ export default function ObservabilityPage() {
             <p className={`text-4xl font-bold tabular-nums ${winRate !== null && winRate >= 55 ? "text-emerald-500" : winRate !== null && winRate >= 40 ? "text-yellow-500" : "text-muted-foreground"}`}>
               {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
             </p>
-            <p className="text-[11px] text-muted-foreground">
-              {settledCount > 0 ? `${settledCount} settled trades` : "no settled trades"}
-            </p>
           </div>
 
           {/* Agent Status */}
@@ -1656,9 +1663,9 @@ export default function ObservabilityPage() {
             <h2 className="text-sm font-semibold mb-4">Last 24 Hours</h2>
             <div className="grid grid-cols-2 gap-4">
               {[
-                { label: "Cron Runs", value: runsToday.toLocaleString(), sub: "every 2 min" },
+                { label: "Cron Runs", value: runsToday.toLocaleString(), sub: "auto-trade runs" },
                 { label: "Markets Scanned", value: scansToday.toLocaleString(), sub: "surface scans" },
-                { label: "Trades Placed", value: tradesFilledToday.toString(), sub: primaryMode + " mode" },
+                { label: "Trades Placed", value: tradesFilledToday.toString(), sub: "new positions" },
                 { label: "Open Positions", value: openPositionCount.toString(), sub: isPlatformView ? "across all accounts" : `$${openPositionValue.toFixed(0)} at risk` },
               ].map(({ label, value, sub }) => (
                 <div key={label}>
@@ -1896,10 +1903,10 @@ export default function ObservabilityPage() {
 
           {/* 24h latency trend */}
           <div className="px-6 pt-4 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
-            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 48h (avg per hour, seconds)</p>
+            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 7 days (avg per 6h window, seconds)</p>
             <ResponsiveContainer width="100%" height={100}>
               <LineChart data={latencyTrend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={5} />
+                <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
                 <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={28} tickFormatter={(v) => `${v}s`} />
                 <Tooltip
                   formatter={(value: number | null) => [value !== null ? `${value.toFixed(2)}s` : "—", "Avg duration"]}

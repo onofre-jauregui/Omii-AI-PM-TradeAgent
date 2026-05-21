@@ -36,14 +36,19 @@ function AgentStatusBadge() {
   const [lastRun, setLastRun] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
-    supabase
-      .from("compliance_log")
-      .select("created_at")
-      .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
-      .then(({ data }) => setLastRun(data?.created_at ?? null));
+    const fetch = () =>
+      supabase
+        .from("compliance_log")
+        .select("created_at")
+        .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+        .then(({ data }) => setLastRun(data?.created_at ?? null));
+
+    fetch();
+    const interval = setInterval(fetch, 2 * 60 * 1000); // refresh every 2 min
+    return () => clearInterval(interval);
   }, []);
 
   if (lastRun === undefined) return null;
