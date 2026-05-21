@@ -24,6 +24,36 @@ import ObservabilityPage from "./pages/ObservabilityPage.tsx";
 
 const queryClient = new QueryClient();
 
+/** Gate that checks profiles.is_admin before rendering admin pages. */
+function AdminRoute({ element }: { element: React.ReactElement }) {
+  const [state, setState] = useState<"loading" | "ok" | "denied">("loading");
+
+  useEffect(() => {
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (!user) return setState("denied");
+      const { data } = await supabase
+        .from("profiles")
+        .select("is_admin")
+        .eq("id", user.id)
+        .maybeSingle();
+      setState((data as any)?.is_admin ? "ok" : "denied");
+    });
+  }, []);
+
+  if (state === "loading") return null;
+  if (state === "denied") {
+    return (
+      <div
+        className="min-h-screen flex items-center justify-center"
+        style={{ backgroundColor: "#0f0d0b" }}
+      >
+        <p className="text-sm text-muted-foreground">Access denied.</p>
+      </div>
+    );
+  }
+  return element;
+}
+
 /** Protected portion of the app — requires a valid session. */
 function ProtectedApp({ session }: { session: Session | null | undefined }) {
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
@@ -97,12 +127,13 @@ function AppRoutes() {
         <Route path="/login" element={<AuthPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route path="/performance" element={<PerformancePage />} />
-        <Route path="/observability" element={<ObservabilityPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
-        {/* Auth-protected — admin + onboarding + billing */}
-        <Route path="/admin/waitlist" element={<WaitlistPage />} />
-        <Route path="/admin/costs" element={<CostReport />} />
+        {/* Admin-only — requires is_admin = true in profiles */}
+        <Route path="/observability" element={<AdminRoute element={<ObservabilityPage />} />} />
+        <Route path="/admin/waitlist" element={<AdminRoute element={<WaitlistPage />} />} />
+        <Route path="/admin/costs" element={<AdminRoute element={<CostReport />} />} />
+        {/* Auth-protected — onboarding + billing */}
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/billing" element={<BillingPage />} />
         {/* Everything else goes through the auth gate */}

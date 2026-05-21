@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Bot, ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   AreaChart,
   Area,
@@ -318,6 +319,9 @@ export default function ObservabilityPage() {
   const [liveIndicator, setLiveIndicator] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [viewUserId, setViewUserId] = useState<string | null>(null); // null = platform view
+  const [userList, setUserList] = useState<{ id: string; strategyCount: number }[]>([]);
 
   // Hero state
   const [lastRunAt, setLastRunAt] = useState<string | null>(null);
@@ -402,29 +406,34 @@ export default function ObservabilityPage() {
 
   // ── Data loaders ──────────────────────────────────────────────────────────
 
-  const loadHeroStatus = useCallback(async () => {
+  const loadHeroStatus = useCallback(async (uid?: string | null) => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    const [lastRunRes, openRes, pnlRes] = await Promise.all([
-      supabase
-        .from("compliance_log")
-        .select("created_at")
-        .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-      supabase
-        .from("trades")
-        .select("amount")
-        .eq("status", "filled")
-        .is("settled_at", null),
-      supabase
-        .from("trades")
-        .select("pnl")
-        .eq("status", "settled")
-        .gte("settled_at", todayStart.toISOString()),
-    ]);
+    let complianceQ = supabase
+      .from("compliance_log")
+      .select("created_at")
+      .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    let openQ = supabase
+      .from("trades")
+      .select("amount")
+      .eq("status", "filled")
+      .is("settled_at", null);
+    let pnlQ = supabase
+      .from("trades")
+      .select("pnl")
+      .eq("status", "settled")
+      .gte("settled_at", todayStart.toISOString());
+
+    if (uid) {
+      openQ = openQ.eq("user_id", uid);
+      pnlQ = pnlQ.eq("user_id", uid);
+    }
+
+    const [lastRunRes, openRes, pnlRes] = await Promise.all([complianceQ, openQ, pnlQ]);
 
     setLastRunAt(lastRunRes.data?.created_at ?? null);
 
@@ -436,19 +445,21 @@ export default function ObservabilityPage() {
     setTodayPnl(pnlTrades.reduce((s, t) => s + (t.pnl ?? 0), 0));
   }, []);
 
-  const loadHeroFeed = useCallback(async () => {
-    const { data } = await supabase
+  const loadHeroFeed = useCallback(async (uid?: string | null) => {
+    let q = supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id")
       .order("created_at", { ascending: false })
       .limit(10);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) setHeroFeed(data as ComplianceEvent[]);
   }, []);
 
-  const loadTraceLogs = useCallback(async () => {
+  const loadTraceLogs = useCallback(async (uid?: string | null) => {
     const dayStart = new Date(traceDay + "T00:00:00.000Z").toISOString();
     const dayEnd   = new Date(traceDay + "T23:59:59.999Z").toISOString();
-    const { data } = await supabase
+    let q = supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id")
       .eq("event_type", "auto_trade_run")
@@ -456,12 +467,15 @@ export default function ObservabilityPage() {
       .lte("created_at", dayEnd)
       .order("created_at", { ascending: false })
       .limit(200);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) setTraceRuns(data as ComplianceEvent[]);
   }, [traceDay]);
 
   const loadDecisionHistory = useCallback(async (
     dateFilter: "today" | "7d" | "30d" | "all" = "30d",
-    statusFilter: "all" | "filled" | "settled" = "all"
+    statusFilter: "all" | "filled" | "settled" = "all",
+    uid?: string | null
   ) => {
     let query = supabase
       .from("trades")
@@ -486,17 +500,21 @@ export default function ObservabilityPage() {
       query = query.gte("created_at", new Date(Date.now() - 30 * 86400000).toISOString());
     }
 
+    if (uid) query = query.eq("user_id", uid);
+
     const { data } = await query;
     if (data) setDecisionTrades(data as Trade[]);
   }, []);
 
-  const loadPerformance = useCallback(async () => {
-    const { data } = await supabase
+  const loadPerformance = useCallback(async (uid?: string | null) => {
+    let q = supabase
       .from("trades")
       .select("id, pnl, created_at, filled_at, settled_at, status, strategy_id")
       .eq("status", "settled")
       .gte("settled_at", "2026-04-22T00:00:00.000Z")
       .order("settled_at", { ascending: true });
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) {
       setAllSettledTrades(data as Trade[]);
       // Build equity curve — one point per day (aggregate trades settled on same day)
@@ -517,7 +535,7 @@ export default function ObservabilityPage() {
     }
   }, []);
 
-  const loadComplianceLast30d = useCallback(async () => {
+  const loadComplianceLast30d = useCallback(async (uid?: string | null) => {
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     // Event types that actually exist in compliance_log (verified from edge function source)
@@ -534,24 +552,35 @@ export default function ObservabilityPage() {
       "strategy_auto_halted",
     ];
 
-    const [eventsRes, tradesCountRes, ...countResults] = await Promise.all([
-      supabase
+    let eventsQ = supabase
+      .from("compliance_log")
+      .select("id, created_at, event_type, severity, message, trade_id")
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(500);
+    let tradesQ = supabase
+      .from("trades")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", since);
+    if (uid) {
+      eventsQ = eventsQ.eq("user_id", uid);
+      tradesQ = tradesQ.eq("user_id", uid);
+    }
+
+    const toolCountQueries = toolEventTypes.map((et) => {
+      let q = supabase
         .from("compliance_log")
-        .select("id, created_at, event_type, severity, message, trade_id")
-        .gte("created_at", since)
-        .order("created_at", { ascending: false })
-        .limit(500),
-      supabase
-        .from("trades")
         .select("*", { count: "exact", head: true })
-        .gte("created_at", since),
-      ...toolEventTypes.map((et) =>
-        supabase
-          .from("compliance_log")
-          .select("*", { count: "exact", head: true })
-          .eq("event_type", et)
-          .gte("created_at", since)
-      ),
+        .eq("event_type", et)
+        .gte("created_at", since);
+      if (uid) q = q.eq("user_id", uid);
+      return q;
+    });
+
+    const [eventsRes, tradesCountRes, ...countResults] = await Promise.all([
+      eventsQ,
+      tradesQ,
+      ...toolCountQueries,
     ]);
 
     if (eventsRes.data) setComplianceLast30d(eventsRes.data as ComplianceEvent[]);
@@ -564,14 +593,16 @@ export default function ObservabilityPage() {
     setToolCounts(counts);
   }, []);
 
-  const loadModelLatency = useCallback(async () => {
+  const loadModelLatency = useCallback(async (uid?: string | null) => {
     // Fetch last 8 auto_trade_run events
-    const { data: runs } = await supabase
+    let runsQ = supabase
       .from("compliance_log")
       .select("id, created_at")
       .eq("event_type", "auto_trade_run")
       .order("created_at", { ascending: false })
       .limit(8);
+    if (uid) runsQ = runsQ.eq("user_id", uid);
+    const { data: runs } = await runsQ;
     if (!runs || runs.length === 0) return;
 
     // For each run, find the last child event within 90s
@@ -600,21 +631,32 @@ export default function ObservabilityPage() {
     }
   }, []);
 
-  const loadActivity24h = useCallback(async () => {
+  const loadActivity24h = useCallback(async (uid?: string | null) => {
     const since24h = new Date(Date.now() - 86_400_000).toISOString();
     const since6h  = new Date(Date.now() - 21_600_000).toISOString();
+
+    let runsQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+      .eq("event_type", "auto_trade_run").gte("created_at", since24h);
+    let stratRuns24hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+      .eq("event_type", "auto_trade_strategy_run").gte("created_at", since24h);
+    let stratRuns6hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+      .eq("event_type", "auto_trade_strategy_run").gte("created_at", since6h);
+    let scansQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+      .eq("event_type", "surface_scan_complete").gte("created_at", since24h);
+    let tradesQ = supabase.from("trades").select("*", { count: "exact", head: true })
+      .gte("created_at", since24h);
+
+    if (uid) {
+      runsQ = runsQ.eq("user_id", uid);
+      stratRuns24hQ = stratRuns24hQ.eq("user_id", uid);
+      stratRuns6hQ = stratRuns6hQ.eq("user_id", uid);
+      scansQ = scansQ.eq("user_id", uid);
+      tradesQ = tradesQ.eq("user_id", uid);
+    }
+
     // stratRuns24hRes and runs6hRes use the same event type — spike ratio is apples-to-apples
     const [runsRes, stratRuns24hRes, stratRuns6hRes, scansRes, tradesRes] = await Promise.all([
-      supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "auto_trade_run").gte("created_at", since24h),
-      supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "auto_trade_strategy_run").gte("created_at", since24h),
-      supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "auto_trade_strategy_run").gte("created_at", since6h),
-      supabase.from("compliance_log").select("*", { count: "exact", head: true })
-        .eq("event_type", "surface_scan_complete").gte("created_at", since24h),
-      supabase.from("trades").select("*", { count: "exact", head: true })
-        .gte("created_at", since24h),
+      runsQ, stratRuns24hQ, stratRuns6hQ, scansQ, tradesQ,
     ]);
     setRuns24hCount(runsRes.count ?? 0);
     setStratRuns24hCount(stratRuns24hRes.count ?? 0);
@@ -623,19 +665,21 @@ export default function ObservabilityPage() {
     setTradesFilled24hCount(tradesRes.count ?? 0);
   }, []);
 
-  const loadErrors24h = useCallback(async () => {
+  const loadErrors24h = useCallback(async (uid?: string | null) => {
     const since = new Date(Date.now() - 86_400_000).toISOString();
-    const { data } = await supabase
+    let q = supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id")
       .gte("created_at", since)
       .in("severity", ["error", "warning", "critical"])
       .order("created_at", { ascending: false })
       .limit(500);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) setErrors24h(data as ComplianceEvent[]);
   }, []);
 
-  const loadErrors = useCallback(async () => {
+  const loadErrors = useCallback(async (uid?: string | null) => {
     const guardrailTypes = [
       "risk_check_failed",
       "position_limit_hit",
@@ -648,38 +692,61 @@ export default function ObservabilityPage() {
       "auto_trade_strategy_error",
     ];
 
-    const [guardrailRes, errorRes] = await Promise.all([
-      supabase
-        .from("compliance_log")
-        .select("id, created_at, event_type, severity, message, trade_id")
-        .in("event_type", guardrailTypes)
-        .order("created_at", { ascending: false })
-        .limit(50),
-      supabase
-        .from("compliance_log")
-        .select("id, created_at, event_type, severity, message, trade_id")
-        .in("severity", ["error", "critical", "warning"])
-        .order("created_at", { ascending: false })
-        .limit(30),
-    ]);
+    let guardrailQ = supabase
+      .from("compliance_log")
+      .select("id, created_at, event_type, severity, message, trade_id")
+      .in("event_type", guardrailTypes)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    let errorQ = supabase
+      .from("compliance_log")
+      .select("id, created_at, event_type, severity, message, trade_id")
+      .in("severity", ["error", "critical", "warning"])
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (uid) {
+      guardrailQ = guardrailQ.eq("user_id", uid);
+      errorQ = errorQ.eq("user_id", uid);
+    }
+
+    const [guardrailRes, errorRes] = await Promise.all([guardrailQ, errorQ]);
 
     if (guardrailRes.data) setGuardrailEvents(guardrailRes.data as ComplianceEvent[]);
     if (errorRes.data) setErrorEvents(errorRes.data as ComplianceEvent[]);
   }, []);
 
-  const loadStrategies = useCallback(async () => {
-    const { data } = await supabase
+  const loadStrategies = useCallback(async (uid?: string | null) => {
+    let q = supabase
       .from("strategies")
       .select("id, name, active, mode, suspended_until, suspension_reason, starting_balance, user_id");
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) setStrategies(data as Strategy[]);
   }, []);
 
-  const loadMemories = useCallback(async () => {
-    const { data } = await (supabase.from("agent_memory" as any) as any)
+  const loadMemories = useCallback(async (uid?: string | null) => {
+    let q = (supabase.from("agent_memory" as any) as any)
       .select("*")
       .order("confidence", { ascending: false })
       .limit(200);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) setMemories(data as MemoryEntry[]);
+  }, []);
+
+  const loadUserList = useCallback(async () => {
+    const { data } = await supabase
+      .from("strategies")
+      .select("user_id")
+      .not("user_id", "is", null);
+    if (!data) return;
+    const counts = new Map<string, number>();
+    (data as { user_id: string }[]).forEach(({ user_id }) =>
+      counts.set(user_id, (counts.get(user_id) ?? 0) + 1)
+    );
+    setUserList(
+      Array.from(counts.entries()).map(([id, strategyCount]) => ({ id, strategyCount }))
+    );
   }, []);
 
   const loadActiveModel = useCallback(async () => {
@@ -691,13 +758,15 @@ export default function ObservabilityPage() {
     if (data?.key_id) setActiveModel(data.key_id as string);
   }, []);
 
-  const loadLatencyData = useCallback(async () => {
-    const { data } = await supabase
+  const loadLatencyData = useCallback(async (uid?: string | null) => {
+    let q = supabase
       .from("compliance_log")
       .select("created_at, metadata")
       .eq("event_type", "auto_trade_strategy_run")
       .order("created_at", { ascending: false })
       .limit(200);
+    if (uid) q = q.eq("user_id", uid);
+    const { data } = await q;
     if (data) {
       setStratRunDurations(
         data
@@ -715,22 +784,30 @@ export default function ObservabilityPage() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsAuthenticated(!!session);
       setUserId(session?.user?.id ?? null);
+      if (session?.user?.id) {
+        supabase.from("profiles").select("is_admin").eq("id", session.user.id).maybeSingle()
+          .then(({ data }) => {
+            const admin = (data as any)?.is_admin ?? false;
+            setIsAdmin(admin);
+            if (admin) loadUserList();
+          });
+      }
     });
 
-    loadHeroStatus();
-    loadHeroFeed();
-    loadTraceLogs();
-    loadDecisionHistory(decisionDateFilter, decisionStatusFilter);
-    loadPerformance();
-    loadComplianceLast30d();
-    loadModelLatency();
-    loadActivity24h();
-    loadErrors24h();
-    loadErrors();
-    loadStrategies();
-    loadMemories();
+    loadHeroStatus(null);
+    loadHeroFeed(null);
+    loadTraceLogs(null);
+    loadDecisionHistory(decisionDateFilter, decisionStatusFilter, null);
+    loadPerformance(null);
+    loadComplianceLast30d(null);
+    loadModelLatency(null);
+    loadActivity24h(null);
+    loadErrors24h(null);
+    loadErrors(null);
+    loadStrategies(null);
+    loadMemories(null);
     loadActiveModel();
-    loadLatencyData();
+    loadLatencyData(null);
   }, [
     loadHeroStatus,
     loadHeroFeed,
