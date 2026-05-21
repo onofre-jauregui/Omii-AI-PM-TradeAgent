@@ -1,5 +1,5 @@
 import { Bot, Clock, Zap, MessageSquare, TrendingUp, ArrowUpRight } from "lucide-react";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
@@ -128,6 +128,7 @@ export function DashboardHero({
   mode?: "paper" | "live";
   onNavigate?: (tab: string) => void;
 }) {
+  const loadIdRef = useRef(0); // cancels stale concurrent loads
   const [stats, setStats] = useState<HeroStats>({
     startingBalance: 0,
     portfolioValue: 0,
@@ -146,6 +147,7 @@ export function DashboardHero({
   });
 
   const load = useCallback(async () => {
+    const myId = ++loadIdRef.current; // increment; stale loads will see myId !== loadIdRef.current
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const todayISO = todayStart.toISOString();
@@ -263,6 +265,7 @@ export function DashboardHero({
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
 
+    if (myId !== loadIdRef.current) return; // a newer load fired — discard this result
     setStats({
       startingBalance,
       portfolioValue,
