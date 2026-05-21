@@ -463,12 +463,12 @@ const FEATURES = [
   {
     icon: Bot,
     title: "Multi-agent architecture",
-    body: "A coordinated system of specialized agents — signal scanner, qualifier, executor, settler — running continuously on Kalshi, a CFTC-licensed exchange. Every trade is logged on a federally supervised venue.",
+    body: "Two agents working in tandem: a conversational agent you interact with directly, and an autonomous trading agent that runs the execution pipeline on Kalshi — a CFTC-licensed exchange.",
   },
   {
     icon: Activity,
     title: "Full observability",
-    body: "Every agent action is traced end-to-end. LLM calls, tool invocations, latency, and token costs are all tracked. You can see exactly what the system did, why, and what it cost.",
+    body: "Every agent action is traced end-to-end — LLM calls, tool invocations, latency, and token cost. Nothing runs in a black box.",
   },
   {
     icon: BarChart2,
