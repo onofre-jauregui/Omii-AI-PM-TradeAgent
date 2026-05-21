@@ -6,6 +6,7 @@ import { User, Trophy, Calendar, BarChart3, TrendingUp, Activity, Wallet, Loader
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { AvatarCropModal } from "./AvatarCropModal";
 
 export function ProfilePanel() {
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export function ProfilePanel() {
   const [subscription, setSubscription] = useState<{ tier: string; status: string } | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [cropSrc, setCropSrc] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [stats, setStats] = useState({
@@ -85,31 +87,47 @@ export function ProfilePanel() {
 
   useEffect(() => { loadStats(); }, [loadStats]);
 
-  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Step 1: file selected → open crop modal
+  const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setUploadError(null);
+    const objectUrl = URL.createObjectURL(file);
+    setCropSrc(objectUrl);
+    e.target.value = "";
+  };
+
+  // Step 2: crop confirmed → upload blob
+  const handleCropConfirm = async (blob: Blob) => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
     setUploadingAvatar(true);
     setUploadError(null);
-    const ext = file.name.split(".").pop();
-    const path = `${user.id}/avatar.${ext}`;
+    const path = `${user.id}/avatar.jpg`;
 
     const { error: uploadErr } = await supabase.storage
       .from("avatars")
-      .upload(path, file, { upsert: true });
+      .upload(path, blob, { upsert: true, contentType: "image/jpeg" });
 
     if (uploadErr) {
       setUploadError(uploadErr.message);
     } else {
+      // Bust the cache by appending a timestamp so the browser re-fetches
       const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(path);
-      await supabase.from("profiles").update({ avatar_url: publicUrl }).eq("id", user.id);
-      setProfile(prev => ({ ...prev, avatarUrl: publicUrl }));
+      const bustedUrl = `${publicUrl}?t=${Date.now()}`;
+      await supabase.from("profiles").update({ avatar_url: bustedUrl }).eq("id", user.id);
+      setProfile(prev => ({ ...prev, avatarUrl: bustedUrl }));
     }
+
     setUploadingAvatar(false);
-    // Reset file input so selecting the same file again triggers onChange
-    e.target.value = "";
+    if (cropSrc) URL.revokeObjectURL(cropSrc);
+    setCropSrc(null);
+  };
+
+  const handleCropCancel = () => {
+    if (cropSrc) URL.revokeObjectURL(cropSrc);
+    setCropSrc(null);
   };
 
   const handleSaveProfile = async () => {
@@ -129,6 +147,14 @@ export function ProfilePanel() {
   };
 
   return (
+    <>
+    {cropSrc && (
+      <AvatarCropModal
+        imageSrc={cropSrc}
+        onConfirm={handleCropConfirm}
+        onCancel={handleCropCancel}
+      />
+    )}
     <div className="space-y-6 apple-reveal">
       <div className="grid md:grid-cols-3 gap-6">
         {/* Avatar + identity card */}
@@ -158,7 +184,7 @@ export function ProfilePanel() {
               type="file"
               accept="image/*"
               className="hidden"
-              onChange={handleAvatarUpload}
+              onChange={handleFileSelected}
             />
             {uploadError && (
               <div className="flex items-center gap-1.5 text-[11px] text-loss">
@@ -242,5 +268,6 @@ export function ProfilePanel() {
         </div>
       </div>
     </div>
+    </>
   );
 }
