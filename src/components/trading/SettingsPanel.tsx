@@ -352,13 +352,10 @@ export function SettingsPanel() {
       {/* ── Kalshi Live Trading ──────────────────────────────────── */}
       <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
         <div className="px-6 py-4 border-b border-border">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Key className="h-4 w-4 text-muted-foreground" />
-              <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
-              <StatusBadge saved={savedProviders.has("kalshi_live")} />
-            </div>
-            <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Real money only</span>
+          <div className="flex items-center gap-2">
+            <Key className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
+            <StatusBadge saved={savedProviders.has("kalshi_live")} />
           </div>
           <p className="text-xs text-muted-foreground mt-1">
             Paper trading works without these. Only add when you're ready to trade with real money on Kalshi.
