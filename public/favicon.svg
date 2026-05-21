@@ -1,17 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- Blue rounded square background matching landing page #0071e3 -->
+  <!-- Blue rounded square — matches landing page nav logo (#0071e3) -->
   <rect width="32" height="32" rx="7" fill="#0071e3"/>
-  <!-- Bot icon (lucide-react Bot, scaled from 24→22px, centered in 32px canvas) -->
-  <!-- Antenna top path: M12 8V4H8 → scaled+offset -->
-  <path d="M16 10.5V7.17l-2.67-2.67" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-  <!-- Head rectangle: x=4,y=8,w=16,h=12,rx=2 → scaled ~0.92x, centered -->
-  <rect x="5.5" y="11" width="21" height="15" rx="2.5" fill="none" stroke="white" stroke-width="1.8"/>
-  <!-- Left arm -->
-  <path d="M2.5 18.5h3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-  <!-- Right arm -->
-  <path d="M26.5 18.5h3" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-  <!-- Left leg/eye line -->
-  <path d="M11.5 17v2.5" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
-  <!-- Right leg/eye line -->
-  <path d="M20.5 17v2.5" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+  <!-- Lucide Bot icon (24×24 paths), scaled 0.75× and centered in 32×32 -->
+  <g transform="translate(7,7) scale(0.75)" stroke="white" stroke-width="2.67" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M12 8V4H8"/>
+    <rect width="16" height="12" x="4" y="8" rx="2"/>
+    <path d="M2 14h2"/>
+    <path d="M20 14h2"/>
+    <path d="M15 13v2"/>
+    <path d="M9 13v2"/>
+  </g>
 </svg>
