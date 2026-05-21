@@ -678,12 +678,13 @@ export default function ObservabilityPage() {
       .in("severity", ["error", "warning", "critical"])
       .order("created_at", { ascending: false })
       .limit(500);
-    // Dedicated rate limit count — no severity filter so we catch gracefully-handled 429s logged as info
+    // Dedicated LLM rate limit count — match explicit event type or LLM-specific patterns only.
+    // Intentionally excludes Kalshi API 429s ("GET /markets", "kalshi") which belong under api_timeout.
     let rlQ = supabase
       .from("compliance_log")
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
-      .or("event_type.eq.llm_rate_limit,message.ilike.%429%,message.ilike.%rate limit%");
+      .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
     if (uid) {
       q = q.eq("user_id", uid);
       rlQ = rlQ.eq("user_id", uid);
@@ -712,10 +713,21 @@ export default function ObservabilityPage() {
       .in("event_type", guardrailTypes)
       .order("created_at", { ascending: false })
       .limit(50);
-    let errorQ = supabase
+    // Exclude operational event types that use 'warning' severity for normal outcomes
+  // (e.g. surface_scan_complete warns when it finds alerts — that's expected behavior, not an error)
+  const operationalEventTypes = [
+    "surface_scan_complete",
+    "auto_trade_run",
+    "auto_trade_strategy_run",
+    "auto_trade_skipped",
+    "auto_settle_run",
+    "auto_reflect_run",
+  ];
+  let errorQ = supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id")
       .in("severity", ["error", "critical", "warning"])
+      .not("event_type", "in", `(${operationalEventTypes.join(",")})`)
       .order("created_at", { ascending: false })
       .limit(30);
     if (uid) {
@@ -1299,34 +1311,9 @@ export default function ObservabilityPage() {
           <span className="text-sm text-muted-foreground">Observability</span>
         </div>
         {isAdmin && (
-          <div className="absolute left-1/2 -translate-x-1/2">
-            <Select
-              value={viewUserId ?? "__platform__"}
-              onValueChange={(v) => setViewUserId(v === "__platform__" ? null : v)}
-            >
-              <SelectTrigger className="h-7 text-xs w-[220px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__platform__">
-                  <span className="flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block" />
-                    Platform View · {userList.length} users
-                  </span>
-                </SelectItem>
-                <SelectSeparator />
-                {userList.map((u) => (
-                  <SelectItem key={u.id} value={u.id}>
-                    <span className="flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block" />
-                      {u.id.slice(0, 8)}…
-                      <span className="text-muted-foreground ml-1 text-[10px]">{u.strategyCount} strat</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <span className="text-[11px] text-muted-foreground tabular-nums hidden sm:inline">
+            {isPlatformView ? `${userList.length} accounts` : `User ${viewUserId?.slice(0, 8)}…`}
+          </span>
         )}
         <div className="flex items-center gap-1.5">
           <span
@@ -1353,18 +1340,61 @@ export default function ObservabilityPage() {
         </div>
       )}
 
-      {/* Admin view banners */}
-      {isAdmin && !viewUserId && (
-        <div className="px-8 py-2 text-xs flex items-center gap-2 border-b" style={{ color: "#60a5fa", backgroundColor: "rgba(59,130,246,0.05)", borderColor: "rgba(59,130,246,0.1)" }}>
-          <span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block flex-shrink-0" />
-          Platform View — aggregated across all {userList.length} accounts · ROI hidden (select a user to see per-account return)
-        </div>
-      )}
-      {isAdmin && viewUserId && (
-        <div className="px-8 py-2 text-xs flex items-center gap-2 border-b" style={{ color: "#fb923c", backgroundColor: "rgba(249,115,22,0.05)", borderColor: "rgba(249,115,22,0.1)" }}>
-          <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block flex-shrink-0" />
-          Viewing User {viewUserId.slice(0, 8)}…
-          <button onClick={() => setViewUserId(null)} className="underline ml-1">← back to platform view</button>
+      {/* ── Admin Scope Bar ──────────────────────────────────────────────── */}
+      {isAdmin && (
+        <div className="border-b border-border bg-card/60 px-8 py-3 flex items-center justify-between gap-4">
+          {/* Left: current scope */}
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${isPlatformView ? "bg-blue-400" : "bg-orange-400"}`} />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold leading-tight">
+                {isPlatformView ? "Platform View" : `User ${viewUserId?.slice(0, 8)}…`}
+              </p>
+              <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">
+                {isPlatformView
+                  ? `Aggregated across all ${userList.length} registered accounts · per-account financials hidden`
+                  : `${userList.find(u => u.id === viewUserId)?.strategyCount ?? 0} strategies · isolated account view`}
+              </p>
+            </div>
+          </div>
+
+          {/* Right: account switcher */}
+          <div className="flex items-center gap-2 shrink-0">
+            {!isPlatformView && (
+              <button
+                onClick={() => setViewUserId(null)}
+                className="text-[11px] px-3 py-1.5 rounded-full border border-border text-muted-foreground hover:text-foreground hover:bg-secondary/60 transition-colors"
+              >
+                ← Platform View
+              </button>
+            )}
+            <Select
+              value={viewUserId ?? "__platform__"}
+              onValueChange={(v) => setViewUserId(v === "__platform__" ? null : v)}
+            >
+              <SelectTrigger className="h-8 text-xs w-[200px] font-medium">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__platform__">
+                  <span className="flex items-center gap-2">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block shrink-0" />
+                    Platform View
+                  </span>
+                </SelectItem>
+                <SelectSeparator />
+                {userList.map((u) => (
+                  <SelectItem key={u.id} value={u.id}>
+                    <span className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block shrink-0" />
+                      <span>{u.id === userId ? "Your account" : `User ${u.id.slice(0, 8)}…`}</span>
+                      <span className="text-muted-foreground text-[10px] ml-1">{u.strategyCount} strat</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
       )}
 
@@ -1438,18 +1468,26 @@ export default function ObservabilityPage() {
 
         {/* ── 1. KPI Hero ──────────────────────────────────────────────── */}
         <div className="grid grid-cols-3 gap-4">
-          {/* ROI */}
-          <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
-            <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Return on Capital</p>
-            <p className={`text-4xl font-bold tabular-nums ${roi === null ? "text-muted-foreground" : roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-              {roi === null ? "—" : `${roi >= 0 ? "+" : ""}${roi.toFixed(2)}%`}
-            </p>
-            <p className="text-[11px] text-muted-foreground">
-              {isPlatformView
-                ? `aggregated · ${userList.length} accounts`
-                : `${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}${STARTING_CAPITAL > 0 ? ` on $${STARTING_CAPITAL.toLocaleString()}` : ""} · ${settledCount} trades`}
-            </p>
-          </div>
+          {/* ROI — per-user view only; platform view shows account scope card */}
+          {isPlatformView ? (
+            <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
+              <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Accounts</p>
+              <p className="text-4xl font-bold tabular-nums">{userList.length}</p>
+              <p className="text-[11px] text-muted-foreground">
+                {strategies.filter(s => s.active).length} active strategies · {settledCount} total trades
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
+              <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Return on Capital</p>
+              <p className={`text-4xl font-bold tabular-nums ${roi === null ? "text-muted-foreground" : roi >= 0 ? "text-emerald-500" : "text-red-500"}`}>
+                {roi === null ? "—" : `${roi >= 0 ? "+" : ""}${roi.toFixed(2)}%`}
+              </p>
+              <p className="text-[11px] text-muted-foreground">
+                {`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}${STARTING_CAPITAL > 0 ? ` on $${STARTING_CAPITAL.toLocaleString()}` : ""} · ${settledCount} trades`}
+              </p>
+            </div>
+          )}
 
           {/* Win Rate */}
           <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
@@ -1604,7 +1642,20 @@ export default function ObservabilityPage() {
         </div>
 
         {/* ── 5. Cost & Efficiency ─────────────────────────────────────── */}
-        <Section title="Cost & Efficiency">
+        <Section
+          title="Cost & Efficiency"
+          action={
+            isPlatformView ? (
+              <span className="text-[10px] text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-full">
+                aggregate · all {userList.length} accounts
+              </span>
+            ) : viewUserId ? (
+              <span className="text-[10px] text-orange-400 bg-orange-500/10 px-2 py-0.5 rounded-full">
+                User {viewUserId.slice(0, 8)}… only
+              </span>
+            ) : undefined
+          }
+        >
           <div className="p-6 space-y-6">
             <div className="grid grid-cols-4 gap-4">
               <div className="rounded-xl border border-border p-4">
