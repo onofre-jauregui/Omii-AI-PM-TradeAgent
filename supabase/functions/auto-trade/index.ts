@@ -1104,13 +1104,15 @@ async function runS005WeatherEdge(
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
-  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  // 3h window: weather-signal runs every 15min but auto-trade runs hourly, so a 30min
+  // window missed signals created at :15/:30 past the hour. GFS forecasts are valid for hours.
+  const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
   const { data: rawSignals } = await applySignalTenantFilter(
     supabase
       .from("signals")
       .select("*")
       .eq("source", "weather_signal_s005")
-      .gte("created_at", thirtyMinAgo)
+      .gte("created_at", threeHoursAgo)
       .gte("edge_cents", minEdge)
       .not("direction", "is", null)
       .order("edge_cents", { ascending: false })
@@ -1133,7 +1135,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `No fresh weather signals with edge >= ${minEdge}c (run weather-signal first)`,
+      details: `No weather signals with edge >= ${minEdge}c in last 3h (weather-signal runs every 15min)`,
     };
   }
 

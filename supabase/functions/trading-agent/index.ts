@@ -708,22 +708,49 @@ serve(async (req) => {
       `
 
 ## Kalshi Market Catalogue
-This catalogue lists known series — it is NOT exhaustive. Kalshi has hundreds of active series. When the user asks about an unknown ticker or series, use fetch_live_markets with a keyword to look it up. Never assume a market's nature from its ticker name alone — always trust the title and resolution criteria returned by the API.
 
-Known series (for reference only):
-- **KXHIGH[CITY]** — Daily high temperature (NY, CHI, LA, MIA, AUS, PHX, SEA, DAL). Settles at midnight local. Active strategies: S-002, S-005.
-- **KXFED** — Federal Reserve rate decisions. **HARD REJECTED** — zero liquidity confirmed.
-- **KXBTC** — Bitcoin price levels (daily/weekly).
-- **KXETH** — Ethereum price levels. **HARD REJECTED** — consistent losses confirmed.
-- **KXGDP / KXPAYROLLS / KXCPI** — US macro reports.
-- **KXNHL / KXNBA / KXMLB / KXNFL / KXMLS** — Sports outcomes (hockey, basketball, baseball, football, soccer).
-- **KXWCGAME** — FIFA World Cup game-by-game outcomes. Real professional soccer matches.
-- **KXPRES / KXSENATE** — US political elections and outcomes.
+IMPORTANT: Kalshi's search keyword endpoint is broken — it returns irrelevant sportsbook parlay markets for any search term. DO NOT use keyword in fetch_live_markets. Always use category with the series ticker instead.
 
-**Critical rule**: If the user provides a market ticker, URL, or resolution criteria — fetch that market and trust what comes back. Never invent an explanation (e.g., "this is esports") without evidence from the fetched data. If the market title says "professional FIFA World Cup soccer game," it is that.
+Known series and their category values for fetch_live_markets:
+- Weather New York City: category=KXHIGHNY
+- Weather Los Angeles: category=KXHIGHLAX
+- Weather Miami: category=KXHIGHMIA
+- Weather Chicago: category=KXHIGHCHI
+- Weather Austin: category=KXHIGHAUS
+- Weather Phoenix: category=KXHIGHPHX
+- Weather Seattle: category=KXHIGHSEA
+- Weather Dallas: category=KXHIGHDAL
+- Bitcoin: category=KXBTC
+- Ethereum: category=KXETH — HARD REJECTED (consistent losses)
+- S&P 500 / Nasdaq: category=KXINX
+- Fed rate decisions: category=KXFED — HARD REJECTED (zero liquidity)
+- GDP / Payrolls / CPI: category=KXGDP or KXPAYROLLS or KXCPI
+- NHL / NBA / MLB / NFL / Soccer: category=KXNHL or KXNBA or KXMLB or KXNFL or KXMLS
+- FIFA World Cup: category=KXWCGAME
+- US Politics / Elections: category=KXPRES or KXSENATE
+
+Weather markets settle at end of the local calendar day. If a user asks about weather "today" in the evening, today's market may already be closed — show them tomorrow's open markets and note today's has closed.
+
+Critical rule: If the user provides a market ticker — fetch that market and trust what comes back. Never invent an explanation without evidence from the fetched data.
+
+## Natural Language Market Search — REQUIRED BEHAVIOR
+
+When the user describes a market topic WITHOUT a ticker:
+1. Map their description to the closest series ticker from the catalogue above
+2. Call fetch_live_markets with category=<series_ticker> — NEVER use keyword (it is broken and returns wrong results)
+3. Present the top 1–3 open markets in a card-style format:
+   > **Found:** [Market Title]
+   > Ticker: \`KXHIGHNY-26MAY22-B69.5\` | YES: 42c | NO: 58c | Vol: $14K | Closes: May 22
+4. Ask: "Is this the market you're looking for? If yes — YES or NO?"
+5. Wait for confirmation before executing
+
+If no series ticker maps to their request, call fetch_live_markets with NO parameters (returns broad market list) and scan visually. Never tell the user "I couldn't find it" without first trying at least one category fetch.
 
 ## Tool Workflow
-recall_lessons → fetch_signals → scan_surface → check_portfolio → execute → save_insight/reflect_on_trades
+
+**User-initiated trades (no ticker provided):** map topic → fetch_live_markets(category=series) → present 1–3 matches → confirm direction → execute_trade
+**User-initiated trades (ticker provided):** execute_trade directly
+**Autonomous analysis:** recall_lessons → fetch_signals → scan_surface → check_portfolio → execute → save_insight/reflect_on_trades
 
 - Arb alerts (monotonicity_violation, bracket_sum_violation): **execute_basket** only — never execute_trade for 2-leg arb (naked exposure risk)
 - Single-leg signals: **execute_trade** with reasoning + expectedOutcome + confidenceLevel
