@@ -600,13 +600,7 @@ export default function LandingPage() {
           </div>
 
           {/* Right actions */}
-          <div className="hidden items-center gap-4 md:flex">
-            <Link
-              to="/login"
-              style={{ fontSize: 14, color: "#0071e3", textDecoration: "none" }}
-            >
-              Sign in
-            </Link>
+          <div className="hidden items-center md:flex">
             <Link
               to="/login"
               className="inline-flex items-center"
@@ -621,7 +615,7 @@ export default function LandingPage() {
                 lineHeight: 1,
               }}
             >
-              Get started
+              Sign in
             </Link>
           </div>
 
@@ -653,26 +647,12 @@ export default function LandingPage() {
                 </a>
               ))}
             </div>
-            <div className="mt-auto flex flex-col gap-3">
+            <div className="mt-auto">
               <Link
                 to="/login"
                 onClick={() => setMobileMenuOpen(false)}
                 style={{
-                  textAlign: "center",
-                  padding: "14px 0",
-                  fontSize: 17,
-                  color: "#0071e3",
-                  textDecoration: "none",
-                  border: "1px solid #0071e3",
-                  borderRadius: 980,
-                }}
-              >
-                Sign in
-              </Link>
-              <Link
-                to="/login"
-                onClick={() => setMobileMenuOpen(false)}
-                style={{
+                  display: "block",
                   textAlign: "center",
                   padding: "14px 0",
                   fontSize: 17,
@@ -682,7 +662,7 @@ export default function LandingPage() {
                   borderRadius: 980,
                 }}
               >
-                Get started
+                Sign in
               </Link>
             </div>
           </div>
