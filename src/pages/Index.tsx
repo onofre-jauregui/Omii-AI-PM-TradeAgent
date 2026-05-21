@@ -13,7 +13,6 @@ import { TradeLog } from "@/components/trading/TradeLog";
 import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
-import { AccountStatusCard } from "@/components/trading/AccountStatusCard";
 import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -219,11 +218,7 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-6 apple-reveal">
-              {/* Profile identity left, Agent & Account right */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-                <ProfilePanel />
-                <AccountStatusCard mode={mode} userEmail={userEmail} />
-              </div>
+              <ProfilePanel mode={mode} userEmail={userEmail} />
               <SettingsPanel />
             </div>
           )}

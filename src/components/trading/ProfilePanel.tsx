@@ -2,13 +2,22 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Wallet, Loader2, Zap, Camera, AlertCircle } from "lucide-react";
+import { Wallet, Loader2, Zap, Camera, AlertCircle, Bot, CheckCircle, Circle } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { AvatarCropModal } from "./AvatarCropModal";
 
-export function ProfilePanel() {
+interface Props {
+  mode?: "paper" | "live";
+  userEmail?: string;
+}
+
+const providerLabel: Record<string, string> = {
+  openrouter: "OpenRouter", anthropic: "Anthropic", openai: "OpenAI", google: "Google AI",
+};
+
+export function ProfilePanel({ mode = "paper", userEmail }: Props) {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [profile, setProfile] = useState({
@@ -20,14 +29,17 @@ export function ProfilePanel() {
   const [cropSrc, setCropSrc] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [kalshiConnected, setKalshiConnected] = useState(false);
+  const [activeProvider, setActiveProvider] = useState<string | null>(null);
 
   const loadProfile = useCallback(async () => {
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-      const [{ data: prof }, { data: sub }] = await Promise.all([
+      const [{ data: prof }, { data: sub }, { data: keys }] = await Promise.all([
         supabase.from("profiles").select("display_name, avatar_url").eq("id", user.id).maybeSingle(),
         supabase.from("subscriptions").select("tier, status").eq("user_id", user.id).maybeSingle(),
+        supabase.from("api_keys").select("provider"),
       ]);
       setProfile(prev => ({
         ...prev,
@@ -36,6 +48,11 @@ export function ProfilePanel() {
         avatarUrl: prof?.avatar_url ?? "",
       }));
       setSubscription(sub ?? { tier: "free", status: "inactive" });
+      if (keys) {
+        const providers = new Set(keys.map(r => r.provider));
+        setKalshiConnected(providers.has("kalshi_live"));
+        setActiveProvider(["openrouter", "anthropic", "openai", "google"].find(p => providers.has(p)) ?? null);
+      }
     }
     setLoading(false);
   }, []);
@@ -46,8 +63,7 @@ export function ProfilePanel() {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadError(null);
-    const objectUrl = URL.createObjectURL(file);
-    setCropSrc(objectUrl);
+    setCropSrc(URL.createObjectURL(file));
     e.target.value = "";
   };
 
@@ -58,8 +74,7 @@ export function ProfilePanel() {
     setUploadError(null);
     const path = `${user.id}/avatar.jpg`;
     const { error: uploadErr } = await supabase.storage
-      .from("avatars")
-      .upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+      .from("avatars").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
     if (uploadErr) {
       setUploadError(uploadErr.message);
     } else {
@@ -95,109 +110,116 @@ export function ProfilePanel() {
   return (
     <>
       {cropSrc && (
-        <AvatarCropModal
-          imageSrc={cropSrc}
-          onConfirm={handleCropConfirm}
-          onCancel={handleCropCancel}
-        />
+        <AvatarCropModal imageSrc={cropSrc} onConfirm={handleCropConfirm} onCancel={handleCropCancel} />
       )}
 
-      <div className="rounded-2xl bg-card p-6 apple-shadow space-y-5">
-        {/* Clickable avatar */}
-        <div className="flex flex-col items-center gap-3">
-          <button
-            className="relative group"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploadingAvatar}
-            title="Upload photo"
-          >
-            <Avatar className="h-20 w-20">
-              {profile.avatarUrl && <AvatarImage src={profile.avatarUrl} alt="Avatar" />}
-              <AvatarFallback className="bg-secondary text-foreground text-xl font-light">
-                {profile.displayName.slice(0, 2).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-            <div className="absolute inset-0 rounded-full bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-              {uploadingAvatar
-                ? <Loader2 className="h-5 w-5 text-white animate-spin" />
-                : <Camera className="h-5 w-5 text-white" />}
+      <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+        {/* ── Profile identity ──────────────────────────── */}
+        <div className="p-6 space-y-5">
+          <div className="flex flex-col items-center gap-3">
+            <button
+              className="relative group"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingAvatar}
+              title="Upload photo"
+            >
+              <Avatar className="h-20 w-20">
+                {profile.avatarUrl && <AvatarImage src={profile.avatarUrl} alt="Avatar" />}
+                <AvatarFallback className="bg-secondary text-foreground text-xl font-light">
+                  {profile.displayName.slice(0, 2).toUpperCase()}
+                </AvatarFallback>
+              </Avatar>
+              <div className="absolute inset-0 rounded-full bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                {uploadingAvatar
+                  ? <Loader2 className="h-5 w-5 text-white animate-spin" />
+                  : <Camera className="h-5 w-5 text-white" />}
+              </div>
+            </button>
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileSelected} />
+            {uploadError && (
+              <div className="flex items-center gap-1.5 text-[11px] text-loss">
+                <AlertCircle className="h-3 w-3 shrink-0" /><span>Upload failed: {uploadError}</span>
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground">Click to change photo</p>
+          </div>
+
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Display Name</Label>
+              <Input value={profile.displayName} onChange={(e) => setProfile(prev => ({ ...prev, displayName: e.target.value }))} className="rounded-xl border-0 bg-secondary text-sm" />
             </div>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleFileSelected}
-          />
-          {uploadError && (
-            <div className="flex items-center gap-1.5 text-[11px] text-loss">
-              <AlertCircle className="h-3 w-3 shrink-0" />
-              <span>Upload failed: {uploadError}</span>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Email</Label>
+              <Input value={profile.email} disabled className="rounded-xl border-0 bg-secondary text-sm opacity-60" />
             </div>
-          )}
-          <p className="text-xs text-muted-foreground">Click to change photo</p>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Kalshi Username</Label>
+              <Input value={profile.kalshiUsername} onChange={(e) => setProfile(prev => ({ ...prev, kalshiUsername: e.target.value }))} placeholder="your-kalshi-username" className="rounded-xl border-0 bg-secondary text-sm" />
+            </div>
+            <Button className="w-full rounded-full gap-2 text-sm" onClick={handleSaveProfile} disabled={saving || loading}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
+              {saving ? "Saving…" : "Save Profile"}
+            </Button>
+          </div>
+
+          <div className="border-t border-border pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-muted-foreground">Plan</span>
+              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                subscription?.tier === "prop"    ? "bg-amber-500/10 text-amber-500" :
+                subscription?.tier === "pro"     ? "bg-primary/10 text-primary" :
+                subscription?.tier === "starter" ? "bg-emerald-500/10 text-emerald-500" :
+                "bg-secondary text-muted-foreground"
+              }`}>
+                {tierLabel(subscription?.tier ?? "free")}
+              </span>
+            </div>
+            {(!subscription || subscription.tier === "free" || subscription.status !== "active") && (
+              <Button variant="outline" size="sm" className="w-full rounded-full gap-1.5 text-xs mt-1" onClick={() => navigate("/billing")}>
+                <Zap className="h-3 w-3" /> Upgrade plan
+              </Button>
+            )}
+          </div>
         </div>
 
-        <div className="space-y-3">
-          <div className="space-y-1.5">
-            <Label className="text-sm text-muted-foreground">Display Name</Label>
-            <Input
-              value={profile.displayName}
-              onChange={(e) => setProfile(prev => ({ ...prev, displayName: e.target.value }))}
-              className="rounded-xl border-0 bg-secondary text-sm"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-muted-foreground">Email</Label>
-            <Input
-              value={profile.email}
-              disabled
-              className="rounded-xl border-0 bg-secondary text-sm opacity-60"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-sm text-muted-foreground">Kalshi Username</Label>
-            <Input
-              value={profile.kalshiUsername}
-              onChange={(e) => setProfile(prev => ({ ...prev, kalshiUsername: e.target.value }))}
-              placeholder="your-kalshi-username"
-              className="rounded-xl border-0 bg-secondary text-sm"
-            />
-          </div>
-          <Button
-            className="w-full rounded-full gap-2 text-sm"
-            onClick={handleSaveProfile}
-            disabled={saving || loading}
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
-            {saving ? "Saving…" : "Save Profile"}
-          </Button>
-        </div>
-
-        {/* Plan */}
-        <div className="border-t border-border pt-4">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-muted-foreground">Plan</span>
-            <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-              subscription?.tier === "prop"    ? "bg-amber-500/10 text-amber-500" :
-              subscription?.tier === "pro"     ? "bg-primary/10 text-primary" :
-              subscription?.tier === "starter" ? "bg-emerald-500/10 text-emerald-500" :
-              "bg-secondary text-muted-foreground"
-            }`}>
-              {tierLabel(subscription?.tier ?? "free")}
+        {/* ── Agent & Account status ────────────────────── */}
+        <div className="border-t border-border">
+          <div className="px-6 py-3 flex items-center gap-2">
+            <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium text-muted-foreground">Agent & Account</span>
+            <span className="flex items-center gap-1 text-[10px] text-profit bg-profit/10 px-2 py-0.5 rounded-full ml-auto">
+              <span className="h-1.5 w-1.5 rounded-full bg-profit animate-pulse-gentle" />
+              Active
             </span>
           </div>
-          {(!subscription || subscription.tier === "free" || subscription.status !== "active") && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full rounded-full gap-1.5 text-xs mt-1"
-              onClick={() => navigate("/billing")}
-            >
-              <Zap className="h-3 w-3" /> Upgrade plan
-            </Button>
-          )}
+          <div className="divide-y divide-border">
+            <div className="flex items-center justify-between px-6 py-3">
+              <span className="text-sm text-muted-foreground">Trading Mode</span>
+              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
+                mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
+              }`}>
+                {mode === "live" ? "Live" : "Paper"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between px-6 py-3">
+              <span className="text-sm text-muted-foreground">AI Provider</span>
+              <div className="flex items-center gap-1.5">
+                {activeProvider
+                  ? <CheckCircle className="h-3 w-3 text-profit" />
+                  : <Circle className="h-3 w-3 text-muted-foreground" />}
+                <span className="text-sm">{activeProvider ? providerLabel[activeProvider] : "Not configured"}</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between px-6 py-3">
+              <span className="text-sm text-muted-foreground">Kalshi</span>
+              <div className="flex items-center gap-1.5">
+                {kalshiConnected
+                  ? <><CheckCircle className="h-3 w-3 text-profit" /><span className="text-sm">Connected</span></>
+                  : <><Circle className="h-3 w-3 text-muted-foreground" /><span className="text-sm text-muted-foreground">Not connected</span></>}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </>
