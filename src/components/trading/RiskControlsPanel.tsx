@@ -13,7 +13,8 @@ export function RiskControlsPanel() {
   const { strategies } = useStrategies();
   const activeStrategies = strategies.filter(s => s.active);
 
-  const [budgets, setBudgets] = useState<Record<string, string>>({});
+  const [totalBudget, setTotalBudget] = useState<string>("3000");
+  const [allocations, setAllocations] = useState<Record<string, number>>({}); // strategy id → % (0-100)
   const [riskSettings, setRiskSettings] = useState({
     maxDailyLoss:     [500],
     maxDrawdown:      [20],
@@ -89,13 +90,16 @@ export function RiskControlsPanel() {
 
   useEffect(() => { loadAll(); loadRiskState(); }, [loadAll, loadRiskState]);
 
-  // Sync budget inputs when strategies load
+  // Derive total budget + allocation % from per-strategy starting_balances on load
   useEffect(() => {
-    const initial: Record<string, string> = {};
+    if (strategies.length === 0) return;
+    const total = strategies.reduce((s, st) => s + (st.starting_balance ?? 0), 0);
+    if (total > 0) setTotalBudget(String(total));
+    const pcts: Record<string, number> = {};
     for (const s of strategies) {
-      initial[s.id] = String(s.starting_balance ?? 1000);
+      pcts[s.id] = total > 0 ? Math.round(((s.starting_balance ?? 0) / total) * 100) : Math.round(100 / strategies.length);
     }
-    setBudgets(initial);
+    setAllocations(pcts);
   }, [strategies]);
 
   const handleSave = async () => {
@@ -125,10 +129,11 @@ export function RiskControlsPanel() {
         await supabase.from("risk_settings").insert(riskPayload);
       }
 
-      // Save per-strategy budgets
+      // Save per-strategy starting_balance = totalBudget × allocation%
+      const total = Math.max(0, parseInt(totalBudget, 10) || 0);
       await Promise.all(
-        Object.entries(budgets).map(([id, val]) => {
-          const amount = Math.max(0, parseInt(val, 10) || 0);
+        Object.entries(allocations).map(([id, pct]) => {
+          const amount = Math.round(total * (pct / 100));
           return supabase.from("strategies").update({ starting_balance: amount }).eq("id", id);
         })
       );
@@ -143,9 +148,8 @@ export function RiskControlsPanel() {
     }
   };
 
-  const totalAllocated = Object.entries(budgets)
-    .filter(([id]) => activeStrategies.some(s => s.id === id))
-    .reduce((sum, [, v]) => sum + (parseInt(v, 10) || 0), 0);
+  const totalBudgetNum = Math.max(0, parseInt(totalBudget, 10) || 0);
+  const totalAllocatedPct = Object.values(allocations).reduce((s, p) => s + p, 0);
 
   return (
     <div className="rounded-2xl bg-card apple-shadow overflow-hidden apple-reveal">
@@ -200,7 +204,7 @@ export function RiskControlsPanel() {
         <Wallet className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-sm font-medium">Agent Budget</h3>
         <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full ml-auto">
-          Soft limits · enforced by risk engine
+          Starting capital reference for ROI tracking
         </span>
       </div>
 
@@ -209,36 +213,57 @@ export function RiskControlsPanel() {
           <p className="text-sm text-muted-foreground">No strategies configured yet.</p>
         ) : (
           <>
-            <div className="space-y-3">
-              {strategies.map(s => (
-                <div key={s.id} className="flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground truncate">{s.name}</p>
-                    <p className="text-[11px] text-muted-foreground">{s.active ? "Active" : "Paused"}</p>
-                  </div>
-                  <div className="relative w-28 shrink-0">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">$</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      step={100}
-                      value={budgets[s.id] ?? ""}
-                      onChange={(e) => setBudgets(prev => ({ ...prev, [s.id]: e.target.value }))}
-                      className="pl-6 rounded-xl border-0 bg-secondary text-sm tabular-nums h-9"
+            {/* Total budget */}
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Total Budget</Label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">$</span>
+                <Input
+                  type="number"
+                  min={0}
+                  step={500}
+                  value={totalBudget}
+                  onChange={(e) => setTotalBudget(e.target.value)}
+                  className="pl-6 rounded-xl border-0 bg-secondary text-sm tabular-nums h-9"
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Your Kalshi balance is the real constraint for live trades — this is the reference capital used for ROI and Kelly sizing. Revoke access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
+              </p>
+            </div>
+
+            {/* Per-strategy allocation % */}
+            <div className="space-y-3 pt-1 border-t border-border">
+              <Label className="text-xs text-muted-foreground uppercase tracking-wide">Allocation per Strategy</Label>
+              {strategies.map(s => {
+                const pct = allocations[s.id] ?? 0;
+                const dollars = Math.round(totalBudgetNum * (pct / 100));
+                return (
+                  <div key={s.id} className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <div className="min-w-0">
+                        <span className="text-sm text-foreground">{s.name}</span>
+                        <span className="ml-1.5 text-[11px] text-muted-foreground">{s.active ? "Active" : "Paused"}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-xs text-muted-foreground tabular-nums">${dollars.toLocaleString()}</span>
+                        <span className="text-sm font-medium tabular-nums w-9 text-right">{pct}%</span>
+                      </div>
+                    </div>
+                    <Slider
+                      value={[pct]}
+                      onValueChange={([v]) => setAllocations(prev => ({ ...prev, [s.id]: v }))}
+                      min={0} max={100} step={5}
                     />
                   </div>
-                </div>
-              ))}
+                );
+              })}
+              {totalAllocatedPct !== 100 && (
+                <p className="text-[11px] text-warning">
+                  Allocations total {totalAllocatedPct}% — adjust to reach 100% for accurate tracking.
+                </p>
+              )}
             </div>
-            <div className="flex items-center justify-between pt-1 border-t border-border">
-              <span className="text-xs text-muted-foreground">Total allocated (active)</span>
-              <span className="text-sm font-semibold tabular-nums">
-                ${totalAllocated.toLocaleString()}
-              </span>
-            </div>
-            <p className="text-[11px] text-muted-foreground">
-              Your Kalshi balance is separate — the agent only uses what you allocate here. Revoke access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
-            </p>
           </>
         )}
       </div>
@@ -283,7 +308,7 @@ export function RiskControlsPanel() {
               <Slider
                 value={riskSettings.maxOpenPositions}
                 onValueChange={(v) => setRiskSettings(prev => ({ ...prev, maxOpenPositions: v }))}
-                max={50} step={1}
+                max={100} step={1}
               />
             </div>
             <div className="space-y-2">
