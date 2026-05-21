@@ -99,9 +99,9 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
     resolution: "Check Deno Deploy / Supabase Edge Function network status. These are usually transient. If sustained, verify the target API domain hasn't changed and that no IP allowlisting is required.",
   },
   memory_pressure: {
-    title: "Memory Pressure",
-    description: "A significant portion of agent memories have been quarantined (exposed confidence below 0.30 threshold) or the total memory count is very high. High quarantine rates indicate the agent is learning conflicting lessons.",
-    resolution: "Review quarantined memories in the Agent Memory panel to understand which lessons were invalidated. Consider running compact-memory to merge and prune the memory graph. High quarantine rate often signals a strategy edge that has degraded.",
+    title: "Memory",
+    description: "A significant portion of agent memories have been quarantined (exposed confidence below 0.30 after 10+ attributed trades). High quarantine count means the agent accumulated lessons that real trade outcomes later contradicted.",
+    resolution: "Review quarantined memories in the Agent Memory panel — look for patterns in which strategies or market conditions produced bad lessons. Run compact-memory to compress and merge the active memory graph (token savings). Quarantined entries can only be cleared by resetting their is_active flag directly in the DB.",
   },
   execution_gap: {
     title: "Execution Gaps",
@@ -802,25 +802,45 @@ export default function ObservabilityPage() {
 
   const loadLatencyData = useCallback(async (uid?: string | null) => {
     const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    let q = supabase
+    // auto_trade_strategy_run is system-level (user_id = NULL) — no uid filter
+    const { data: stratData } = await supabase
       .from("compliance_log")
       .select("created_at, metadata")
       .eq("event_type", "auto_trade_strategy_run")
       .gte("created_at", since7d)
-      .order("created_at", { ascending: false })
+      .order("created_at", { ascending: true })
       .limit(10000);
-    // auto_trade_strategy_run is system-level (user_id = NULL) — no uid filter
-    const { data } = await q;
-    if (data) {
-      setStratRunDurations(
-        data
-          .map((e: any) => ({
-            ts: new Date(e.created_at).getTime(),
-            seconds: parseFloat(e.metadata?.elapsed_seconds ?? "0"),
-          }))
-          .filter((d) => d.seconds > 0)
-      );
+
+    const stratDurations = (stratData ?? [])
+      .map((e: any) => ({
+        ts: new Date(e.created_at).getTime(),
+        seconds: parseFloat(e.metadata?.elapsed_seconds ?? "0"),
+      }))
+      .filter((d) => d.seconds > 0);
+
+    // Fallback: if strategy run events are sparse (agent crashing before it logs),
+    // derive cycle time from consecutive auto_trade_run timestamps.
+    // Only include intervals < 5 min to exclude gap outliers.
+    if (stratDurations.length < 10) {
+      const { data: runData } = await supabase
+        .from("compliance_log")
+        .select("created_at")
+        .eq("event_type", "auto_trade_run")
+        .gte("created_at", since7d)
+        .order("created_at", { ascending: true })
+        .limit(10000);
+
+      if (runData && runData.length > 1) {
+        const intervals = runData.slice(1).map((e: any, i: number) => ({
+          ts: new Date(e.created_at).getTime(),
+          seconds: (new Date(e.created_at).getTime() - new Date(runData[i].created_at).getTime()) / 1000,
+        })).filter((d) => d.seconds > 0 && d.seconds < 300); // exclude gaps > 5 min
+        setStratRunDurations([...stratDurations, ...intervals]);
+        return;
+      }
     }
+
+    setStratRunDurations(stratDurations);
   }, []);
 
   const loadSurfaceScanLatency = useCallback(async (uid?: string | null) => {
@@ -1871,8 +1891,9 @@ export default function ObservabilityPage() {
                   dataKey="avg"
                   stroke="hsl(var(--primary))"
                   strokeWidth={1.5}
-                  dot={false}
-                  connectNulls={false}
+                  dot={{ r: 2, fill: "hsl(var(--primary))" }}
+                  activeDot={{ r: 4 }}
+                  connectNulls={true}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -2494,23 +2515,28 @@ export default function ObservabilityPage() {
                       : `${mode.count} quarantined memories · ${failureModes.memory_pressure.extra ?? ""}`}
                   </p>
                   {selectedFailureMode === "memory_pressure" && (
-                    <button
-                      disabled={clearingMemory}
-                      onClick={async () => {
-                        setClearingMemory(true);
-                        const { data: { session } } = await supabase.auth.getSession();
-                        await fetch(
-                          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
-                          { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
-                        ).catch(() => {});
-                        setClearingMemory(false);
-                        loadAll(viewUserId);
-                        setSelectedFailureMode(null);
-                      }}
-                      className="w-full mt-3 py-2.5 rounded-xl bg-red-500/10 text-red-400 text-xs font-medium hover:bg-red-500/20 transition-colors disabled:opacity-50"
-                    >
-                      {clearingMemory ? "Running compact-memory…" : "Clear Quarantine — Run compact-memory"}
-                    </button>
+                    <>
+                      <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
+                        compact-memory summarizes active memories (saves tokens) and merges clusters of 3+ related entries. It does not reduce the quarantine count — quarantined entries must be reset directly in the DB.
+                      </p>
+                      <button
+                        disabled={clearingMemory}
+                        onClick={async () => {
+                          setClearingMemory(true);
+                          const { data: { session } } = await supabase.auth.getSession();
+                          await fetch(
+                            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
+                            { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
+                          ).catch(() => {});
+                          setClearingMemory(false);
+                          loadAll(viewUserId);
+                          setSelectedFailureMode(null);
+                        }}
+                        className="w-full mt-2 py-2.5 rounded-xl bg-secondary text-foreground text-xs font-medium hover:bg-secondary/80 transition-colors disabled:opacity-50"
+                      >
+                        {clearingMemory ? "Running compact-memory…" : "Run compact-memory"}
+                      </button>
+                    </>
                   )}
                 </div>
               )}
