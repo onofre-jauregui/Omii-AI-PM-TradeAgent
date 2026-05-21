@@ -167,7 +167,7 @@ export function DashboardHero({
       // Open positions: filled but not yet settled
       supabase
         .from("trades")
-        .select("id")
+        .select("id, ticker")
         .eq("status", "filled")
         .eq("user_id", userId ?? "")
         .is("settled_at", null),
@@ -222,10 +222,12 @@ export function DashboardHero({
     const losers = modeTrades.filter(t => (t.pnl ?? 0) < 0).length;
     const winRate = winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0;
 
-    // Markets closing within 24h
+    // Markets closing within 24h that the user has an open position in
+    const openTickers = new Set((openTrades as any[]).map(t => t.ticker).filter(Boolean));
     const cutoff = Date.now() + 24 * 60 * 60 * 1000;
     const marketsClosingToday = markets.filter(m => {
-      if (!m.closeTime) return false;
+      if (!m.closeTime || !m.ticker) return false;
+      if (!openTickers.has(m.ticker)) return false;
       const t = new Date(m.closeTime).getTime();
       return t > Date.now() && t < cutoff;
     }).length;
@@ -433,7 +435,7 @@ export function DashboardHero({
         {marketsClosingToday > 0 && (
           <AlertChip
             icon={<Clock className="h-3 w-3" />}
-            label={`${marketsClosingToday} market${marketsClosingToday === 1 ? "" : "s"} close today`}
+            label={`${marketsClosingToday} of your position${marketsClosingToday === 1 ? "" : "s"} settle today`}
             color="warning"
             onClick={() => onNavigate?.("markets")}
           />

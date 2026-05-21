@@ -63,7 +63,8 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
     // Group settled trades by day (settled_at date)
     const dayMap = new Map<string, typeof trades>();
     for (const t of trades) {
-      const day = new Date((t.settled_at ?? "") + "T12:00:00Z").toLocaleDateString("en-US", {
+      const rawDate = (t.settled_at ?? "").slice(0, 10); // "2026-05-21" — strip time before appending
+      const day = new Date(rawDate + "T12:00:00Z").toLocaleDateString("en-US", {
         month: "short", day: "numeric",
       });
       if (!dayMap.has(day)) dayMap.set(day, []);
