@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Bot, Loader2, Eye, EyeOff } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
@@ -63,18 +62,11 @@ export function AuthPage() {
   };
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center px-4"
-      style={{ backgroundColor: "#0f0d0b", color: "#eee8df" }}
-    >
+    <div className="min-h-screen flex items-center justify-center px-4 bg-background">
       <div className="w-full max-w-sm">
         {/* Back link */}
         <div className="mb-6">
-          <a
-            href="/"
-            className="inline-flex items-center gap-1.5 text-xs"
-            style={{ color: "#8a7f74" }}
-          >
+          <a href="/" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
             ← Back to home
           </a>
         </div>
@@ -82,24 +74,21 @@ export function AuthPage() {
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <div className="flex items-center gap-2 mb-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-500">
-              <Bot className="h-4 w-4 text-white" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
+              <Bot className="h-4 w-4 text-primary-foreground" />
             </div>
-            <span className="text-lg font-medium tracking-tight" style={{ color: "#eee8df" }}>Omii TradeAgent</span>
+            <span className="text-lg font-medium tracking-tight text-foreground">Omii TradeAgent</span>
           </div>
-          <p className="text-xs" style={{ color: "#8a7f74" }}>AI-powered Kalshi trading</p>
+          <p className="text-xs text-muted-foreground">AI-powered Kalshi trading</p>
         </div>
 
         {/* Card */}
-        <div
-          className="rounded-2xl p-6 space-y-5"
-          style={{ backgroundColor: "#1c1814", border: "1px solid #2e2720" }}
-        >
+        <div className="rounded-2xl bg-card border border-border p-6 space-y-5 apple-shadow">
           <div>
-            <h2 className="text-base font-medium" style={{ color: "#eee8df" }}>
+            <h2 className="text-base font-medium text-foreground">
               {mode === "login" ? "Sign in" : "Create account"}
             </h2>
-            <p className="text-xs mt-0.5" style={{ color: "#8a7f74" }}>
+            <p className="text-xs mt-0.5 text-muted-foreground">
               {mode === "login" ? "Access your trading dashboard" : "Start trading with AI"}
             </p>
           </div>
@@ -109,22 +98,21 @@ export function AuthPage() {
             type="button"
             onClick={handleGoogleLogin}
             disabled={loading}
-            className="w-full flex items-center justify-center gap-2.5 rounded-full text-sm font-medium py-2.5 transition-colors disabled:opacity-50"
-            style={{ border: "1px solid #2e2720", backgroundColor: "#241f1a", color: "#eee8df" }}
+            className="w-full flex items-center justify-center gap-2.5 rounded-full text-sm font-medium py-2.5 border border-border bg-secondary text-foreground hover:bg-secondary/70 transition-colors disabled:opacity-50"
           >
             <GoogleIcon />
             Continue with Google
           </button>
 
           <div className="flex items-center gap-3">
-            <div className="flex-1 h-px" style={{ backgroundColor: "#2e2720" }} />
-            <span className="text-xs" style={{ color: "#8a7f74" }}>or</span>
-            <div className="flex-1 h-px" style={{ backgroundColor: "#2e2720" }} />
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-xs text-muted-foreground">or</span>
+            <div className="flex-1 h-px bg-border" />
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-sm" style={{ color: "#8a7f74" }}>Email</Label>
+              <Label className="text-sm text-muted-foreground">Email</Label>
               <Input
                 type="email"
                 value={email}
@@ -132,13 +120,12 @@ export function AuthPage() {
                 placeholder="you@example.com"
                 required
                 autoComplete="email"
-                className="rounded-xl border-0 text-sm"
-                style={{ backgroundColor: "#241f1a", color: "#eee8df" }}
+                className="rounded-xl text-sm bg-secondary border-border"
               />
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-sm" style={{ color: "#8a7f74" }}>Password</Label>
+              <Label className="text-sm text-muted-foreground">Password</Label>
               <div className="relative">
                 <Input
                   type={showPassword ? "text" : "password"}
@@ -147,14 +134,12 @@ export function AuthPage() {
                   placeholder="••••••••"
                   required
                   autoComplete={mode === "login" ? "current-password" : "new-password"}
-                  className="rounded-xl border-0 text-sm pr-10"
-                  style={{ backgroundColor: "#241f1a", color: "#eee8df" }}
+                  className="rounded-xl text-sm pr-10 bg-secondary border-border"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 transition-colors"
-                  style={{ color: "#8a7f74" }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
                 >
                   {showPassword ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                 </button>
@@ -162,17 +147,16 @@ export function AuthPage() {
             </div>
 
             {error && (
-              <p className="text-xs rounded-lg px-3 py-2" style={{ color: "#f87171", backgroundColor: "rgba(248,113,113,0.1)" }}>{error}</p>
+              <p className="text-xs rounded-lg px-3 py-2 text-red-400 bg-red-500/10">{error}</p>
             )}
             {message && (
-              <p className="text-xs rounded-lg px-3 py-2" style={{ color: "#4ade80", backgroundColor: "rgba(74,222,128,0.1)" }}>{message}</p>
+              <p className="text-xs rounded-lg px-3 py-2 text-profit bg-profit/10">{message}</p>
             )}
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full rounded-full text-sm font-semibold py-2.5 transition-colors disabled:opacity-50 flex items-center justify-center"
-              style={{ backgroundColor: "#f97316", color: "#fff" }}
+              className="w-full rounded-full text-sm font-semibold py-2.5 bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center"
             >
               {loading && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
               {mode === "login" ? "Sign in" : "Create account"}
@@ -183,8 +167,7 @@ export function AuthPage() {
             <button
               type="button"
               onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(null); setMessage(null); }}
-              className="text-xs transition-colors"
-              style={{ color: "#8a7f74" }}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
               {mode === "login" ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
             </button>

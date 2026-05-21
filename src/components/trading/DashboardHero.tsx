@@ -188,13 +188,6 @@ export function DashboardHero({
     const losers = modeTrades.filter(t => (t.pnl ?? 0) < 0).length;
     const winRate = winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0;
 
-    // Win streak from most recent settled trades
-    let winStreak = 0;
-    for (const t of modeTrades) {
-      if ((t.pnl ?? 0) > 0) winStreak++;
-      else break;
-    }
-
     // Markets closing within 24h
     const cutoff = Date.now() + 24 * 60 * 60 * 1000;
     const marketsClosingToday = markets.filter(m => {
@@ -203,12 +196,20 @@ export function DashboardHero({
       return t > Date.now() && t < cutoff;
     }).length;
 
-    // Build equity curve from settled trades (modeTrades is descending — sort ascending for chart)
+    // Build daily P&L map — shared by streak calc and chart
     const byDay: Record<string, number> = {};
     for (const t of modeTrades) {
       const day = (t.settled_at ?? "").slice(0, 10);
       if (!day) continue;
       byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
+    }
+
+    // Win streak = consecutive days with positive net P&L, working backwards from most recent
+    let winStreak = 0;
+    const sortedDays = Object.keys(byDay).sort().reverse();
+    for (const day of sortedDays) {
+      if (byDay[day] > 0) winStreak++;
+      else break;
     }
     // Fill every calendar date Apr 22 → today so the chart is continuous
     let cum = startingBalance;
