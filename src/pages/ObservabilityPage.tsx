@@ -823,6 +823,7 @@ export default function ObservabilityPage() {
     loadMemories,
     loadActiveModel,
     loadLatencyData,
+    loadUserList,
     decisionDateFilter,
     decisionStatusFilter,
   ]);
@@ -830,12 +831,29 @@ export default function ObservabilityPage() {
   useEffect(() => {
     setTracePage(1);
     setTraceExpanded(false);
-    loadTraceLogs();
-  }, [traceDay, loadTraceLogs]);
+    loadTraceLogs(viewUserId);
+  }, [traceDay, viewUserId, loadTraceLogs]);
 
   useEffect(() => {
-    loadDecisionHistory(decisionDateFilter, decisionStatusFilter);
-  }, [decisionDateFilter, decisionStatusFilter, loadDecisionHistory]);
+    loadDecisionHistory(decisionDateFilter, decisionStatusFilter, viewUserId);
+  }, [decisionDateFilter, decisionStatusFilter, viewUserId, loadDecisionHistory]);
+
+  // Re-fetch all data when admin switches user view
+  useEffect(() => {
+    if (!isAdmin) return; // only fires for admin
+    loadHeroStatus(viewUserId);
+    loadHeroFeed(viewUserId);
+    loadTraceLogs(viewUserId);
+    loadPerformance(viewUserId);
+    loadComplianceLast30d(viewUserId);
+    loadModelLatency(viewUserId);
+    loadActivity24h(viewUserId);
+    loadErrors24h(viewUserId);
+    loadErrors(viewUserId);
+    loadStrategies(viewUserId);
+    loadMemories(viewUserId);
+    loadLatencyData(viewUserId);
+  }, [viewUserId, isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Real-time + polling fallback
   useEffect(() => {
@@ -1236,6 +1254,36 @@ export default function ObservabilityPage() {
           <span className="text-muted-foreground/40 text-sm">·</span>
           <span className="text-sm text-muted-foreground">Observability</span>
         </div>
+        {isAdmin && (
+          <div className="absolute left-1/2 -translate-x-1/2">
+            <Select
+              value={viewUserId ?? "__platform__"}
+              onValueChange={(v) => setViewUserId(v === "__platform__" ? null : v)}
+            >
+              <SelectTrigger className="h-7 text-xs w-[220px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__platform__">
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block" />
+                    Platform View · {userList.length} users
+                  </span>
+                </SelectItem>
+                <SelectSeparator />
+                {userList.map((u) => (
+                  <SelectItem key={u.id} value={u.id}>
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block" />
+                      {u.id.slice(0, 8)}…
+                      <span className="text-muted-foreground ml-1 text-[10px]">{u.strategyCount} strat</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
           <span
             className={`h-2 w-2 rounded-full transition-opacity duration-500 ${
@@ -1258,6 +1306,21 @@ export default function ObservabilityPage() {
           >
             Sign in →
           </a>
+        </div>
+      )}
+
+      {/* Admin view banners */}
+      {isAdmin && !viewUserId && (
+        <div className="px-8 py-2 text-xs flex items-center gap-2 border-b" style={{ color: "#60a5fa", backgroundColor: "rgba(59,130,246,0.05)", borderColor: "rgba(59,130,246,0.1)" }}>
+          <span className="h-1.5 w-1.5 rounded-full bg-blue-400 inline-block flex-shrink-0" />
+          Platform View — aggregated across all {userList.length} accounts · ROI hidden (select a user to see per-account return)
+        </div>
+      )}
+      {isAdmin && viewUserId && (
+        <div className="px-8 py-2 text-xs flex items-center gap-2 border-b" style={{ color: "#fb923c", backgroundColor: "rgba(249,115,22,0.05)", borderColor: "rgba(249,115,22,0.1)" }}>
+          <span className="h-1.5 w-1.5 rounded-full bg-orange-400 inline-block flex-shrink-0" />
+          Viewing User {viewUserId.slice(0, 8)}…
+          <button onClick={() => setViewUserId(null)} className="underline ml-1">← back to platform view</button>
         </div>
       )}
 
