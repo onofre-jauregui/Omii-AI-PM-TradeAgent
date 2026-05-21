@@ -380,6 +380,14 @@ export default function ObservabilityPage() {
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
   const [avgCycleMs, setAvgCycleMs] = useState<number | null>(null);
+  // Real token usage from llm_usage compliance_log events (actual API response counts)
+  const [realTokenStats, setRealTokenStats] = useState<{
+    calls: number;
+    avgInputTokens: number | null;
+    avgOutputTokens: number | null;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+  } | null>(null);
 
   const [stratRunDurations, setStratRunDurations] = useState<{ ts: number; seconds: number }[]>([]);
 
@@ -807,6 +815,30 @@ export default function ObservabilityPage() {
     if (data?.key_id) setActiveModel(data.key_id as string);
   }, []);
 
+  const loadRealTokenStats = useCallback(async () => {
+    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    // llm_usage events are system-level (user_id = NULL) — no uid filter
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("metadata")
+      .eq("event_type", "llm_usage")
+      .gte("created_at", since30d)
+      .limit(10000);
+    if (!data || data.length === 0) { setRealTokenStats(null); return; }
+    const rows = data as { metadata: any }[];
+    const withInput = rows.filter((r) => r.metadata?.prompt_tokens != null);
+    const withOutput = rows.filter((r) => r.metadata?.completion_tokens != null);
+    const totalInput = withInput.reduce((s, r) => s + (r.metadata.prompt_tokens as number), 0);
+    const totalOutput = withOutput.reduce((s, r) => s + (r.metadata.completion_tokens as number), 0);
+    setRealTokenStats({
+      calls: rows.length,
+      avgInputTokens: withInput.length > 0 ? Math.round(totalInput / withInput.length) : null,
+      avgOutputTokens: withOutput.length > 0 ? Math.round(totalOutput / withOutput.length) : null,
+      totalInputTokens: totalInput,
+      totalOutputTokens: totalOutput,
+    });
+  }, []);
+
   const loadLatencyData = useCallback(async (uid?: string | null) => {
     const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     // auto_trade_strategy_run is system-level (user_id = NULL) — no uid filter
@@ -936,10 +968,12 @@ export default function ObservabilityPage() {
     loadSurfaceScanLatency(uid);
     loadExecutionGaps();
     loadActiveModel();
+    loadRealTokenStats();
   }, [
     loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
     loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
     loadMemories, loadLatencyData, loadSurfaceScanLatency, loadExecutionGaps, loadActiveModel,
+    loadRealTokenStats,
   ]);
 
   // Session init — fires once on mount. Gets userId for profile display + populates user list.
@@ -1805,22 +1839,40 @@ export default function ObservabilityPage() {
               <div className="grid grid-cols-4 gap-3">
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">LLM Calls</p>
-                  <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {(realTokenStats?.calls ?? llmCallsLast30d).toLocaleString()}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {realTokenStats ? "measured · qualify events" : "strategy evaluations est."}
+                  </p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input Tokens</p>
                   <p className="text-base font-bold tabular-nums">
-                    {inputTokens30d >= 1_000_000 ? `${(inputTokens30d / 1_000_000).toFixed(2)}M` : `${(inputTokens30d / 1_000).toFixed(0)}K`}
+                    {(() => {
+                      const n = realTokenStats ? realTokenStats.totalInputTokens : inputTokens30d;
+                      return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : `${(n / 1_000).toFixed(0)}K`;
+                    })()}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">~{QUALIFY_INPUT_TOKENS.toLocaleString()} / call est.</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {realTokenStats?.avgInputTokens != null
+                      ? `${realTokenStats.avgInputTokens.toLocaleString()} / call measured`
+                      : `~${QUALIFY_INPUT_TOKENS.toLocaleString()} / call est.`}
+                  </p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output Tokens</p>
                   <p className="text-base font-bold tabular-nums">
-                    {outputTokens30d >= 1_000_000 ? `${(outputTokens30d / 1_000_000).toFixed(2)}M` : `${(outputTokens30d / 1_000).toFixed(0)}K`}
+                    {(() => {
+                      const n = realTokenStats ? realTokenStats.totalOutputTokens : outputTokens30d;
+                      return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : `${(n / 1_000).toFixed(0)}K`;
+                    })()}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">~{QUALIFY_OUTPUT_TOKENS} / call est.</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {realTokenStats?.avgOutputTokens != null
+                      ? `${realTokenStats.avgOutputTokens} / call measured`
+                      : `~${QUALIFY_OUTPUT_TOKENS} / call est.`}
+                  </p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
