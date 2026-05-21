@@ -410,6 +410,7 @@ export default function ObservabilityPage() {
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
   const [clearingMemory, setClearingMemory] = useState(false);
+  const [selectedTimelineHour, setSelectedTimelineHour] = useState<{ label: string; events: ComplianceEvent[] } | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [showFullHistory, setShowFullHistory] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(false);
@@ -1237,30 +1238,28 @@ export default function ObservabilityPage() {
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
   const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents);
 
-  // 24h failure timeline — bucket all failure events by hour
+  // 24h failure timeline — bucket all failure events by hour, include events array for drill-down
+  const allFailureEventsFlat = [
+    ...failureModes.llm_timeout.events,
+    ...failureModes.kalshi_timeout.events,
+    ...failureModes.llm_rate_limit.events,
+    ...failureModes.exchange_error.events,
+    ...failureModes.strategy_error.events,
+    ...failureModes.pii_detected.events,
+    ...failureModes.db_connection.events,
+    ...failureModes.network_failure.events,
+  ];
   const failureTimeline = (() => {
     const now = Date.now();
-    const allFailureEvents = [
-      ...failureModes.llm_timeout.events,
-      ...failureModes.kalshi_timeout.events,
-      ...failureModes.llm_rate_limit.events,
-      ...failureModes.exchange_error.events,
-      ...failureModes.strategy_error.events,
-      ...failureModes.pii_detected.events,
-      ...failureModes.db_connection.events,
-      ...failureModes.network_failure.events,
-    ];
     return Array.from({ length: 24 }, (_, i) => {
       const hourStart = now - (23 - i) * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
       const label = new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" });
-      return {
-        hour: label,
-        count: allFailureEvents.filter((e) => {
-          const t = new Date(e.created_at).getTime();
-          return t >= hourStart && t < hourEnd;
-        }).length,
-      };
+      const events = allFailureEventsFlat.filter((e) => {
+        const t = new Date(e.created_at).getTime();
+        return t >= hourStart && t < hourEnd;
+      });
+      return { hour: label, count: events.length, events };
     });
   })();
 
@@ -1326,12 +1325,10 @@ export default function ObservabilityPage() {
     ? scanDurations.reduce((s, v) => s + v, 0) / scanDurations.length
     : null;
 
-  // Execution gap log URL helper — links to Supabase Edge Function logs with ±5 min buffer
-  const gapLogsUrl = (from: string, to: string) => {
-    const start = new Date(new Date(from).getTime() - 5 * 60_000).toISOString();
-    const end = new Date(new Date(to).getTime() + 5 * 60_000).toISOString();
-    return `https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/logs/edge-functions?iso_timestamp_start=${encodeURIComponent(start)}&iso_timestamp_end=${encodeURIComponent(end)}`;
-  };
+  // Execution gap log URL — Supabase edge function logs page (timestamp URL params not supported by dashboard).
+  // Opens the logs page; use the Supabase time picker to navigate to the gap window shown in the link text.
+  const gapLogsUrl = (_from: string, _to: string) =>
+    `https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/logs/edge-functions`;
 
   // Trace pagination
   const TRACE_PAGE_SIZE = 30;
@@ -1524,12 +1521,21 @@ export default function ObservabilityPage() {
             </div>
             {failureTimeline.some((h) => h.count > 0) && (
               <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline</p>
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">24h Failure Timeline <span className="normal-case tracking-normal opacity-60 lowercase">· click a bar to see events</span></p>
                 <ResponsiveContainer width="100%" height={70}>
                   <BarChart data={failureTimeline} barSize={10}>
                     <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
                     <Tooltip formatter={(v: number) => [v, "events"]} contentStyle={{ fontSize: 10, borderRadius: 6 }} />
-                    <Bar dataKey="count" fill="#ef4444" fillOpacity={0.7} radius={[2, 2, 0, 0]} />
+                    <Bar
+                      dataKey="count"
+                      fill="#ef4444"
+                      fillOpacity={0.7}
+                      radius={[2, 2, 0, 0]}
+                      style={{ cursor: "pointer" }}
+                      onClick={(data: any) => {
+                        if (data.count > 0) setSelectedTimelineHour({ label: data.hour, events: data.events });
+                      }}
+                    />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -2554,9 +2560,10 @@ export default function ObservabilityPage() {
                             href={gapLogsUrl(g.from, g.to)}
                             target="_blank"
                             rel="noopener noreferrer"
+                            title={`Set Supabase time picker to: ${fmtDate(g.from)} – ${fmtDate(g.to)}`}
                             className="text-[10px] text-primary hover:opacity-80 transition-opacity shrink-0 ml-2"
                           >
-                            View logs →
+                            Open logs ↗
                           </a>
                         </div>
                       </div>
@@ -2707,6 +2714,49 @@ export default function ObservabilityPage() {
                 </tbody>
               </table>
             )}
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* ── Timeline Hour Drill-Down Modal ───────────────────────────── */}
+    {selectedTimelineHour && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        onClick={() => setSelectedTimelineHour(null)}
+      >
+        <div
+          className="bg-card rounded-2xl apple-shadow w-full max-w-xl max-h-[80vh] overflow-hidden flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-6 py-4 border-b border-border flex items-center justify-between shrink-0">
+            <div>
+              <h3 className="text-sm font-semibold">Failures at {selectedTimelineHour.label}</h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">{selectedTimelineHour.events.length} event{selectedTimelineHour.events.length !== 1 ? "s" : ""} in this hour</p>
+            </div>
+            <button onClick={() => setSelectedTimelineHour(null)} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
+          </div>
+          <div className="overflow-y-auto flex-1 divide-y divide-border">
+            {selectedTimelineHour.events
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+              .map((ev) => {
+                const category = Object.entries(failureModes).find(([, m]) => m.events.some((e) => e.id === ev.id))?.[0];
+                const categoryTitle = category ? FAILURE_MODE_DETAILS[category]?.title : null;
+                return (
+                  <div key={ev.id} className="px-6 py-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-[10px] font-semibold uppercase ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>
+                        {ev.severity}
+                      </span>
+                      {categoryTitle && (
+                        <span className="text-[10px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded-full">{categoryTitle}</span>
+                      )}
+                      <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{fmtTime(ev.created_at)}</span>
+                    </div>
+                    <p className="text-[12px] text-foreground leading-snug">{ev.message}</p>
+                  </div>
+                );
+              })}
           </div>
         </div>
       </div>
