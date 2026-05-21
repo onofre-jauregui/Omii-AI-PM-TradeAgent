@@ -67,12 +67,12 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Free Trial",
     monthlyPriceUsd: 0,
     limits: {
-      maxTradesPerDay: 5,
-      maxOpenPositions: 2,
-      maxPositionUsd: 25,
-      maxMarketsWatched: 10,
+      maxTradesPerDay: 999999,
+      maxOpenPositions: 999999,
+      maxPositionUsd: 999999,
+      maxMarketsWatched: 999999,
       liveTradingEnabled: false,
-      allowedStrategies: ["S-004"],
+      allowedStrategies: ALL_STRATEGIES, // paper trades always allowed regardless of strategy
     },
   },
   starter: {
@@ -80,10 +80,10 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Starter",
     monthlyPriceUsd: 99,
     limits: {
-      maxTradesPerDay: 25,
-      maxOpenPositions: 8,
-      maxPositionUsd: 100,
-      maxMarketsWatched: 50,
+      maxTradesPerDay: 999999,
+      maxOpenPositions: 999999,
+      maxPositionUsd: 999999, // user enforces via in-app risk controls
+      maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ["S-001", "S-002", "S-004"],
     },
@@ -93,10 +93,10 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Pro",
     monthlyPriceUsd: 199,
     limits: {
-      maxTradesPerDay: 100,
-      maxOpenPositions: 25,
-      maxPositionUsd: 500,
-      maxMarketsWatched: 200,
+      maxTradesPerDay: 999999,
+      maxOpenPositions: 999999,
+      maxPositionUsd: 999999, // user enforces via in-app risk controls
+      maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
     },
@@ -106,10 +106,10 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Prop",
     monthlyPriceUsd: 999,
     limits: {
-      maxTradesPerDay: 1000,
-      maxOpenPositions: 100,
-      maxPositionUsd: 5000,
-      maxMarketsWatched: 1000,
+      maxTradesPerDay: 999999,
+      maxOpenPositions: 999999,
+      maxPositionUsd: 999999,
+      maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
     },
@@ -206,18 +206,6 @@ export function checkEntitlement(
     return {
       allowed: false,
       reason: `Strategy ${input.strategy} is not available on your current tier. Upgrade for access.`,
-      limits,
-    };
-  }
-
-  // Position size must be within tier limit
-  if (
-    input.positionUsd !== undefined &&
-    input.positionUsd > limits.maxPositionUsd
-  ) {
-    return {
-      allowed: false,
-      reason: `Position size $${input.positionUsd} exceeds tier limit $${limits.maxPositionUsd}.`,
       limits,
     };
   }

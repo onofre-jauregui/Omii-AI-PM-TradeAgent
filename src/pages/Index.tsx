@@ -16,7 +16,7 @@ import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
-import { Bot } from "lucide-react";
+import { Bot, Lock } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 
 type Tab = "dashboard" | "agent" | "markets" | "settings";
@@ -34,6 +34,8 @@ const Index = () => {
   const [mode, setMode] = useState<Mode>("paper");
   const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history" | "memory">("chat");
   const [userEmail, setUserEmail] = useState<string | undefined>();
+  const [subscriptionTier, setSubscriptionTier] = useState<"free" | "starter" | "pro" | "prop">("free");
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const navigate = useNavigate();
   const isMobile = useIsMobile();
 
@@ -41,19 +43,25 @@ const Index = () => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       setUserEmail(session?.user?.email ?? undefined);
       if (session?.user?.id) {
-        const { data } = await supabase
-          .from("profiles")
-          .select("trading_mode")
-          .eq("id", session.user.id)
-          .single();
-        if (data?.trading_mode === "live" || data?.trading_mode === "paper") {
-          setMode(data.trading_mode);
+        const [profileRes, subRes] = await Promise.all([
+          supabase.from("profiles").select("trading_mode").eq("id", session.user.id).single(),
+          supabase.from("subscriptions").select("tier, status").eq("user_id", session.user.id).maybeSingle(),
+        ]);
+        if (profileRes.data?.trading_mode === "live" || profileRes.data?.trading_mode === "paper") {
+          setMode(profileRes.data.trading_mode);
+        }
+        if (subRes.data?.tier && (subRes.data.status === "active" || subRes.data.status === "trialing")) {
+          setSubscriptionTier(subRes.data.tier as typeof subscriptionTier);
         }
       }
     });
   }, []);
 
   async function handleModeChange(next: Mode) {
+    if (next === "live" && subscriptionTier === "free") {
+      setShowUpgradeModal(true);
+      return;
+    }
     setMode(next);
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
@@ -71,6 +79,48 @@ const Index = () => {
 
   return (
     <div className="flex min-h-screen bg-background">
+      {/* Upgrade modal — shown when free-tier user tries to enable live trading */}
+      {showUpgradeModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}
+          onClick={() => setShowUpgradeModal(false)}
+        >
+          <div
+            className="relative w-full max-w-sm rounded-2xl p-8 text-center"
+            style={{ background: "var(--background)", boxShadow: "0 24px 48px rgba(0,0,0,0.2)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="mx-auto mb-4 flex items-center justify-center rounded-full"
+              style={{ width: 48, height: 48, background: "var(--secondary)" }}
+            >
+              <Lock className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <h2 className="text-lg font-semibold text-foreground mb-2">Live trading is locked</h2>
+            <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
+              Your current plan only supports paper trading. Upgrade to Starter ($99/mo) to enable live trading on Kalshi.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => { setShowUpgradeModal(false); navigate("/billing"); }}
+                className="w-full rounded-full py-3 text-sm font-medium text-white"
+                style={{ background: "#0071e3" }}
+              >
+                View plans
+              </button>
+              <button
+                onClick={() => setShowUpgradeModal(false)}
+                className="w-full rounded-full py-3 text-sm font-medium text-muted-foreground"
+                style={{ background: "var(--secondary)" }}
+              >
+                Stay on paper
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {!isMobile && (
         <Sidebar activeTab={activeTab} onNavigate={handleNavigate} userEmail={userEmail} />
       )}
