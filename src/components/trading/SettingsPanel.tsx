@@ -74,6 +74,7 @@ export function SettingsPanel() {
   const [aiSaveStatus, setAiSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [kalshiSaving, setKalshiSaving] = useState(false);
   const [kalshiSaveStatus, setKalshiSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [kalshiSaveError, setKalshiSaveError] = useState<string | null>(null);
 
   // Model selector
   const [models] = useState<AIModel[]>(FALLBACK_MODELS);
@@ -198,20 +199,24 @@ export function SettingsPanel() {
     if (!kalshiLive.key_id || !kalshiLive.private_key) return;
     setKalshiSaving(true);
     setKalshiSaveStatus("idle");
+    setKalshiSaveError(null);
     try {
       const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Not authenticated — please sign in again");
       const resp = await fetch(SAVE_KALSHI_KEY_URL, {
         method: "POST",
-        headers: { Authorization: `Bearer ${session?.access_token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ key_id: kalshiLive.key_id.trim(), private_key: kalshiLive.private_key.trim() }),
       });
-      const json = await resp.json();
-      if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
+      const json = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
+      if (!resp.ok || !json.ok) throw new Error(json.error ?? `Server error ${resp.status}`);
       setSavedProviders(prev => new Set([...prev, "kalshi_live"]));
-      await loadAll();
       setKalshiSaveStatus("success");
       setTimeout(() => setKalshiSaveStatus("idle"), 3000);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Save failed";
+      console.error("Kalshi key save failed:", msg);
+      setKalshiSaveError(msg);
       setKalshiSaveStatus("error");
     } finally {
       setKalshiSaving(false);
@@ -396,10 +401,16 @@ export function SettingsPanel() {
              kalshiSaveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
              kalshiSaveStatus === "error" ? <AlertCircle className="h-4 w-4" /> :
              <Save className="h-4 w-4" />}
-            {kalshiSaveStatus === "success" ? "Kalshi credentials saved" :
-             kalshiSaveStatus === "error" ? "Save failed — try again" :
+            {kalshiSaveStatus === "success" ? "Kalshi credentials saved — configured" :
+             kalshiSaveStatus === "error" ? "Save failed" :
              "Save Kalshi Keys"}
           </Button>
+          {kalshiSaveError && (
+            <p className="mt-2 text-[11px] text-loss flex items-center gap-1">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              {kalshiSaveError}
+            </p>
+          )}
         </div>
       </div>
 
