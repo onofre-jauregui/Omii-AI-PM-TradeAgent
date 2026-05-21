@@ -184,7 +184,6 @@ function HeroDashboardMockup() {
     <div
       className="relative w-full overflow-hidden"
       style={{
-        aspectRatio: "16/9",
         maxWidth: 900,
         borderRadius: 24,
         background: "linear-gradient(160deg, #1a1a1a 0%, #0d0d0d 100%)",
