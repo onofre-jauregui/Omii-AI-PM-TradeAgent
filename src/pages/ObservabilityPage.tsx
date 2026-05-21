@@ -1252,7 +1252,7 @@ export default function ObservabilityPage() {
   ];
   const failureTimeline = (() => {
     const now = Date.now();
-    return Array.from({ length: 24 }, (_, i) => {
+    const buckets = Array.from({ length: 24 }, (_, i) => {
       const hourStart = now - (23 - i) * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
       const label = new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" });
@@ -1260,9 +1260,16 @@ export default function ObservabilityPage() {
         const t = new Date(e.created_at).getTime();
         return t >= hourStart && t < hourEnd;
       });
-      // barValue: actual failure count when red, fixed 1 when green (uniform height for clean hours)
-      return { hour: label, count: events.length, events, barValue: events.length > 0 ? events.length : 1 };
+      return { hour: label, count: events.length, events };
     });
+    // Scale green bars to 40% of the max red bar so they're always visible regardless of red scale.
+    // If no failures at all, green bars default to height 1.
+    const maxFailures = Math.max(...buckets.map((b) => b.count), 1);
+    const greenHeight = Math.max(1, maxFailures * 0.4);
+    return buckets.map((b) => ({
+      ...b,
+      barValue: b.count > 0 ? b.count : greenHeight,
+    }));
   })();
 
   const totalFailures24h = Object.values(failureModes).reduce((s, m) => s + (m.events?.length ?? 0), 0);
@@ -1529,7 +1536,7 @@ export default function ObservabilityPage() {
               <ResponsiveContainer width="100%" height={70}>
                 <BarChart data={failureTimeline} barSize={10}>
                   <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
-                  <YAxis hide domain={[0, "auto"]} />
+                  <YAxis hide domain={[0, "dataMax"]} />
                   <Tooltip
                     contentStyle={{ fontSize: 10, borderRadius: 6 }}
                     formatter={(_: any, __: any, props: any) => {
@@ -1761,7 +1768,7 @@ export default function ObservabilityPage() {
                 <p className="text-xl font-bold tabular-nums">
                   {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
                 </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">{tradesLast30dCount} trades last 30d</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">avg · last 30d</p>
               </div>
               <div className="rounded-xl border border-border p-4">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
