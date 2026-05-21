@@ -793,12 +793,14 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadLatencyData = useCallback(async (uid?: string | null) => {
+    const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     let q = supabase
       .from("compliance_log")
       .select("created_at, metadata")
       .eq("event_type", "auto_trade_strategy_run")
+      .gte("created_at", since48h)
       .order("created_at", { ascending: false })
-      .limit(2000);
+      .limit(5000);
     if (uid) q = q.eq("user_id", uid);
     const { data } = await q;
     if (data) {
@@ -1197,7 +1199,7 @@ export default function ObservabilityPage() {
     },
     {
       name: "Order Execution",
-      desc: primaryMode === "live" ? "Basket orders submitted to Kalshi" : "Trades placed (paper — basket_completed fires in live mode)",
+      desc: "Trades placed (paper simulation)",
       calls: tradesLast30dCount,
       errors: toolCounts["basket_aborted"] ?? 0,
     },
@@ -1214,8 +1216,8 @@ export default function ObservabilityPage() {
       errors: 0,
     },
     {
-      name: "Risk Guard",
-      desc: "Blocks trades that fail pre-flight checks",
+      name: "Risk Halt",
+      desc: "Global trading halt (halted by risk state or missing config) — per-trade blocks log under Guardrails",
       calls: toolCounts["auto_trade_skipped"] ?? 0,
       errors: toolCounts["strategy_auto_halted"] ?? 0,
     },
@@ -1303,14 +1305,14 @@ export default function ObservabilityPage() {
 
   // Latency derived stats
   const latencyNow = Date.now();
-  const latencyTrend = Array.from({ length: 24 }, (_, i) => {
-    const hourStart = latencyNow - (23 - i) * 3_600_000;
+  const latencyTrend = Array.from({ length: 48 }, (_, i) => {
+    const hourStart = latencyNow - (47 - i) * 3_600_000;
     const hourEnd = hourStart + 3_600_000;
     const bucket = stratRunDurations
       .filter((d) => d.ts >= hourStart && d.ts < hourEnd)
       .map((d) => d.seconds);
     return {
-      hour: new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" }),
+      hour: new Date(hourStart).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" }),
       avg: bucket.length > 0 ? bucket.reduce((s, v) => s + v, 0) / bucket.length : null,
     };
   });
@@ -1549,9 +1551,7 @@ export default function ObservabilityPage() {
             <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
               <p className="text-[11px] text-muted-foreground uppercase tracking-widest">Accounts</p>
               <p className="text-4xl font-bold tabular-nums">{userList.length}</p>
-              <p className="text-[11px] text-muted-foreground">
-                {strategies.filter(s => s.active).length} active strategies · {settledCount} total trades
-              </p>
+              <p className="text-[11px] text-muted-foreground">registered accounts</p>
             </div>
           ) : (
             <div className="rounded-2xl bg-card apple-shadow px-8 py-6 flex flex-col gap-1">
@@ -1572,7 +1572,7 @@ export default function ObservabilityPage() {
               {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {settledCount > 0 ? `${wins} wins / ${settledCount - wins} losses` : "no settled trades"}
+              {settledCount > 0 ? `${settledCount} settled trades` : "no settled trades"}
             </p>
           </div>
 
@@ -1584,7 +1584,7 @@ export default function ObservabilityPage() {
               <p className={`text-4xl font-bold ${status.color}`}>{status.label}</p>
             </div>
             <p className="text-[11px] text-muted-foreground">
-              {minsAgo !== null ? `Last run: ${minsAgo}m ago · ${primaryMode} mode` : "No heartbeat recorded"}
+              {minsAgo !== null ? `Last run: ${minsAgo}m ago` : "No heartbeat recorded"}
             </p>
           </div>
         </div>
@@ -1804,7 +1804,7 @@ export default function ObservabilityPage() {
               </div>
             </div>
             <div>
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Agent Tools</p>
+              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Automated Pipeline <span className="normal-case tracking-normal lowercase opacity-60">(not the 14 conversational agent tools)</span></p>
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border">
@@ -1839,7 +1839,7 @@ export default function ObservabilityPage() {
         <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
           <div className="px-6 pt-5 pb-4">
             <h2 className="text-sm font-semibold">Latency</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">Strategy execution · order fill · settlement · last 200 runs</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Strategy execution · order fill · settlement</p>
           </div>
 
           {/* 5 KPI cards */}
@@ -1866,7 +1866,7 @@ export default function ObservabilityPage() {
               <p className={`text-2xl font-bold tabular-nums ${fillIsPaper ? "text-emerald-500" : avgFillLatencyMs === null ? "text-muted-foreground" : avgFillLatencyMs < 120_000 ? "text-emerald-500" : avgFillLatencyMs < 600_000 ? "text-yellow-500" : "text-red-500"}`}>
                 {fillIsPaper ? "Instant" : fmtMs(avgFillLatencyMs)}
               </p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">{fillIsPaper ? "paper mode" : "order → fill avg"}</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">order → fill avg</p>
             </div>
             {/* Settlement */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
@@ -1888,7 +1888,7 @@ export default function ObservabilityPage() {
 
           {/* 24h latency trend */}
           <div className="px-6 pt-4 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
-            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 24h (avg per hour, seconds)</p>
+            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 48h (avg per hour, seconds)</p>
             <ResponsiveContainer width="100%" height={100}>
               <LineChart data={latencyTrend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                 <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={5} />
@@ -1960,52 +1960,22 @@ export default function ObservabilityPage() {
           </div>
         </div>
 
-        {/* ── 7. Errors — always visible, first-responder view ── */}
-        <Section title="Errors">
-          <div className="divide-y divide-border">
-            <div className="px-6 py-4">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Guardrails Fired</p>
-              {guardrailEvents.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-2">No guardrail events.</p>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody className="divide-y divide-border">
-                    {guardrailEvents.map((ev) => (
-                      <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
-                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
-                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
-                        <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
-                        <td className="py-2 text-right pl-4">
-                          <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+        {/* ── 7. Errors — grouped by type, deduplicated ── */}
+        <Section
+          title="Errors"
+          action={
+            <span className="text-[10px] text-muted-foreground">
+              {guardrailEvents.length + errorEvents.length === 0 ? "Clean" : `${guardrailEvents.length + errorEvents.length} events`}
+            </span>
+          }
+        >
+          {guardrailEvents.length === 0 && errorEvents.length === 0 ? (
+            <div className="px-6 py-8 text-center">
+              <p className="text-xs text-muted-foreground">No errors or guardrail events in the log.</p>
             </div>
-            <div className="px-6 py-4">
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Warnings &amp; Errors</p>
-              {errorEvents.length === 0 ? (
-                <p className="text-xs text-muted-foreground py-2">No warnings or errors in the log.</p>
-              ) : (
-                <table className="w-full text-sm">
-                  <tbody className="divide-y divide-border">
-                    {errorEvents.map((ev) => (
-                      <tr key={ev.id} onClick={() => setSelectedError(ev)} className="hover:bg-secondary/20 transition-colors cursor-pointer">
-                        <td className="py-2 text-[11px] text-muted-foreground tabular-nums whitespace-nowrap pr-4 w-[140px]">{fmtDate(ev.created_at)}</td>
-                        <td className="py-2 text-[11px] font-medium pr-4 w-[200px]">{EVENT_TYPE_LABELS[ev.event_type] ?? ev.event_type}</td>
-                        <td className="py-2 text-[11px] text-muted-foreground flex-1">{ev.message}</td>
-                        <td className="py-2 text-right pl-4">
-                          <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
+          ) : (
+            <ErrorGroupPanel guardrailEvents={guardrailEvents} errorEvents={errorEvents} onSelectError={setSelectedError} />
+          )}
         </Section>
 
         {/* ── System Details toggle ─────────────────────────────────── */}
@@ -2780,6 +2750,130 @@ export default function ObservabilityPage() {
       </div>
     )}
     </>
+  );
+}
+
+// ── ErrorGroupPanel ───────────────────────────────────────────────────────────
+// Groups flat compliance_log events by event_type, deduplicates repetitive entries,
+// and shows count + most recent per group for fast triage.
+
+function ErrorGroupPanel({
+  guardrailEvents,
+  errorEvents,
+  onSelectError,
+}: {
+  guardrailEvents: ComplianceEvent[];
+  errorEvents: ComplianceEvent[];
+  onSelectError: (ev: ComplianceEvent) => void;
+}) {
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+
+  function groupByType(events: ComplianceEvent[]) {
+    const map = new Map<string, ComplianceEvent[]>();
+    for (const ev of events) {
+      const key = ev.event_type;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(ev);
+    }
+    // Sort groups by most recent occurrence desc
+    return Array.from(map.entries())
+      .map(([type, evs]) => ({
+        type,
+        count: evs.length,
+        latest: evs.reduce((a, b) => a.created_at > b.created_at ? a : b),
+        events: evs.sort((a, b) => b.created_at.localeCompare(a.created_at)),
+      }))
+      .sort((a, b) => b.latest.created_at.localeCompare(a.latest.created_at));
+  }
+
+  const guardrailGroups = groupByType(guardrailEvents);
+  const errorGroups = groupByType(errorEvents);
+
+  function renderGroup(
+    { type, count, latest, events }: ReturnType<typeof groupByType>[0],
+    sectionPrefix: string
+  ) {
+    const groupKey = `${sectionPrefix}:${type}`;
+    const isOpen = expandedGroup === groupKey;
+    const label = EVENT_TYPE_LABELS[type] ?? type;
+    const severityText =
+      latest.severity === "critical" ? "text-red-500" :
+      latest.severity === "error"    ? "text-red-400" :
+      latest.severity === "warning"  ? "text-yellow-500" :
+      "text-muted-foreground";
+    const dot =
+      latest.severity === "critical" || latest.severity === "error" ? "bg-red-500" :
+      latest.severity === "warning" ? "bg-yellow-500" : "bg-muted-foreground/40";
+
+    // Truncate the most representative message (strip UUIDs/hashes for readability)
+    const cleanMsg = latest.message
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "…")
+      .slice(0, 120);
+
+    return (
+      <div key={groupKey} className="border-b border-border last:border-0">
+        <button
+          className="w-full px-6 py-3 flex items-start gap-3 hover:bg-secondary/20 transition-colors text-left"
+          onClick={() => setExpandedGroup(isOpen ? null : groupKey)}
+        >
+          <span className={`mt-1 h-2 w-2 rounded-full shrink-0 ${dot}`} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-medium">{label}</span>
+              {count > 1 && (
+                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${severityText} bg-current/10`}>
+                  ×{count}
+                </span>
+              )}
+              <span className="text-[10px] text-muted-foreground ml-auto shrink-0">{relativeTime(latest.created_at)}</span>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{cleanMsg}</p>
+          </div>
+          <ChevronRight className={`h-3.5 w-3.5 text-muted-foreground/40 shrink-0 mt-0.5 transition-transform ${isOpen ? "rotate-90" : ""}`} />
+        </button>
+        {isOpen && (
+          <div className="px-6 pb-3 space-y-1">
+            {events.slice(0, 10).map((ev) => (
+              <button
+                key={ev.id}
+                onClick={() => onSelectError(ev)}
+                className="w-full rounded-lg bg-secondary/40 px-3 py-2 text-left hover:bg-secondary/70 transition-colors"
+              >
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>{ev.severity}</span>
+                  <span className="text-[10px] text-muted-foreground ml-auto">{fmtDate(ev.created_at)}</span>
+                </div>
+                <p className="text-[11px] text-foreground leading-snug">{ev.message}</p>
+              </button>
+            ))}
+            {events.length > 10 && (
+              <p className="text-[10px] text-muted-foreground text-center pt-1">+{events.length - 10} more</p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {guardrailGroups.length > 0 && (
+        <div>
+          <p className="px-6 pt-4 pb-2 text-[10px] text-muted-foreground uppercase tracking-wide">
+            Guardrails Fired <span className="normal-case tracking-normal">— expected behavior, system blocked something</span>
+          </p>
+          {guardrailGroups.map((g) => renderGroup(g, "guardrail"))}
+        </div>
+      )}
+      {errorGroups.length > 0 && (
+        <div>
+          <p className="px-6 pt-4 pb-2 text-[10px] text-muted-foreground uppercase tracking-wide">
+            Unexpected Errors <span className="normal-case tracking-normal">— things that should not happen</span>
+          </p>
+          {errorGroups.map((g) => renderGroup(g, "error"))}
+        </div>
+      )}
+    </div>
   );
 }
 
