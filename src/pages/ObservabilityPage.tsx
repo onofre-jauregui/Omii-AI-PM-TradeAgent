@@ -18,8 +18,12 @@ import {
 } from "recharts";
 
 // ── Token counts (estimated from qualify prompt structure) ────────────────────
+// Input: system rules (~300) + market context (~600) + memory lessons (~300) = ~1200
+// Output: "QUALIFY/REJECT\nReason: [one sentence]" — actual avg ~25 tokens; max_tokens=100
+// Note: auto-qualify bypass (edge >= 25¢) skips the LLM — these counts include all strategy
+// runs, so LLM call count is an upper bound (actual calls = runs - auto-qualified).
 const QUALIFY_INPUT_TOKENS = 1_200;
-const QUALIFY_OUTPUT_TOKENS = 50;
+const QUALIFY_OUTPUT_TOKENS = 25; // corrected from 50 — actual response is ~1 word + 1 sentence
 
 // ── Model cost lookup (per million tokens) ────────────────────────────────────
 // Key = model identifier as stored in api_keys.key_id / as sent to OpenRouter
@@ -1751,67 +1755,77 @@ export default function ObservabilityPage() {
             ) : undefined
           }
         >
-          <div className="p-6 space-y-6">
-            <div className="grid grid-cols-4 gap-4">
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Daily LLM Spend</p>
-                <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">{modelLabel} via {modelProviderLabel}</p>
-              </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Tokens / Decision</p>
-                <p className="text-xl font-bold tabular-nums">{avgTokensPerDecision.toLocaleString()}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">est. per qualify call</p>
-              </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost per Trade</p>
-                <p className="text-xl font-bold tabular-nums">
-                  {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">avg · last 30d</p>
-              </div>
-              <div className="rounded-xl border border-border p-4">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
-                <p className="text-xl font-bold tabular-nums">
-                  {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
-                </p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
-                </p>
-              </div>
-            </div>
+          <div className="p-6 space-y-5">
+            {/* ── Top row: daily snapshot ─────────────────────────────── */}
             <div>
-              <div className="flex items-center gap-2 mb-3">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Model</p>
-                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">
+                Daily
+                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full ml-2">
                   {modelLabel} · {modelProviderLabel}
                   {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
                 </span>
+              </p>
+              <div className="grid grid-cols-4 gap-4">
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
+                  <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">avg daily · last 30d</p>
+                </div>
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Decision</p>
+                  <p className="text-xl font-bold tabular-nums">
+                    {(() => {
+                      const c = ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M + (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M);
+                      return c < 0.000001 ? "<$0.000001" : `$${c.toFixed(6)}`;
+                    })()}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{avgTokensPerDecision.toLocaleString()} tokens est.</p>
+                </div>
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Trade</p>
+                  <p className="text-xl font-bold tabular-nums">
+                    {costPerTrade !== null ? costPerTrade < 0.0001 ? "<$0.0001" : `$${costPerTrade.toFixed(4)}` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">avg · last 30d</p>
+                </div>
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Run</p>
+                  <p className="text-xl font-bold tabular-nums">
+                    {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
+                  </p>
+                </div>
               </div>
+            </div>
+            {/* ── Bottom row: 30-day volume ─────────────────────────────── */}
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Last 30 Days</p>
               <div className="grid grid-cols-4 gap-3">
                 <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Calls (30d)</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">LLM Calls</p>
                   <p className="text-base font-bold tabular-nums">{llmCallsLast30d.toLocaleString()}</p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">strategy evaluations</p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input tokens</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input Tokens</p>
                   <p className="text-base font-bold tabular-nums">
                     {inputTokens30d >= 1_000_000 ? `${(inputTokens30d / 1_000_000).toFixed(2)}M` : `${(inputTokens30d / 1_000).toFixed(0)}K`}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_INPUT_TOKENS.toLocaleString()} / call</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">~{QUALIFY_INPUT_TOKENS.toLocaleString()} / call est.</p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output tokens</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output Tokens</p>
                   <p className="text-base font-bold tabular-nums">
                     {outputTokens30d >= 1_000_000 ? `${(outputTokens30d / 1_000_000).toFixed(2)}M` : `${(outputTokens30d / 1_000).toFixed(0)}K`}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{QUALIFY_OUTPUT_TOKENS} / call</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">~{QUALIFY_OUTPUT_TOKENS} / call est.</p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Spend (30d)</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
                   <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in · ${(LLM_OUTPUT_PER_M / 1000).toFixed(3)}/1K out</p>
                 </div>
               </div>
             </div>
