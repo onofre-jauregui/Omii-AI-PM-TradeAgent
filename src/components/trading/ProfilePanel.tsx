@@ -2,7 +2,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { User, Trophy, Calendar, BarChart3, TrendingUp, Activity, Wallet, Loader2, Zap, Camera } from "lucide-react";
+import { User, Trophy, Calendar, BarChart3, TrendingUp, Activity, Wallet, Loader2, Zap, Camera, AlertCircle } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -15,6 +15,7 @@ export function ProfilePanel() {
   });
   const [subscription, setSubscription] = useState<{ tier: string; status: string } | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [stats, setStats] = useState({
@@ -91,6 +92,7 @@ export function ProfilePanel() {
     if (!user) return;
 
     setUploadingAvatar(true);
+    setUploadError(null);
     const ext = file.name.split(".").pop();
     const path = `${user.id}/avatar.${ext}`;
 
@@ -98,12 +100,16 @@ export function ProfilePanel() {
       .from("avatars")
       .upload(path, file, { upsert: true });
 
-    if (!uploadErr) {
+    if (uploadErr) {
+      setUploadError(uploadErr.message);
+    } else {
       const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(path);
       await supabase.from("profiles").update({ avatar_url: publicUrl }).eq("id", user.id);
       setProfile(prev => ({ ...prev, avatarUrl: publicUrl }));
     }
     setUploadingAvatar(false);
+    // Reset file input so selecting the same file again triggers onChange
+    e.target.value = "";
   };
 
   const handleSaveProfile = async () => {
@@ -154,6 +160,12 @@ export function ProfilePanel() {
               className="hidden"
               onChange={handleAvatarUpload}
             />
+            {uploadError && (
+              <div className="flex items-center gap-1.5 text-[11px] text-loss">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                <span>Upload failed: {uploadError}</span>
+              </div>
+            )}
             <div className="text-center">
               <p className="font-medium text-foreground">{profile.displayName}</p>
               <p className="text-xs text-muted-foreground">Active since {stats.activeSince}</p>
