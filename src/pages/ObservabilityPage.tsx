@@ -324,6 +324,7 @@ export default function ObservabilityPage() {
   const [liveIndicator, setLiveIndicator] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const userIdRef = useRef<string | null>(null); // stable ref for realtime/poll closures
   const [isAdmin, setIsAdmin] = useState(false);
   const [viewUserId, setViewUserId] = useState<string | null>(null); // null = platform view
   const [userList, setUserList] = useState<{ id: string; strategyCount: number }[]>([]);
@@ -878,9 +879,31 @@ export default function ObservabilityPage() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setIsAuthenticated(!!session);
-      setUserId(session?.user?.id ?? null);
-      if (session?.user?.id) {
-        supabase.from("profiles").select("is_admin").eq("id", session.user.id).maybeSingle()
+      const uid = session?.user?.id ?? null;
+      setUserId(uid);
+      userIdRef.current = uid;
+
+      // Load all data scoped to the authenticated user (or null for unauthenticated).
+      // Admins get platform-wide data after the admin check below resolves.
+      const userUid = uid; // non-null for logged-in users, null for public/unauthenticated
+      loadHeroStatus(userUid);
+      loadHeroFeed(userUid);
+      loadTraceLogs(userUid);
+      loadDecisionHistory(decisionDateFilter, decisionStatusFilter, userUid);
+      loadPerformance(userUid);
+      loadComplianceLast30d(userUid);
+      loadModelLatency(userUid);
+      loadActivity24h(userUid);
+      loadErrors24h(userUid);
+      loadErrors(userUid);
+      loadStrategies(userUid);
+      loadMemories(userUid);
+      loadLatencyData(userUid);
+      loadSurfaceScanLatency(userUid);
+      loadExecutionGaps();
+
+      if (uid) {
+        supabase.from("profiles").select("is_admin").eq("id", uid).maybeSingle()
           .then(({ data }) => {
             const admin = (data as any)?.is_admin ?? false;
             setIsAdmin(admin);
@@ -889,22 +912,7 @@ export default function ObservabilityPage() {
       }
     });
 
-    loadHeroStatus(null);
-    loadHeroFeed(null);
-    loadTraceLogs(null);
-    loadDecisionHistory(decisionDateFilter, decisionStatusFilter, null);
-    loadPerformance(null);
-    loadComplianceLast30d(null);
-    loadModelLatency(null);
-    loadActivity24h(null);
-    loadErrors24h(null);
-    loadErrors(null);
-    loadStrategies(null);
-    loadMemories(null);
     loadActiveModel();
-    loadLatencyData(null);
-    loadSurfaceScanLatency(null);
-    loadExecutionGaps();
   }, [
     loadHeroStatus,
     loadHeroFeed,
@@ -993,18 +1001,18 @@ export default function ObservabilityPage() {
           // Prepend to trace list on new run
           if (ev.event_type === "auto_trade_run") {
             setTraceRuns((prev) => [ev, ...prev.slice(0, 199)]);
-            loadHeroStatus();
-            loadComplianceLast30d(); // refresh tool counts
+            loadHeroStatus(userIdRef.current);
+            loadComplianceLast30d(userIdRef.current); // refresh tool counts
           }
 
           // Refresh errors section on any error/guardrail event
           if (ERROR_EVENTS.has(ev.event_type) || ev.severity === "error" || ev.severity === "critical" || ev.severity === "warning") {
-            loadErrors();
+            loadErrors(userIdRef.current);
           }
 
           // Refresh strategy health on suspension/resume
           if (STRATEGY_SUSPENSION_EVENTS.has(ev.event_type)) {
-            loadStrategies();
+            loadStrategies(userIdRef.current);
           }
         }
       )
@@ -1012,31 +1020,31 @@ export default function ObservabilityPage() {
         "postgres_changes",
         { event: "*", schema: "public", table: "trades" },
         () => {
-          loadHeroStatus();
-          loadDecisionHistory("30d", "all");
-          loadPerformance();
-          loadComplianceLast30d(); // trade count for cost section
+          loadHeroStatus(userIdRef.current);
+          loadDecisionHistory("30d", "all", userIdRef.current);
+          loadPerformance(userIdRef.current);
+          loadComplianceLast30d(userIdRef.current); // trade count for cost section
         }
       )
       .subscribe();
 
     // 2-minute polling fallback — catches anything real-time misses
     const poll = setInterval(() => {
-      loadHeroStatus();
-      loadHeroFeed();
-      loadTraceLogs();
-      loadDecisionHistory("30d", "all");
-      loadPerformance();
-      loadComplianceLast30d();
-      loadModelLatency();
-      loadActivity24h();
-      loadErrors24h();
-      loadErrors();
-      loadStrategies();
-      loadMemories();
+      loadHeroStatus(userIdRef.current);
+      loadHeroFeed(userIdRef.current);
+      loadTraceLogs(userIdRef.current);
+      loadDecisionHistory("30d", "all", userIdRef.current);
+      loadPerformance(userIdRef.current);
+      loadComplianceLast30d(userIdRef.current);
+      loadModelLatency(userIdRef.current);
+      loadActivity24h(userIdRef.current);
+      loadErrors24h(userIdRef.current);
+      loadErrors(userIdRef.current);
+      loadStrategies(userIdRef.current);
+      loadMemories(userIdRef.current);
       loadActiveModel();
-      loadLatencyData();
-      loadSurfaceScanLatency();
+      loadLatencyData(userIdRef.current);
+      loadSurfaceScanLatency(userIdRef.current);
       loadExecutionGaps();
     }, 2 * 60 * 1000);
 
