@@ -1275,17 +1275,30 @@ export default function ObservabilityPage() {
   ];
 
   // Filtered + sorted memories for the panel
-  const filteredMemories = memories
-    .filter((m) => {
-      if (memoryTypeFilter === "quarantined") return !m.is_active || !!m.quarantined_at;
-      if (memoryTypeFilter !== "all") return m.memory_type === memoryTypeFilter;
-      return true;
-    })
-    .sort((a, b) => {
-      if (memorySortBy === "confidence") return b.confidence - a.confidence;
-      if (memorySortBy === "confirmations") return b.confirmations - a.confirmations;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
+  const filteredMemories = (() => {
+    const sorted = memories
+      .filter((m) => {
+        if (memoryTypeFilter === "quarantined") return !m.is_active || !!m.quarantined_at;
+        if (memoryTypeFilter !== "all") return m.memory_type === memoryTypeFilter;
+        return true;
+      })
+      .sort((a, b) => {
+        if (memorySortBy === "confidence") return b.confidence - a.confidence;
+        if (memorySortBy === "confirmations") return b.confirmations - a.confirmations;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+    // In "all" view: show top 5 active + all quarantined. Other filters show everything.
+    if (memoryTypeFilter === "all") {
+      const quarantined = sorted.filter((m) => !m.is_active || !!m.quarantined_at);
+      const active = sorted.filter((m) => m.is_active && !m.quarantined_at);
+      return [...active.slice(0, 5), ...quarantined];
+    }
+    return sorted;
+  })();
+
+  const hiddenActiveCount = memoryTypeFilter === "all"
+    ? Math.max(0, activeMemories.length - 5)
+    : 0;
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
   const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents, kalshiRateLimitCount24h ?? undefined);
@@ -2480,68 +2493,91 @@ export default function ObservabilityPage() {
             {filteredMemories.length === 0 ? (
               <div className="py-12 text-center text-sm text-muted-foreground">No memories match this filter.</div>
             ) : (
-              filteredMemories.map((mem) => {
-                const isExpanded = expandedMemoryId === mem.id;
-                const conf = mem.confidence;
-                return (
-                  <div key={mem.id} className="px-6 py-4">
-                    {/* Top row */}
-                    <div className="flex items-start gap-2 mb-2">
-                      <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${MEMORY_TYPE_COLORS[mem.memory_type] ?? "bg-secondary text-muted-foreground"}`}>
-                        {MEMORY_TYPE_LABELS[mem.memory_type] ?? mem.memory_type}
-                      </span>
-                      {mem.quarantined_at && (
-                        <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">quarantined</span>
-                      )}
-                      <span className="text-[11px] text-muted-foreground ml-auto shrink-0 tabular-nums">
-                        {mem.confirmations}✓ {mem.contradictions}✗
-                      </span>
-                    </div>
-                    {/* Title + confidence */}
-                    <button
-                      onClick={() => setExpandedMemoryId(isExpanded ? null : mem.id)}
-                      className="w-full text-left"
-                    >
-                      <p className="text-[13px] font-medium leading-snug mb-1.5">{mem.title}</p>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
-                          <div
-                            className="h-full rounded-full"
-                            style={{
-                              width: `${conf * 100}%`,
-                              backgroundColor: conf >= 0.6 ? "hsl(var(--primary))" : conf >= 0.4 ? "#eab308" : "#ef4444",
-                            }}
-                          />
-                        </div>
-                        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-                          {(conf * 100).toFixed(0)}%
+              <>
+                {filteredMemories.map((mem) => {
+                  const isExpanded = expandedMemoryId === mem.id;
+                  const conf = mem.confidence;
+                  const stratName = mem.strategy_id
+                    ? strategies.find((s) => s.id === mem.strategy_id || mem.strategy_id?.startsWith(s.id.replace(/-[0-9a-f]{8}$/, "")))?.name ?? mem.strategy_id
+                    : null;
+                  return (
+                    <div key={mem.id} className="px-6 py-4">
+                      {/* Top row */}
+                      <div className="flex items-start gap-2 mb-2 flex-wrap">
+                        <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full ${MEMORY_TYPE_COLORS[mem.memory_type] ?? "bg-secondary text-muted-foreground"}`}>
+                          {MEMORY_TYPE_LABELS[mem.memory_type] ?? mem.memory_type}
+                        </span>
+                        {stratName && (
+                          <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 font-mono">
+                            {stratName}
+                          </span>
+                        )}
+                        {mem.quarantined_at && (
+                          <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">quarantined</span>
+                        )}
+                        <span className="text-[11px] text-muted-foreground ml-auto shrink-0 tabular-nums">
+                          {mem.confirmations}✓ {mem.contradictions}✗
                         </span>
                       </div>
-                    </button>
-                    {/* Expanded content */}
-                    {isExpanded && (
-                      <div className="mt-3 space-y-2">
-                        <div className="rounded-lg bg-secondary/40 p-3">
-                          <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">{mem.content}</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
-                          {mem.scope && <span>scope: {mem.scope}</span>}
-                          {mem.trade_sample_size > 0 && <span>sample: {mem.trade_sample_size} trades</span>}
-                          {mem.last_recalled_at && <span>recalled: {relativeTime(mem.last_recalled_at)}</span>}
-                          <span>created: {fmtDate(mem.created_at)}</span>
-                        </div>
-                        {mem.tags && mem.tags.length > 0 && (
-                          <div className="flex flex-wrap gap-1">
-                            {mem.tags.map((tag) => (
-                              <span key={tag} className="text-[10px] bg-secondary px-1.5 py-0.5 rounded-full">{tag}</span>
-                            ))}
+                      {/* Title + confidence */}
+                      <button
+                        onClick={() => setExpandedMemoryId(isExpanded ? null : mem.id)}
+                        className="w-full text-left"
+                      >
+                        <p className="text-[13px] font-medium leading-snug mb-1.5">{mem.title}</p>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1 bg-secondary rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${conf * 100}%`,
+                                backgroundColor: conf >= 0.6 ? "hsl(var(--primary))" : conf >= 0.4 ? "#eab308" : "#ef4444",
+                              }}
+                            />
                           </div>
-                        )}
-                      </div>
-                    )}
+                          <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                            {(conf * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      </button>
+                      {/* Expanded content */}
+                      {isExpanded && (
+                        <div className="mt-3 space-y-2">
+                          <div className="rounded-lg bg-secondary/40 p-3">
+                            <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">{mem.content}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                            {mem.scope && <span>scope: {mem.scope}</span>}
+                            {mem.trade_sample_size > 0 && <span>sample: {mem.trade_sample_size} trades</span>}
+                            {mem.last_recalled_at && <span>recalled: {relativeTime(mem.last_recalled_at)}</span>}
+                            <span>created: {fmtDate(mem.created_at)}</span>
+                          </div>
+                          {mem.tags && mem.tags.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {mem.tags.map((tag) => (
+                                <span key={tag} className="text-[10px] bg-secondary px-1.5 py-0.5 rounded-full">{tag}</span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {hiddenActiveCount > 0 && (
+                  <div className="px-6 py-4 text-center">
+                    <p className="text-[11px] text-muted-foreground">
+                      {hiddenActiveCount} more active {hiddenActiveCount === 1 ? "memory" : "memories"} —{" "}
+                      <button
+                        className="text-primary hover:opacity-80 transition-opacity"
+                        onClick={() => setMemoryTypeFilter("lesson")}
+                      >
+                        use type filters above to see all
+                      </button>
+                    </p>
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </div>
         </div>
