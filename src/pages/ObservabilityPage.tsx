@@ -73,6 +73,11 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
     description: "OpenRouter returned a 429 Too Many Requests. The qualify call failed and the strategy was skipped. Repeated rate limits mean the account RPM/TPM limit is too low for the current cron frequency.",
     resolution: "Check your OpenRouter dashboard for current usage vs. plan limits. Upgrade the rate limit tier or increase the cron interval from 2min to 5min in the pg_cron schedule.",
   },
+  kalshi_rate_limit: {
+    title: "Kalshi Rate Limits",
+    description: "Kalshi REST API returned 429 Too Many Requests on a market data fetch or order submission. Kalshi enforces per-minute and per-second request limits. The surface scanner batches multiple series requests in a single run — if too many users are running simultaneously, the shared IP pool may hit the limit.",
+    resolution: "Kalshi's rate limit is typically 10 req/s or 600 req/min. Add exponential backoff + retry logic to the surface scanner's market fetch loop. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash). Check the Kalshi developer portal for current limits.",
+  },
   cost_spike: {
     title: "Cost Spike",
     description: "LLM call rate in the last 6 hours is significantly above the 30-day hourly average. Could indicate a misconfigured cron schedule, a runaway retry loop, or an unusually active market session driving many concurrent signals.",
@@ -399,8 +404,9 @@ export default function ObservabilityPage() {
   const [tradesFilled24hCount, setTradesFilled24hCount] = useState<number | null>(null);
   // 24h error events — for failure mode detection (error/warning only, last 24h, last 500)
   const [errors24h, setErrors24h] = useState<ComplianceEvent[]>([]);
-  // Dedicated rate limit count — catches events logged at any severity
+  // Dedicated rate limit counts — catches events logged at any severity
   const [rateLimitCount24h, setRateLimitCount24h] = useState<number | null>(null);
+  const [kalshiRateLimitCount24h, setKalshiRateLimitCount24h] = useState<number | null>(null);
   // Surface scan durations for market data pull latency
   const [scanDurations, setScanDurations] = useState<number[]>([]);
   // Execution gap detection — gaps > 5 min between auto_trade_run/skipped events
@@ -706,21 +712,28 @@ export default function ObservabilityPage() {
       .in("severity", ["error", "warning", "critical"])
       .order("created_at", { ascending: false })
       .limit(500);
-    // Dedicated LLM rate limit count — match explicit event type or LLM-specific patterns only.
-    // Intentionally excludes Kalshi API 429s ("GET /markets", "kalshi") which belong under api_timeout.
+    // Dedicated LLM rate limit count — LLM-specific 429s only
     let rlQ = supabase
       .from("compliance_log")
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
       .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
+    // Dedicated Kalshi rate limit count — Kalshi API 429s
+    let krlQ = supabase
+      .from("compliance_log")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", since)
+      .or("event_type.eq.kalshi_rate_limit,message.ilike.%kalshi%429%,message.ilike.%kalshi%rate%limit%,message.ilike.%kalshi%too%many%");
     // Include both user-specific errors (user_id = uid) and system-level errors (user_id = NULL)
     if (uid) {
       q = q.or(`user_id.eq.${uid},user_id.is.null`);
       rlQ = rlQ.or(`user_id.eq.${uid},user_id.is.null`);
+      krlQ = krlQ.or(`user_id.eq.${uid},user_id.is.null`);
     }
-    const [{ data }, { count: rlCount }] = await Promise.all([q, rlQ]);
+    const [{ data }, { count: rlCount }, { count: krlCount }] = await Promise.all([q, rlQ, krlQ]);
     if (data) setErrors24h(data as ComplianceEvent[]);
     setRateLimitCount24h(rlCount ?? 0);
+    setKalshiRateLimitCount24h(krlCount ?? 0);
   }, []);
 
   const loadErrors = useCallback(async (uid?: string | null) => {
@@ -1275,13 +1288,14 @@ export default function ObservabilityPage() {
     });
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents, kalshiRateLimitCount24h ?? undefined);
 
   // 24h failure timeline — bucket all failure events by hour, include events array for drill-down
   const allFailureEventsFlat = [
     ...failureModes.llm_timeout.events,
     ...failureModes.kalshi_timeout.events,
     ...failureModes.llm_rate_limit.events,
+    ...failureModes.kalshi_rate_limit.events,
     ...failureModes.exchange_error.events,
     ...failureModes.strategy_error.events,
     ...failureModes.pii_detected.events,
@@ -1293,12 +1307,15 @@ export default function ObservabilityPage() {
     const buckets = Array.from({ length: 24 }, (_, i) => {
       const hourStart = now - (23 - i) * 3_600_000;
       const hourEnd = hourStart + 3_600_000;
-      const label = new Date(hourStart).toLocaleTimeString(undefined, { hour: "numeric" });
+      const hourStartDate = new Date(hourStart);
+      const hourEndDate = new Date(hourEnd);
+      const label = hourStartDate.toLocaleTimeString(undefined, { hour: "numeric" });
+      const tooltipLabel = `${hourStartDate.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} – ${hourEndDate.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
       const events = allFailureEventsFlat.filter((e) => {
         const t = new Date(e.created_at).getTime();
         return t >= hourStart && t < hourEnd;
       });
-      return { hour: label, count: events.length, events };
+      return { hour: label, tooltipLabel, count: events.length, events };
     });
     // Scale green bars to 40% of the max red bar so they're always visible regardless of red scale.
     // If no failures at all, green bars default to height 1.
@@ -1506,6 +1523,7 @@ export default function ObservabilityPage() {
                   "llm_timeout",
                   "kalshi_timeout",
                   "llm_rate_limit",
+                  "kalshi_rate_limit",
                   "cost_spike",
                   "exchange_error",
                   "strategy_error",
@@ -1577,11 +1595,20 @@ export default function ObservabilityPage() {
                   <YAxis hide domain={[0, "dataMax"]} />
                   <Tooltip
                     contentStyle={{ fontSize: 10, borderRadius: 6 }}
-                    formatter={(_: any, __: any, props: any) => {
-                      const entry = props?.payload;
-                      return entry?.count > 0
-                        ? [`${entry.count} failure event${entry.count !== 1 ? "s" : ""}`, "Failures"]
-                        : ["No failures", "Status"];
+                    content={({ payload }: any) => {
+                      if (!payload?.length) return null;
+                      const entry = payload[0]?.payload;
+                      if (!entry) return null;
+                      return (
+                        <div className="rounded-lg border border-border bg-popover px-3 py-2 shadow-sm text-[10px]">
+                          <p className="font-medium mb-1 text-foreground">{entry.tooltipLabel}</p>
+                          {entry.count > 0 ? (
+                            <p className="text-red-400">{entry.count} failure event{entry.count !== 1 ? "s" : ""}</p>
+                          ) : (
+                            <p className="text-emerald-500">Clean — no failures</p>
+                          )}
+                        </div>
+                      );
                     }}
                   />
                   <Bar
@@ -3214,7 +3241,8 @@ function detectFailureModes(
   runs6hCount: number | null = null,
   runs24hCount: number | null = null,
   rateLimitCount?: number,
-  gaps: { from: string; to: string; gapMins: number }[] = []
+  gaps: { from: string; to: string; gapMins: number }[] = [],
+  kalshiRateLimitCount?: number
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
@@ -3232,7 +3260,14 @@ function detectFailureModes(
 
   const rateLimitEvents = last24h.filter((e) =>
     e.event_type === "llm_rate_limit" ||
-    /\b429\b|rate.?limit|quota.?exceeded|too.?many.?request/i.test(e.message)
+    (/(\b429\b|rate.?limit|quota.?exceeded|too.?many.?request)/i.test(e.message) &&
+     !/kalshi/i.test(e.message))
+  );
+
+  const kalshiRateLimitEvents = last24h.filter((e) =>
+    e.event_type === "kalshi_rate_limit" ||
+    (e.event_type === "api_timeout" && /kalshi/i.test(e.message) && /\b429\b/i.test(e.message)) ||
+    (/kalshi/i.test(e.message) && /\b429\b|rate.?limit|too.?many.?request/i.test(e.message))
   );
 
   const dbEvents = last24h.filter((e) =>
@@ -3292,10 +3327,15 @@ function detectFailureModes(
     },
     llm_rate_limit: {
       events: rateLimitEvents,
-      // Use dedicated server-side count when available — catches events logged at any severity
       count: rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length,
       lastAt: lastAt(rateLimitEvents),
       status: (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 1 ? "critical" : "ok",
+    },
+    kalshi_rate_limit: {
+      events: kalshiRateLimitEvents,
+      count: kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length,
+      lastAt: lastAt(kalshiRateLimitEvents),
+      status: (kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length) >= 1 ? "critical" : "ok",
     },
     cost_spike: {
       events: [],
