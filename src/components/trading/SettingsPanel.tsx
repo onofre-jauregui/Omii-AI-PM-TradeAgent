@@ -56,7 +56,7 @@ function StatusBadge({ saved }: { saved: boolean }) {
   );
 }
 
-export function SettingsPanel() {
+export function SettingsPanel({ userId }: { userId?: string }) {
   const navigate = useNavigate();
 
   // Profile identity
@@ -93,10 +93,11 @@ export function SettingsPanel() {
     });
   };
 
-  const loadAll = useCallback(async () => {
-    const [{ data: keyRows }, { data: { user } }] = await Promise.all([
-      supabase.from("api_keys").select("provider, key_id"),
-      supabase.auth.getUser(),
+  const loadAll = useCallback(async (uid: string) => {
+    const [{ data: keyRows }, { data: prof }, { data: sub }] = await Promise.all([
+      supabase.from("api_keys").select("provider, key_id").eq("user_id", uid),
+      supabase.from("profiles").select("display_name, avatar_url").eq("id", uid).maybeSingle(),
+      supabase.from("subscriptions").select("tier, status").eq("user_id", uid).maybeSingle(),
     ]);
 
     if (keyRows) {
@@ -107,19 +108,12 @@ export function SettingsPanel() {
       if (modelRow?.key_id) setSelectedModel(modelRow.key_id);
     }
 
-    if (user) {
-      setProfileEmail(user.email ?? "");
-      const [{ data: prof }, { data: sub }] = await Promise.all([
-        supabase.from("profiles").select("display_name, avatar_url").eq("id", user.id).maybeSingle(),
-        supabase.from("subscriptions").select("tier, status").eq("user_id", user.id).maybeSingle(),
-      ]);
-      if (prof?.display_name) setProfileName(prof.display_name);
-      if (prof?.avatar_url) setProfileAvatar(prof.avatar_url);
-      if (sub?.tier) setSubscriptionTier(sub.tier);
-    }
+    if (prof?.display_name) setProfileName(prof.display_name);
+    if (prof?.avatar_url) setProfileAvatar(prof.avatar_url);
+    if (sub?.tier) setSubscriptionTier(sub.tier);
   }, []);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => { if (userId) loadAll(userId); }, [userId, loadAll]);
 
   const handleSaveProfile = async () => {
     const { data: { user } } = await supabase.auth.getUser();

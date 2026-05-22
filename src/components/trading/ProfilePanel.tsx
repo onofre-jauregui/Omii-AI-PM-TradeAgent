@@ -11,13 +11,14 @@ import { AvatarCropModal } from "./AvatarCropModal";
 interface Props {
   mode?: "paper" | "live";
   userEmail?: string;
+  userId?: string;
 }
 
 const providerLabel: Record<string, string> = {
   openrouter: "OpenRouter", anthropic: "Anthropic", openai: "OpenAI", google: "Google AI",
 };
 
-export function ProfilePanel({ mode = "paper", userEmail }: Props) {
+export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [profile, setProfile] = useState({
@@ -32,32 +33,29 @@ export function ProfilePanel({ mode = "paper", userEmail }: Props) {
   const [kalshiConnected, setKalshiConnected] = useState(false);
   const [activeProvider, setActiveProvider] = useState<string | null>(null);
 
-  const loadProfile = useCallback(async () => {
+  const loadProfile = useCallback(async (uid: string) => {
     setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const [{ data: prof }, { data: sub }, { data: keys }] = await Promise.all([
-        supabase.from("profiles").select("display_name, avatar_url").eq("id", user.id).maybeSingle(),
-        supabase.from("subscriptions").select("tier, status").eq("user_id", user.id).maybeSingle(),
-        supabase.from("api_keys").select("provider"),
-      ]);
-      setProfile(prev => ({
-        ...prev,
-        email: user.email ?? "",
-        displayName: prof?.display_name ?? prev.displayName,
-        avatarUrl: prof?.avatar_url ?? "",
-      }));
-      setSubscription(sub ?? { tier: "free", status: "inactive" });
-      if (keys) {
-        const providers = new Set(keys.map(r => r.provider));
-        setKalshiConnected(providers.has("kalshi_live"));
-        setActiveProvider(["openrouter", "anthropic", "openai", "google"].find(p => providers.has(p)) ?? null);
-      }
+    const [{ data: prof }, { data: sub }, { data: keys }] = await Promise.all([
+      supabase.from("profiles").select("display_name, avatar_url").eq("id", uid).maybeSingle(),
+      supabase.from("subscriptions").select("tier, status").eq("user_id", uid).maybeSingle(),
+      supabase.from("api_keys").select("provider").eq("user_id", uid),
+    ]);
+    setProfile(prev => ({
+      ...prev,
+      email: userEmail ?? prev.email,
+      displayName: prof?.display_name ?? prev.displayName,
+      avatarUrl: prof?.avatar_url ?? "",
+    }));
+    setSubscription(sub ?? { tier: "free", status: "inactive" });
+    if (keys) {
+      const providers = new Set(keys.map(r => r.provider));
+      setKalshiConnected(providers.has("kalshi_live"));
+      setActiveProvider(["openrouter", "anthropic", "openai", "google"].find(p => providers.has(p)) ?? null);
     }
     setLoading(false);
-  }, []);
+  }, [userEmail]);
 
-  useEffect(() => { loadProfile(); }, [loadProfile]);
+  useEffect(() => { if (userId) loadProfile(userId); }, [userId, loadProfile]);
 
   const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -68,11 +66,10 @@ export function ProfilePanel({ mode = "paper", userEmail }: Props) {
   };
 
   const handleCropConfirm = async (blob: Blob) => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!userId) return;
     setUploadingAvatar(true);
     setUploadError(null);
-    const path = `${user.id}/avatar.jpg`;
+    const path = `${userId}/avatar.jpg`;
     const { error: uploadErr } = await supabase.storage
       .from("avatars").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
     if (uploadErr) {
@@ -80,7 +77,7 @@ export function ProfilePanel({ mode = "paper", userEmail }: Props) {
     } else {
       const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(path);
       const bustedUrl = `${publicUrl}?t=${Date.now()}`;
-      await supabase.from("profiles").update({ avatar_url: bustedUrl }).eq("id", user.id);
+      await supabase.from("profiles").update({ avatar_url: bustedUrl }).eq("id", userId);
       setProfile(prev => ({ ...prev, avatarUrl: bustedUrl }));
     }
     setUploadingAvatar(false);
@@ -94,13 +91,12 @@ export function ProfilePanel({ mode = "paper", userEmail }: Props) {
   };
 
   const handleSaveProfile = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!userId) return;
     setSaving(true);
     await supabase.from("profiles").update({
       display_name: profile.displayName,
       updated_at: new Date().toISOString(),
-    }).eq("id", user.id);
+    }).eq("id", userId);
     setSaving(false);
   };
 

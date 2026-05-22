@@ -34,6 +34,7 @@ const Index = () => {
   const [mode, setMode] = useState<Mode>("paper");
   const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history" | "memory">("chat");
   const [userEmail, setUserEmail] = useState<string | undefined>();
+  const [userId, setUserId] = useState<string | undefined>();
   const [subscriptionTier, setSubscriptionTier] = useState<"free" | "starter" | "pro" | "prop">("free");
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [marketToOpen, setMarketToOpen] = useState<string | null>(null);
@@ -41,8 +42,11 @@ const Index = () => {
   const isMobile = useIsMobile();
 
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
+    // onAuthStateChange fires immediately with the current session AND again after
+    // OAuth redirects complete — so panels never render in an unauthenticated limbo.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setUserEmail(session?.user?.email ?? undefined);
+      setUserId(session?.user?.id ?? undefined);
       if (session?.user?.id) {
         const [profileRes, subRes] = await Promise.all([
           supabase.from("profiles").select("trading_mode").eq("id", session.user.id).single(),
@@ -56,6 +60,7 @@ const Index = () => {
         }
       }
     });
+    return () => subscription.unsubscribe();
   }, []);
 
   async function handleModeChange(next: Mode) {
@@ -274,8 +279,8 @@ const Index = () => {
           {/* ── Settings ───────────────────────────────────────────── */}
           {activeTab === "settings" && (
             <div className="space-y-6 apple-reveal">
-              <ProfilePanel mode={mode} userEmail={userEmail} />
-              <SettingsPanel />
+              <ProfilePanel mode={mode} userEmail={userEmail} userId={userId} />
+              <SettingsPanel userId={userId} />
             </div>
           )}
 
