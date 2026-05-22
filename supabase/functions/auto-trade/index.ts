@@ -26,6 +26,9 @@ import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared
 
 const LOCK_STALE_MS = 5 * 60 * 1000; // 5 min — auto-release stuck locks (longest strategy loop is ~90s)
 const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
+const KALSHI_RETRY_DELAY_MS = 500; // single retry delay for Kalshi API calls
+const CIRCUIT_TRIP_THRESHOLD = 5; // consecutive post-retry Kalshi failures before circuit opens
+const CIRCUIT_WINDOW_MS = 10 * 60 * 1000; // 10 min — circuit auto-resets after this window
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -231,6 +234,44 @@ async function countOpenPositions(
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
+// ── Kalshi HTTP wrapper with single retry + circuit breaker ─────────────────
+// One retry (not three) keeps worst-case overhead at ~5s for 10 calls — safe
+// under the 60s edge function timeout. Three retries × 10 calls = ~70s overhead.
+async function kalshiFetch(
+  url: string,
+  options: RequestInit,
+  circuit: { failures: number; open: boolean }
+): Promise<Response> {
+  if (circuit.open) throw new Error("kalshi_circuit_open");
+  const attempt = () => fetch(url, options);
+  const res = await attempt();
+  if (res.status === 429 || res.status >= 500) {
+    const retryAfterMs = parseInt(res.headers.get("Retry-After") ?? "0", 10) * 1000;
+    await new Promise((r) => setTimeout(r, Math.max(retryAfterMs, KALSHI_RETRY_DELAY_MS)));
+    return attempt();
+  }
+  return res;
+}
+
+async function tripCircuitBreaker(supabase: any, runId: string): Promise<void> {
+  const msg = `[TradeAgent] Kalshi circuit breaker tripped — ${CIRCUIT_TRIP_THRESHOLD} consecutive API failures in run ${runId}. All Kalshi requests halted for this and subsequent runs for 10 minutes.`;
+  await supabase.from("compliance_log").insert({
+    event_type: "kalshi_circuit_open",
+    severity: "critical",
+    message: msg,
+    metadata: { run_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
+  }).catch(() => {});
+  const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
+  const chatId = Deno.env.get("TELEGRAM_CHAT_ID");
+  if (botToken && chatId) {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: msg }),
+    }).catch(() => {});
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -327,6 +368,33 @@ serve(async (req) => {
         skipped: true,
         reason: `Trading halted: ${riskState.halt_reason || "daily limits exceeded"}`,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // ── Cross-run Kalshi circuit breaker check ────────────────────────────────
+    // If the circuit was tripped in the last 10 min, skip this run immediately.
+    // Prevents stacking failed Kalshi requests during an outage across 30s cron ticks.
+    // Circuit auto-resets when no new kalshi_circuit_open events appear within the window.
+    const kalshiCircuit = { failures: 0, open: false };
+    {
+      const circuitOpenSince = new Date(Date.now() - CIRCUIT_WINDOW_MS).toISOString();
+      const { data: circuitEvents } = await supabase
+        .from("compliance_log")
+        .select("id, created_at")
+        .eq("event_type", "kalshi_circuit_open")
+        .gte("created_at", circuitOpenSince)
+        .limit(1);
+      if (circuitEvents && circuitEvents.length > 0) {
+        kalshiCircuit.open = true;
+        await supabase.from("compliance_log").insert({
+          event_type: "auto_trade_skipped",
+          severity: "warning",
+          message: "Kalshi circuit open — run skipped. Auto-resets 10 minutes after last failure.",
+          metadata: { run_id: runId, circuit_open_since: circuitEvents[0].created_at },
+        });
+        return new Response(JSON.stringify({ skipped: true, reason: "kalshi_circuit_open" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
     }
 
     // ── Load active strategies ────────────────────────────────────────────────
@@ -486,7 +554,7 @@ serve(async (req) => {
         const templateId = (strategy as any).template_id ?? strategy.id;
 
         if (templateId === "S-001") {
-          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId);
+          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, kalshiCircuit);
         } else if (templateId === "S-002") {
           result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk);
         } else if (templateId === "S-005") {
@@ -655,6 +723,7 @@ async function runS001SurfaceArb(
   supabaseUrl: string,
   supabaseKey: string,
   runId?: string,
+  kalshiCircuit: { failures: number; open: boolean } = { failures: 0, open: false },
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
   const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
@@ -718,15 +787,33 @@ async function runS001SurfaceArb(
     seenEvents.add(eventTicker);
 
     // 3. Fetch all bracket markets for this event from Kalshi
+    // Uses kalshiFetch for single-retry backoff + circuit breaker protection.
     let eventMarkets: any[] = [];
     try {
-      const resp = await fetch(
-        `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(eventTicker)}&status=open&limit=50`
+      const resp = await kalshiFetch(
+        `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(eventTicker)}&status=open&limit=50`,
+        {},
+        kalshiCircuit
       );
-      if (!resp.ok) continue;
+      if (!resp.ok) {
+        kalshiCircuit.failures++;
+        if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
+          kalshiCircuit.open = true;
+          await tripCircuitBreaker(supabase, runId);
+        }
+        continue;
+      }
+      kalshiCircuit.failures = 0; // successful response — reset failure counter
       const data = await resp.json();
       eventMarkets = data?.markets || [];
-    } catch {
+    } catch (err: any) {
+      if (err.message !== "kalshi_circuit_open") {
+        kalshiCircuit.failures++;
+        if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
+          kalshiCircuit.open = true;
+          await tripCircuitBreaker(supabase, runId);
+        }
+      }
       continue;
     }
 
@@ -1537,6 +1624,25 @@ async function qualifySetup(
         outputTokens: data?.usage?.completion_tokens,
         metadata: { qualified, reason, mode, strategyId },
       })]);
+    }
+
+    // Log actual token usage to compliance_log so the dashboard can compute real costs.
+    // This is the source of truth — prompt_tokens / completion_tokens come directly from the API response.
+    if (supabaseClient && data?.usage) {
+      supabaseClient.from("compliance_log").insert({
+        event_type: "llm_usage",
+        severity: "info",
+        message: `qualify: ${data.usage.prompt_tokens ?? "?"} in / ${data.usage.completion_tokens ?? "?"} out · ${qualified ? "QUALIFY" : "REJECT"}`,
+        metadata: {
+          model: aiConfig.model,
+          provider: aiConfig.provider,
+          prompt_tokens: data.usage.prompt_tokens ?? null,
+          completion_tokens: data.usage.completion_tokens ?? null,
+          total_tokens: data.usage.total_tokens ?? null,
+          qualified,
+          strategy_id: strategyId ?? null,
+        },
+      });
     }
 
     return { qualified, reason };
