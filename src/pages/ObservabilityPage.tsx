@@ -450,7 +450,7 @@ export default function ObservabilityPage() {
   const [expandedMemoryId, setExpandedMemoryId] = useState<string | null>(null);
   const [selectedFailureMode, setSelectedFailureMode] = useState<string | null>(null);
   const [clearingMemory, setClearingMemory] = useState(false);
-  const [selectedTimelineHour, setSelectedTimelineHour] = useState<{ label: string; events: ComplianceEvent[] } | null>(null);
+  const [selectedTimelineHour, setSelectedTimelineHour] = useState<{ label: string; tooltipLabel?: string; events: ComplianceEvent[] } | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [showFullHistory, setShowFullHistory] = useState(false);
   const [traceExpanded, setTraceExpanded] = useState(false);
@@ -1739,7 +1739,7 @@ export default function ObservabilityPage() {
                     radius={[2, 2, 0, 0]}
                     style={{ cursor: "pointer" }}
                     onClick={(data: any) => {
-                      if (data.count > 0) setSelectedTimelineHour({ label: data.hour, events: data.events });
+                      if (data.count > 0) setSelectedTimelineHour({ label: data.hour, tooltipLabel: data.tooltipLabel, events: data.events });
                     }}
                   >
                     {failureTimeline.map((entry, index) => (
@@ -3124,7 +3124,20 @@ export default function ObservabilityPage() {
     )}
 
     {/* ── Timeline Hour Drill-Down Modal ───────────────────────────── */}
-    {selectedTimelineHour && (
+    {selectedTimelineHour && (() => {
+      // Group events by failure category. Falls back to event_type for 30d tool errors
+      // that aren't in the 24h failureModes window.
+      const groupMap = new Map<string, { category: string | null; title: string; events: ComplianceEvent[] }>();
+      selectedTimelineHour.events.forEach((ev) => {
+        const category = Object.entries(failureModes).find(([, m]) => m.events.some((e) => e.id === ev.id))?.[0] ?? null;
+        const title = (category && FAILURE_MODE_DETAILS[category]?.title) ?? ev.event_type.replace(/_/g, " ");
+        if (!groupMap.has(title)) groupMap.set(title, { category, title, events: [] });
+        groupMap.get(title)!.events.push(ev);
+      });
+      const groups = Array.from(groupMap.values());
+      const autoOpen = groups.length === 1;
+
+      return (
       <div
         className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
         onClick={() => setSelectedTimelineHour(null)}
@@ -3135,52 +3148,67 @@ export default function ObservabilityPage() {
         >
           <div className="px-6 py-4 border-b border-border flex items-center justify-between shrink-0">
             <div>
-              <h3 className="text-sm font-semibold">Failures at {selectedTimelineHour.label}</h3>
-              <p className="text-[11px] text-muted-foreground mt-0.5">{selectedTimelineHour.events.length} event{selectedTimelineHour.events.length !== 1 ? "s" : ""} in this hour</p>
+              <h3 className="text-sm font-semibold">
+                {selectedTimelineHour.tooltipLabel ?? selectedTimelineHour.label}
+              </h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                {selectedTimelineHour.events.length} event{selectedTimelineHour.events.length !== 1 ? "s" : ""}
+                {groups.length > 1 && ` · ${groups.length} categories`}
+              </p>
             </div>
             <button onClick={() => setSelectedTimelineHour(null)} className="text-muted-foreground hover:text-foreground text-lg leading-none">×</button>
           </div>
-          <div className="overflow-y-auto flex-1 divide-y divide-border">
-            {selectedTimelineHour.events
-              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-              .map((ev) => {
-                const category = Object.entries(failureModes).find(([, m]) => m.events.some((e) => e.id === ev.id))?.[0];
-                const categoryTitle = category ? FAILURE_MODE_DETAILS[category]?.title : null;
-                return (
-                  <div key={ev.id} className="px-6 py-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`text-[10px] font-semibold uppercase ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>
-                        {ev.severity}
-                      </span>
-                      {categoryTitle && (
-                        <button
-                          className="text-[10px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded-full hover:bg-secondary/70 transition-colors"
-                          onClick={() => { setSelectedTimelineHour(null); setSelectedFailureMode(category!); }}
-                        >{categoryTitle} →</button>
+          <div className="overflow-y-auto flex-1">
+            {groups.map(({ category, title, events: groupEvents }) => (
+              <details key={title} open={autoOpen} className="group border-b border-border last:border-0">
+                <summary className="px-6 py-3 flex items-center gap-2.5 cursor-pointer list-none hover:bg-secondary/20 transition-colors select-none">
+                  <span className="text-[11px] font-medium capitalize flex-1">{title}</span>
+                  <span className="text-[10px] bg-red-500/15 text-red-400 px-1.5 py-0.5 rounded-full tabular-nums shrink-0">
+                    {groupEvents.length}
+                  </span>
+                  {category && (
+                    <button
+                      className="text-[10px] text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                      onClick={(e) => { e.preventDefault(); setSelectedTimelineHour(null); setSelectedFailureMode(category); }}
+                    >details →</button>
+                  )}
+                  <span className="text-muted-foreground/30 text-[10px] shrink-0 transition-transform group-open:rotate-90 inline-block">▶</span>
+                </summary>
+                <div className="divide-y divide-border/40">
+                  {groupEvents
+                    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                    .map((ev) => (
+                    <div key={ev.id} className="px-6 pl-10 py-2.5">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className={`text-[10px] font-semibold uppercase ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>
+                          {ev.severity}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{fmtTime(ev.created_at)}</span>
+                      </div>
+                      <p className="text-[12px] text-foreground leading-snug">{ev.message}</p>
+                      {ev.metadata && Object.keys(ev.metadata).length > 0 && (
+                        <details className="mt-1.5">
+                          <summary className="text-[9px] text-muted-foreground/50 cursor-pointer select-none hover:text-muted-foreground transition-colors">trace metadata</summary>
+                          <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                            {Object.entries(ev.metadata as Record<string, unknown>).map(([k, v]) => (
+                              <div key={k} className="flex gap-1.5 items-baseline">
+                                <span className="text-[9px] text-muted-foreground/60 font-mono shrink-0">{k}</span>
+                                <span className="text-[9px] text-muted-foreground font-mono truncate">{String(v)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
                       )}
-                      <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{fmtTime(ev.created_at)}</span>
                     </div>
-                    <p className="text-[12px] text-foreground leading-snug">{ev.message}</p>
-                    {ev.metadata && Object.keys(ev.metadata).length > 0 && (
-                      <details className="mt-1.5">
-                        <summary className="text-[9px] text-muted-foreground/50 cursor-pointer select-none hover:text-muted-foreground transition-colors">trace metadata</summary>
-                        <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
-                          {Object.entries(ev.metadata as Record<string, unknown>).map(([k, v]) => (
-                            <div key={k} className="flex gap-1.5 items-baseline">
-                              <span className="text-[9px] text-muted-foreground/60 font-mono shrink-0">{k}</span>
-                              <span className="text-[9px] text-muted-foreground font-mono truncate">{String(v)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                );
-              })}
+                  ))}
+                </div>
+              </details>
+            ))}
           </div>
         </div>
       </div>
-    )}
+      );
+    })()}
 
     {/* ── Trade Detail Panel ───────────────────────────────────────── */}
 
