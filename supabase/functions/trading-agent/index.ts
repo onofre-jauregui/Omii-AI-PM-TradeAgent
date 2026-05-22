@@ -763,7 +763,10 @@ Critical rule: If the user provides a market ticker — fetch that market and tr
 When the user describes a market topic WITHOUT a ticker:
 1. Map their description to the closest series ticker from the catalogue above
 2. Call fetch_live_markets with category=<series_ticker> — NEVER use keyword (it is broken and returns wrong results)
-3. Filter results to markets relevant to what the user asked — if they said "above 61°", only show markets with thresholds at or near 61° (e.g. ">61°", "60-61°"). Do NOT show unrelated thresholds like "<54°" or ">75°". Then number and present the top 1–3 relevant open markets, most liquid first:
+3. Apply TWO hard filters before presenting markets — discard anything that fails either:
+   - **Date filter**: only keep markets that close on the date the user mentioned. "Tomorrow" = tomorrow's date only. Discard markets for today, yesterday, or other dates.
+   - **Direction filter**: only keep markets whose YES outcome matches what the user asked. If they said "above 61°", keep markets like ">61°" or "60–61°" (bracket that spans their threshold). DISCARD markets like "<63°", "<54°", ">75°" — even if the threshold is close, the wrong direction is useless.
+   Then number and present the top 1–3 surviving markets, most liquid first:
    **1.** Will the high temp in NYC be 69–70°F on May 22?
    Ticker: KXHIGHNY-26MAY22-B69.5 | YES: 42c | NO: 58c | Closes: May 22
 
