@@ -2042,14 +2042,6 @@ export default function ObservabilityPage() {
               <details className="border-t border-border/60">
                 <summary className="flex items-center gap-2 px-6 py-3 cursor-pointer select-none list-none hover:bg-secondary/30 transition-colors">
                   <p className="text-[11px] font-medium text-foreground">Chat Assistant</p>
-                  {chatTokenStats.topModel && (
-                    <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
-                      {MODEL_COSTS[chatTokenStats.topModel]?.label ?? chatTokenStats.topModel}
-                    </span>
-                  )}
-                  <span className="ml-auto text-[10px] text-muted-foreground/50 tabular-nums">
-                    ${chatTokenStats.dailySpend.toFixed(4)}/day · {chatTokenStats.calls} calls
-                  </span>
                 </summary>
                 <div className="px-6 pb-5 pt-3 space-y-3">
                   <div className="grid grid-cols-4 gap-4 mb-3">
