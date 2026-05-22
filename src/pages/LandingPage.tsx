@@ -221,7 +221,7 @@ function HeroDashboardMockup() {
         ) : (
           [
             { label: "Return", value: `+${roiPct}%`, sub: "cumulative ROI", color: "#34d058" },
-            { label: "Win Rate", value: `${s.winRate.toFixed(1)}%`, sub: "", color: "#f5f5f7" },
+            { label: "Win Rate", value: `${Math.round(s.winRate)}%`, sub: "", color: "#f5f5f7" },
             { label: "Agent Status", value: "Active", sub: "Auto-trading", color: "#34d058" },
           ].map((stat) => (
             <div key={stat.label} className="px-3 first:pl-0">
