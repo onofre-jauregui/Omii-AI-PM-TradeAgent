@@ -2121,43 +2121,38 @@ export default function ObservabilityPage() {
           </div>
 
           {/* 5 KPI cards */}
-          <div className="grid grid-cols-5 gap-0 border-t" style={{ borderColor: "#2e2720" }}>
-            {/* p50 */}
-            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+          <div className="px-6 py-4 border-t border-border grid grid-cols-5 gap-3">
+            <div className="rounded-xl border border-border p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p50 Cycle</p>
-              <p className={`text-2xl font-bold tabular-nums ${p50CycleS === null ? "text-muted-foreground" : p50CycleS <= 3 ? "text-emerald-500" : p50CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
+              <p className={`text-xl font-bold tabular-nums ${p50CycleS === null ? "text-muted-foreground" : p50CycleS <= 3 ? "text-emerald-500" : p50CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
                 {fmtSeconds(p50CycleS)}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">median run</p>
             </div>
-            {/* p95 */}
-            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+            <div className="rounded-xl border border-border p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p95 Cycle</p>
-              <p className={`text-2xl font-bold tabular-nums ${p95CycleS === null ? "text-muted-foreground" : p95CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
+              <p className={`text-xl font-bold tabular-nums ${p95CycleS === null ? "text-muted-foreground" : p95CycleS <= 8 ? "text-yellow-500" : "text-red-500"}`}>
                 {fmtSeconds(p95CycleS)}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">95th pct run</p>
             </div>
-            {/* Avg Cycle */}
-            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+            <div className="rounded-xl border border-border p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Run Duration</p>
-              <p className={`text-2xl font-bold tabular-nums ${avgCycleMs === null ? "text-muted-foreground" : avgCycleMs < 8000 ? "text-emerald-500" : avgCycleMs < 20000 ? "text-yellow-500" : "text-red-500"}`}>
+              <p className={`text-xl font-bold tabular-nums ${avgCycleMs === null ? "text-muted-foreground" : avgCycleMs < 8000 ? "text-emerald-500" : avgCycleMs < 20000 ? "text-yellow-500" : "text-red-500"}`}>
                 {cycleLabel ?? "—"}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">cron fire → last event (avg)</p>
             </div>
-            {/* Settlement */}
-            <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
+            <div className="rounded-xl border border-border p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Settlement</p>
-              <p className="text-2xl font-bold tabular-nums text-muted-foreground">
+              <p className="text-xl font-bold tabular-nums text-muted-foreground">
                 {fmtMs(avgSettlementMs)}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">fill → resolve avg</p>
             </div>
-            {/* Market Scan */}
-            <div className="px-6 py-4">
+            <div className="rounded-xl border border-border p-4">
               <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Market Scan</p>
-              <p className={`text-2xl font-bold tabular-nums ${avgScanS === null ? "text-muted-foreground" : avgScanS <= 5 ? "text-emerald-500" : avgScanS <= 15 ? "text-yellow-500" : "text-red-500"}`}>
+              <p className={`text-xl font-bold tabular-nums ${avgScanS === null ? "text-muted-foreground" : avgScanS <= 5 ? "text-emerald-500" : avgScanS <= 15 ? "text-yellow-500" : "text-red-500"}`}>
                 {avgScanS !== null ? `${avgScanS.toFixed(1)}s` : "—"}
               </p>
               <p className="text-[10px] text-muted-foreground mt-0.5">surface scan avg</p>
@@ -2165,8 +2160,11 @@ export default function ObservabilityPage() {
           </div>
 
           {/* 7d latency trend */}
-          <div className="px-6 pt-4 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
-            <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 7 days (avg per 6h window, seconds)</p>
+          <div className="px-6 pt-4 pb-5 border-t border-border">
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold mb-3">
+              Strategy Execution · Run Duration
+              <span className="normal-case tracking-normal font-normal lowercase ml-1 opacity-60">last 7 days · avg per 6h window · seconds</span>
+            </p>
             {stratRunDurations.length === 0 ? (
               <div className="h-[100px] flex items-center justify-center">
                 <p className="text-[11px] text-muted-foreground/50">No run data in the last 7 days — agent may not have executed recently</p>
@@ -2194,30 +2192,30 @@ export default function ObservabilityPage() {
             )}
           </div>
 
-          {/* ── Chat Response Latency (shown only when duration_ms data exists) */}
+          {/* Chat Response Latency */}
           {chatLatencyStats && (
-            <div className="px-6 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold mt-4 mb-3">
+            <div className="px-6 pt-4 pb-5 border-t border-border">
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold mb-3">
                 Chat Assistant · Response Latency
                 <span className="normal-case tracking-normal font-normal lowercase ml-1 opacity-60">({chatLatencyStats.sampleCount} calls measured · last 30d)</span>
               </p>
               <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-xl border border-border p-3">
+                <div className="rounded-xl border border-border p-4">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p50</p>
                   <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.p50Ms === null ? "text-muted-foreground" : chatLatencyStats.p50Ms <= 3000 ? "text-emerald-500" : chatLatencyStats.p50Ms <= 8000 ? "text-yellow-500" : "text-red-500"}`}>
                     {chatLatencyStats.p50Ms !== null ? `${(chatLatencyStats.p50Ms / 1000).toFixed(1)}s` : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">median response</p>
                 </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p95</p>
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widests mb-1">p95</p>
                   <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.p95Ms === null ? "text-muted-foreground" : chatLatencyStats.p95Ms <= 8000 ? "text-yellow-500" : "text-red-500"}`}>
                     {chatLatencyStats.p95Ms !== null ? `${(chatLatencyStats.p95Ms / 1000).toFixed(1)}s` : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">95th pct response</p>
                 </div>
-                <div className="rounded-xl border border-border p-3">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Avg</p>
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widests mb-1">Avg</p>
                   <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.avgMs === null ? "text-muted-foreground" : chatLatencyStats.avgMs <= 5000 ? "text-emerald-500" : chatLatencyStats.avgMs <= 12000 ? "text-yellow-500" : "text-red-500"}`}>
                     {chatLatencyStats.avgMs !== null ? `${(chatLatencyStats.avgMs / 1000).toFixed(1)}s` : "—"}
                   </p>
