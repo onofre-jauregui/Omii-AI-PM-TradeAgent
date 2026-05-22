@@ -101,7 +101,7 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
   db_connection: {
     title: "DB / Connection Errors",
     description: "Supabase client returned a connection error, socket failure, or database-level error. Edge functions depend on the DB for trade state, risk rules, and memory injection — connection failures degrade all operations.",
-    resolution: "Check Supabase project status and connection pooler health. If persistent, review edge function database connection limits. Supabase free tier pauses after 7 days of inactivity.",
+    resolution: "Check Supabase project status and connection pooler health. If persistent, review edge function database connection limits.",
   },
   network_failure: {
     title: "Network Failures",
@@ -1713,10 +1713,18 @@ export default function ObservabilityPage() {
               </div>
             ))}
             <div>
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
-                24h Uptime
-                <span className="normal-case tracking-normal opacity-60 lowercase"> · green = clean · red = failures · click red bars for details</span>
-              </p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">
+                  24h Uptime
+                  <span className="normal-case tracking-normal opacity-60 lowercase"> · green = clean · red = failures · click red bars for details</span>
+                </p>
+                <a
+                  href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor?schema=public"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground transition-colors shrink-0 ml-4"
+                >Full log in Supabase ↗</a>
+              </div>
               <ResponsiveContainer width="100%" height={70}>
                 <BarChart
                   data={failureTimeline}
