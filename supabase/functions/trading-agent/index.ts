@@ -549,25 +549,78 @@ serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Resolve the calling user from their session JWT so agent trades are attributed correctly.
-    // This mirrors the resolveTenant pattern in execute-trade/tenant.ts.
+    // ── Open SSE stream immediately — processing happens in background ──
+    // This ensures the client gets the response header right away rather than
+    // waiting for DB queries + LLM calls to complete before any bytes are sent.
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const streamWriter = writable.getWriter();
+    const enc = new TextEncoder();
+    const sendStatus = async (text: string) => {
+      try { await streamWriter.write(enc.encode(`data: ${JSON.stringify({ type: "status", text })}\n\n`)); } catch {}
+    };
+    const sseResponse = new Response(readable, {
+      headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
+    });
+
+    // All processing runs in this IIFE; return sseResponse immediately below.
+    (async () => {
+      try {
+
+    // Extract JWT before parallel fetch so we can include auth in the batch.
     let userId: string | null = null;
     const authHeader = req.headers.get("Authorization") || req.headers.get("authorization");
-    if (authHeader?.toLowerCase().startsWith("bearer ")) {
-      const jwt = authHeader.slice(7).trim();
-      if (jwt && jwt !== supabaseKey) {
-        try {
-          const { data } = await supabase.auth.getUser(jwt);
-          if (data?.user?.id) userId = data.user.id;
-        } catch { /* non-fatal — fall back to null */ }
-      }
-    }
+    const jwt = authHeader?.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : null;
+    const authPromise = jwt && jwt !== supabaseKey
+      ? supabase.auth.getUser(jwt)
+      : Promise.resolve({ data: { user: null }, error: null });
 
-    // ── Load API keys ──
-    const { data: keyRows } = await supabase
-      .from("api_keys")
-      .select("provider, encrypted_secret")
-      .in("provider", ["openrouter", "openai", "anthropic", "google"]);
+    // ── Load all startup data in parallel (was 7 sequential awaits ~700ms; now one round-trip) ──
+    const MAY_START = "2026-05-01T00:00:00.000Z";
+    const [
+      authSettled,
+      keyRowsSettled,
+      savedModelSettled,
+      riskSettled,
+      memorySettled,
+      tradesSettled,
+      unreflectedSettled,
+    ] = await Promise.allSettled([
+      authPromise,
+      supabase.from("api_keys").select("provider, encrypted_secret").in("provider", ["openrouter", "openai", "anthropic", "google"]),
+      supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
+      supabase.from("risk_settings").select("*").maybeSingle(),
+      supabase.from("agent_memory")
+        .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
+        .eq("is_active", true)
+        .is("merged_into", null)
+        .order("confidence", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(30),
+      supabase.from("trades")
+        .select("ticker, side, action, price, amount, pnl, strategy, settled_at")
+        .eq("status", "settled")
+        .gte("settled_at", MAY_START)
+        .order("settled_at", { ascending: false })
+        .limit(20),
+      supabase.from("trades")
+        .select("id")
+        .eq("status", "settled")
+        .not("id", "in", "(SELECT trade_id FROM trade_reflections)")
+        .limit(1),
+    ]);
+
+    // Extract values — any failed query falls back to null/[] to match prior behavior
+    if (authSettled.status === "fulfilled" && authSettled.value?.data?.user?.id) {
+      userId = authSettled.value.data.user.id;
+    }
+    const keyRows = keyRowsSettled.status === "fulfilled" ? (keyRowsSettled.value?.data ?? []) : [];
+    const savedModelData = savedModelSettled.status === "fulfilled" ? (savedModelSettled.value?.data ?? null) : null;
+    const riskSettings = riskSettled.status === "fulfilled" ? (riskSettled.value?.data ?? null) : null;
+    const topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
+    const recentFilledTrades = tradesSettled.status === "fulfilled" ? (tradesSettled.value?.data ?? null) : null;
+    const unreflectedTrades = unreflectedSettled.status === "fulfilled" ? (unreflectedSettled.value?.data ?? null) : null;
 
     const keys: Record<string, string> = {};
     for (const row of keyRows || []) {
@@ -587,12 +640,7 @@ serve(async (req) => {
     };
     let resolvedModel = modelMap[model] || (model?.trim() || null);
     if (!resolvedModel) {
-      const { data: savedModel } = await supabase
-        .from("api_keys")
-        .select("key_id")
-        .eq("provider", "model_agent")
-        .maybeSingle();
-      resolvedModel = savedModel?.key_id || "openai/gpt-4o-mini";
+      resolvedModel = savedModelData?.key_id || "openai/gpt-4o-mini";
     }
 
     const provider = getProvider(resolvedModel);
@@ -628,23 +676,13 @@ serve(async (req) => {
         ? "\n\n--- TRADING MODE: PAPER. All trades are simulated. No real money is at risk."
         : "\n\n--- TRADING MODE: LIVE. Trades execute on Kalshi with real money. Apply strict risk management.";
 
-    const { data: riskSettings } = await supabase.from("risk_settings").select("*").maybeSingle();
     let riskContext = "";
     if (riskSettings) {
       riskContext = `\n\n## Risk Limits (Enforced)\n- Max position size: $${riskSettings.max_position_size}\n- Max daily loss: $${riskSettings.max_daily_loss}\n- Max drawdown: ${riskSettings.max_drawdown_pct}%\n- Max open positions: ${riskSettings.max_open_positions}\n- Auto stop-loss: ${riskSettings.auto_stop_loss ? "Enabled" : "Disabled"} at ${riskSettings.stop_loss_pct}%\nThese limits are enforced server-side. Orders exceeding limits will be rejected.`;
     }
 
-    // ── Load persistent memory (compact summaries with token budget) ──
+    // ── Build persistent memory block (data already loaded in parallel above) ──
     const MEMORY_TOKEN_BUDGET = 1500; // max ~1500 tokens for memory block
-    const { data: topMemories } = await supabase
-      .from("agent_memory")
-      .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
-      .eq("is_active", true)
-      .is("merged_into", null) // merged originals stay in DB but are excluded here; use recall_lessons to retrieve them
-      .order("confidence", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(30);
-
     let memoryBlock = "";
     if (topMemories && topMemories.length > 0) {
       memoryBlock = "\n\n## Your Trading Memory (Persistent Lessons)\nThese are insights you've learned from past trading sessions. Use them to make better decisions. If new evidence contradicts a lesson, use the update_memory tool to adjust it. Use `recall_lessons` to retrieve full details on any memory.\n\n";
@@ -663,17 +701,8 @@ serve(async (req) => {
       }
     }
 
-    // ── Load recent trade performance summary ──
+    // ── Build performance block (data already loaded in parallel above) ──
     // P&L only exists on settled trades; filled trades always have pnl=0
-    const MAY_START = "2026-05-01T00:00:00.000Z";
-    const { data: recentFilledTrades } = await supabase
-      .from("trades")
-      .select("ticker, side, action, price, amount, pnl, strategy, settled_at")
-      .eq("status", "settled")
-      .gte("settled_at", MAY_START)
-      .order("settled_at", { ascending: false })
-      .limit(20);
-
     let performanceBlock = "";
     if (recentFilledTrades && recentFilledTrades.length > 0) {
       const totalPnl = recentFilledTrades.reduce((sum, t) => sum + (Number(t.pnl) || 0), 0);
@@ -683,15 +712,7 @@ serve(async (req) => {
       performanceBlock = `\n\n## Recent Performance (last ${recentFilledTrades.length} trades)\n- Total P&L: $${totalPnl.toFixed(2)}\n- Wins: ${wins} | Losses: ${losses} | Neutral: ${neutral}\n- Win rate: ${recentFilledTrades.length > 0 ? ((wins / recentFilledTrades.length) * 100).toFixed(0) : 0}%\nUse reflect_on_trades to analyze patterns in these results.\n`;
     }
 
-    // ── Check for unreflected settled trades ──
-    const { data: unreflectedTrades } = await supabase
-      .from("trades")
-      .select("id")
-      .eq("status", "settled")
-      .not("id", "in", `(SELECT trade_id FROM trade_reflections)`)
-      .limit(1);
-
-    // This query might fail if the subquery isn't supported; handle gracefully
+    // ── Check for unreflected settled trades (data already loaded in parallel above) ──
     const hasUnreflected = (unreflectedTrades?.length || 0) > 0;
     const reflectionHint = hasUnreflected
       ? "\n\n> **Note:** You have trades that haven't been reflected on yet. Consider calling `reflect_on_trades` to learn from recent outcomes.\n"
@@ -749,8 +770,8 @@ When the user describes a market topic WITHOUT a ticker:
    **2.** Will the high temp in NYC be >70°F on May 22?
    Ticker: KXHIGHNY-26MAY22-T70 | YES: 2c | NO: 98c | Closes: May 22
 
-4. Ask exactly: "Which one do you want? Reply with the number and YES or NO — e.g. '1, YES' or '2, NO'."
-5. On reply, extract the number, look up the ticker from your list, and call execute_trade — the user never needs to type a ticker.
+4. Ask: "Which one do you want? (reply with number + yes/no)"
+5. On reply, extract the market number and direction from ANY natural phrasing. "one yes", "do 1", "let's go two no", "yes on 3", "the first one yes", "Do one, yes" all count — never ask for re-confirmation of format. If you can identify a number (1/2/3) and a direction (yes/no), execute immediately.
 
 If no series ticker maps to their request, call fetch_live_markets with NO parameters (returns broad market list) and scan visually. Never tell the user "I couldn't find it" without first trying at least one category fetch.
 
@@ -774,7 +795,9 @@ Format responses with markdown. Be transparent about reasoning and risk.
 All market prices in fetch_live_markets results are in INTEGER CENTS (1–99). Use these values directly as the price parameter in execute_trade. Do NOT convert or divide. A market showing yes_ask_cents=2 means the limit price is 2.
 
 ## Error Handling
-If execute_trade or any tool returns an error field, relay the exact error text to the user verbatim. Do not rephrase, interpret, or replace it with a different explanation.`;
+If execute_trade returns a non-success response, print the FULL JSON exactly as received, prefixed with "Raw error:". Do NOT summarize it as "authentication error" or "JWT error" — print it verbatim. Never fabricate next steps based on guessed error causes.
+
+For user-initiated manual trades (not triggered by a strategy run), set strategy=null and strategyId=null in execute_trade. Strategy IDs are only for autonomous cron-triggered strategy runs.`;
 
     // ── All tools ──
     const allTools = [
@@ -824,7 +847,7 @@ If execute_trade or any tool returns an error field, relay the exact error text 
               turn_index: turnIndex,
               duration_ms: durationMs,
             },
-          }).catch(() => {});
+          }).then(() => {}).catch(() => {});
         }
       } else {
         const cfg = getOpenAICompatConfig(effectiveProvider, keys);
@@ -847,18 +870,8 @@ If execute_trade or any tool returns an error field, relay the exact error text 
 
         if (!resp.ok) {
           const status = resp.status;
-          if (status === 429) {
-            return new Response(JSON.stringify({ error: "Rate limit exceeded. Please wait and try again." }), {
-              status: 429,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            });
-          }
-          if (status === 402) {
-            return new Response(JSON.stringify({ error: "Usage credits depleted. Please add credits." }), {
-              status: 402,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            });
-          }
+          if (status === 429) throw new Error("Rate limit exceeded. Please wait and try again.");
+          if (status === 402) throw new Error("Usage credits depleted. Please add credits to your AI provider.");
           const t = await resp.text();
           console.error("AI error:", status, t);
           let errMsg = `AI provider error (HTTP ${status})`;
@@ -866,10 +879,7 @@ If execute_trade or any tool returns an error field, relay the exact error text 
             const parsed = JSON.parse(t);
             errMsg = parsed?.error?.message || parsed?.message || parsed?.error || errMsg;
           } catch {}
-          return new Response(JSON.stringify({ error: errMsg }), {
-            status: 500,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+          throw new Error(errMsg);
         }
         result = await resp.json();
         const durationMs = Date.now() - llmCallStart;
@@ -888,40 +898,21 @@ If execute_trade or any tool returns an error field, relay the exact error text 
               turn_index: turnIndex,
               duration_ms: durationMs,
             },
-          }).catch(() => {});
+          }).then(() => {}).catch(() => {});
         }
       }
 
       const choice = result.choices?.[0];
-      if (!choice) {
-        return new Response(JSON.stringify({ error: "No response from AI" }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
+      if (!choice) throw new Error("No response from AI");
 
-      // No tool calls — stream the final response
+      // No tool calls — write the already-received content directly to the stream.
+      // This avoids a second LLM round-trip (the old approach called streamAnthropicAsSSE
+      // which re-sent the full conversation to get a streaming response we already had).
       if (choice.finish_reason !== "tool_calls" || !choice.message?.tool_calls?.length) {
-        if (effectiveProvider === "anthropic") {
-          return await streamAnthropicAsSSE(finalModel, keys["anthropic"], aiMessages, temperature ?? 0.3);
-        }
-        const cfg = getOpenAICompatConfig(effectiveProvider, keys)!;
-        const streamResp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${cfg.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: finalModel,
-            messages: aiMessages,
-            temperature: temperature ?? 0.3,
-            stream: true,
-          }),
-        });
-        return new Response(streamResp.body, {
-          headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
-        });
+        const content = choice.message?.content || "";
+        await streamWriter.write(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        await streamWriter.write(enc.encode("data: [DONE]\n\n"));
+        return;
       }
 
       // Process tool calls
@@ -937,6 +928,24 @@ If execute_trade or any tool returns an error field, relay the exact error text 
         }
 
         let toolResult = "";
+
+        // ── Emit status event so user sees progress during tool execution ──
+        {
+          const statusLabels: Record<string, string> = {
+            fetch_live_markets: `Searching ${args.category ? args.category + " " : ""}markets…`,
+            execute_trade: `Placing ${String(args.side || "").toUpperCase() || "trade"} order on ${args.ticker || "market"}…`,
+            execute_basket: "Executing basket trade…",
+            check_portfolio: "Loading portfolio…",
+            fetch_signals: "Scoring live markets…",
+            scan_surface: "Scanning for arb opportunities…",
+            recall_lessons: "Reading agent memory…",
+            save_insight: "Saving insight…",
+            update_memory: "Updating memory…",
+            reflect_on_trades: "Analyzing trade history…",
+          };
+          const label = statusLabels[fnName];
+          if (label) await sendStatus(label);
+        }
 
         // ── fetch_live_markets ──
         if (fnName === "fetch_live_markets") {
@@ -1518,30 +1527,27 @@ If execute_trade or any tool returns an error field, relay the exact error text 
     }
 
     // Exhausted iterations — final stream
-    if (effectiveProvider === "anthropic") {
-      return await streamAnthropicAsSSE(finalModel, keys["anthropic"], aiMessages, temperature ?? 0.3);
-    }
+    // Fallback after max iterations exhausted — write whatever we have
+    const lastContent = aiMessages.filter((m: any) => m.role === "assistant").pop()?.content || "Max iterations reached without a final response.";
+    await streamWriter.write(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: lastContent } }] })}\n\n`));
+    await streamWriter.write(enc.encode("data: [DONE]\n\n"));
 
-    const cfg = getOpenAICompatConfig(effectiveProvider, keys)!;
-    const streamResponse = await fetch(`${cfg.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${cfg.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: finalModel,
-        messages: aiMessages,
-        temperature: temperature ?? 0.3,
-        stream: true,
-      }),
-    });
+      } catch (e: any) {
+        console.error("trading-agent error:", e);
+        const errText = e instanceof Error ? e.message : "Unknown error";
+        try {
+          await streamWriter.write(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: `\n\nError: ${errText}` } }] })}\n\n`));
+          await streamWriter.write(enc.encode("data: [DONE]\n\n"));
+        } catch {}
+      } finally {
+        try { await streamWriter.close(); } catch {}
+      }
+    })();
 
-    return new Response(streamResponse.body, {
-      headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
-    });
+    return sseResponse;
+
   } catch (e) {
-    console.error("trading-agent error:", e);
+    console.error("trading-agent setup error:", e);
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

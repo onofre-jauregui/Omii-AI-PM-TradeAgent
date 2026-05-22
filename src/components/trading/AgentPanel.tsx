@@ -40,11 +40,12 @@ const QUICK_PROMPTS = [
 ];
 
 async function streamChat({
-  messages, strategies, model, temperature, systemPrompt, tradingMode, onDelta, onDone, onError,
+  messages, strategies, model, temperature, systemPrompt, tradingMode, onDelta, onDone, onError, onStatus,
 }: {
   messages: Msg[]; strategies: { name: string; instructions: string }[];
   model: string; temperature: number; systemPrompt: string; tradingMode: string;
   onDelta: (text: string) => void; onDone: () => void; onError: (error: string) => void;
+  onStatus?: (text: string) => void;
 }) {
   const resp = await fetch(AGENT_URL, {
     method: "POST",
@@ -71,8 +72,11 @@ async function streamChat({
       if (line.startsWith(":") || line.trim() === "" || !line.startsWith("data: ")) continue;
       const jsonStr = line.slice(6).trim();
       if (jsonStr === "[DONE]") { done = true; break; }
-      try { const p = JSON.parse(jsonStr); const c = p.choices?.[0]?.delta?.content; if (c) onDelta(c); }
-      catch { buffer = line + "\n" + buffer; break; }
+      try {
+        const p = JSON.parse(jsonStr);
+        if (p.type === "status") { onStatus?.(p.text); continue; }
+        const c = p.choices?.[0]?.delta?.content; if (c) onDelta(c);
+      } catch { buffer = line + "\n" + buffer; break; }
     }
   }
   if (buffer.trim()) {
@@ -107,6 +111,7 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   const [chatInput, setChatInput] = useState("");
   const [configOpen, setConfigOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [statusText, setStatusText] = useState("");
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
 
@@ -162,8 +167,9 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
       strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
       model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode: mode,
       onDelta: (chunk) => { assistantSoFar += chunk; chat.upsertAssistant(assistantSoFar); },
-      onDone: () => chat.setLoading(false),
-      onError: (err) => { chat.upsertAssistant(`Error: ${err}`); chat.setLoading(false); },
+      onDone: () => { chat.setLoading(false); setStatusText(""); },
+      onError: (err) => { chat.upsertAssistant(`Error: ${err}`); chat.setLoading(false); setStatusText(""); },
+      onStatus: (text) => setStatusText(text),
     });
   };
 
@@ -199,7 +205,7 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
           <h3 className="text-sm font-medium text-foreground shrink-0">Agent</h3>
           {isLoading && (
             <span className="text-[10px] text-muted-foreground flex items-center gap-1 shrink-0">
-              <Loader2 className="h-3 w-3 animate-spin" /> Thinking…
+              <Loader2 className="h-3 w-3 animate-spin" /> {statusText || "Thinking…"}
             </span>
           )}
         </div>
