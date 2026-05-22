@@ -84,12 +84,12 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
     resolution: "Review execution traces to check if auto_trade_strategy_run frequency is abnormal. Verify the pg_cron schedule in Supabase. If it's legitimate market activity, no action needed.",
   },
   exchange_error: {
-    title: "Exchange Data Errors",
+    title: "Kalshi Data Errors",
     description: "Kalshi API returned malformed or schema-mismatched market data. Usually caused by Kalshi maintenance windows or API field changes.",
     resolution: "Check Kalshi API changelog. These are usually transient. If sustained, a market field may have been renamed — compare error against current Kalshi API spec.",
   },
   strategy_error: {
-    title: "Strategy Code Errors",
+    title: "Strategy System Errors",
     description: "A strategy threw an unhandled exception — null/undefined field access, JSON parse failure, or schema mismatch in the qualify prompt.",
     resolution: "Check the specific error message below. Common cause: strategy accessing a market field that can be null (closeTime, yes_ask, no_bid). Add null guards.",
   },
