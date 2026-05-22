@@ -656,13 +656,13 @@ export default function ObservabilityPage() {
   }, []);
 
   const loadModelLatency = useCallback(async (uid?: string | null) => {
-    // Fetch last 8 auto_trade_run events
+    // Fetch last 50 auto_trade_run events — matches Market Scan sample size
     let runsQ = supabase
       .from("compliance_log")
       .select("id, created_at")
       .eq("event_type", "auto_trade_run")
       .order("created_at", { ascending: false })
-      .limit(8);
+      .limit(50);
     // auto_trade_run is system-level (user_id = NULL) — no uid filter
     const { data: runs } = await runsQ;
     if (!runs || runs.length === 0) return;
@@ -2195,11 +2195,11 @@ export default function ObservabilityPage() {
             </div>
             {/* Avg Cycle */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Avg Cycle</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Run Duration</p>
               <p className={`text-2xl font-bold tabular-nums ${avgCycleMs === null ? "text-muted-foreground" : avgCycleMs < 8000 ? "text-emerald-500" : avgCycleMs < 20000 ? "text-yellow-500" : "text-red-500"}`}>
                 {cycleLabel ?? "—"}
               </p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">run → last event avg</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">cron fire → last event (avg)</p>
             </div>
             {/* Settlement */}
             <div className="px-6 py-4 border-r" style={{ borderColor: "#2e2720" }}>
