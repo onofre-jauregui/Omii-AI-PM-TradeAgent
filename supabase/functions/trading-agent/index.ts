@@ -763,7 +763,7 @@ Critical rule: If the user provides a market ticker — fetch that market and tr
 When the user describes a market topic WITHOUT a ticker:
 1. Map their description to the closest series ticker from the catalogue above
 2. Call fetch_live_markets with category=<series_ticker> — NEVER use keyword (it is broken and returns wrong results)
-3. Number and present the top 1–3 open markets (sort by volume descending — most liquid first):
+3. Filter results to markets relevant to what the user asked — if they said "above 61°", only show markets with thresholds at or near 61° (e.g. ">61°", "60-61°"). Do NOT show unrelated thresholds like "<54°" or ">75°". Then number and present the top 1–3 relevant open markets, most liquid first:
    **1.** Will the high temp in NYC be 69–70°F on May 22?
    Ticker: KXHIGHNY-26MAY22-B69.5 | YES: 42c | NO: 58c | Closes: May 22
 
@@ -1050,61 +1050,114 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         }
 
         // ── execute_trade ──
-        // All modes (paper + live) go through execute-trade for consistent
-        // risk checks, reflection creation, and risk state updates.
+        // Paper trades: insert directly into DB using the service-role client already
+        // in scope — no HTTP boundary, no JWT auth issue.
+        // Live trades: forward to execute-trade function which handles Kalshi auth,
+        // entitlement checks, and risk management.
         else if (fnName === "execute_trade") {
           try {
-            const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-            const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
-            const execPayload = {
-              ticker: args.ticker,
-              marketId: args.ticker,
-              marketQuestion: args.marketQuestion,
-              side: args.side,
-              action: args.action,
-              price: args.price,
-              amount: args.amount,
-              strategy: args.strategy || null,
-              strategyId: args.strategyId || null,
-              orderType: args.orderType || "limit",
-              mode,
-              user_id: userId,
-              notes: `Agent trade: ${args.reasoning}`,
-              expectedOutcome: args.expectedOutcome || null,
-              confidenceLevel: args.confidenceLevel || null,
-            };
-            // Log the outbound call so we can diagnose auth failures
-            await supabase.from("compliance_log").insert({
-              user_id: userId,
-              event_type: "agent_trade_attempt",
-              severity: "info",
-              message: `Agent calling execute-trade: ${mode} ${args.side} ${args.ticker} @ ${args.price}c $${args.amount}`,
-              metadata: {
-                payload: execPayload,
-                svc_key_present: !!svcKey,
-                svc_key_prefix: svcKey ? svcKey.slice(0, 20) + "…" : null,
-              },
-            });
-            const execResp = await fetch(execUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${svcKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(execPayload),
-            });
-            const rawText = await execResp.text();
-            // Log the HTTP status + raw body so auth errors are visible
-            await supabase.from("compliance_log").insert({
-              user_id: userId,
-              event_type: "agent_trade_response",
-              severity: execResp.ok ? "info" : "error",
-              message: `execute-trade responded HTTP ${execResp.status}`,
-              metadata: { status: execResp.status, raw_body: rawText.slice(0, 2000) },
-            });
-            let execResult: any;
-            try { execResult = JSON.parse(rawText); } catch { execResult = { raw: rawText }; }
-            toolResult = JSON.stringify(execResult);
+            if (mode === "paper") {
+              // ── Inline paper trade ───────────────────────────────────────────
+              const { data: trade, error: insertError } = await supabase
+                .from("trades")
+                .insert({
+                  user_id: userId,
+                  ticker: args.ticker,
+                  market_id: args.ticker,
+                  market_question: args.marketQuestion || args.ticker,
+                  side: args.side,
+                  action: args.action,
+                  price: args.price,
+                  amount: args.amount,
+                  strategy: args.strategy || null,
+                  strategy_id: args.strategyId || null,
+                  mode: "paper",
+                  status: "filled",
+                  filled_price: args.price,
+                  filled_at: new Date().toISOString(),
+                  exchange: "paper",
+                  order_type: args.orderType || "limit",
+                  pnl: 0,
+                  notes: `Agent trade: ${args.reasoning || ""}`,
+                })
+                .select()
+                .single();
+
+              if (insertError) throw insertError;
+
+              // Trade reflection if agent provided expected outcome
+              if (args.expectedOutcome) {
+                await supabase.from("trade_reflections").insert({
+                  trade_id: trade.id,
+                  expected_outcome: args.expectedOutcome,
+                  expected_confidence: args.confidenceLevel || null,
+                  decision_quality: "unknown",
+                });
+              }
+
+              // Compliance log
+              await supabase.from("compliance_log").insert({
+                user_id: userId,
+                trade_id: trade.id,
+                event_type: "order_filled",
+                severity: "info",
+                message: `Paper trade filled: ${args.action} ${args.side} ${args.ticker} @ ${args.price}c for $${args.amount}`,
+                metadata: { mode: "paper", reasoning: args.reasoning },
+              });
+
+              // Increment daily trade count in risk_state
+              const today = new Date().toISOString().split("T")[0];
+              const riskQuery = userId
+                ? supabase.from("risk_state").select("daily_trades").eq("user_id", userId).eq("date", today).maybeSingle()
+                : supabase.from("risk_state").select("daily_trades").is("user_id", null).eq("date", today).maybeSingle();
+              const { data: rs } = await riskQuery;
+              await supabase.from("risk_state").upsert(
+                {
+                  user_id: userId,
+                  date: today,
+                  daily_trades: (rs?.daily_trades ?? 0) + 1,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: userId ? "user_id,date" : "date" }
+              );
+
+              toolResult = JSON.stringify({
+                success: true,
+                trade,
+                message: `Paper trade: ${String(args.action).toUpperCase()} ${String(args.side).toUpperCase()} ${args.ticker} @ ${args.price}c for $${args.amount}`,
+              });
+            } else {
+              // ── Live trade — forward to execute-trade function ──────────────
+              const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
+              const execResp = await fetch(execUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${supabaseKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  ticker: args.ticker,
+                  marketId: args.ticker,
+                  marketQuestion: args.marketQuestion,
+                  side: args.side,
+                  action: args.action,
+                  price: args.price,
+                  amount: args.amount,
+                  strategy: args.strategy || null,
+                  strategyId: args.strategyId || null,
+                  orderType: args.orderType || "limit",
+                  mode: "live",
+                  user_id: userId,
+                  notes: `Agent trade: ${args.reasoning}`,
+                  expectedOutcome: args.expectedOutcome || null,
+                  confidenceLevel: args.confidenceLevel || null,
+                }),
+              });
+              const rawText = await execResp.text();
+              let execResult: any;
+              try { execResult = JSON.parse(rawText); } catch { execResult = { raw: rawText }; }
+              toolResult = JSON.stringify(execResult);
+            }
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
           }
