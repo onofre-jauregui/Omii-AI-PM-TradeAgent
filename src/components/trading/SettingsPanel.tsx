@@ -352,9 +352,11 @@ export function SettingsPanel() {
       {/* ── Kalshi Live Trading ──────────────────────────────────── */}
       <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
         <div className="px-6 py-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <Key className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Key className="h-4 w-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium">Kalshi — Live Trading</h3>
+            </div>
             <StatusBadge saved={savedProviders.has("kalshi_live")} />
           </div>
           <p className="text-xs text-muted-foreground mt-1">
