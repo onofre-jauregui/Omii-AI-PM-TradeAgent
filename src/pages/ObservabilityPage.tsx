@@ -620,7 +620,7 @@ export default function ObservabilityPage() {
 
     let eventsQ = supabase
       .from("compliance_log")
-      .select("id, created_at, event_type, severity, message, trade_id")
+      .select("id, created_at, event_type, severity, message, trade_id, metadata")
       .gte("created_at", since)
       .order("created_at", { ascending: false })
       .limit(500);
@@ -951,10 +951,10 @@ export default function ObservabilityPage() {
       }))
       .filter((d) => d.seconds > 0);
 
-    // Fallback: if strategy run events are sparse (agent crashing before it logs),
+    // Fallback: if strategy run events have no elapsed_seconds (older deploys) or are sparse,
     // derive cycle time from consecutive auto_trade_run timestamps.
     // Only include intervals < 5 min to exclude gap outliers.
-    if (stratDurations.length < 10) {
+    if (stratDurations.length === 0) {
       const { data: runData } = await supabase
         .from("compliance_log")
         .select("created_at")
@@ -1341,36 +1341,42 @@ export default function ObservabilityPage() {
       desc: "Scans all open markets for edge opportunities",
       calls: toolCounts["surface_scan_complete"] ?? 0,
       errors: 0,
+      errorEventTypes: [] as string[],
     },
     {
       name: "Strategy Engine",
       desc: "Evaluates signals per active strategy (1 LLM call each)",
       calls: toolCounts["auto_trade_strategy_run"] ?? 0,
       errors: toolCounts["auto_trade_strategy_error"] ?? 0,
+      errorEventTypes: ["auto_trade_strategy_error"],
     },
     {
       name: "Order Execution",
       desc: "Executes orders to Kalshi",
       calls: tradesLast30dCount,
       errors: toolCounts["basket_aborted"] ?? 0,
+      errorEventTypes: ["basket_aborted"],
     },
     {
       name: "Settlement Engine",
       desc: "Resolves positions after market closes",
       calls: toolCounts["auto_settle_run"] ?? 0,
       errors: 0,
+      errorEventTypes: [] as string[],
     },
     {
       name: "Memory & Learning",
       desc: "Reflects on trades and updates agent memory",
       calls: toolCounts["auto_reflect_run"] ?? 0,
       errors: 0,
+      errorEventTypes: [] as string[],
     },
     {
       name: "Risk Halt",
       desc: "Global trading halt (halted by risk state or missing config) — per-trade blocks log under Guardrails",
       calls: toolCounts["auto_trade_skipped"] ?? 0,
       errors: toolCounts["strategy_auto_halted"] ?? 0,
+      errorEventTypes: ["strategy_auto_halted"],
     },
   ];
 
@@ -1943,7 +1949,7 @@ export default function ObservabilityPage() {
                 </p>
                 {activeModel && (
                   <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
-                    {modelLabel} · {modelProviderLabel}
+                    {modelLabel}
                     {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
                   </span>
                 )}
@@ -2128,20 +2134,30 @@ export default function ObservabilityPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {tools.map((tool) => (
+                  {tools.map((tool) => {
+                    const toolErrorEvents = complianceLast30d.filter((e) =>
+                      tool.errorEventTypes.includes(e.event_type)
+                    );
+                    return (
                     <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
                       <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
                       <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
                       <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
                       <td className="py-2.5 text-right text-[12px] tabular-nums">
-                        {tool.errors > 0 ? (
+                        {tool.errors > 0 && toolErrorEvents.length > 0 ? (
+                          <button
+                            className="text-red-500 underline underline-offset-2 decoration-dotted hover:text-red-400 transition-colors"
+                            onClick={() => setSelectedTimelineHour({ label: `${tool.name} Errors · last 30d`, events: toolErrorEvents })}
+                          >{tool.errors}</button>
+                        ) : tool.errors > 0 ? (
                           <span className="text-red-500">{tool.errors}</span>
                         ) : (
                           <span className="text-muted-foreground">0</span>
                         )}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -2199,9 +2215,14 @@ export default function ObservabilityPage() {
             </div>
           </div>
 
-          {/* 24h latency trend */}
+          {/* 7d latency trend */}
           <div className="px-6 pt-4 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
             <p className="text-[10px] text-muted-foreground mb-3">Strategy run duration · last 7 days (avg per 6h window, seconds)</p>
+            {stratRunDurations.length === 0 ? (
+              <div className="h-[100px] flex items-center justify-center">
+                <p className="text-[11px] text-muted-foreground/50">No run data in the last 7 days — agent may not have executed recently</p>
+              </div>
+            ) : (
             <ResponsiveContainer width="100%" height={100}>
               <LineChart data={latencyTrend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                 <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
@@ -2221,6 +2242,7 @@ export default function ObservabilityPage() {
                 />
               </LineChart>
             </ResponsiveContainer>
+            )}
           </div>
 
           {/* ── Chat Response Latency (shown only when duration_ms data exists) */}
@@ -2617,7 +2639,7 @@ export default function ObservabilityPage() {
                 value={primaryMode.charAt(0).toUpperCase() + primaryMode.slice(1)}
                 valueClass={primaryMode === "live" ? "text-emerald-500" : "text-yellow-500"}
               />
-              <SystemPill label="LLM" value={`${modelLabel} via ${modelProviderLabel}`} />
+              <SystemPill label="LLM" value={modelLabel} />
               <SystemPill label="Functions" value="7 edge functions" />
               <a
                 href="https://cloud.langfuse.com"
