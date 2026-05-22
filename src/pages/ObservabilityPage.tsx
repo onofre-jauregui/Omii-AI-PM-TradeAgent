@@ -1628,60 +1628,56 @@ export default function ObservabilityPage() {
           }
         >
           <div className="p-6 space-y-5">
-            <div className="grid grid-cols-4 gap-3">
-              {(
-                [
-                  "llm_timeout",
-                  "kalshi_timeout",
-                  "llm_rate_limit",
-                  "kalshi_rate_limit",
-                  "cost_spike",
-                  "exchange_error",
-                  "strategy_error",
-                  "pii_detected",
-                  "db_connection",
-                  "network_failure",
-                  "memory_pressure",
-                  "execution_gap",
-                ] as const
-              ).map((key) => {
-                const mode = failureModes[key];
-                const detail = FAILURE_MODE_DETAILS[key];
-                const { status: modeStatus } = mode;
-                const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
-                const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
-                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setSelectedFailureMode(key)}
-                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
-                  >
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
-                    </div>
-                    <p className="text-lg font-bold tabular-nums">
-                      {key === "cost_spike"
-                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
-                        : key === "memory_pressure" ? `${mode.count} quarant.`
-                        : key === "execution_gap" ? (mode.count === 0 ? "0" : `${mode.count} gap${mode.count !== 1 ? "s" : ""}`)
-                        : `${mode.count}`}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {key === "cost_spike"
-                        ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
-                        : key === "memory_pressure" ? mode.extra ?? ""
-                        : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
-                        : lastOccurrence}
-                    </p>
-                    <p className="text-[9px] text-muted-foreground/40 uppercase tracking-wide mt-1">
-                      {key === "kalshi_rate_limit" ? "last 1h" : key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
+            {([
+              { label: "Pipeline", keys: ["execution_gap","db_connection","network_failure","memory_pressure"] },
+              { label: "Kalshi / Exchange", keys: ["kalshi_timeout","kalshi_rate_limit","exchange_error","strategy_error"] },
+              { label: "LLM / Cost", keys: ["llm_timeout","llm_rate_limit","cost_spike","pii_detected"] },
+            ] as const).map(({ label, keys }) => (
+              <div key={label}>
+                <p className="text-[9px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">{label}</p>
+                <div className="grid grid-cols-4 gap-3">
+                  {keys.map((key) => {
+                    const mode = failureModes[key];
+                    const detail = FAILURE_MODE_DETAILS[key];
+                    const { status: modeStatus } = mode;
+                    const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
+                    const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
+                    const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedFailureMode(key)}
+                        className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                      >
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                        </div>
+                        <p className="text-lg font-bold tabular-nums">
+                          {key === "cost_spike"
+                            ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
+                            : key === "memory_pressure" ? `${mode.count} quarant.`
+                            : key === "execution_gap" ? (mode.count === 0 ? "0" : `${mode.count} gap${mode.count !== 1 ? "s" : ""}`)
+                            : `${mode.count}`}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          {key === "cost_spike"
+                            ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
+                            : key === "memory_pressure" ? mode.extra ?? ""
+                            : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
+                            : key === "kalshi_rate_limit"
+                            ? (mode.count > 0 ? "active · last 1h" : lastOccurrence !== "Clean" ? `last hit: ${lastOccurrence}` : "Clean")
+                            : lastOccurrence}
+                        </p>
+                        <p className="text-[9px] text-muted-foreground/40 uppercase tracking-wide mt-1">
+                          {key === "kalshi_rate_limit" ? "last 1h" : key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
             <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
                 24h Uptime
