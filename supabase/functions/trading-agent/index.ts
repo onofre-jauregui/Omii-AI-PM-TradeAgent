@@ -44,6 +44,7 @@ const FETCH_MARKETS_TOOL = {
         limit: { type: "number", description: "Number of markets to fetch (default 20)" },
         category: { type: "string", description: "Filter by Kalshi series ticker (e.g. 'KXFED', 'KXMLB', 'KXNBA')" },
         keyword: { type: "string", description: "Free-text search across all Kalshi markets by title/topic. NOTE: Kalshi search is unreliable — prefer category when possible." },
+        title_contains: { type: "string", description: "After fetching, keep only markets whose title contains this substring (case-insensitive). Use to pre-filter results — e.g. '>61' when user asked about above 61°, or 'May 23' to restrict to a specific date. Applied server-side before returning results." },
       },
     },
   },
@@ -762,11 +763,13 @@ Critical rule: If the user provides a market ticker — fetch that market and tr
 
 When the user describes a market topic WITHOUT a ticker:
 1. Map their description to the closest series ticker from the catalogue above
-2. Call fetch_live_markets with category=<series_ticker> — NEVER use keyword (it is broken and returns wrong results)
-3. Apply TWO hard filters before presenting markets — discard anything that fails either:
-   - **Date filter**: only keep markets that close on the date the user mentioned. "Tomorrow" = tomorrow's date only. Discard markets for today, yesterday, or other dates.
-   - **Direction filter**: only keep markets whose YES outcome matches what the user asked. If they said "above 61°", keep markets like ">61°" or "60–61°" (bracket that spans their threshold). DISCARD markets like "<63°", "<54°", ">75°" — even if the threshold is close, the wrong direction is useless.
-   Then number and present the top 1–3 surviving markets, most liquid first:
+2. Call fetch_live_markets with category=<series_ticker> AND title_contains=<direction+threshold> — always pass title_contains to pre-filter server-side. Examples:
+   - User says "above 61°" → title_contains=">61"
+   - User says "below 54°" → title_contains="<54"
+   - User says "between 60 and 61" → title_contains="60-61"
+   - Also add the date if the user specified one: title_contains=">61° on May 23"
+   NEVER use keyword (it is broken and returns wrong results)
+3. Number and present the top 1–3 returned markets, most liquid first (server already filtered by direction — no further filtering needed):
    **1.** Will the high temp in NYC be 69–70°F on May 22?
    Ticker: KXHIGHNY-26MAY22-B69.5 | YES: 42c | NO: 58c | Closes: May 22
 
@@ -1041,9 +1044,17 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
                 .sort((a: any, b: any) => (b.volume || 0) - (a.volume || 0));
             }
 
+            // Apply title_contains filter server-side before slicing
+            if (args.title_contains) {
+              const needle = String(args.title_contains).toLowerCase();
+              allMarkets = allMarkets.filter(m =>
+                (m.title || "").toLowerCase().includes(needle)
+              );
+            }
+
             const finalMarkets = allMarkets.slice(0, limit);
             if (finalMarkets.length === 0) {
-              toolResult = JSON.stringify({ markets: [], note: `No markets found${args.keyword ? ` for "${args.keyword}"` : ""}. Kalshi may not have active markets on this topic right now.` });
+              toolResult = JSON.stringify({ markets: [], note: `No markets found${args.title_contains ? ` matching "${args.title_contains}"` : args.keyword ? ` for "${args.keyword}"` : ""}. Kalshi may not have active markets on this topic right now.` });
             } else {
               toolResult = JSON.stringify({ markets: finalMarkets, total_found: allMarkets.length });
             }
