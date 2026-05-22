@@ -18,6 +18,9 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 
+// Strip the user-scoped suffix added for multi-tenancy (e.g. "S-002-ab12cd34" → "S-002")
+const displayId = (id: string) => id.replace(/-[a-f0-9]{6,}$/i, "");
+
 // ─── Strategy detail chart ────────────────────────────────────────────────────
 function StrategyDetailModal({
   strategy,
@@ -86,7 +89,7 @@ function StrategyDetailModal({
         <div className="p-6 space-y-5">
           <DialogHeader>
             <div className="flex items-center gap-2 mb-1">
-              <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strategy.id}</Badge>
+              <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{displayId(strategy.id)}</Badge>
               {strategy.active && (
                 <Badge variant="secondary" className="text-[10px] rounded-full bg-profit/10 text-profit">Active</Badge>
               )}
@@ -237,7 +240,7 @@ function TradingModePanel() {
             <div key={strat.id} className="px-5 py-3">
               <div className="flex items-center gap-3">
                 <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-1.5 shrink-0">
-                  {strat.id}
+                  {displayId(strat.id)}
                 </Badge>
                 <p className="text-sm text-foreground flex-1 min-w-0 truncate">{strat.name}</p>
                 <div className="flex items-center gap-2 shrink-0">
@@ -341,7 +344,7 @@ export function StrategiesPanel() {
               <div className="flex items-start justify-between mb-3">
                 <div className="flex-1 min-w-0 pr-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{strat.id}</Badge>
+                    <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2">{displayId(strat.id)}</Badge>
                   </div>
                   <h3 className="text-sm font-medium text-foreground">{strat.name}</h3>
                   <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{strat.description}</p>

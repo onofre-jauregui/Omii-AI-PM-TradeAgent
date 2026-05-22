@@ -1054,32 +1054,56 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // risk checks, reflection creation, and risk state updates.
         else if (fnName === "execute_trade") {
           try {
+            const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
             const execUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-trade`;
+            const execPayload = {
+              ticker: args.ticker,
+              marketId: args.ticker,
+              marketQuestion: args.marketQuestion,
+              side: args.side,
+              action: args.action,
+              price: args.price,
+              amount: args.amount,
+              strategy: args.strategy || null,
+              strategyId: args.strategyId || null,
+              orderType: args.orderType || "limit",
+              mode,
+              user_id: userId,
+              notes: `Agent trade: ${args.reasoning}`,
+              expectedOutcome: args.expectedOutcome || null,
+              confidenceLevel: args.confidenceLevel || null,
+            };
+            // Log the outbound call so we can diagnose auth failures
+            await supabase.from("compliance_log").insert({
+              user_id: userId,
+              event_type: "agent_trade_attempt",
+              severity: "info",
+              message: `Agent calling execute-trade: ${mode} ${args.side} ${args.ticker} @ ${args.price}c $${args.amount}`,
+              metadata: {
+                payload: execPayload,
+                svc_key_present: !!svcKey,
+                svc_key_prefix: svcKey ? svcKey.slice(0, 20) + "…" : null,
+              },
+            });
             const execResp = await fetch(execUrl, {
               method: "POST",
               headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                Authorization: `Bearer ${svcKey}`,
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify({
-                ticker: args.ticker,
-                marketId: args.ticker,
-                marketQuestion: args.marketQuestion,
-                side: args.side,
-                action: args.action,
-                price: args.price,
-                amount: args.amount,
-                strategy: args.strategy || null,
-                strategyId: args.strategyId || null,
-                orderType: args.orderType || "limit",
-                mode,
-                user_id: userId,
-                notes: `Agent trade: ${args.reasoning}`,
-                expectedOutcome: args.expectedOutcome || null,
-                confidenceLevel: args.confidenceLevel || null,
-              }),
+              body: JSON.stringify(execPayload),
             });
-            const execResult = await execResp.json();
+            const rawText = await execResp.text();
+            // Log the HTTP status + raw body so auth errors are visible
+            await supabase.from("compliance_log").insert({
+              user_id: userId,
+              event_type: "agent_trade_response",
+              severity: execResp.ok ? "info" : "error",
+              message: `execute-trade responded HTTP ${execResp.status}`,
+              metadata: { status: execResp.status, raw_body: rawText.slice(0, 2000) },
+            });
+            let execResult: any;
+            try { execResult = JSON.parse(rawText); } catch { execResult = { raw: rawText }; }
             toolResult = JSON.stringify(execResult);
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Trade execution failed: " + e.message });
