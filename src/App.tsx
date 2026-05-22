@@ -24,15 +24,19 @@ import ObservabilityPage from "./pages/ObservabilityPage.tsx";
 
 const queryClient = new QueryClient();
 
-const ADMIN_USER_IDS = new Set(["ea207ba1-b7a9-4a7b-96bc-922e922d627d"]);
-
-/** Gate that allows access only to hardcoded admin user IDs. */
+/** Gate that checks profiles.is_admin — DB is the source of truth, works for any admin. */
 function AdminRoute({ element }: { element: React.ReactElement }) {
   const [state, setState] = useState<"loading" | "ok" | "denied">("loading");
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setState(session?.user && ADMIN_USER_IDS.has(session.user.id) ? "ok" : "denied");
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (!session?.user) return setState("denied");
+      const { data } = await supabase
+        .from("profiles")
+        .select("is_admin")
+        .eq("id", session.user.id)
+        .maybeSingle();
+      setState((data as any)?.is_admin ? "ok" : "denied");
     });
   }, []);
 
