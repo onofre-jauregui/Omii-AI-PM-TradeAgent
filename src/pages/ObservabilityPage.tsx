@@ -1713,7 +1713,15 @@ export default function ObservabilityPage() {
                 <span className="normal-case tracking-normal opacity-60 lowercase"> · green = clean · red = failures · click red bars for details</span>
               </p>
               <ResponsiveContainer width="100%" height={70}>
-                <BarChart data={failureTimeline} barSize={10}>
+                <BarChart
+                  data={failureTimeline}
+                  barSize={10}
+                  style={{ cursor: "pointer" }}
+                  onClick={(chartData: any) => {
+                    const entry = chartData?.activePayload?.[0]?.payload;
+                    if (entry?.count > 0) setSelectedTimelineHour({ label: entry.hour, tooltipLabel: entry.tooltipLabel, events: entry.events });
+                  }}
+                >
                   <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
                   <YAxis hide domain={[0, "dataMax"]} />
                   <Tooltip
@@ -1726,7 +1734,7 @@ export default function ObservabilityPage() {
                         <div className="rounded-lg border border-border bg-popover px-3 py-2 shadow-sm text-[10px]">
                           <p className="font-medium mb-1 text-foreground">{entry.tooltipLabel}</p>
                           {entry.count > 0 ? (
-                            <p className="text-red-400">{entry.count} failure event{entry.count !== 1 ? "s" : ""}</p>
+                            <p className="text-red-400">{entry.count} failure event{entry.count !== 1 ? "s" : ""} · click to drill in</p>
                           ) : (
                             <p className="text-emerald-500">Clean — no failures</p>
                           )}
@@ -1737,10 +1745,6 @@ export default function ObservabilityPage() {
                   <Bar
                     dataKey="barValue"
                     radius={[2, 2, 0, 0]}
-                    style={{ cursor: "pointer" }}
-                    onClick={(data: any) => {
-                      if (data.count > 0) setSelectedTimelineHour({ label: data.hour, tooltipLabel: data.tooltipLabel, events: data.events });
-                    }}
                   >
                     {failureTimeline.map((entry, index) => (
                       <Cell
