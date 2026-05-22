@@ -9,6 +9,7 @@ import {
   fetchKalshiMarkets,
   fetchKalshiSeries,
   fetchKalshiMarketsByCategory,
+  fetchKalshiMarket,
   formatVolume,
   type ParsedMarket,
   type KalshiSeries,
@@ -88,9 +89,11 @@ type Horizon = typeof HORIZON_OPTIONS[number]["value"];
 
 interface MarketsPanelProps {
   mode?: "paper" | "live";
+  openMarketTicker?: string | null;
+  onMarketOpened?: () => void;
 }
 
-export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
+export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened }: MarketsPanelProps) {
   const [activeCategory, setActiveCategory] = useState<string>("Trending");
   const [allSeries, setAllSeries] = useState<KalshiSeries[]>([]);
   // Cache: category → markets, so switching tabs doesn't re-fetch
@@ -207,6 +210,17 @@ export function MarketsPanel({ mode = "paper" }: MarketsPanelProps) {
 
   // Reset visible count when search or horizon changes
   useEffect(() => { setVisibleCount(50); }, [search, horizon, sortBy]);
+
+  // Open a market by ticker when navigated from agent chat
+  useEffect(() => {
+    if (!openMarketTicker) return;
+    fetchKalshiMarket(openMarketTicker)
+      .then(parsed => {
+        if (parsed) setSelectedMarket(parsed);
+      })
+      .catch(() => {})
+      .finally(() => onMarketOpened?.());
+  }, [openMarketTicker]);
 
   const filtered = useMemo(() => {
     let list = markets;

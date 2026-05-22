@@ -1191,15 +1191,16 @@ async function runS005WeatherEdge(
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
-  // 3h window: weather-signal runs every 15min but auto-trade runs hourly, so a 30min
-  // window missed signals created at :15/:30 past the hour. GFS forecasts are valid for hours.
-  const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  // 12h window: GFS model updates at ~04:00 and ~07:00 UTC, then weather-signal deduplicates
+  // and skips re-insertion until the next model run. Signals are valid all trading day —
+  // same-day bucket markets don't change their forecast meaningfully between model runs.
+  const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
   const { data: rawSignals } = await applySignalTenantFilter(
     supabase
       .from("signals")
       .select("*")
       .eq("source", "weather_signal_s005")
-      .gte("created_at", threeHoursAgo)
+      .gte("created_at", twelveHoursAgo)
       .gte("edge_cents", minEdge)
       .not("direction", "is", null)
       .order("edge_cents", { ascending: false })
@@ -1222,7 +1223,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `No weather signals with edge >= ${minEdge}c in last 3h (weather-signal runs every 15min)`,
+      details: `No weather signals with edge >= ${minEdge}c in last 12h (GFS model updates ~04:00 and ~07:00 UTC)`,
     };
   }
 

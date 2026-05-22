@@ -7,9 +7,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider";
 import {
   Cpu, Send, MessageSquare, Loader2, BookOpen, RefreshCw,
-  Settings2, ChevronDown, ChevronUp, Zap,
+  Settings2, ChevronDown, ChevronUp, Zap, ExternalLink,
 } from "lucide-react";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStrategies } from "@/lib/strategiesContext";
 import { useChat } from "@/lib/chatContext";
@@ -86,7 +86,7 @@ async function streamChat({
   onDone();
 }
 
-export function AgentPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
+export function AgentPanel({ mode = "paper", onOpenMarket }: { mode?: "paper" | "live"; onOpenMarket?: (ticker: string) => void }) {
   const { getActiveStrategies } = useStrategies();
   const chat = useChat("agent");
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
@@ -168,6 +168,25 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   };
 
   const currentModel = models.find(m => m.id === selectedModel) ?? models[0];
+
+  const tickerComponents = useMemo(() => ({
+    code({ inline, children, ...props }: any) {
+      const text = String(children).trim();
+      if (inline && /^KX[A-Z]+-[A-Z0-9]/.test(text) && onOpenMarket) {
+        return (
+          <button
+            onClick={() => onOpenMarket(text)}
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-mono bg-primary/10 text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+            title={`Open ${text} in Markets`}
+          >
+            {text}
+            <ExternalLink className="h-2.5 w-2.5 opacity-70" />
+          </button>
+        );
+      }
+      return <code className="text-xs bg-background/50 px-1 rounded-md" {...props}>{children}</code>;
+    }
+  }), [onOpenMarket]);
 
   return (
     <div className="rounded-2xl bg-card apple-shadow overflow-hidden flex flex-col apple-reveal"
@@ -301,7 +320,7 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
               }`}>
                 {msg.role === "assistant" ? (
                   <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-xs [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded-md [&_strong]:font-medium">
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    <ReactMarkdown components={tickerComponents}>{msg.content}</ReactMarkdown>
                   </div>
                 ) : msg.content}
               </div>

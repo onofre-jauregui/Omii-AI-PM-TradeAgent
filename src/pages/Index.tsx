@@ -36,6 +36,7 @@ const Index = () => {
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const [subscriptionTier, setSubscriptionTier] = useState<"free" | "starter" | "pro" | "prop">("free");
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [marketToOpen, setMarketToOpen] = useState<string | null>(null);
   const navigate = useNavigate();
   const isMobile = useIsMobile();
 
@@ -68,6 +69,11 @@ const Index = () => {
       supabase.from("profiles").update({ trading_mode: next }).eq("id", user.id);
     }
   }
+
+  const handleOpenMarket = (ticker: string) => {
+    setMarketToOpen(ticker);
+    setActiveTab("markets");
+  };
 
   function handleNavigate(tab: string) {
     if (tab === "performance") {
@@ -251,7 +257,7 @@ const Index = () => {
                   </button>
                 ))}
               </div>
-              {agentSubTab === "chat"       && <AgentPanel mode={mode} />}
+              {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
               {agentSubTab === "strategies" && <StrategiesPanel />}
               {agentSubTab === "risk"       && <RiskControlsPanel />}
               {agentSubTab === "memory"     && <AgentMemoryCard full />}
@@ -261,7 +267,7 @@ const Index = () => {
           {/* ── Markets ────────────────────────────────────────────── */}
           {activeTab === "markets" && (
             <div className="apple-reveal">
-              <MarketsPanel mode={mode} />
+              <MarketsPanel mode={mode} openMarketTicker={marketToOpen} onMarketOpened={() => setMarketToOpen(null)} />
             </div>
           )}
 
