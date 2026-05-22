@@ -98,13 +98,6 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; parameter: string; d
     fallback: "Strategy skipped for this cycle. No automatic retry — next cron tick resumes normally.",
     resolution: "Check your OpenRouter dashboard for current usage vs. plan limits. Upgrade the rate limit tier or increase the cron interval from 2 min to 5 min in the pg_cron schedule.",
   },
-  kalshi_rate_limit: {
-    title: "Kalshi Rate Limit (429)",
-    parameter: "Kalshi enforces roughly 10 requests per second or 600 per minute. Critical on the first 429 received.",
-    description: "Kalshi REST API returned 429 Too Many Requests on a market data fetch or order submission. The surface scanner batches multiple series in one run — shared IP pools can hit this fast under multi-tenant load.",
-    fallback: "Circuit breaker opens for a 1-hour window. All Kalshi calls are blocked until the window resets. One retry at 5 s is attempted before the breaker opens.",
-    resolution: "Add exponential backoff + retry logic to the surface scanner's market fetch loop. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash).",
-  },
   cost_spike: {
     title: "Cost Spike",
     parameter: "Compares LLM calls in the last 6 h against the prior 24 h hourly average. Warning above 2× that average, critical above 4×.",
@@ -463,7 +456,6 @@ function ObservabilityPageInner() {
   const [errors24h, setErrors24h] = useState<ComplianceEvent[]>([]);
   // Dedicated rate limit counts — catches events logged at any severity
   const [rateLimitCount24h, setRateLimitCount24h] = useState<number | null>(null);
-  const [kalshiRateLimitCount24h, setKalshiRateLimitCount24h] = useState<number | null>(null);
   // Surface scan durations for market data pull latency
   const [scanDurations, setScanDurations] = useState<number[]>([]);
   // Execution gap detection — gaps > 5 min between auto_trade_run/skipped events
@@ -775,24 +767,13 @@ function ObservabilityPageInner() {
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
       .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
-    // Kalshi rate limit: 1h window for status (only red if currently failing),
-    // 24h events still captured in errors24h for timeline display.
-    const since1h = new Date(Date.now() - 3_600_000).toISOString();
-    let krlQ = supabase
-      .from("compliance_log")
-      .select("*", { count: "exact", head: true })
-      .gte("created_at", since1h)
-      .or("event_type.eq.kalshi_rate_limit,event_type.eq.kalshi_circuit_open,message.ilike.%kalshi%429%,message.ilike.%kalshi%rate%limit%,message.ilike.%kalshi%too%many%");
-    // Include both user-specific errors (user_id = uid) and system-level errors (user_id = NULL)
     if (uid) {
       q = q.or(`user_id.eq.${uid},user_id.is.null`);
       rlQ = rlQ.or(`user_id.eq.${uid},user_id.is.null`);
-      krlQ = krlQ.or(`user_id.eq.${uid},user_id.is.null`);
     }
-    const [{ data }, { count: rlCount }, { count: krlCount }] = await Promise.all([q, rlQ, krlQ]);
+    const [{ data }, { count: rlCount }] = await Promise.all([q, rlQ]);
     if (data) setErrors24h(data as ComplianceEvent[]);
     setRateLimitCount24h(rlCount ?? 0);
-    setKalshiRateLimitCount24h(krlCount ?? 0);
   }, []);
 
   const loadErrors = useCallback(async (uid?: string | null) => {
@@ -1417,14 +1398,13 @@ function ObservabilityPageInner() {
     : 0;
 
   // Failure mode detection — uses errors24h (error/warning events from last 24h, server-fetched)
-  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents, kalshiRateLimitCount24h ?? undefined);
+  const failureModes = detectFailureModes(errors24h, memories, toolCounts, runs6hCount, stratRuns24hCount, rateLimitCount24h ?? undefined, gapEvents);
 
   // 24h failure timeline — bucket all failure events by hour, include events array for drill-down
   const allFailureEventsFlat = [
     ...failureModes.llm_timeout.events,
     ...failureModes.kalshi_timeout.events,
     ...failureModes.llm_rate_limit.events,
-    ...failureModes.kalshi_rate_limit.events,
     ...failureModes.exchange_error.events,
     ...failureModes.strategy_error.events,
     ...failureModes.pii_detected.events,
@@ -1471,9 +1451,9 @@ function ObservabilityPageInner() {
       : 0)
   );
   const latestMemory = activeMemories[0] ?? null;
-  const TABLE_MONITOR_KEYS = ["llm_timeout","kalshi_timeout","llm_rate_limit","kalshi_rate_limit","cost_spike","exchange_error","strategy_error","pii_detected","db_connection","network_failure","execution_gap"] as const;
-  const healthyCount = TABLE_MONITOR_KEYS.filter((k) => failureModes[k]?.status === "ok").length;
-  const totalHealthChecks = TABLE_MONITOR_KEYS.length;
+  const HEALTH_GRID_KEYS = ["llm_timeout","kalshi_timeout","llm_rate_limit","cost_spike","exchange_error","strategy_error","pii_detected","db_connection","network_failure"] as const;
+  const healthyCount = HEALTH_GRID_KEYS.filter((k) => failureModes[k]?.status === "ok").length;
+  const totalHealthChecks = HEALTH_GRID_KEYS.length;
 
   // Latency derived stats
   const latencyNow = Date.now();
@@ -1647,53 +1627,57 @@ function ObservabilityPageInner() {
           }
         >
           <div className="p-6 space-y-5">
-            <div className="rounded-xl border border-border overflow-hidden">
-              <table className="w-full text-[11px]">
-                <thead>
-                  <tr className="border-b border-border bg-secondary/30">
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[18%]">Monitor</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[28%]">Parameter &amp; Threshold</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[30%]">Definition</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[18%]">Fallback</th>
-                    <th className="px-4 py-2.5 text-center font-medium text-muted-foreground uppercase tracking-wide w-[6%]">24h</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {TABLE_MONITOR_KEYS.map((key) => {
-                    const mode = failureModes[key];
-                    const detail = FAILURE_MODE_DETAILS[key];
-                    const { status: modeStatus } = mode;
-                    const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
-                    const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
-                    const countDisplay =
-                      key === "cost_spike"
-                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "—")
-                        : key === "execution_gap"
-                        ? (mode.count === 0 ? "0" : `${mode.count}`)
-                        : `${mode.count}`;
-                    return (
-                      <tr
-                        key={key}
-                        onClick={() => setSelectedFailureMode(key)}
-                        className="hover:bg-secondary/20 cursor-pointer transition-colors"
-                      >
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`text-[10px] font-bold shrink-0 ${dotText}`}>{dotLabel}</span>
-                            <span className="font-medium text-foreground">{detail.title}</span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.parameter}</td>
-                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.description}</td>
-                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.fallback}</td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`font-semibold tabular-nums ${modeStatus === "ok" ? "text-emerald-500" : dotText}`}>{countDisplay}</span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="grid grid-cols-4 gap-3">
+              {HEALTH_GRID_KEYS.map((key) => {
+                const mode = failureModes[key];
+                const detail = FAILURE_MODE_DETAILS[key];
+                const { status: modeStatus } = mode;
+                const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
+                const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
+                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setSelectedFailureMode(key)}
+                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                    </div>
+                    <p className="text-lg font-bold tabular-nums">
+                      {key === "cost_spike"
+                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
+                        : `${mode.count}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {key === "cost_spike"
+                        ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
+                        : lastOccurrence}
+                    </p>
+                  </button>
+                );
+              })}
+              {failureModes["execution_gap"].status !== "ok" && (() => {
+                const mode = failureModes["execution_gap"];
+                const detail = FAILURE_MODE_DETAILS["execution_gap"];
+                const { status: modeStatus } = mode;
+                const dotLabel = modeStatus === "critical" ? "✖" : "▲";
+                const dotText = modeStatus === "critical" ? "text-red-500" : "text-yellow-500";
+                return (
+                  <button
+                    onClick={() => setSelectedFailureMode("execution_gap")}
+                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
+                    </div>
+                    <p className="text-lg font-bold tabular-nums">{mode.count} gap{mode.count !== 1 ? "s" : ""}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">{mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—")}</p>
+                  </button>
+                );
+              })()}
             </div>
             <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
@@ -3451,8 +3435,7 @@ function detectFailureModes(
   runs6hCount: number | null = null,
   runs24hCount: number | null = null,
   rateLimitCount?: number,
-  gaps: { from: string; to: string; gapMins: number }[] = [],
-  kalshiRateLimitCount?: number
+  gaps: { from: string; to: string; gapMins: number }[] = []
 ): Record<string, { status: "ok" | "warning" | "critical"; events: ComplianceEvent[]; count: number; lastAt: string | null; extra?: string }> {
   const now = Date.now();
   const cutoff24h = now - 86_400_000;
@@ -3472,14 +3455,6 @@ function detectFailureModes(
     e.event_type === "llm_rate_limit" ||
     (/(\b429\b|rate.?limit|quota.?exceeded|too.?many.?request)/i.test(e.message) &&
      !/kalshi/i.test(e.message))
-  );
-
-  // 24h events — used for timeline bars
-  const kalshiRateLimitEvents = last24h.filter((e) =>
-    e.event_type === "kalshi_rate_limit" ||
-    e.event_type === "kalshi_circuit_open" ||
-    (e.event_type === "api_timeout" && /kalshi/i.test(e.message) && /\b429\b/i.test(e.message)) ||
-    (/kalshi/i.test(e.message) && /\b429\b|rate.?limit|too.?many.?request/i.test(e.message))
   );
 
   const dbEvents = last24h.filter((e) =>
@@ -3542,12 +3517,6 @@ function detectFailureModes(
       count: rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length,
       lastAt: lastAt(rateLimitEvents),
       status: (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 1 ? "critical" : "ok",
-    },
-    kalshi_rate_limit: {
-      events: kalshiRateLimitEvents,
-      count: kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length,
-      lastAt: lastAt(kalshiRateLimitEvents),
-      status: (kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length) >= 1 ? "critical" : "ok",
     },
     cost_spike: {
       events: [],
