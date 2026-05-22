@@ -2039,21 +2039,19 @@ export default function ObservabilityPage() {
             </div>
 
             {chatTokenStats && (
-              <>
-            <div className="border-t border-border/60" />
-
-            {/* ── Chat Assistant ───────────────────────────────────────── */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Chat Assistant</p>
-                {chatTokenStats.topModel && (
-                  <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
-                    {MODEL_COSTS[chatTokenStats.topModel]?.label ?? chatTokenStats.topModel}
+              <details className="border-t border-border/60">
+                <summary className="flex items-center gap-2 px-6 py-3 cursor-pointer select-none list-none hover:bg-secondary/30 transition-colors">
+                  <p className="text-[11px] font-medium text-foreground">Chat Assistant</p>
+                  {chatTokenStats.topModel && (
+                    <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
+                      {MODEL_COSTS[chatTokenStats.topModel]?.label ?? chatTokenStats.topModel}
+                    </span>
+                  )}
+                  <span className="ml-auto text-[10px] text-muted-foreground/50 tabular-nums">
+                    ${chatTokenStats.dailySpend.toFixed(4)}/day · {chatTokenStats.calls} calls
                   </span>
-                )}
-              </div>
-              {(
-                <>
+                </summary>
+                <div className="px-6 pb-5 pt-3 space-y-3">
                   <div className="grid grid-cols-4 gap-4 mb-3">
                     <div className="rounded-xl border border-border p-4">
                       <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
@@ -2116,54 +2114,10 @@ export default function ObservabilityPage() {
                       <p className="text-[10px] text-muted-foreground mt-0.5">tokens measured</p>
                     </div>
                   </div>
-                </>
-              )}
-            </div>
-              </>
+                </div>
+              </details>
             )}
 
-            <div className="border-t border-border/60" />
-
-            {/* ── Automated Pipeline table ──────────────────────────────── */}
-            <div>
-              <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Automated Pipeline <span className="normal-case tracking-normal lowercase opacity-60">(not the 14 conversational agent tools)</span></p>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">Tool</th>
-                    <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">What it does</th>
-                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Calls (30d)</th>
-                    <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Errors (30d)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {tools.map((tool) => {
-                    const toolErrorEvents = complianceLast30d.filter((e) =>
-                      tool.errorEventTypes.includes(e.event_type)
-                    );
-                    return (
-                    <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
-                      <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
-                      <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
-                      <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
-                      <td className="py-2.5 text-right text-[12px] tabular-nums">
-                        {tool.errors > 0 && toolErrorEvents.length > 0 ? (
-                          <button
-                            className="text-red-500 underline underline-offset-2 decoration-dotted hover:text-red-400 transition-colors"
-                            onClick={() => setSelectedTimelineHour({ label: `${tool.name} Errors · last 30d`, events: toolErrorEvents })}
-                          >{tool.errors}</button>
-                        ) : tool.errors > 0 ? (
-                          <span className="text-red-500">{tool.errors}</span>
-                        ) : (
-                          <span className="text-muted-foreground">0</span>
-                        )}
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
           </div>
         </Section>
 
@@ -2280,6 +2234,52 @@ export default function ObservabilityPage() {
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Automated Pipeline ───────────────────────────────────────── */}
+        <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+          <div className="px-6 py-4 border-b border-border">
+            <h2 className="text-sm font-semibold">Automated Pipeline</h2>
+            <p className="text-[11px] text-muted-foreground mt-0.5">Call counts and errors per backend tool · last 30d</p>
+          </div>
+          <div className="px-6 py-4">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">Tool</th>
+                  <th className="text-left py-2 text-[11px] font-medium text-muted-foreground">What it does</th>
+                  <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Calls (30d)</th>
+                  <th className="text-right py-2 text-[11px] font-medium text-muted-foreground">Errors (30d)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {tools.map((tool) => {
+                  const toolErrorEvents = complianceLast30d.filter((e) =>
+                    tool.errorEventTypes.includes(e.event_type)
+                  );
+                  return (
+                    <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
+                      <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
+                      <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
+                      <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
+                      <td className="py-2.5 text-right text-[12px] tabular-nums">
+                        {tool.errors > 0 && toolErrorEvents.length > 0 ? (
+                          <button
+                            className="text-red-500 underline underline-offset-2 decoration-dotted hover:text-red-400 transition-colors"
+                            onClick={() => setSelectedTimelineHour({ label: `${tool.name} Errors · last 30d`, events: toolErrorEvents })}
+                          >{tool.errors}</button>
+                        ) : tool.errors > 0 ? (
+                          <span className="text-red-500">{tool.errors}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* ── 6. Recent Decisions ──────────────────────────────────────── */}
