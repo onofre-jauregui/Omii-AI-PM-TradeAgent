@@ -440,6 +440,17 @@ function ObservabilityPageInner() {
     totalOutputTokens: number;
   } | null>(null);
 
+  const [chatTokenStats, setChatTokenStats] = useState<{
+    calls: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    avgInputTokens: number | null;
+    avgOutputTokens: number | null;
+    dailySpend: number;
+    totalSpend30d: number;
+    topModel: string | null;
+  } | null>(null);
+
   const [stratRunDurations, setStratRunDurations] = useState<{ ts: number; seconds: number }[]>([]);
 
   // 24h activity — dedicated server-side counts (not derived from capped array)
