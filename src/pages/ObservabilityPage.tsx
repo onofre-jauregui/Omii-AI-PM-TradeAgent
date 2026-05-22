@@ -1650,6 +1650,9 @@ export default function ObservabilityPage() {
                         : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
                         : lastOccurrence}
                     </p>
+                    <p className="text-[9px] text-muted-foreground/40 uppercase tracking-wide mt-1">
+                      {key === "kalshi_rate_limit" ? "last 1h" : key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
+                    </p>
                   </button>
                 );
               })}
@@ -3517,13 +3520,13 @@ function detectFailureModes(
       events: rateLimitEvents,
       count: rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length,
       lastAt: lastAt(rateLimitEvents),
-      status: (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 1 ? "critical" : "ok",
+      status: (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 5 ? "critical" : (rateLimitCount !== undefined ? rateLimitCount : rateLimitEvents.length) >= 1 ? "warning" : "ok",
     },
     kalshi_rate_limit: {
       events: kalshiRateLimitEvents,
       count: kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length,
       lastAt: lastAt(kalshiRateLimitEvents),
-      status: (kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length) >= 1 ? "critical" : "ok",
+      status: (kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length) >= 5 ? "critical" : (kalshiRateLimitCount !== undefined ? kalshiRateLimitCount : kalshiRateLimitEvents.length) >= 1 ? "warning" : "ok",
     },
     cost_spike: {
       events: [],
@@ -3576,7 +3579,7 @@ function detectFailureModes(
           })()
         : null,
       extra: `${activeCount} active`,
-      status: quarantined.length >= 20 ? "critical" : quarantined.length >= 5 ? "warning" : "ok",
+      status: quarantined.length >= 40 ? "critical" : quarantined.length >= 15 ? "warning" : "ok",
     },
     execution_gap: {
       events: [],
