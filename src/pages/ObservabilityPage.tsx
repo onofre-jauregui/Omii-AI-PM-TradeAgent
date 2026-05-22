@@ -129,6 +129,7 @@ interface ComplianceEvent {
   severity: string;
   message: string;
   trade_id: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 interface Trade {
@@ -728,7 +729,7 @@ export default function ObservabilityPage() {
     const since = new Date(Date.now() - 86_400_000).toISOString();
     let q = supabase
       .from("compliance_log")
-      .select("id, created_at, event_type, severity, message, trade_id")
+      .select("id, created_at, event_type, severity, message, trade_id, metadata")
       .gte("created_at", since)
       .in("severity", ["error", "warning", "critical"])
       .order("created_at", { ascending: false })
@@ -774,7 +775,7 @@ export default function ObservabilityPage() {
 
     let guardrailQ = supabase
       .from("compliance_log")
-      .select("id, created_at, event_type, severity, message, trade_id")
+      .select("id, created_at, event_type, severity, message, trade_id, metadata")
       .in("event_type", guardrailTypes)
       .order("created_at", { ascending: false })
       .limit(50);
@@ -791,7 +792,7 @@ export default function ObservabilityPage() {
   ];
   let errorQ = supabase
       .from("compliance_log")
-      .select("id, created_at, event_type, severity, message, trade_id")
+      .select("id, created_at, event_type, severity, message, trade_id, metadata")
       .in("severity", ["error", "critical", "warning"])
       .not("event_type", "in", `(${operationalEventTypes.join(",")})`)
       .order("created_at", { ascending: false })
