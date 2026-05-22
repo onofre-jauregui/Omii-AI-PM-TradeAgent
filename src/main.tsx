@@ -8,4 +8,13 @@ if (saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dar
   document.documentElement.classList.add("dark");
 }
 
+// When the service worker updates (new deploy), reload immediately so the active
+// page never runs stale JS. skipWaiting + clientsClaim in vite.config installs the
+// new SW instantly; this listener fires the reload so the page picks it up.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    window.location.reload();
+  });
+}
+
 createRoot(document.getElementById("root")!).render(<App />);
