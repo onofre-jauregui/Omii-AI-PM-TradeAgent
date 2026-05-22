@@ -211,7 +211,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-1.5">
-                        {strat.id}
+                        {strat.id.replace(/-[0-9a-f]{8}$/, "")}
                       </Badge>
                       <p className="text-sm font-medium text-foreground truncate">{strat.name}</p>
                     </div>
