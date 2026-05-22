@@ -88,7 +88,7 @@ serve(async (req) => {
           `⚠️ <b>[TradeAgent] Trading Silence</b>\n` +
           `No trades placed in ${hoursSinceLastTrade.toFixed(1)}h.\n` +
           `Last trade: ${sinceStr}\n` +
-          `Strategies active: ${(activeStrategies || []).map((s) => s.name).join(", ")}\n` +
+          `Strategies active: ${[...new Set((activeStrategies || []).map((s) => s.name))].join(", ")}\n` +
           `Signals present: yes — check compliance_log for errors.`
         );
       }

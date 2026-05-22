@@ -260,7 +260,7 @@ async function tripCircuitBreaker(supabase: any, runId: string): Promise<void> {
     severity: "critical",
     message: msg,
     metadata: { run_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
-  }).catch(() => {});
+  }).then(() => {}).catch(() => {});
   const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
   const chatId = Deno.env.get("TELEGRAM_CHAT_ID");
   if (botToken && chatId) {
@@ -1205,7 +1205,7 @@ async function runS005WeatherEdge(
       .not("direction", "is", null)
       .order("edge_cents", { ascending: false })
       .limit(MAX_PARALLEL_SIGNALS + excludedCities.length), // fetch extra, filter below
-    strategy.user_id
+    null // signals are system-generated — no user_id column on signals table
   );
 
   // Filter out cities where S-005 has persistent forecast_bias losses

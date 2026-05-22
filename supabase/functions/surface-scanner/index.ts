@@ -352,15 +352,17 @@ serve(async (req) => {
         );
       }
 
-      // Warn if cache data is stale (older than 15 min)
-      const oldestMs = Math.min(...cacheRows.map((r) => new Date(r.fetched_at).getTime()));
-      const ageMinutes = (Date.now() - oldestMs) / 60000;
+      // Warn if cache data is stale (older than 15 min) — use newest row, not oldest.
+      // Old closed-market rows remain in the table indefinitely; Math.min would always
+      // find one from hours ago and fire a false alarm.
+      const newestMs = Math.max(...cacheRows.map((r) => new Date(r.fetched_at).getTime()));
+      const ageMinutes = (Date.now() - newestMs) / 60000;
       if (ageMinutes > 15 && supabase) {
         supabase.from("compliance_log").insert({
           event_type: "cache_stale",
           severity: "warning",
           message: `surface-scanner: market cache is ${Math.round(ageMinutes)}m old — market-data-fetcher may be failing`,
-          metadata: { oldest_fetched_at: new Date(oldestMs).toISOString() },
+          metadata: { newest_fetched_at: new Date(newestMs).toISOString() },
         }).then().catch(() => {});
       }
 
