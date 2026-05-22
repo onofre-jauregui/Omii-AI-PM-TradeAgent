@@ -740,13 +740,11 @@ export default function ObservabilityPage() {
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
       .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
-    // Kalshi rate limit: 1h window for status (only red if currently failing),
-    // 24h events still captured in errors24h for timeline display.
-    const since1h = new Date(Date.now() - 3_600_000).toISOString();
+    // Kalshi rate limit: 24h window so any incident today surfaces in health.
     let krlQ = supabase
       .from("compliance_log")
       .select("*", { count: "exact", head: true })
-      .gte("created_at", since1h)
+      .gte("created_at", since)
       .or("event_type.eq.kalshi_rate_limit,event_type.eq.kalshi_circuit_open,message.ilike.%kalshi%429%,message.ilike.%kalshi%rate%limit%,message.ilike.%kalshi%too%many%");
     // Include both user-specific errors (user_id = uid) and system-level errors (user_id = NULL)
     if (uid) {
@@ -1696,11 +1694,11 @@ export default function ObservabilityPage() {
                             : key === "memory_pressure" ? mode.extra ?? ""
                             : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
                             : key === "kalshi_rate_limit"
-                            ? (mode.count > 0 ? "active · last 1h" : lastOccurrence !== "Clean" ? `last hit: ${lastOccurrence}` : "Clean")
+                            ? (mode.count > 0 ? `${mode.count} hit${mode.count !== 1 ? "s" : ""} · last 24h` : "Clean")
                             : lastOccurrence}
                         </p>
                         <p className="text-[9px] text-muted-foreground/40 uppercase tracking-wide mt-1">
-                          {key === "kalshi_rate_limit" ? "last 1h" : key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
+                          {key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
                         </p>
                       </button>
                     );
