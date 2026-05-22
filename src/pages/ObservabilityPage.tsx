@@ -365,6 +365,9 @@ export default function ObservabilityPage() {
     Record<string, ComplianceEvent[]>
   >({});
   const loadingTracesRef = useRef<Set<string>>(new Set());
+  // Monotonic counter — each loadAll call gets a seq ID. If a newer call starts
+  // while wave 1 is awaiting, wave 2 is skipped to avoid stale concurrent writes.
+  const loadAllSeqRef = useRef(0);
   const [traceDay, setTraceDay] = useState<string>(() => {
     return new Date().toISOString().slice(0, 10);
   });
@@ -1007,26 +1010,40 @@ export default function ObservabilityPage() {
     setGapEvents(gaps);
   }, []);
 
-  // Single data-load coordinator — all loaders go through here so there is exactly one
-  // authority deciding what uid to use. Syncs viewUserIdRef for RT/poll closures.
-  const loadAll = useCallback((uid: string | null) => {
+  // Single data-load coordinator — two-wave pattern prevents saturating the
+  // Supabase connection pool (17 simultaneous queries was causing silent failures
+  // that left state stale). Wave 1 loads above-the-fold content first; wave 2
+  // loads analytics. Seq guard aborts wave 2 if a newer loadAll started.
+  const loadAll = useCallback(async (uid: string | null) => {
+    const seq = ++loadAllSeqRef.current;
     viewUserIdRef.current = uid;
-    loadHeroStatus(uid);
-    loadHeroFeed(uid);
-    loadPerformance(uid);
-    loadComplianceLast30d(uid);
-    loadModelLatency(uid);
-    loadActivity24h(uid);
-    loadErrors24h(uid);
-    loadErrors(uid);
-    loadStrategies(uid);
-    loadMemories(uid);
-    loadLatencyData(uid);
-    loadSurfaceScanLatency(uid);
-    loadExecutionGaps();
-    loadActiveModel();
-    loadRealTokenStats();
-    loadChatStats();
+
+    // Wave 1 — visible content first (hero, activity, health, strategies, memory)
+    await Promise.all([
+      loadHeroStatus(uid),
+      loadHeroFeed(uid),
+      loadPerformance(uid),
+      loadActivity24h(uid),
+      loadErrors24h(uid),
+      loadStrategies(uid),
+      loadMemories(uid),
+      loadActiveModel(),
+    ]);
+
+    // Abort wave 2 if a newer loadAll started while we were awaiting wave 1
+    if (seq !== loadAllSeqRef.current) return;
+
+    // Wave 2 — analytics and cost data (below the fold)
+    await Promise.all([
+      loadComplianceLast30d(uid),
+      loadModelLatency(uid),
+      loadErrors(uid),
+      loadLatencyData(uid),
+      loadSurfaceScanLatency(uid),
+      loadExecutionGaps(),
+      loadRealTokenStats(),
+      loadChatStats(),
+    ]);
   }, [
     loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
     loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
