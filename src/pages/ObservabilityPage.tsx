@@ -2766,7 +2766,7 @@ export default function ObservabilityPage() {
                             {stratName}
                           </span>
                         )}
-                        {mem.quarantined_at && (
+                        {!mem.is_active && (
                           <span className="shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500">quarantined</span>
                         )}
                         <span className="text-[11px] text-muted-foreground ml-auto shrink-0 tabular-nums">
@@ -2797,9 +2797,24 @@ export default function ObservabilityPage() {
                       {/* Expanded content */}
                       {isExpanded && (
                         <div className="mt-3 space-y-2">
-                          <div className="rounded-lg bg-secondary/40 p-3">
-                            <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">{mem.content}</p>
-                          </div>
+                          {!mem.is_active ? (
+                            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 space-y-2">
+                              <p className="text-[10px] text-red-400/70 uppercase tracking-widest font-semibold">Quarantine Story</p>
+                              <p className="text-[11px] text-foreground whitespace-pre-wrap leading-relaxed">{mem.content}</p>
+                              <div className="pt-1 border-t border-red-500/10 flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground/60">
+                                <span>Quarantined {relativeTime(mem.updated_at)}</span>
+                                <span>·</span>
+                                <span>{mem.contradictions} contradiction{mem.contradictions !== 1 ? "s" : ""}</span>
+                                {mem.confirmations > 0 && (
+                                  <><span>·</span><span>{mem.confirmations} prior confirmation{mem.confirmations !== 1 ? "s" : ""}</span></>
+                                )}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="rounded-lg bg-secondary/40 p-3">
+                              <p className="text-[12px] text-foreground leading-relaxed whitespace-pre-wrap">{mem.content}</p>
+                            </div>
+                          )}
                           <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
                             {mem.scope && <span>scope: {mem.scope}</span>}
                             {mem.trade_sample_size > 0 && <span>sample: {mem.trade_sample_size} trades</span>}
