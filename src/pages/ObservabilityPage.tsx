@@ -57,66 +57,90 @@ const DEFAULT_MODEL_INFO: ModelInfo = { label: "gpt-4o-mini", provider: "OpenRou
 
 // ── Failure Mode Details ───────────────────────────────────────────────────────
 
-const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string; resolution: string }> = {
+const FAILURE_MODE_DETAILS: Record<string, { title: string; parameter: string; description: string; fallback: string; resolution: string }> = {
   llm_timeout: {
     title: "LLM API Timeout",
+    parameter: "Hard cutoff: 15 s per qualify call. Warning at 1 timeout in 24 h, critical at 5.",
     description: "The qualify call to OpenRouter/Anthropic exceeded 15 seconds and was aborted. The strategy is skipped for this run — market opportunity missed, no trade blocked.",
+    fallback: "Strategy skipped for this cycle. Next cron tick retries from scratch with no carry-over state.",
     resolution: "Check OpenRouter status (status.openrouter.ai). If sustained, increase QUALIFY_TIMEOUT_MS in the edge function or switch to a faster model (gpt-4o-mini is fastest).",
   },
   kalshi_timeout: {
     title: "Kalshi API Timeout",
+    parameter: "No hard timeout configured — aborts on hanging fetch. Warning at 1 timeout in 24 h, critical at 5.",
     description: "A request to the Kalshi REST API timed out — market data fetch or order submission. The surface scanner or order executor aborted the call.",
+    fallback: "Surface scan drops remaining series for this cycle. Already-submitted orders stay open; unsubmitted orders are discarded.",
     resolution: "Check Kalshi status. Kalshi maintenance windows happen weekly. If orders are timing out, reduce basket size or add retry logic in execute-basket.",
   },
   llm_rate_limit: {
-    title: "LLM Rate Limits",
+    title: "LLM Rate Limit (429)",
+    parameter: "Limit set by your OpenRouter plan (requests per minute / tokens per minute). Critical on the first 429 received.",
     description: "OpenRouter returned a 429 Too Many Requests. The qualify call failed and the strategy was skipped. Repeated rate limits mean the account RPM/TPM limit is too low for the current cron frequency.",
-    resolution: "Check your OpenRouter dashboard for current usage vs. plan limits. Upgrade the rate limit tier or increase the cron interval from 2min to 5min in the pg_cron schedule.",
+    fallback: "Strategy skipped for this cycle. No automatic retry — next cron tick resumes normally.",
+    resolution: "Check your OpenRouter dashboard for current usage vs. plan limits. Upgrade the rate limit tier or increase the cron interval from 2 min to 5 min in the pg_cron schedule.",
   },
   kalshi_rate_limit: {
-    title: "Kalshi Rate Limits",
-    description: "Kalshi REST API returned 429 Too Many Requests on a market data fetch or order submission. Kalshi enforces per-minute and per-second request limits. The surface scanner batches multiple series requests in a single run — if too many users are running simultaneously, the shared IP pool may hit the limit.",
-    resolution: "Kalshi's rate limit is typically 10 req/s or 600 req/min. Add exponential backoff + retry logic to the surface scanner's market fetch loop. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash). Check the Kalshi developer portal for current limits.",
+    title: "Kalshi Rate Limit (429)",
+    parameter: "Kalshi enforces roughly 10 requests per second or 600 per minute. Critical on the first 429 received.",
+    description: "Kalshi REST API returned 429 Too Many Requests on a market data fetch or order submission. The surface scanner batches multiple series in one run — shared IP pools can hit this fast under multi-tenant load.",
+    fallback: "Circuit breaker opens for a 1-hour window. All Kalshi calls are blocked until the window resets. One retry at 5 s is attempted before the breaker opens.",
+    resolution: "Add exponential backoff + retry logic to the surface scanner\'s market fetch loop. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash).",
   },
   cost_spike: {
     title: "Cost Spike",
-    description: "LLM call rate in the last 6 hours is significantly above the 30-day hourly average. Could indicate a misconfigured cron schedule, a runaway retry loop, or an unusually active market session driving many concurrent signals.",
-    resolution: "Review execution traces to check if auto_trade_strategy_run frequency is abnormal. Verify the pg_cron schedule in Supabase. If it's legitimate market activity, no action needed.",
+    parameter: "Compares LLM calls in the last 6 h against the prior 24 h hourly average. Warning above 2×, critical above 4×.",
+    description: "LLM call rate in the last 6 hours is significantly above the prior 24 h hourly average. Could indicate a misconfigured cron schedule, a runaway retry loop, or an unusually active market session driving many concurrent signals.",
+    fallback: "Alert only — no automatic throttle. Trading continues. Review traces to confirm whether the spike is legitimate market activity.",
+    resolution: "Review execution traces to check if auto_trade_strategy_run frequency is abnormal. Verify the pg_cron schedule in Supabase. If it\'s legitimate market activity, no action needed.",
   },
   exchange_error: {
-    title: "Kalshi Data Errors",
+    title: "Exchange Data Errors",
+    parameter: "Counts Kalshi responses that fail JSON parsing or schema validation. Warning at 3 errors in 24 h, critical at 10.",
     description: "Kalshi API returned malformed or schema-mismatched market data. Usually caused by Kalshi maintenance windows or API field changes.",
-    resolution: "Check Kalshi API changelog. These are usually transient. If sustained, a market field may have been renamed — compare error against current Kalshi API spec.",
+    fallback: "Affected market is skipped. Scanner continues with remaining series. Bad data never reaches the qualify or execution step.",
+    resolution: "Check Kalshi API changelog. These are usually transient. If sustained, a market field may have been renamed — compare the error against the current Kalshi API spec.",
   },
   strategy_error: {
-    title: "Strategy System Errors",
+    title: "Strategy Code Errors",
+    parameter: "Counts unhandled exceptions thrown inside a strategy block. Warning at 3 errors in 24 h, critical at 10.",
     description: "A strategy threw an unhandled exception — null/undefined field access, JSON parse failure, or schema mismatch in the qualify prompt.",
-    resolution: "Check the specific error message below. Common cause: strategy accessing a market field that can be null (closeTime, yes_ask, no_bid). Add null guards.",
+    fallback: "Error is caught and logged. The failing strategy is skipped; all other strategies in the same cycle continue normally.",
+    resolution: "Check the specific error message in the events list. Common cause: a strategy reading a market field that can be null (closeTime, yes_ask, no_bid). Add null guards.",
   },
   pii_detected: {
     title: "PII Detected",
+    parameter: "Scans every compliance_log message for email addresses and phone number patterns. Critical on the first match — any hit is a violation.",
     description: "A compliance log message appears to contain personal identifiable information (email address or phone number pattern). This should never appear in operational logs and represents a data handling violation.",
+    fallback: "None — the PII is already written to the database. Immediate manual review and sanitization is required.",
     resolution: "Identify the event and trace its source. Remove or sanitize the PII from any log store. Review the code path that produced the event and add input sanitization before logging.",
   },
   db_connection: {
     title: "DB / Connection Errors",
+    parameter: "Counts Supabase connection refused, socket, or pool errors at error/critical severity. Warning at 1, critical at 3.",
     description: "Supabase client returned a connection error, socket failure, or database-level error. Edge functions depend on the DB for trade state, risk rules, and memory injection — connection failures degrade all operations.",
-    resolution: "Check Supabase project status and connection pooler health. If persistent, review edge function database connection limits. Supabase free tier pauses after 7 days of inactivity.",
+    fallback: "Edge function returns early and logs the error. No trades are placed. Supabase free tier auto-pauses after 7 days of inactivity — resume from the Supabase dashboard.",
+    resolution: "Check Supabase project status and connection pooler health. If persistent, review edge function database connection limits.",
   },
   network_failure: {
     title: "Network Failures",
-    description: "Outbound network requests from edge functions failed at the transport layer — DNS resolution failure, connection refused, or unreachable host. Distinct from API errors (4xx/5xx) which indicate the host was reached.",
-    resolution: "Check Deno Deploy / Supabase Edge Function network status. These are usually transient. If sustained, verify the target API domain hasn't changed and that no IP allowlisting is required.",
+    parameter: "Counts transport-layer failures (DNS, connection refused, unreachable host) on outbound fetches — distinct from API 4xx/5xx errors. Warning at 1, critical at 5.",
+    description: "Outbound network requests from edge functions failed at the transport layer — DNS resolution failure, connection refused, or unreachable host. The host was never reached, so there is no HTTP response code.",
+    fallback: "Fetch is aborted and the call is dropped for this cycle. No automatic retry — next cron tick retries from scratch.",
+    resolution: "Check Deno Deploy / Supabase Edge Function network status. These are usually transient. If sustained, verify the target API domain hasn\'t changed and that no IP allowlisting is required.",
   },
   memory_pressure: {
     title: "Memory",
+    parameter: "Counts memories where exposed_confidence dropped below 0.30 after 10+ attributed trades. Warning at 5 quarantined, critical at 20.",
     description: "A significant portion of agent memories have been quarantined (exposed confidence below 0.30 after 10+ attributed trades). High quarantine count means the agent accumulated lessons that real trade outcomes later contradicted.",
-    resolution: "Review quarantined memories in the Agent Memory panel — look for patterns in which strategies or market conditions produced bad lessons. Run compact-memory to compress and merge the active memory graph (token savings). Quarantined entries can only be cleared by resetting their is_active flag directly in the DB.",
+    fallback: "Quarantined memories are silently removed from the LLM context window. They remain in the DB for audit. No trading is disrupted — the agent simply stops using contradicted lessons.",
+    resolution: "Review quarantined memories in the Agent Memory panel. Run compact-memory to compress and merge the active memory graph. Quarantined entries can only be cleared by resetting their is_active flag directly in the DB.",
   },
   execution_gap: {
-    title: "Execution Gaps",
-    description: "A gap of more than 5 minutes was detected between consecutive auto_trade_run or auto_trade_skipped events. The cron fires every 30 seconds — gaps longer than 5 minutes indicate the edge function crashed or timed out mid-execution without logging a completion event.",
-    resolution: "Check Supabase Edge Function logs for the gap window. Common causes: edge function timeout (functions have a 60s limit by default), stale lock that wasn't released on crash (LOCK_STALE_MS=5min), or a transient Supabase cold-start. If gaps recur, add a try/finally block to the auto-trade function to guarantee the lock is released even on error.",
+    title: "Agent Heartbeat",
+    parameter: "Looks for gaps longer than 5 minutes between consecutive auto_trade_run events. The cron fires every 30 s — a 5-minute gap means at least 10 consecutive missed ticks with no log entries at all.",
+    description: "The agent went completely silent — no run or skip events logged. This is a liveness signal, not a specific error type. Causes: pg_cron stopped firing, the edge function crashed before it could write to the DB, or the DB itself was unreachable. Unlike DB or network monitors (which produce error events), a heartbeat gap means nothing was logged at all.",
+    fallback: "The stale lock expires after 5 minutes (LOCK_STALE_MS) and is released on the next cron tick. If pg_cron stopped entirely, the function simply never runs until cron is restarted.",
+    resolution: "Check Supabase Edge Function logs for the gap window. Common causes: edge function timeout (60 s default), stale lock not released on crash, or pg_cron stopped. Add a try/finally block to guarantee lock release on error.",
   },
 };
 
@@ -992,31 +1016,62 @@ export default function ObservabilityPage() {
   }, []);
 
   // Intentionally no uid filter — the trading agent is global (one cron, not per-user).
-  // Gaps in auto_trade_run/skipped represent edge function crashes, not user-specific issues.
+  // Agent heartbeat — detects silence windows across a 7-day lookback.
+  // Uses two queries: (1) most recent event ever, to catch ongoing silence since last run;
+  // (2) last 24h events, to compute median cadence and historical gaps.
+  // This fixes the blind spot where data.length < 2 in 24h returned [] even when the
+  // agent had been completely silent for days.
   const loadExecutionGaps = useCallback(async () => {
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { data } = await supabase
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const since7d  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000).toISOString();
+
+    // Most recent event ever (unbounded) — to detect ongoing silence
+    const { data: latestRow } = await supabase
       .from("compliance_log")
       .select("created_at")
       .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
-      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    // Last 24h events — for median cadence + historical gap detection
+    const { data: recent } = await supabase
+      .from("compliance_log")
+      .select("created_at")
+      .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
+      .gte("created_at", since24h)
       .order("created_at", { ascending: true });
-    if (!data || data.length < 2) { setGapEvents([]); return; }
-    // Compute median inter-run interval to set a dynamic threshold (3× median).
-    // This avoids false alarms when the cron schedule changes (e.g. hourly vs 30s).
+
+    const gaps: { from: string; to: string; gapMins: number }[] = [];
+    const nowIso = new Date().toISOString();
+
+    // Case 1: no event at all, or last event is more than 2 hours old → ongoing silence gap
+    const lastEventMs = latestRow ? new Date(latestRow.created_at).getTime() : null;
+    const silenceMins = lastEventMs ? (Date.now() - lastEventMs) / 60000 : 9999;
+    if (silenceMins > 120) {
+      gaps.push({
+        from: latestRow?.created_at ?? since7d,
+        to: nowIso,
+        gapMins: silenceMins,
+      });
+      setGapEvents(gaps);
+      return;
+    }
+
+    // Case 2: enough recent events — compute median cadence and flag historical gaps
+    if (!recent || recent.length < 2) { setGapEvents([]); return; }
     const intervals: number[] = [];
-    for (let i = 1; i < data.length; i++) {
-      intervals.push((new Date(data[i].created_at).getTime() - new Date(data[i - 1].created_at).getTime()) / 60000);
+    for (let i = 1; i < recent.length; i++) {
+      intervals.push((new Date(recent[i].created_at).getTime() - new Date(recent[i - 1].created_at).getTime()) / 60000);
     }
     const sorted = [...intervals].sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
     const threshold = Math.max(15, median * 3); // at least 15 min, or 3× median cadence
-    const gaps: { from: string; to: string; gapMins: number }[] = [];
-    for (let i = 1; i < data.length; i++) {
-      const prev = new Date(data[i - 1].created_at).getTime();
-      const curr = new Date(data[i].created_at).getTime();
+    for (let i = 1; i < recent.length; i++) {
+      const prev = new Date(recent[i - 1].created_at).getTime();
+      const curr = new Date(recent[i].created_at).getTime();
       const gapMins = (curr - prev) / 60000;
-      if (gapMins > threshold) gaps.push({ from: data[i - 1].created_at, to: data[i].created_at, gapMins });
+      if (gapMins > threshold) gaps.push({ from: recent[i - 1].created_at, to: recent[i].created_at, gapMins });
     }
     setGapEvents(gaps);
   }, []);
@@ -1428,8 +1483,9 @@ export default function ObservabilityPage() {
       : 0)
   );
   const latestMemory = activeMemories[0] ?? null;
-  const healthyCount = Object.values(failureModes).filter((m) => m.status === "ok").length;
-  const totalHealthChecks = Object.keys(failureModes).length;
+  const TABLE_MONITOR_KEYS = ["llm_timeout","kalshi_timeout","llm_rate_limit","kalshi_rate_limit","cost_spike","exchange_error","strategy_error","pii_detected","db_connection","network_failure","execution_gap"] as const;
+  const healthyCount = TABLE_MONITOR_KEYS.filter((k) => failureModes[k]?.status === "ok").length;
+  const totalHealthChecks = TABLE_MONITOR_KEYS.length;
 
   // Latency derived stats
   const latencyNow = Date.now();
@@ -1603,61 +1659,55 @@ export default function ObservabilityPage() {
           }
         >
           <div className="p-6 space-y-5">
-            <div className="grid grid-cols-4 gap-3">
-              {(
-                [
-                  "llm_timeout",
-                  "kalshi_timeout",
-                  "llm_rate_limit",
-                  "kalshi_rate_limit",
-                  "cost_spike",
-                  "exchange_error",
-                  "strategy_error",
-                  "pii_detected",
-                  "db_connection",
-                  "network_failure",
-                  "memory_pressure",
-                  "execution_gap",
-                ] as const
-              ).map((key) => {
-                const mode = failureModes[key];
-                const detail = FAILURE_MODE_DETAILS[key];
-                const { status: modeStatus } = mode;
-                const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
-                const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
-                const lastOccurrence = mode.lastAt ? relativeTime(mode.lastAt) : "Clean";
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setSelectedFailureMode(key)}
-                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
-                  >
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
-                    </div>
-                    <p className="text-lg font-bold tabular-nums">
-                      {key === "cost_spike"
-                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
-                        : key === "memory_pressure" ? `${mode.count} quarant.`
-                        : key === "execution_gap" ? (mode.count === 0 ? "0" : `${mode.count} gap${mode.count !== 1 ? "s" : ""}`)
-                        : `${mode.count}`}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {key === "cost_spike"
-                        ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
-                        : key === "memory_pressure" ? mode.extra ?? ""
-                        : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
-                        : lastOccurrence}
-                    </p>
-                    <p className="text-[9px] text-muted-foreground/40 uppercase tracking-wide mt-1">
-                      {key === "kalshi_rate_limit" ? "last 1h" : key === "memory_pressure" || key === "execution_gap" ? "all time" : "last 24h"}
-                    </p>
-                  </button>
-                );
-              })}
+            <div className="rounded-xl border border-border overflow-hidden">
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="border-b border-border bg-secondary/30">
+                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[17%]">Monitor</th>
+                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[26%]">Parameter &amp; Threshold</th>
+                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[30%]">Definition</th>
+                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground uppercase tracking-wide w-[21%]">Fallback</th>
+                    <th className="px-4 py-2.5 text-center font-medium text-muted-foreground uppercase tracking-wide w-[6%]">24h</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {TABLE_MONITOR_KEYS.map((key) => {
+                    const mode = failureModes[key];
+                    const detail = FAILURE_MODE_DETAILS[key];
+                    const { status: modeStatus } = mode;
+                    const dotLabel = modeStatus === "critical" ? "✖" : modeStatus === "warning" ? "▲" : "●";
+                    const dotText = modeStatus === "critical" ? "text-red-500" : modeStatus === "warning" ? "text-yellow-500" : "text-emerald-500";
+                    const countDisplay =
+                      key === "cost_spike"
+                        ? (mode.status !== "ok" ? (mode.extra ?? "—") : "—")
+                        : key === "execution_gap"
+                        ? (mode.count === 0 ? "0" : `${mode.count}`)
+                        : `${mode.count}`;
+                    return (
+                      <tr
+                        key={key}
+                        onClick={() => setSelectedFailureMode(key)}
+                        className="hover:bg-secondary/20 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] font-bold shrink-0 ${dotText}`}>{dotLabel}</span>
+                            <span className="font-medium text-foreground">{detail.title}</span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.parameter}</td>
+                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.description}</td>
+                        <td className="px-4 py-3 text-muted-foreground leading-relaxed">{detail.fallback}</td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`font-semibold tabular-nums ${modeStatus === "ok" ? "text-emerald-500" : dotText}`}>{countDisplay}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
-            <div>
+                        <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
                 24h Uptime
                 <span className="normal-case tracking-normal opacity-60 lowercase"> · green = clean · red = failures · click red bars for details</span>
@@ -2777,18 +2827,27 @@ export default function ObservabilityPage() {
 
             {/* Body */}
             <div className="px-6 py-5 space-y-4">
-              <div>
-                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">What This Means</p>
-                <div className="rounded-xl bg-secondary/40 p-4">
-                  <p className="text-[12px] text-foreground leading-relaxed">{detail.description}</p>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Suggested Resolution</p>
-                <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-4">
-                  <p className="text-[12px] text-foreground leading-relaxed">{detail.resolution}</p>
-                </div>
+              <div className="rounded-xl border border-border overflow-hidden">
+                <table className="w-full text-[11px]">
+                  <tbody className="divide-y divide-border">
+                    <tr>
+                      <td className="px-4 py-3 w-[26%] text-muted-foreground font-medium uppercase tracking-wide align-top">Parameter</td>
+                      <td className="px-4 py-3 text-foreground leading-relaxed">{detail.parameter}</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3 text-muted-foreground font-medium uppercase tracking-wide align-top">Definition</td>
+                      <td className="px-4 py-3 text-foreground leading-relaxed">{detail.description}</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3 text-muted-foreground font-medium uppercase tracking-wide align-top">Fallback</td>
+                      <td className="px-4 py-3 text-foreground leading-relaxed">{detail.fallback}</td>
+                    </tr>
+                    <tr>
+                      <td className="px-4 py-3 text-muted-foreground font-medium uppercase tracking-wide align-top">Resolution</td>
+                      <td className="px-4 py-3 text-emerald-400 leading-relaxed">{detail.resolution}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
               {mode.events && mode.events.length > 0 && (
@@ -2812,37 +2871,11 @@ export default function ObservabilityPage() {
                 </div>
               )}
 
-              {(selectedFailureMode === "cost_spike" || selectedFailureMode === "memory_pressure") && (
+              {selectedFailureMode === "cost_spike" && (
                 <div className="rounded-xl bg-secondary/40 p-4">
                   <p className="text-[12px] text-muted-foreground">
-                    {selectedFailureMode === "cost_spike"
-                      ? `${mode.count} strategy evaluations in the last 6h (${mode.extra ?? "—"} per 6h window)`
-                      : `${mode.count} quarantined memories · ${failureModes.memory_pressure.extra ?? ""}`}
+                    {`${mode.count} strategy evaluations in the last 6 h (· ${mode.extra ?? "—"})`}
                   </p>
-                  {selectedFailureMode === "memory_pressure" && (
-                    <>
-                      <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
-                        compact-memory summarizes active memories (saves tokens) and merges clusters of 3+ related entries. It does not reduce the quarantine count — quarantined entries must be reset directly in the DB.
-                      </p>
-                      <button
-                        disabled={clearingMemory}
-                        onClick={async () => {
-                          setClearingMemory(true);
-                          const { data: { session } } = await supabase.auth.getSession();
-                          await fetch(
-                            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
-                            { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
-                          ).catch(() => {});
-                          setClearingMemory(false);
-                          loadAll(viewUserId);
-                          setSelectedFailureMode(null);
-                        }}
-                        className="w-full mt-2 py-2.5 rounded-xl bg-secondary text-foreground text-xs font-medium hover:bg-secondary/80 transition-colors disabled:opacity-50"
-                      >
-                        {clearingMemory ? "Running compact-memory…" : "Run compact-memory"}
-                      </button>
-                    </>
-                  )}
                 </div>
               )}
               {selectedFailureMode === "execution_gap" && gapEvents.length > 0 && (
