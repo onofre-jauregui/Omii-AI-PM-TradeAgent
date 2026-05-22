@@ -803,15 +803,18 @@ If execute_trade or any tool returns an error field, relay the exact error text 
       let result: any;
       const turnIndex = 12 - maxIterations;
 
+      const llmCallStart = Date.now();
+
       if (effectiveProvider === "anthropic") {
         const { result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3);
         result = anthropicResult;
+        const durationMs = Date.now() - llmCallStart;
         if (supabase && anthropicUsage.input_tokens != null) {
           supabase.from("compliance_log").insert({
             event_type: "chat_llm_usage",
             severity: "info",
             user_id: userId ?? null,
-            message: `chat: ${anthropicUsage.input_tokens} in / ${anthropicUsage.output_tokens ?? "?"} out · turn ${turnIndex}`,
+            message: `chat: ${anthropicUsage.input_tokens} in / ${anthropicUsage.output_tokens ?? "?"} out · turn ${turnIndex} · ${durationMs}ms`,
             metadata: {
               model: finalModel,
               provider: "anthropic",
@@ -819,6 +822,7 @@ If execute_trade or any tool returns an error field, relay the exact error text 
               completion_tokens: anthropicUsage.output_tokens,
               total_tokens: (anthropicUsage.input_tokens ?? 0) + (anthropicUsage.output_tokens ?? 0),
               turn_index: turnIndex,
+              duration_ms: durationMs,
             },
           }).catch(() => {});
         }
@@ -868,12 +872,13 @@ If execute_trade or any tool returns an error field, relay the exact error text 
           });
         }
         result = await resp.json();
+        const durationMs = Date.now() - llmCallStart;
         if (supabase && result?.usage) {
           supabase.from("compliance_log").insert({
             event_type: "chat_llm_usage",
             severity: "info",
             user_id: userId ?? null,
-            message: `chat: ${result.usage.prompt_tokens ?? "?"} in / ${result.usage.completion_tokens ?? "?"} out · turn ${turnIndex}`,
+            message: `chat: ${result.usage.prompt_tokens ?? "?"} in / ${result.usage.completion_tokens ?? "?"} out · turn ${turnIndex} · ${durationMs}ms`,
             metadata: {
               model: finalModel,
               provider: effectiveProvider,
@@ -881,6 +886,7 @@ If execute_trade or any tool returns an error field, relay the exact error text 
               completion_tokens: result.usage.completion_tokens ?? null,
               total_tokens: result.usage.total_tokens ?? null,
               turn_index: turnIndex,
+              duration_ms: durationMs,
             },
           }).catch(() => {});
         }

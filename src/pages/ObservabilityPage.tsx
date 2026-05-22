@@ -408,6 +408,13 @@ export default function ObservabilityPage() {
     topModel: string | null;
   } | null>(null);
 
+  const [chatLatencyStats, setChatLatencyStats] = useState<{
+    p50Ms: number | null;
+    p95Ms: number | null;
+    avgMs: number | null;
+    sampleCount: number;
+  } | null>(null);
+
   const [stratRunDurations, setStratRunDurations] = useState<{ ts: number; seconds: number }[]>([]);
 
   // 24h activity — dedicated server-side counts (not derived from capped array)
@@ -908,6 +915,22 @@ export default function ObservabilityPage() {
       totalSpend30d: totalCost,
       topModel,
     });
+
+    // Latency from duration_ms field (logged after deploy — may be null for older rows)
+    const durations = rows
+      .map((r) => r.metadata?.duration_ms)
+      .filter((d): d is number => typeof d === "number" && d > 0)
+      .sort((a, b) => a - b);
+    if (durations.length > 0) {
+      setChatLatencyStats({
+        p50Ms: percentile(durations, 50),
+        p95Ms: percentile(durations, 95),
+        avgMs: Math.round(durations.reduce((s, d) => s + d, 0) / durations.length),
+        sampleCount: durations.length,
+      });
+    } else {
+      setChatLatencyStats(null);
+    }
   }, []);
 
   const loadLatencyData = useCallback(async (uid?: string | null) => {
@@ -2006,19 +2029,21 @@ export default function ObservabilityPage() {
               </div>
             </div>
 
+            {chatTokenStats && (
+              <>
             <div className="border-t border-border/60" />
 
             {/* ── Chat Assistant ───────────────────────────────────────── */}
             <div>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Chat Assistant</p>
-                {chatTokenStats?.topModel && (
+                {chatTokenStats.topModel && (
                   <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
                     {MODEL_COSTS[chatTokenStats.topModel]?.label ?? chatTokenStats.topModel}
                   </span>
                 )}
               </div>
-              {chatTokenStats ? (
+              {(
                 <>
                   <div className="grid grid-cols-4 gap-4 mb-3">
                     <div className="rounded-xl border border-border p-4">
@@ -2083,14 +2108,10 @@ export default function ObservabilityPage() {
                     </div>
                   </div>
                 </>
-              ) : (
-                <div className="grid grid-cols-4 gap-4">
-                  <div className="col-span-4 rounded-xl border border-dashed border-border p-4 text-center text-[11px] text-muted-foreground">
-                    No chat usage data yet — starts recording on next conversation
-                  </div>
-                </div>
               )}
             </div>
+              </>
+            )}
 
             <div className="border-t border-border/60" />
 
@@ -2201,6 +2222,39 @@ export default function ObservabilityPage() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+
+          {/* ── Chat Response Latency (shown only when duration_ms data exists) */}
+          {chatLatencyStats && (
+            <div className="px-6 pb-5 border-t" style={{ borderColor: "#2e2720" }}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold mt-4 mb-3">
+                Chat Assistant · Response Latency
+                <span className="normal-case tracking-normal font-normal lowercase ml-1 opacity-60">({chatLatencyStats.sampleCount} calls measured · last 30d)</span>
+              </p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p50</p>
+                  <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.p50Ms === null ? "text-muted-foreground" : chatLatencyStats.p50Ms <= 3000 ? "text-emerald-500" : chatLatencyStats.p50Ms <= 8000 ? "text-yellow-500" : "text-red-500"}`}>
+                    {chatLatencyStats.p50Ms !== null ? `${(chatLatencyStats.p50Ms / 1000).toFixed(1)}s` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">median response</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">p95</p>
+                  <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.p95Ms === null ? "text-muted-foreground" : chatLatencyStats.p95Ms <= 8000 ? "text-yellow-500" : "text-red-500"}`}>
+                    {chatLatencyStats.p95Ms !== null ? `${(chatLatencyStats.p95Ms / 1000).toFixed(1)}s` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">95th pct response</p>
+                </div>
+                <div className="rounded-xl border border-border p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-widest mb-1">Avg</p>
+                  <p className={`text-xl font-bold tabular-nums ${chatLatencyStats.avgMs === null ? "text-muted-foreground" : chatLatencyStats.avgMs <= 5000 ? "text-emerald-500" : chatLatencyStats.avgMs <= 12000 ? "text-yellow-500" : "text-red-500"}`}>
+                    {chatLatencyStats.avgMs !== null ? `${(chatLatencyStats.avgMs / 1000).toFixed(1)}s` : "—"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">mean response</p>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── 6. Recent Decisions ──────────────────────────────────────── */}
@@ -3077,11 +3131,27 @@ export default function ObservabilityPage() {
                         {ev.severity}
                       </span>
                       {categoryTitle && (
-                        <span className="text-[10px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded-full">{categoryTitle}</span>
+                        <button
+                          className="text-[10px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded-full hover:bg-secondary/70 transition-colors"
+                          onClick={() => { setSelectedTimelineHour(null); setSelectedFailureMode(category!); }}
+                        >{categoryTitle} →</button>
                       )}
                       <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">{fmtTime(ev.created_at)}</span>
                     </div>
                     <p className="text-[12px] text-foreground leading-snug">{ev.message}</p>
+                    {ev.metadata && Object.keys(ev.metadata).length > 0 && (
+                      <details className="mt-1.5">
+                        <summary className="text-[9px] text-muted-foreground/50 cursor-pointer select-none hover:text-muted-foreground transition-colors">trace metadata</summary>
+                        <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                          {Object.entries(ev.metadata as Record<string, unknown>).map(([k, v]) => (
+                            <div key={k} className="flex gap-1.5 items-baseline">
+                              <span className="text-[9px] text-muted-foreground/60 font-mono shrink-0">{k}</span>
+                              <span className="text-[9px] text-muted-foreground font-mono truncate">{String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 );
               })}
