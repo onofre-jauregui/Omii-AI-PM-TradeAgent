@@ -3444,6 +3444,8 @@ function ErrorGroupPanel({
   onSelectError: (ev: ComplianceEvent) => void;
 }) {
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const VISIBLE = 3;
 
   function groupByType(events: ComplianceEvent[]) {
     const map = new Map<string, ComplianceEvent[]>();
@@ -3527,23 +3529,33 @@ function ErrorGroupPanel({
     );
   }
 
+  // Merge and sort all groups by most recent event desc, then slice for display
+  const allGroups = [
+    ...guardrailGroups.map((g) => ({ ...g, section: "guardrail" as const })),
+    ...errorGroups.map((g) => ({ ...g, section: "error" as const })),
+  ].sort((a, b) => b.latest.created_at.localeCompare(a.latest.created_at));
+
+  const visibleGroups = showAll ? allGroups : allGroups.slice(0, VISIBLE);
+  const hiddenCount = allGroups.length - VISIBLE;
+
   return (
     <div>
-      {guardrailGroups.length > 0 && (
-        <div>
-          <p className="px-6 pt-4 pb-2 text-[10px] text-muted-foreground uppercase tracking-wide">
-            Guardrails Fired <span className="normal-case tracking-normal">— expected behavior, system blocked something</span>
-          </p>
-          {guardrailGroups.map((g) => renderGroup(g, "guardrail"))}
-        </div>
+      {visibleGroups.map(({ section, ...g }) => renderGroup(g, section))}
+      {!showAll && hiddenCount > 0 && (
+        <button
+          className="w-full px-6 py-3 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/20 transition-colors text-left border-t border-border"
+          onClick={() => setShowAll(true)}
+        >
+          Show {hiddenCount} more error{hiddenCount !== 1 ? "s" : ""} ↓
+        </button>
       )}
-      {errorGroups.length > 0 && (
-        <div>
-          <p className="px-6 pt-4 pb-2 text-[10px] text-muted-foreground uppercase tracking-wide">
-            Unexpected Errors <span className="normal-case tracking-normal">— things that should not happen</span>
-          </p>
-          {errorGroups.map((g) => renderGroup(g, "error"))}
-        </div>
+      {showAll && allGroups.length > VISIBLE && (
+        <button
+          className="w-full px-6 py-3 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/20 transition-colors text-left border-t border-border"
+          onClick={() => setShowAll(false)}
+        >
+          Show less ↑
+        </button>
       )}
       <div className="px-6 py-3 border-t border-border flex items-center justify-between">
         <span className="text-[10px] text-muted-foreground/50">For full traceability</span>
