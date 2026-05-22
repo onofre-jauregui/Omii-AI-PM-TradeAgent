@@ -718,12 +718,14 @@ export default function ObservabilityPage() {
       .select("*", { count: "exact", head: true })
       .gte("created_at", since)
       .or("event_type.eq.llm_rate_limit,message.ilike.%openrouter%429%,message.ilike.%openrouter%rate%limit%,message.ilike.%llm%rate%limit%");
-    // Dedicated Kalshi rate limit count — Kalshi API 429s
+    // Kalshi rate limit: 1h window for status (only red if currently failing),
+    // 24h events still captured in errors24h for timeline display.
+    const since1h = new Date(Date.now() - 3_600_000).toISOString();
     let krlQ = supabase
       .from("compliance_log")
       .select("*", { count: "exact", head: true })
-      .gte("created_at", since)
-      .or("event_type.eq.kalshi_rate_limit,message.ilike.%kalshi%429%,message.ilike.%kalshi%rate%limit%,message.ilike.%kalshi%too%many%");
+      .gte("created_at", since1h)
+      .or("event_type.eq.kalshi_rate_limit,event_type.eq.kalshi_circuit_open,message.ilike.%kalshi%429%,message.ilike.%kalshi%rate%limit%,message.ilike.%kalshi%too%many%");
     // Include both user-specific errors (user_id = uid) and system-level errors (user_id = NULL)
     if (uid) {
       q = q.or(`user_id.eq.${uid},user_id.is.null`);
@@ -1544,6 +1546,7 @@ export default function ObservabilityPage() {
                   "db_connection",
                   "network_failure",
                   "memory_pressure",
+                  "execution_gap",
                 ] as const
               ).map((key) => {
                 const mode = failureModes[key];
@@ -1565,37 +1568,20 @@ export default function ObservabilityPage() {
                     <p className="text-lg font-bold tabular-nums">
                       {key === "cost_spike"
                         ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
-                        : key === "memory_pressure" ? `${mode.count} quarant.` : `${mode.count}`}
+                        : key === "memory_pressure" ? `${mode.count} quarant.`
+                        : key === "execution_gap" ? (mode.count === 0 ? "0" : `${mode.count} gap${mode.count !== 1 ? "s" : ""}`)
+                        : `${mode.count}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       {key === "cost_spike"
                         ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
-                        : key === "memory_pressure" ? mode.extra ?? "" : lastOccurrence}
+                        : key === "memory_pressure" ? mode.extra ?? ""
+                        : key === "execution_gap" ? (mode.count === 0 ? "Clean" : mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—"))
+                        : lastOccurrence}
                     </p>
                   </button>
                 );
               })}
-              {/* Execution Gaps — only shown when gaps exist; hidden when system is clean */}
-              {failureModes["execution_gap"].status !== "ok" && (() => {
-                const mode = failureModes["execution_gap"];
-                const detail = FAILURE_MODE_DETAILS["execution_gap"];
-                const { status: modeStatus } = mode;
-                const dotLabel = modeStatus === "critical" ? "✖" : "▲";
-                const dotText = modeStatus === "critical" ? "text-red-500" : "text-yellow-500";
-                return (
-                  <button
-                    onClick={() => setSelectedFailureMode("execution_gap")}
-                    className="rounded-xl border border-border p-4 text-left hover:bg-secondary/30 transition-colors"
-                  >
-                    <div className="flex items-center gap-1.5 mb-2">
-                      <span className={`text-[11px] font-bold ${dotText}`}>{dotLabel}</span>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide truncate">{detail.title}</p>
-                    </div>
-                    <p className="text-lg font-bold tabular-nums">{mode.count} gap{mode.count !== 1 ? "s" : ""}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">{mode.extra ?? (mode.lastAt ? relativeTime(mode.lastAt) : "—")}</p>
-                  </button>
-                );
-              })()}
             </div>
             <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-2">
@@ -3300,8 +3286,10 @@ function detectFailureModes(
      !/kalshi/i.test(e.message))
   );
 
+  // 24h events — used for timeline bars
   const kalshiRateLimitEvents = last24h.filter((e) =>
     e.event_type === "kalshi_rate_limit" ||
+    e.event_type === "kalshi_circuit_open" ||
     (e.event_type === "api_timeout" && /kalshi/i.test(e.message) && /\b429\b/i.test(e.message)) ||
     (/kalshi/i.test(e.message) && /\b429\b|rate.?limit|too.?many.?request/i.test(e.message))
   );
