@@ -1663,9 +1663,9 @@ export default function ObservabilityPage() {
         >
           <div className="p-6 space-y-5">
             {([
-              { label: "Pipeline", keys: ["execution_gap","db_connection","network_failure","memory_pressure"] },
+              { label: "Pipeline", keys: ["execution_gap","db_connection","network_failure","pii_detected"] },
               { label: "Kalshi / Exchange", keys: ["kalshi_timeout","kalshi_rate_limit","exchange_error","strategy_error"] },
-              { label: "LLM / Cost", keys: ["llm_timeout","llm_rate_limit","cost_spike","pii_detected"] },
+              { label: "LLM / Cost", keys: ["llm_timeout","llm_rate_limit","cost_spike","memory_pressure"] },
             ] as const).map(({ label, keys }) => (
               <div key={label}>
                 <p className="text-[9px] text-muted-foreground/50 uppercase tracking-widest font-semibold mb-2">{label}</p>
