@@ -787,6 +787,7 @@ export default function ObservabilityPage() {
     "auto_trade_skipped",
     "auto_settle_run",
     "auto_reflect_run",
+    "cache_stale",
   ];
   let errorQ = supabase
       .from("compliance_log")
@@ -3492,11 +3493,6 @@ function ErrorGroupPanel({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-[12px] font-medium">{label}</span>
-              {count > 1 && (
-                <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${severityText} bg-current/10`}>
-                  ×{count}
-                </span>
-              )}
               <span className="text-[10px] text-muted-foreground ml-auto shrink-0">{relativeTime(latest.created_at)}</span>
             </div>
             <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{cleanMsg}</p>
@@ -3545,6 +3541,15 @@ function ErrorGroupPanel({
           {errorGroups.map((g) => renderGroup(g, "error"))}
         </div>
       )}
+      <div className="px-6 py-3 border-t border-border flex items-center justify-between">
+        <span className="text-[10px] text-muted-foreground/50">For full traceability</span>
+        <a
+          href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor?schema=public"
+          target="_blank"
+          rel="noreferrer"
+          className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+        >View compliance_log in Supabase ↗</a>
+      </div>
     </div>
   );
 }
