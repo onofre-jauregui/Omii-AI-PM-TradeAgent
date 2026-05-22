@@ -294,12 +294,12 @@ export function SettingsPanel() {
         </div>
       </div>
 
-      {/* ── AI Model Keys ────────────────────────────────────────── */}
+      {/* ── API Keys ─────────────────────────────────────────────── */}
       <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
         <div className="px-6 py-4 border-b border-border">
           <div className="flex items-center gap-2">
             <Key className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-sm font-medium">AI Model Keys</h3>
+            <h3 className="text-sm font-medium">API Keys</h3>
             <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Required for agent</span>
           </div>
           <p className="text-xs text-muted-foreground mt-1">
