@@ -43,7 +43,7 @@ const FETCH_MARKETS_TOOL = {
       properties: {
         limit: { type: "number", description: "Number of markets to fetch (default 20)" },
         category: { type: "string", description: "Filter by Kalshi series ticker (e.g. 'KXFED', 'KXMLB', 'KXNBA')" },
-        keyword: { type: "string", description: "Free-text search across all Kalshi markets by title/topic. Examples: 'Mexico', 'soccer', 'Trump', 'Bitcoin', 'Lakers'. Use this when the user asks about a specific team, event, or topic." },
+        keyword: { type: "string", description: "Free-text search across all Kalshi markets by title/topic. NOTE: Kalshi search is unreliable — prefer category when possible." },
       },
     },
   },
@@ -435,7 +435,7 @@ async function callAnthropicNonStream(
   msgs: any[],
   tools: any[],
   temperature: number
-): Promise<any> {
+): Promise<{ result: any; usage: { input_tokens: number | null; output_tokens: number | null } }> {
   const { system, messages } = toAnthropicMessages(msgs);
   const body: any = { model, max_tokens: 8192, messages, temperature };
   if (system) body.system = system;
@@ -453,7 +453,11 @@ async function callAnthropicNonStream(
     const text = await resp.text();
     throw new Error(`Anthropic error ${resp.status}: ${text}`);
   }
-  return fromAnthropicResponse(await resp.json());
+  const raw = await resp.json();
+  return {
+    result: fromAnthropicResponse(raw),
+    usage: { input_tokens: raw?.usage?.input_tokens ?? null, output_tokens: raw?.usage?.output_tokens ?? null },
+  };
 }
 
 async function streamAnthropicAsSSE(
@@ -738,11 +742,15 @@ Critical rule: If the user provides a market ticker — fetch that market and tr
 When the user describes a market topic WITHOUT a ticker:
 1. Map their description to the closest series ticker from the catalogue above
 2. Call fetch_live_markets with category=<series_ticker> — NEVER use keyword (it is broken and returns wrong results)
-3. Present the top 1–3 open markets in a card-style format:
-   > **Found:** [Market Title]
-   > Ticker: \`KXHIGHNY-26MAY22-B69.5\` | YES: 42c | NO: 58c | Vol: $14K | Closes: May 22
-4. Ask: "Is this the market you're looking for? If yes — YES or NO?"
-5. Wait for confirmation before executing
+3. Number and present the top 1–3 open markets (sort by volume descending — most liquid first):
+   **1.** Will the high temp in NYC be 69–70°F on May 22?
+   Ticker: KXHIGHNY-26MAY22-B69.5 | YES: 42c | NO: 58c | Closes: May 22
+
+   **2.** Will the high temp in NYC be >70°F on May 22?
+   Ticker: KXHIGHNY-26MAY22-T70 | YES: 2c | NO: 98c | Closes: May 22
+
+4. Ask exactly: "Which one do you want? Reply with the number and YES or NO — e.g. '1, YES' or '2, NO'."
+5. On reply, extract the number, look up the ticker from your list, and call execute_trade — the user never needs to type a ticker.
 
 If no series ticker maps to their request, call fetch_live_markets with NO parameters (returns broad market list) and scan visually. Never tell the user "I couldn't find it" without first trying at least one category fetch.
 
@@ -760,7 +768,13 @@ If no series ticker maps to their request, call fetch_live_markets with NO param
 ## Conversation Memory
 Save user preferences via save_insight (tag "user_preference"): risk limits, market interests, style, strategy directives. Use memoryType "lesson", "market_note", or "strategy_insight".
 
-Format responses with markdown. Be transparent about reasoning and risk.`;
+Format responses with markdown. Be transparent about reasoning and risk.
+
+## Price Units
+All market prices in fetch_live_markets results are in INTEGER CENTS (1–99). Use these values directly as the price parameter in execute_trade. Do NOT convert or divide. A market showing yes_ask_cents=2 means the limit price is 2.
+
+## Error Handling
+If execute_trade or any tool returns an error field, relay the exact error text to the user verbatim. Do not rephrase, interpret, or replace it with a different explanation.`;
 
     // ── All tools ──
     const allTools = [
@@ -787,9 +801,27 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
       maxIterations--;
 
       let result: any;
+      const turnIndex = 12 - maxIterations;
 
       if (effectiveProvider === "anthropic") {
-        result = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3);
+        const { result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3);
+        result = anthropicResult;
+        if (supabase && anthropicUsage.input_tokens != null) {
+          supabase.from("compliance_log").insert({
+            event_type: "chat_llm_usage",
+            severity: "info",
+            user_id: userId ?? null,
+            message: `chat: ${anthropicUsage.input_tokens} in / ${anthropicUsage.output_tokens ?? "?"} out · turn ${turnIndex}`,
+            metadata: {
+              model: finalModel,
+              provider: "anthropic",
+              prompt_tokens: anthropicUsage.input_tokens,
+              completion_tokens: anthropicUsage.output_tokens,
+              total_tokens: (anthropicUsage.input_tokens ?? 0) + (anthropicUsage.output_tokens ?? 0),
+              turn_index: turnIndex,
+            },
+          }).catch(() => {});
+        }
       } else {
         const cfg = getOpenAICompatConfig(effectiveProvider, keys);
         if (!cfg) throw new Error(`No API key for provider: ${effectiveProvider}`);
@@ -836,6 +868,22 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
           });
         }
         result = await resp.json();
+        if (supabase && result?.usage) {
+          supabase.from("compliance_log").insert({
+            event_type: "chat_llm_usage",
+            severity: "info",
+            user_id: userId ?? null,
+            message: `chat: ${result.usage.prompt_tokens ?? "?"} in / ${result.usage.completion_tokens ?? "?"} out · turn ${turnIndex}`,
+            metadata: {
+              model: finalModel,
+              provider: effectiveProvider,
+              prompt_tokens: result.usage.prompt_tokens ?? null,
+              completion_tokens: result.usage.completion_tokens ?? null,
+              total_tokens: result.usage.total_tokens ?? null,
+              turn_index: turnIndex,
+            },
+          }).catch(() => {});
+        }
       }
 
       const choice = result.choices?.[0];
@@ -890,29 +938,41 @@ Format responses with markdown. Be transparent about reasoning and risk.`;
             const limit = args.limit || 10;
             const kalshiBase = KALSHI_BASE_URL;
 
-            // Helper: parse a market into a compact object
-            const parseMarket = (m: any) => ({
-              ticker: m.ticker,
-              title: m.title || m.subtitle,
-              yes_bid: m.yes_bid_dollars ?? m.yes_bid,
-              yes_ask: m.yes_ask_dollars ?? m.yes_ask,
-              no_bid: m.no_bid_dollars ?? m.no_bid,
-              no_ask: m.no_ask_dollars ?? m.no_ask,
-              last_price: m.last_price_dollars ?? m.last_price,
-              volume: m.volume,
-              volume_24h: m.volume_24h,
-              open_interest: m.open_interest,
-              close_time: m.close_time,
-              spread: (((m.yes_ask_dollars ?? m.yes_ask) || 0) - ((m.yes_bid_dollars ?? m.yes_bid) || 0)).toFixed(2),
-            });
+            // Helper: parse a market into a compact object.
+            // Prices are normalized to integer CENTS (1-99) so the LLM passes the
+            // correct value directly to execute_trade without unit conversion.
+            const toCents = (v: any): number => {
+              const n = Number(v) || 0;
+              // Kalshi API returns dollars (0.01–0.99) via *_dollars fields, cents (1–99) via raw fields.
+              // If the value is < 1 it's in dollars — multiply by 100 and round.
+              return n > 0 && n < 1 ? Math.round(n * 100) : Math.round(n);
+            };
+            const parseMarket = (m: any) => {
+              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
+              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
+              return {
+                ticker: m.ticker,
+                title: m.title || m.subtitle,
+                yes_bid_cents: yb,
+                yes_ask_cents: ya,
+                no_bid_cents: toCents(m.no_bid_dollars ?? m.no_bid),
+                no_ask_cents: toCents(m.no_ask_dollars ?? m.no_ask),
+                last_price_cents: toCents(m.last_price_dollars ?? m.last_price),
+                volume: m.volume,
+                volume_24h: m.volume_24h,
+                open_interest: m.open_interest,
+                close_time: m.close_time,
+                spread_cents: ya - yb,
+              };
+            };
 
             // Helper: is this a real tradeable market?
             const isLiquid = (m: any): boolean => {
               if ((m.ticker || "").startsWith("KXMVE")) return false;
-              const ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-              const yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-              const last = Number(m.last_price_dollars ?? m.last_price) || 0;
-              return ya > 0.005 || yb > 0.005 || last > 0.005;
+              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
+              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
+              const last = toCents(m.last_price_dollars ?? m.last_price);
+              return ya >= 1 || yb >= 1 || last >= 1; // values are now in cents
             };
 
             let allMarkets: any[] = [];

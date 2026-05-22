@@ -854,6 +854,48 @@ export default function ObservabilityPage() {
     });
   }, []);
 
+  const loadChatStats = useCallback(async () => {
+    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("metadata, user_id")
+      .eq("event_type", "chat_llm_usage")
+      .gte("created_at", since30d)
+      .limit(10000);
+    if (!data || data.length === 0) { setChatTokenStats(null); return; }
+
+    const rows = data as { metadata: any; user_id: string | null }[];
+    const totalInput = rows.reduce((s, r) => s + (r.metadata?.prompt_tokens ?? 0), 0);
+    const totalOutput = rows.reduce((s, r) => s + (r.metadata?.completion_tokens ?? 0), 0);
+    const withInput = rows.filter((r) => r.metadata?.prompt_tokens != null);
+    const withOutput = rows.filter((r) => r.metadata?.completion_tokens != null);
+
+    const totalCost = rows.reduce((s, r) => {
+      const m = MODEL_COSTS[r.metadata?.model ?? ""] ?? DEFAULT_MODEL_INFO;
+      const inCost = ((r.metadata?.prompt_tokens ?? 0) / 1_000_000) * m.input;
+      const outCost = ((r.metadata?.completion_tokens ?? 0) / 1_000_000) * m.output;
+      return s + inCost + outCost;
+    }, 0);
+
+    const modelFreq = rows.reduce<Record<string, number>>((acc, r) => {
+      const m = r.metadata?.model ?? "unknown";
+      acc[m] = (acc[m] ?? 0) + 1;
+      return acc;
+    }, {});
+    const topModel = Object.entries(modelFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
+    setChatTokenStats({
+      calls: rows.length,
+      totalInputTokens: totalInput,
+      totalOutputTokens: totalOutput,
+      avgInputTokens: withInput.length > 0 ? Math.round(totalInput / withInput.length) : null,
+      avgOutputTokens: withOutput.length > 0 ? Math.round(totalOutput / withOutput.length) : null,
+      dailySpend: totalCost / 30,
+      totalSpend30d: totalCost,
+      topModel,
+    });
+  }, []);
+
   const loadLatencyData = useCallback(async (uid?: string | null) => {
     const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     // auto_trade_strategy_run is system-level (user_id = NULL) — no uid filter
@@ -984,11 +1026,12 @@ export default function ObservabilityPage() {
     loadExecutionGaps();
     loadActiveModel();
     loadRealTokenStats();
+    loadChatStats();
   }, [
     loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
     loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
     loadMemories, loadLatencyData, loadSurfaceScanLatency, loadExecutionGaps, loadActiveModel,
-    loadRealTokenStats,
+    loadRealTokenStats, loadChatStats,
   ]);
 
   // Session init — fires once on mount. Gets userId for profile display + populates user list.
@@ -1815,17 +1858,23 @@ export default function ObservabilityPage() {
             ) : undefined
           }
         >
-          <div className="p-6 space-y-5">
-            {/* ── Top row: daily snapshot ─────────────────────────────── */}
+          <div className="p-6 space-y-6">
+
+            {/* ── Trade Agent — Automated Pipeline ────────────────────── */}
             <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">
-                Daily
-                <span className="text-[10px] font-medium bg-secondary px-2 py-0.5 rounded-full ml-2">
-                  {modelLabel} · {modelProviderLabel}
-                  {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
-                </span>
-              </p>
-              <div className="grid grid-cols-4 gap-4">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">
+                  Trade Agent — Automated Pipeline
+                </p>
+                {activeModel && (
+                  <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
+                    {modelLabel} · {modelProviderLabel}
+                    {unknownModel && <span className="text-yellow-500 ml-1" title={`Unknown model: ${activeModel} — costs are estimated`}>*</span>}
+                  </span>
+                )}
+              </div>
+              {/* Daily snapshot */}
+              <div className="grid grid-cols-4 gap-4 mb-3">
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
                   <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
@@ -1858,10 +1907,7 @@ export default function ObservabilityPage() {
                   </p>
                 </div>
               </div>
-            </div>
-            {/* ── Bottom row: 30-day volume ─────────────────────────────── */}
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Last 30 Days</p>
+              {/* 30-day volume */}
               <div className="grid grid-cols-4 gap-3">
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">LLM Calls</p>
@@ -1907,6 +1953,96 @@ export default function ObservabilityPage() {
                 </div>
               </div>
             </div>
+
+            <div className="border-t border-border/60" />
+
+            {/* ── Chat Assistant ───────────────────────────────────────── */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">Chat Assistant</p>
+                {chatTokenStats?.topModel && (
+                  <span className="text-[10px] bg-secondary px-2 py-0.5 rounded-full text-muted-foreground font-mono">
+                    {MODEL_COSTS[chatTokenStats.topModel]?.label ?? chatTokenStats.topModel}
+                  </span>
+                )}
+              </div>
+              {chatTokenStats ? (
+                <>
+                  <div className="grid grid-cols-4 gap-4 mb-3">
+                    <div className="rounded-xl border border-border p-4">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
+                      <p className="text-xl font-bold tabular-nums">${chatTokenStats.dailySpend.toFixed(4)}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">avg daily · last 30d</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-4">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Turn</p>
+                      <p className="text-xl font-bold tabular-nums">
+                        ${(chatTokenStats.totalSpend30d / chatTokenStats.calls).toFixed(4)}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">avg per LLM call · last 30d</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-4">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Calls</p>
+                      <p className="text-xl font-bold tabular-nums">{chatTokenStats.calls.toLocaleString()}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">chat turns · last 30d</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-4">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
+                      <p className="text-xl font-bold tabular-nums">${chatTokenStats.totalSpend30d.toFixed(4)}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">last 30d</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-3">
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input Tokens</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {chatTokenStats.totalInputTokens >= 1_000_000
+                          ? `${(chatTokenStats.totalInputTokens / 1_000_000).toFixed(2)}M`
+                          : `${(chatTokenStats.totalInputTokens / 1_000).toFixed(0)}K`}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {chatTokenStats.avgInputTokens != null ? `${chatTokenStats.avgInputTokens.toLocaleString()} / call` : "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output Tokens</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {chatTokenStats.totalOutputTokens >= 1_000_000
+                          ? `${(chatTokenStats.totalOutputTokens / 1_000_000).toFixed(2)}M`
+                          : `${(chatTokenStats.totalOutputTokens / 1_000).toFixed(0)}K`}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {chatTokenStats.avgOutputTokens != null ? `${chatTokenStats.avgOutputTokens.toLocaleString()} / call` : "—"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg In / Call</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {chatTokenStats.avgInputTokens != null ? chatTokenStats.avgInputTokens.toLocaleString() : "—"}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">tokens measured</p>
+                    </div>
+                    <div className="rounded-xl border border-border p-3">
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Avg Out / Call</p>
+                      <p className="text-base font-bold tabular-nums">
+                        {chatTokenStats.avgOutputTokens != null ? chatTokenStats.avgOutputTokens.toLocaleString() : "—"}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">tokens measured</p>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="grid grid-cols-4 gap-4">
+                  <div className="col-span-4 rounded-xl border border-dashed border-border p-4 text-center text-[11px] text-muted-foreground">
+                    No chat usage data yet — starts recording on next conversation
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-border/60" />
+
+            {/* ── Automated Pipeline table ──────────────────────────────── */}
             <div>
               <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-3">Automated Pipeline <span className="normal-case tracking-normal lowercase opacity-60">(not the 14 conversational agent tools)</span></p>
               <table className="w-full text-sm">
