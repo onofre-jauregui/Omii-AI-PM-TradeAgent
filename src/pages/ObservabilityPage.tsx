@@ -76,7 +76,7 @@ const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string;
   kalshi_rate_limit: {
     title: "Kalshi Rate Limits",
     description: "Kalshi REST API returned 429 Too Many Requests on a market data fetch or order submission. Kalshi enforces per-minute and per-second request limits. The surface scanner batches multiple series requests in a single run — if too many users are running simultaneously, the shared IP pool may hit the limit.",
-    resolution: "Kalshi's rate limit is typically 10 req/s or 600 req/min. Add exponential backoff + retry logic to the surface scanner's market fetch loop. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash). Check the Kalshi developer portal for current limits.",
+    resolution: "Kalshi's rate limit is typically 10 req/s or 600 req/min. If multi-tenant traffic is the cause, stagger cron schedules per user (offset by user_id hash). Check the Kalshi developer portal for current limits.",
   },
   cost_spike: {
     title: "Cost Spike",
