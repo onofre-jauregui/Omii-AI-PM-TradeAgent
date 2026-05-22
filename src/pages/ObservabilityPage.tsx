@@ -788,6 +788,10 @@ export default function ObservabilityPage() {
     "auto_settle_run",
     "auto_reflect_run",
     "cache_stale",
+    "api_error",
+    "market_data_fetch",
+    "system_event",
+    "futures_signal_run",
   ];
   let errorQ = supabase
       .from("compliance_log")
@@ -795,7 +799,7 @@ export default function ObservabilityPage() {
       .in("severity", ["error", "critical", "warning"])
       .not("event_type", "in", `(${operationalEventTypes.join(",")})`)
       .order("created_at", { ascending: false })
-      .limit(30);
+      .limit(200);
     // Include both user-specific events (user_id = uid) and system-level events (user_id = NULL)
     if (uid) {
       guardrailQ = guardrailQ.or(`user_id.eq.${uid},user_id.is.null`);
