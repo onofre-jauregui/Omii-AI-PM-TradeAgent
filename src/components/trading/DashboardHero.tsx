@@ -1,4 +1,4 @@
-import { Bot, Clock, Zap, MessageSquare, TrendingUp, ArrowUpRight } from "lucide-react";
+import { Bot, Clock, ArrowUpRight } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
@@ -400,30 +400,6 @@ export function DashboardHero({
           />
         </div>
 
-        {/* Actions */}
-        <div className="grid grid-cols-3 gap-2">
-          <button
-            onClick={() => onNavigate?.("markets")}
-            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
-          >
-            <Zap className="h-3.5 w-3.5 text-primary" />
-            Scan Markets
-          </button>
-          <button
-            onClick={() => onNavigate?.("agent")}
-            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
-          >
-            <MessageSquare className="h-3.5 w-3.5 text-primary" />
-            Ask Agent
-          </button>
-          <button
-            onClick={() => onNavigate?.("performance" as string)}
-            className="flex items-center justify-center gap-1.5 h-10 rounded-xl bg-secondary hover:bg-secondary/70 text-xs font-medium text-foreground transition-all active:scale-95"
-          >
-            <TrendingUp className="h-3.5 w-3.5 text-primary" />
-            Performance
-          </button>
-        </div>
       </div>
 
       {/* Status chips */}

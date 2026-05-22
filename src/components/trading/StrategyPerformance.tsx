@@ -108,7 +108,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const chartConfig: Record<string, { label: string; color: string }> = {};
   activeStrategies.forEach((s, i) => {
     chartConfig[s.id] = {
-      label: `${s.id} ${s.name}`,
+      label: `${s.id.replace(/-[0-9a-f]{8}$/, "")} ${s.name}`,
       color: STRATEGY_COLORS[i % STRATEGY_COLORS.length],
     };
   });
@@ -162,7 +162,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                   stroke={STRATEGY_COLORS[i % STRATEGY_COLORS.length]}
                   strokeWidth={2}
                   dot={false}
-                  name={`${s.id} ${s.name}`}
+                  name={`${s.id.replace(/-[0-9a-f]{8}$/, "")} ${s.name}`}
                 />
               ))}
             </LineChart>
@@ -176,7 +176,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
                   className="w-2.5 h-2.5 rounded-full"
                   style={{ backgroundColor: STRATEGY_COLORS[i % STRATEGY_COLORS.length] }}
                 />
-                <span className="text-[10px] text-muted-foreground">{s.id} {s.name}</span>
+                <span className="text-[10px] text-muted-foreground">{s.id.replace(/-[0-9a-f]{8}$/, "")} {s.name}</span>
               </div>
             ))}
           </div>
