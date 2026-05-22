@@ -1451,7 +1451,7 @@ function ObservabilityPageInner() {
       : 0)
   );
   const latestMemory = activeMemories[0] ?? null;
-  const HEALTH_GRID_KEYS = ["llm_timeout","kalshi_timeout","llm_rate_limit","cost_spike","exchange_error","strategy_error","pii_detected","db_connection","network_failure"] as const;
+  const HEALTH_GRID_KEYS = ["llm_timeout","kalshi_timeout","llm_rate_limit","cost_spike","exchange_error","strategy_error","pii_detected","db_connection","network_failure","memory_pressure"] as const;
   const healthyCount = HEALTH_GRID_KEYS.filter((k) => failureModes[k]?.status === "ok").length;
   const totalHealthChecks = HEALTH_GRID_KEYS.length;
 
@@ -1648,11 +1648,13 @@ function ObservabilityPageInner() {
                     <p className="text-lg font-bold tabular-nums">
                       {key === "cost_spike"
                         ? (mode.status !== "ok" ? (mode.extra ?? "—") : "Normal")
+                        : key === "memory_pressure" ? `${mode.count} quarant.`
                         : `${mode.count}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       {key === "cost_spike"
                         ? (mode.status !== "ok" ? `${mode.count} calls · last 6h` : "no spike detected")
+                        : key === "memory_pressure" ? mode.extra ?? ""
                         : lastOccurrence}
                     </p>
                   </button>
