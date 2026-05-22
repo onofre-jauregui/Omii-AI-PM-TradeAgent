@@ -2,7 +2,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Wallet, Loader2, Zap, Camera, AlertCircle, Bot, CheckCircle, Circle } from "lucide-react";
+import { Wallet, Loader2, Zap, Camera, AlertCircle, CheckCircle, Circle } from "lucide-react";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -183,41 +183,23 @@ export function ProfilePanel({ mode = "paper", userEmail }: Props) {
           </div>
         </div>
 
-        {/* ── Agent & Account status ────────────────────── */}
-        <div className="border-t border-border">
-          <div className="px-6 py-3 flex items-center gap-2">
-            <Bot className="h-3.5 w-3.5 text-muted-foreground" />
-            <span className="text-xs font-medium text-muted-foreground">Agent & Account</span>
-            <span className="flex items-center gap-1 text-[10px] text-profit bg-profit/10 px-2 py-0.5 rounded-full ml-auto">
-              <span className="h-1.5 w-1.5 rounded-full bg-profit animate-pulse-gentle" />
-              Active
-            </span>
+        {/* ── Status rows ───────────────────────────────── */}
+        <div className="border-t border-border divide-y divide-border">
+          <div className="flex items-center justify-between px-6 py-3">
+            <span className="text-sm text-muted-foreground">AI Provider</span>
+            <div className="flex items-center gap-1.5">
+              {activeProvider
+                ? <CheckCircle className="h-3 w-3 text-profit" />
+                : <Circle className="h-3 w-3 text-muted-foreground" />}
+              <span className="text-sm">{activeProvider ? providerLabel[activeProvider] : "Not configured"}</span>
+            </div>
           </div>
-          <div className="divide-y divide-border">
-            <div className="flex items-center justify-between px-6 py-3">
-              <span className="text-sm text-muted-foreground">Trading Mode</span>
-              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
-                mode === "live" ? "bg-loss/10 text-loss" : "bg-primary/10 text-primary"
-              }`}>
-                {mode === "live" ? "Live" : "Paper"}
-              </span>
-            </div>
-            <div className="flex items-center justify-between px-6 py-3">
-              <span className="text-sm text-muted-foreground">AI Provider</span>
-              <div className="flex items-center gap-1.5">
-                {activeProvider
-                  ? <CheckCircle className="h-3 w-3 text-profit" />
-                  : <Circle className="h-3 w-3 text-muted-foreground" />}
-                <span className="text-sm">{activeProvider ? providerLabel[activeProvider] : "Not configured"}</span>
-              </div>
-            </div>
-            <div className="flex items-center justify-between px-6 py-3">
-              <span className="text-sm text-muted-foreground">Kalshi</span>
-              <div className="flex items-center gap-1.5">
-                {kalshiConnected
-                  ? <><CheckCircle className="h-3 w-3 text-profit" /><span className="text-sm">Connected</span></>
-                  : <><Circle className="h-3 w-3 text-muted-foreground" /><span className="text-sm text-muted-foreground">Not connected</span></>}
-              </div>
+          <div className="flex items-center justify-between px-6 py-3">
+            <span className="text-sm text-muted-foreground">Kalshi</span>
+            <div className="flex items-center gap-1.5">
+              {kalshiConnected
+                ? <><CheckCircle className="h-3 w-3 text-profit" /><span className="text-sm">Connected</span></>
+                : <><Circle className="h-3 w-3 text-muted-foreground" /><span className="text-sm text-muted-foreground">Not connected</span></>}
             </div>
           </div>
         </div>
