@@ -1340,6 +1340,7 @@ export default function ObservabilityPage() {
       desc: "Scans all open markets for edge opportunities",
       calls: toolCounts["surface_scan_complete"] ?? 0,
       errors: 0,
+      callEventTypes: ["surface_scan_complete"],
       errorEventTypes: [] as string[],
     },
     {
@@ -1347,6 +1348,7 @@ export default function ObservabilityPage() {
       desc: "Evaluates signals per active strategy (1 LLM call each)",
       calls: toolCounts["auto_trade_strategy_run"] ?? 0,
       errors: toolCounts["auto_trade_strategy_error"] ?? 0,
+      callEventTypes: ["auto_trade_strategy_run"],
       errorEventTypes: ["auto_trade_strategy_error"],
     },
     {
@@ -1354,6 +1356,7 @@ export default function ObservabilityPage() {
       desc: "Executes orders to Kalshi",
       calls: tradesLast30dCount,
       errors: toolCounts["basket_aborted"] ?? 0,
+      callEventTypes: [] as string[],
       errorEventTypes: ["basket_aborted"],
     },
     {
@@ -1361,6 +1364,7 @@ export default function ObservabilityPage() {
       desc: "Resolves positions after market closes",
       calls: toolCounts["auto_settle_run"] ?? 0,
       errors: 0,
+      callEventTypes: ["auto_settle_run"],
       errorEventTypes: [] as string[],
     },
     {
@@ -1368,6 +1372,7 @@ export default function ObservabilityPage() {
       desc: "Reflects on trades and updates agent memory",
       calls: toolCounts["auto_reflect_run"] ?? 0,
       errors: 0,
+      callEventTypes: ["auto_reflect_run"],
       errorEventTypes: [] as string[],
     },
     {
@@ -1375,6 +1380,7 @@ export default function ObservabilityPage() {
       desc: "Global trading halt (halted by risk state or missing config) — per-trade blocks log under Guardrails",
       calls: toolCounts["auto_trade_skipped"] ?? 0,
       errors: toolCounts["strategy_auto_halted"] ?? 0,
+      callEventTypes: ["auto_trade_skipped"],
       errorEventTypes: ["strategy_auto_halted"],
     },
   ];
@@ -2159,39 +2165,6 @@ export default function ObservabilityPage() {
             </div>
           </div>
 
-          {/* 7d latency trend */}
-          <div className="px-6 pt-4 pb-5 border-t border-border">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold mb-3">
-              Strategy Execution · Run Duration
-              <span className="normal-case tracking-normal font-normal lowercase ml-1 opacity-60">last 7 days · avg per 6h window · seconds</span>
-            </p>
-            {stratRunDurations.length === 0 ? (
-              <div className="h-[100px] flex items-center justify-center">
-                <p className="text-[11px] text-muted-foreground/50">No run data in the last 7 days — agent may not have executed recently</p>
-              </div>
-            ) : (
-            <ResponsiveContainer width="100%" height={100}>
-              <LineChart data={latencyTrend} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                <XAxis dataKey="hour" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={3} />
-                <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={28} tickFormatter={(v) => `${v}s`} />
-                <Tooltip
-                  formatter={(value: number | null) => [value !== null ? `${value.toFixed(2)}s` : "—", "Avg duration"]}
-                  contentStyle={{ fontSize: 10, borderRadius: 6 }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="avg"
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={1.5}
-                  dot={{ r: 2, fill: "hsl(var(--primary))" }}
-                  activeDot={{ r: 4 }}
-                  connectNulls={true}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-            )}
-          </div>
-
           {/* Chat Response Latency */}
           {chatLatencyStats && (
             <div className="px-6 pt-4 pb-5 border-t border-border">
@@ -2244,6 +2217,9 @@ export default function ObservabilityPage() {
               </thead>
               <tbody className="divide-y divide-border">
                 {tools.map((tool) => {
+                  const toolCallEvents = complianceLast30d.filter((e) =>
+                    tool.callEventTypes.includes(e.event_type)
+                  );
                   const toolErrorEvents = complianceLast30d.filter((e) =>
                     tool.errorEventTypes.includes(e.event_type)
                   );
@@ -2251,7 +2227,16 @@ export default function ObservabilityPage() {
                     <tr key={tool.name} className="hover:bg-secondary/20 transition-colors">
                       <td className="py-2.5 text-[12px] font-medium">{tool.name}</td>
                       <td className="py-2.5 text-[11px] text-muted-foreground">{tool.desc}</td>
-                      <td className="py-2.5 text-right text-[12px] tabular-nums">{tool.calls.toLocaleString()}</td>
+                      <td className="py-2.5 text-right text-[12px] tabular-nums">
+                        {tool.calls > 0 && toolCallEvents.length > 0 ? (
+                          <button
+                            className="underline underline-offset-2 decoration-dotted hover:text-primary transition-colors"
+                            onClick={() => setSelectedTimelineHour({ label: `${tool.name} · last 30d`, events: toolCallEvents })}
+                          >{tool.calls.toLocaleString()}</button>
+                        ) : (
+                          <span>{tool.calls.toLocaleString()}</span>
+                        )}
+                      </td>
                       <td className="py-2.5 text-right text-[12px] tabular-nums">
                         {tool.errors > 0 && toolErrorEvents.length > 0 ? (
                           <button
@@ -3212,6 +3197,15 @@ export default function ObservabilityPage() {
                 </div>
               </details>
             ))}
+          </div>
+          <div className="px-6 py-3 border-t border-border shrink-0 flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground/50">{selectedTimelineHour?.events.length ?? 0} event{(selectedTimelineHour?.events.length ?? 0) !== 1 ? "s" : ""} from compliance_log</span>
+            <a
+              href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor?schema=public"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >View in Supabase ↗</a>
           </div>
         </div>
       </div>
