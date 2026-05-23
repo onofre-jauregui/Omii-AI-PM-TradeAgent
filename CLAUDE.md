@@ -136,7 +136,7 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Edge functions: `user_id` column exists in schema but queries don't filter by it yet — single-user in practice
 - Encryption: migration written, `encrypted_secret` plaintext column still present, key management not wired end-to-end
 - Stripe: schema and webhook handler exist, no billing UI, no subscription enforcement in edge functions
-- `suspended_until` column on strategies: used in code but migration not yet written
+- `suspended_until` column on strategies: ✅ live in DB (verified 2026-05-23)
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
@@ -144,7 +144,7 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - User feedback mechanism (thumbs up/down on agent decisions)
 
 ### Priority order
-1. `suspended_until` migration (unblocks strategy health monitor)
+1. ~~`suspended_until` migration~~ — already live in DB (2026-05-23)
 2. Wire `user_id` into all edge function queries (unblocks true multi-tenancy)
 3. Finish encryption key management end-to-end (security blocker)
 4. Billing UI + subscription enforcement

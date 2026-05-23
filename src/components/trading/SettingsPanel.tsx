@@ -25,19 +25,9 @@ const TIER_LABELS: Record<string, string> = {
   recommended: "Recommended", fast: "Fast", smart: "Smart", cheap: "Budget", premium: "Premium",
 };
 
-const NOTIF_STORAGE_KEY = "tradeagent_notification_prefs";
 const DEFAULT_NOTIFS = {
   tradeExecuted: true, positionClosed: true, stopLossHit: true, dailySummary: false, agentAlerts: true,
 };
-
-function loadNotifPrefs() {
-  try {
-    const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
-    return raw ? { ...DEFAULT_NOTIFS, ...JSON.parse(raw) } : DEFAULT_NOTIFS;
-  } catch {
-    return DEFAULT_NOTIFS;
-  }
-}
 
 interface AIModel { id: string; name: string; provider: string; providerLabel: string; tier?: string; color: string; }
 
@@ -82,21 +72,34 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   const [modelSaving, setModelSaving] = useState(false);
   const [modelSaveStatus, setModelSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
-  // Notifications — persisted to localStorage
-  const [notifications, setNotifications] = useState(loadNotifPrefs);
+  // Notifications — persisted to Supabase notification_prefs
+  const [notifications, setNotifications] = useState(DEFAULT_NOTIFS);
+  const [phone, setPhone] = useState("");
+  const [channel, setChannel] = useState<"email" | "sms" | "both">("email");
 
-  const updateNotif = (key: string, value: boolean) => {
+  const updateNotif = (key: string, value: boolean | string) => {
     setNotifications(prev => {
       const next = { ...prev, [key]: value };
-      localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(next));
+      if (userId) {
+        const prefs = { channel, ...next };
+        supabase.from("profiles").update({ notification_prefs: prefs }).eq("id", userId);
+      }
       return next;
     });
+  };
+
+  const handleChannelChange = (next: "email" | "sms" | "both") => {
+    setChannel(next);
+    if (userId) {
+      const prefs = { ...notifications, channel: next };
+      supabase.from("profiles").update({ notification_prefs: prefs }).eq("id", userId);
+    }
   };
 
   const loadAll = useCallback(async (uid: string) => {
     const [{ data: keyRows }, { data: prof }, { data: sub }] = await Promise.all([
       supabase.from("api_keys").select("provider, key_id").eq("user_id", uid),
-      supabase.from("profiles").select("display_name, avatar_url").eq("id", uid).maybeSingle(),
+      supabase.from("profiles").select("display_name, avatar_url, phone, notification_prefs").eq("id", uid).maybeSingle(),
       supabase.from("subscriptions").select("tier, status").eq("user_id", uid).maybeSingle(),
     ]);
 
@@ -110,16 +113,31 @@ export function SettingsPanel({ userId }: { userId?: string }) {
 
     if (prof?.display_name) setProfileName(prof.display_name);
     if (prof?.avatar_url) setProfileAvatar(prof.avatar_url);
+    if (prof?.phone) setPhone(prof.phone);
+    if (prof?.notification_prefs) {
+      const prefs = prof.notification_prefs as Record<string, unknown>;
+      if (prefs.channel) setChannel(prefs.channel as "email" | "sms" | "both");
+      setNotifications({
+        tradeExecuted: prefs.trade_executed !== false,
+        positionClosed: prefs.position_closed !== false,
+        stopLossHit: prefs.stop_loss_hit !== false,
+        dailySummary: prefs.daily_summary === true,
+        agentAlerts: prefs.agent_alerts !== false,
+      });
+    }
     if (sub?.tier) setSubscriptionTier(sub.tier);
   }, []);
 
   useEffect(() => { if (userId) loadAll(userId); }, [userId, loadAll]);
 
   const handleSaveProfile = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!userId) return;
     setProfileSaving(true);
-    await supabase.from("profiles").update({ display_name: profileName, updated_at: new Date().toISOString() }).eq("id", user.id);
+    await supabase.from("profiles").update({
+      display_name: profileName,
+      phone: phone.trim() || null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", userId);
     setProfileSaving(false);
   };
 
@@ -416,12 +434,50 @@ export function SettingsPanel({ userId }: { userId?: string }) {
             <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">Saved automatically</span>
           </div>
         </div>
+
+        {/* Phone + channel */}
+        <div className="px-6 pt-5 pb-4 border-b border-border space-y-4">
+          <div className="space-y-1.5">
+            <Label className="text-sm text-muted-foreground">Phone number (for SMS alerts)</Label>
+            <Input
+              type="tel"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              onBlur={() => {
+                if (userId && phone !== undefined) {
+                  supabase.from("profiles").update({ phone: phone.trim() || null }).eq("id", userId);
+                }
+              }}
+              placeholder="+1 (___) ___-____"
+              className="rounded-xl border-0 bg-secondary text-sm"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-sm text-muted-foreground">Notification channel</Label>
+            <div className="flex gap-1 p-1 bg-secondary rounded-full w-fit">
+              {(["email", "sms", "both"] as const).map((ch) => (
+                <button
+                  key={ch}
+                  onClick={() => handleChannelChange(ch)}
+                  className={`px-4 py-1.5 rounded-full text-xs font-medium transition-all ${
+                    channel === ch
+                      ? "bg-foreground text-background shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {ch === "email" ? "Email" : ch === "sms" ? "Text" : "Both"}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
         <div className="px-6 py-2">
           {[
             { key: "tradeExecuted",  label: "Trade Executed",      desc: "Alert when the agent enters a position" },
             { key: "positionClosed", label: "Position Closed",     desc: "Alert when a position settles or is exited" },
             { key: "stopLossHit",    label: "Stop Loss Triggered",  desc: "Alert when a position is force-closed by risk limits" },
-            { key: "dailySummary",   label: "Daily Summary",        desc: "End-of-day recap of P&L and agent decisions" },
+            { key: "dailySummary",   label: "Daily Summary",        desc: "End-of-day recap of P&L and agent decisions (6pm ET)" },
             { key: "agentAlerts",    label: "Agent Alerts",         desc: "Strategy suspensions, memory updates, anomalies" },
           ].map((item, i, arr) => (
             <div key={item.key} className={`flex items-center justify-between py-4 ${i < arr.length - 1 ? "border-b border-border/50" : ""}`}>
