@@ -242,12 +242,20 @@ export function DashboardHero({
       byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
     }
 
-    // Win streak = consecutive days with positive net P&L, working backwards from most recent
+    // Win streak = consecutive CALENDAR days ending today with positive net P&L.
+    // Days with no settled trades count as $0 and break the streak — skipping
+    // them would produce false counts (e.g. 3 when there was a gap day).
     let winStreak = 0;
-    const sortedDays = Object.keys(byDay).sort().reverse();
-    for (const day of sortedDays) {
-      if (byDay[day] > 0) winStreak++;
-      else break;
+    const streakCursor = new Date();
+    streakCursor.setUTCHours(12, 0, 0, 0);
+    while (true) {
+      const key = streakCursor.toISOString().slice(0, 10);
+      if ((byDay[key] ?? 0) > 0) {
+        winStreak++;
+        streakCursor.setUTCDate(streakCursor.getUTCDate() - 1);
+      } else {
+        break;
+      }
     }
     // Fill every calendar date Apr 22 → today so the chart is continuous
     let cum = startingBalance;
@@ -307,7 +315,14 @@ export function DashboardHero({
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
             {mode === "paper" ? "Portfolio" : "Live Portfolio"}
           </p>
-          <AgentStatusBadge />
+          <div className="flex flex-col items-end gap-1">
+            <AgentStatusBadge />
+            {winStreak >= 2 && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
+                🔥 {winStreak} day streak
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Portfolio value — the number */}
@@ -334,11 +349,6 @@ export function DashboardHero({
           {todayPnl !== 0 && (
             <span className={cn("text-xs tabular-nums", isTodayUp ? "text-profit" : "text-loss")}>
               {isTodayUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)} today
-            </span>
-          )}
-          {winStreak >= 3 && (
-            <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
-              🔥 {winStreak} streak
             </span>
           )}
         </div>
