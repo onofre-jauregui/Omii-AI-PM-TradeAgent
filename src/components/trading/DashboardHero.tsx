@@ -242,19 +242,19 @@ export function DashboardHero({
       byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
     }
 
-    // Win streak = consecutive CALENDAR days ending today with positive net P&L.
-    // Days with no settled trades count as $0 and break the streak — skipping
-    // them would produce false counts (e.g. 3 when there was a gap day).
+    // Win streak = consecutive calendar days with positive net P&L, working
+    // backwards from the most recent day that had any settled trades.
+    // Starting from today would always break on days with no settlements yet.
     let winStreak = 0;
-    const streakCursor = new Date();
-    streakCursor.setUTCHours(12, 0, 0, 0);
-    while (true) {
-      const key = streakCursor.toISOString().slice(0, 10);
-      if ((byDay[key] ?? 0) > 0) {
+    const sortedTradeDays = Object.keys(byDay).sort().reverse();
+    if (sortedTradeDays.length > 0) {
+      const streakCursor = new Date(sortedTradeDays[0] + "T12:00:00Z");
+      while (true) {
+        const key = streakCursor.toISOString().slice(0, 10);
+        if (!byDay[key]) break;          // gap day — no trades at all
+        if (byDay[key] <= 0) break;      // losing day
         winStreak++;
         streakCursor.setUTCDate(streakCursor.getUTCDate() - 1);
-      } else {
-        break;
       }
     }
     // Fill every calendar date Apr 22 → today so the chart is continuous
