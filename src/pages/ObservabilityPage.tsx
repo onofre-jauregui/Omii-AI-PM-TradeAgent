@@ -376,6 +376,8 @@ export default function ObservabilityPage() {
   // Decision history
   const [decisionTrades, setDecisionTrades] = useState<Trade[]>([]);
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
+  const [tradeLogEvents, setTradeLogEvents] = useState<ComplianceEvent[]>([]);
+  const [tradeLogLoading, setTradeLogLoading] = useState(false);
   const [selectedError, setSelectedError] = useState<ComplianceEvent | null>(null);
   const [decisionDateFilter, setDecisionDateFilter] = useState<"today" | "7d" | "30d" | "all">("30d");
   const [decisionStatusFilter, setDecisionStatusFilter] = useState<"all" | "filled" | "settled">("all");
@@ -471,6 +473,21 @@ export default function ObservabilityPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!selectedTrade) { setTradeLogEvents([]); return; }
+    setTradeLogLoading(true);
+    supabase
+      .from("compliance_log")
+      .select("id, created_at, event_type, severity, message, trade_id, metadata")
+      .eq("trade_id", selectedTrade.id)
+      .order("created_at", { ascending: true })
+      .limit(50)
+      .then(({ data }) => {
+        setTradeLogEvents((data as ComplianceEvent[]) ?? []);
+        setTradeLogLoading(false);
+      });
+  }, [selectedTrade]);
+
   // ── Data loaders ──────────────────────────────────────────────────────────
 
   const loadHeroStatus = useCallback(async (uid?: string | null) => {
@@ -546,7 +563,7 @@ export default function ObservabilityPage() {
   ) => {
     let query = supabase
       .from("trades")
-      .select("id, ticker, market_question, side, action, price, amount, strategy, mode, status, pnl, notes, filled_price, created_at, settled_at")
+      .select("id, ticker, market_question, side, action, price, amount, strategy, mode, status, pnl, notes, filled_price, created_at, filled_at, settled_at")
       .order("created_at", { ascending: false })
       .limit(50);
 
@@ -3332,6 +3349,52 @@ export default function ObservabilityPage() {
                 </div>
               )}
             </div>
+
+            {/* Activity Log */}
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Activity Log</p>
+              {tradeLogLoading ? (
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[11px] text-muted-foreground">Loading...</p>
+                </div>
+              ) : tradeLogEvents.length === 0 ? (
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[11px] text-muted-foreground italic">No compliance_log events linked to this trade.</p>
+                </div>
+              ) : (
+                <div className="rounded-xl bg-secondary/40 divide-y divide-border/50 overflow-hidden">
+                  {tradeLogEvents.map((ev) => (
+                    <div key={ev.id} className="px-4 py-3 flex items-start gap-3">
+                      <span className={`shrink-0 inline-block w-1.5 h-1.5 rounded-full mt-2 ${
+                        ev.severity === "error" ? "bg-red-500" :
+                        ev.severity === "warning" ? "bg-yellow-500" : "bg-emerald-500"
+                      }`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <p className="text-[10px] font-medium text-foreground truncate">{ev.event_type.replace(/_/g, " ")}</p>
+                          <p className="text-[10px] text-muted-foreground shrink-0 tabular-nums">{fmtDate(ev.created_at)}</p>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground leading-snug">{ev.message}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-3 border-t border-border flex items-center justify-between shrink-0">
+            <span className="text-[10px] text-muted-foreground/50">
+              {tradeLogEvents.length} log event{tradeLogEvents.length !== 1 ? "s" : ""} · trade {selectedTrade.id.slice(0, 8)}
+            </span>
+            <a
+              href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor?schema=public"
+              target="_blank" rel="noreferrer"
+              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              View in Supabase ↗
+            </a>
           </div>
         </div>
       </div>
