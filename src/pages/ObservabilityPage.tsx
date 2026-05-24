@@ -2918,7 +2918,11 @@ export default function ObservabilityPage() {
                   </p>
                   <div className="rounded-xl bg-secondary/40 divide-y divide-border overflow-hidden">
                     {mode.events.slice(0, 8).map((ev) => (
-                      <div key={ev.id} className="px-4 py-2.5">
+                      <button
+                        key={ev.id}
+                        className="w-full text-left px-4 py-2.5 hover:bg-secondary/60 transition-colors cursor-pointer"
+                        onClick={() => { setSelectedFailureMode(null); setSelectedError(ev); }}
+                      >
                         <div className="flex items-center gap-2 mb-0.5">
                           <span className={`text-[10px] font-medium ${SEVERITY_CLASSES[ev.severity] ?? "text-muted-foreground"}`}>
                             {ev.severity}
@@ -2926,7 +2930,7 @@ export default function ObservabilityPage() {
                           <span className="text-[10px] text-muted-foreground ml-auto">{relativeTime(ev.created_at)}</span>
                         </div>
                         <p className="text-[11px] text-foreground leading-snug">{ev.message}</p>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>
