@@ -174,8 +174,17 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
     const day = (t.settled_at ?? "").slice(0, 10);
     if (day) byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
   }
-  let streak = 0;
   const days = Object.keys(byDay).sort().reverse();
+  const lastDay = new Date(days[0] + "T12:00:00Z");
+  const nowNoon = new Date();
+  nowNoon.setUTCHours(12, 0, 0, 0);
+  const daysSinceLast = Math.floor((nowNoon.getTime() - lastDay.getTime()) / 86_400_000);
+  if (daysSinceLast > 1) {
+    // No positive traction in the last 24h — streak is broken
+    winStreakCache.set(userId, 0);
+    return 0;
+  }
+  let streak = 0;
   const cursor = new Date(days[0] + "T12:00:00Z");
   while (true) {
     const key = cursor.toISOString().slice(0, 10);

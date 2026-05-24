@@ -249,14 +249,22 @@ export function DashboardHero({
     let winStreak = 0;
     const sortedTradeDays = Object.keys(byDay).sort().reverse();
     if (sortedTradeDays.length > 0) {
-      const streakCursor = new Date(sortedTradeDays[0] + "T12:00:00Z");
-      while (true) {
-        const key = streakCursor.toISOString().slice(0, 10);
-        if (!byDay[key]) break;          // gap day — no trades at all
-        if (byDay[key] <= 0) break;      // losing day
-        winStreak++;
-        streakCursor.setUTCDate(streakCursor.getUTCDate() - 1);
+      const lastDay = new Date(sortedTradeDays[0] + "T12:00:00Z");
+      const todayNoon = new Date();
+      todayNoon.setUTCHours(12, 0, 0, 0);
+      const daysSinceLast = Math.floor((todayNoon.getTime() - lastDay.getTime()) / 86_400_000);
+      if (daysSinceLast <= 1) {
+        // Last settlement was today or yesterday — streak is live
+        const streakCursor = new Date(sortedTradeDays[0] + "T12:00:00Z");
+        while (true) {
+          const key = streakCursor.toISOString().slice(0, 10);
+          if (!byDay[key]) break;          // gap day — no trades at all
+          if (byDay[key] <= 0) break;      // losing day
+          winStreak++;
+          streakCursor.setUTCDate(streakCursor.getUTCDate() - 1);
+        }
       }
+      // daysSinceLast > 1: no positive traction in last 24h — streak stays 0
     }
     // Fill every calendar date Apr 22 → today so the chart is continuous
     let cum = startingBalance;
