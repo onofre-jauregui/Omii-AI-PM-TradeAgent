@@ -823,6 +823,23 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       TRIGGER_STRATEGY_RUN_TOOL,
     ];
 
+    // ── Kill switch check ── halt before any LLM calls if trading is globally halted
+    if (userId) {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: riskStateRow } = await supabase
+        .from("risk_state")
+        .select("is_trading_halted")
+        .eq("user_id", userId)
+        .eq("date", today)
+        .maybeSingle();
+      if (riskStateRow?.is_trading_halted) {
+        await streamWriter.write(enc.encode(`data: ${JSON.stringify({ type: "content", content: "⛔ Trading is currently halted for your account. No trades can be placed until the halt is lifted in your risk settings." })}\n\n`));
+        await streamWriter.write(enc.encode("data: [DONE]\n\n"));
+        await streamWriter.close();
+        return;
+      }
+    }
+
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 12; // Supports: recall → fetch_signals → scan_surface → portfolio → fetch_markets → trade chains
 

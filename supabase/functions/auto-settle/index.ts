@@ -143,15 +143,52 @@ serve(async (req) => {
         continue;
       }
 
-      // Kalshi uses various status values; settlement is marked by 'settled'
-      // or non-empty 'result' field.
+      // Kalshi status → action mapping (exhaustive):
+      //   active          → skip, still trading
+      //   closed + result → settle with P&L (Kalshi published result before final bookkeeping)
+      //   closed + empty  → skip, result not published yet
+      //   settled         → settle with P&L (normal path)
+      //   finalized       → settle with P&L (same as settled)
+      //   voided/cancelled → refund at cost, pnl = 0
+      const hasResult =
+        typeof market.result === "string" &&
+        market.result !== "" &&
+        market.result !== "undetermined";
+      const isVoided = ["voided", "cancelled"].includes(market.status);
       const isSettled =
+        isVoided ||
+        market.status === "finalized" ||
         market.status === "settled" ||
-        (typeof market.result === "string" && market.result !== "" && market.result !== "undetermined");
+        hasResult;
 
       if (!isSettled) {
         results.push({ ticker, state: "still_open", status: market.status, trades: tradeIds.length });
         totalStillPending += tradeIds.length;
+        continue;
+      }
+
+      // Voided/cancelled: refund at cost (no gain, no loss)
+      if (isVoided) {
+        const { data: voidedTrades } = await supabase
+          .from("trades")
+          .select("id")
+          .in("id", tradeIds);
+        if (voidedTrades && voidedTrades.length > 0) {
+          await supabase.from("trades").update({
+            status: "settled",
+            settled_at: new Date().toISOString(),
+            resolution: "voided",
+            pnl: 0,
+          }).in("id", voidedTrades.map((t: any) => t.id));
+          await supabase.from("compliance_log").insert({
+            event_type: "trade_settled",
+            severity: "info",
+            message: `auto-settle: ${voidedTrades.length} trade(s) on ${ticker} voided/cancelled — refunded at cost`,
+            metadata: { ticker, status: market.status, trade_ids: voidedTrades.map((t: any) => t.id) },
+          });
+          totalSettled += voidedTrades.length;
+          results.push({ ticker, state: "voided", trades_settled: voidedTrades.length });
+        }
         continue;
       }
 

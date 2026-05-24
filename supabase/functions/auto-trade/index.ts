@@ -155,8 +155,37 @@ function applySignalTenantFilter(query: any, userId: string | null | undefined):
   return query;
 }
 
-// Cache risk_settings per user for the duration of one auto-trade run (avoids N queries for N strategies).
+// Cache risk_settings and win streak per user for one auto-trade run.
 const riskSettingsCache = new Map<string, any>();
+const winStreakCache = new Map<string, number>();
+
+async function computeWinStreak(supabase: any, userId: string): Promise<number> {
+  if (winStreakCache.has(userId)) return winStreakCache.get(userId)!;
+  const { data } = await supabase
+    .from("trades")
+    .select("settled_at, pnl")
+    .eq("user_id", userId)
+    .eq("status", "settled")
+    .order("settled_at", { ascending: false })
+    .limit(200);
+  if (!data || data.length === 0) { winStreakCache.set(userId, 0); return 0; }
+  const byDay: Record<string, number> = {};
+  for (const t of data) {
+    const day = (t.settled_at ?? "").slice(0, 10);
+    if (day) byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
+  }
+  let streak = 0;
+  const days = Object.keys(byDay).sort().reverse();
+  const cursor = new Date(days[0] + "T12:00:00Z");
+  while (true) {
+    const key = cursor.toISOString().slice(0, 10);
+    if (!byDay[key] || byDay[key] <= 0) break;
+    streak++;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  winStreakCache.set(userId, streak);
+  return streak;
+}
 async function fetchUserRiskSettings(supabase: any, userId: string): Promise<any> {
   if (riskSettingsCache.has(userId)) return riskSettingsCache.get(userId);
   const { data } = await supabase.from("risk_settings").select("*")
@@ -503,8 +532,10 @@ serve(async (req) => {
         // max_open_positions: concurrent position cap (weighted by near/far term)
         // max_daily_trades:   total trades placed today across ALL strategies for this user
         let userRisk: any = null;
+        let winStreak = 0;
         if (strategy.user_id) {
           userRisk = await fetchUserRiskSettings(supabase, strategy.user_id);
+          winStreak = await computeWinStreak(supabase, strategy.user_id);
 
           // Open position cap
           const openPositions = await countOpenPositions(supabase, undefined, 7, strategy.user_id);
@@ -556,9 +587,9 @@ serve(async (req) => {
         if (templateId === "S-001") {
           result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, kalshiCircuit);
         } else if (templateId === "S-002") {
-          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
         } else if (templateId === "S-005") {
-          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk);
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
         } else {
           // Unknown strategy — hard reject. All strategies require an explicit handler.
           // This prevents a bad strategy_config row from triggering unguarded LLM usage.
@@ -917,6 +948,7 @@ async function runS002LongshotBias(
   supabaseKey: string,
   runId?: string,
   userRisk?: any,
+  winStreak = 0,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
   // User's limit takes precedence; 12 is the strategy-level ceiling (longshot needs diversification)
@@ -986,6 +1018,7 @@ async function runS002LongshotBias(
       .lte("days_to_close", 30)
       .gte("created_at", twoHoursAgo)
       .not("direction", "is", null)
+      .eq("was_acted_on", false)
       .order("created_at", { ascending: false })
       .limit(20),
     strategy.user_id
@@ -1105,6 +1138,12 @@ async function runS002LongshotBias(
       yes_ask: sig.yes_ask,
       volume: sig.volume,
       days_to_close: sig.days_to_close,
+      win_streak: winStreak,
+      performance_context: winStreak >= 3
+        ? `Agent is on a ${winStreak}-day winning streak — momentum is strong, continue qualifying sound setups.`
+        : winStreak === 0
+        ? "No active win streak — last closed day was not profitable or no recent settlements. Be disciplined: only QUALIFY setups with clear structural edge."
+        : `Agent is on day ${winStreak} of a positive run — stay selective, protect the streak.`,
       note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
     });
 
@@ -1150,6 +1189,19 @@ async function runS002LongshotBias(
   }));
 
   const filled = execResults.filter(r => r.success);
+
+  // Mark consumed signals so the next cron run skips them — without this, the same
+  // signal is re-qualified on every 30s run until the freshness window expires.
+  if (filled.length > 0) {
+    const filledIds = filled.map(r => r.sig.id).filter(Boolean);
+    if (filledIds.length > 0) {
+      await supabase.from("signals")
+        .update({ was_acted_on: true, acted_on_at: new Date().toISOString() })
+        .in("id", filledIds)
+        .eq("was_acted_on", false);
+    }
+  }
+
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
@@ -1184,6 +1236,7 @@ async function runS005WeatherEdge(
   supabaseKey: string,
   runId?: string,
   userRisk?: any,
+  winStreak = 0,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 15; // raised from 8¢ — weather needs bigger edge
@@ -1203,6 +1256,7 @@ async function runS005WeatherEdge(
       .gte("created_at", twelveHoursAgo)
       .gte("edge_cents", minEdge)
       .not("direction", "is", null)
+      .eq("was_acted_on", false)
       .order("edge_cents", { ascending: false })
       .limit(MAX_PARALLEL_SIGNALS + excludedCities.length), // fetch extra, filter below
     null // signals are system-generated — no user_id column on signals table
@@ -1375,6 +1429,12 @@ async function runS005WeatherEdge(
         forecast_std_dev: sig.metadata?.forecast_std_dev,
         location: sig.metadata?.location,
         city_history: cityHistoryNote,
+        win_streak: winStreak,
+        performance_context: winStreak >= 3
+          ? `Agent is on a ${winStreak}-day winning streak — momentum is strong, continue qualifying sound setups.`
+          : winStreak === 0
+          ? "No active win streak — last closed day was not profitable or no recent settlements. Be disciplined: only QUALIFY setups with clear structural edge."
+          : `Agent is on day ${winStreak} of a positive run — stay selective, protect the streak.`,
         ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
         ...(memoryBlock ? { strategy_memory: memoryBlock } : {}),
         note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
@@ -1447,6 +1507,18 @@ async function runS005WeatherEdge(
 
   const filled = execResults.filter(r => r.result.success);
   const failed = execResults.filter(r => !r.result.success);
+
+  // Mark consumed signals so the next cron run skips them — without this, the same
+  // weather signal is re-qualified on every 30s run for its full 12h freshness window.
+  if (filled.length > 0) {
+    const filledIds = filled.map(r => r.sig.id).filter(Boolean);
+    if (filledIds.length > 0) {
+      await supabase.from("signals")
+        .update({ was_acted_on: true, acted_on_at: new Date().toISOString() })
+        .in("id", filledIds)
+        .eq("was_acted_on", false);
+    }
+  }
 
   const detailParts = [
     filled.length > 0

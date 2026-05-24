@@ -453,7 +453,7 @@ serve(async (req) => {
         const validTypes = ["forecast_bias", "market_timing", "signal_quality", "execution", "market_structure", "general"];
         if (!validTypes.includes(lesson_type)) lesson_type = "general";
 
-        const { data: insertedLesson } = await supabase
+        const { data: insertedLesson, error: lessonInsertError } = await supabase
           .from("trade_lessons")
           .insert({
             trade_id: trade.id,
@@ -471,6 +471,16 @@ serve(async (req) => {
           .select("id")
           .single();
 
+        if (lessonInsertError) {
+          await supabase.from("compliance_log").insert({
+            event_type: "lesson_write_error",
+            severity: "error",
+            message: `Failed to write lesson for trade ${trade.id} (${trade.ticker}): ${lessonInsertError.message}`,
+            metadata: { trade_id: trade.id, ticker: trade.ticker, error: lessonInsertError },
+          });
+          continue;
+        }
+
         if (insertedLesson?.id) {
           await supabase
             .from("trade_reflections")
@@ -478,23 +488,44 @@ serve(async (req) => {
             .eq("trade_id", trade.id);
         }
 
-        // Promote significant outcomes to agent_memory
+        // Promote significant outcomes to agent_memory (deduped by ticker base + last 7 days)
         const absP = Math.abs(pnl);
         const shouldPromote = (outcome === "loss" && (price < 10 || price > 85)) || absP >= 50;
         if (shouldPromote) {
-          await supabase.from("agent_memory").insert({
-            memory_type: "lesson",
-            title: `${outcome === "loss" ? "Loss" : "Win"} on ${trade.ticker} at ${price}¢ — ${lesson_type}`,
-            content: `${lesson} ${do_differently}`,
-            source_type: "trade_outcome",
-            user_id: trade.user_id ?? null,
-            strategy_id: trade.strategy_id,
-            tags: [trade.strategy_id?.toLowerCase(), lesson_type, outcome, trade.ticker.split("-")[0].toLowerCase()].filter(Boolean),
-            confidence: outcome === "loss" ? 0.85 : 0.75,
-            confirmations: 1,
-            is_active: true,
-            summary: lesson.slice(0, 120),
-          });
+          const tickerBase = trade.ticker.split("-")[0].toLowerCase();
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          const { data: existingMem } = await supabase
+            .from("agent_memory")
+            .select("id, confirmations, confidence")
+            .eq("is_active", true)
+            .eq("memory_type", "lesson")
+            .contains("tags", [tickerBase])
+            .gte("created_at", sevenDaysAgo)
+            .limit(1)
+            .maybeSingle();
+
+          if (existingMem) {
+            await supabase.from("agent_memory").update({
+              confirmations: (existingMem.confirmations || 1) + 1,
+              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + 0.02),
+              updated_at: new Date().toISOString(),
+              last_updated_at: new Date().toISOString(),
+            }).eq("id", existingMem.id);
+          } else {
+            await supabase.from("agent_memory").insert({
+              memory_type: "lesson",
+              title: `${outcome === "loss" ? "Loss" : "Win"} on ${trade.ticker} at ${price}¢ — ${lesson_type}`,
+              content: `${lesson} ${do_differently}`,
+              source_type: "trade_outcome",
+              user_id: trade.user_id ?? null,
+              strategy_id: trade.strategy_id,
+              tags: [trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase].filter(Boolean),
+              confidence: outcome === "loss" ? 0.85 : 0.75,
+              confirmations: 1,
+              is_active: true,
+              summary: lesson.slice(0, 120),
+            });
+          }
         }
 
         lessonsWritten++;

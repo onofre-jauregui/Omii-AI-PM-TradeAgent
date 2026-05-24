@@ -186,12 +186,13 @@ export function DashboardHero({
         .select("starting_balance")
         .eq("user_id", userId ?? ""),
       fetchKalshiMarkets(200),
-      // Most recently placed trade (any status) — for "Last trade" chip
+      // Most recently SETTLED trade — "Last settled" chip aligns with streak metric
       supabase
         .from("trades")
-        .select("created_at")
+        .select("settled_at")
         .eq("user_id", userId ?? "")
-        .order("created_at", { ascending: false })
+        .eq("status", "settled")
+        .order("settled_at", { ascending: false })
         .limit(1),
     ]);
 
@@ -200,7 +201,7 @@ export function DashboardHero({
     const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
     const strategies = strategiesRes.status === "fulfilled" ? (strategiesRes.value.data ?? []) : [];
     const markets = marketsRes.status === "fulfilled" ? marketsRes.value : [];
-    const lastPlaced = lastPlacedRes.status === "fulfilled" ? (lastPlacedRes.value.data?.[0]?.created_at ?? null) : null;
+    const lastPlaced = lastPlacedRes.status === "fulfilled" ? (lastPlacedRes.value.data?.[0]?.settled_at ?? null) : null;
 
     // Starting balance from DB — what was allocated when strategies were set up
     const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
@@ -417,7 +418,7 @@ export function DashboardHero({
         {lastTradeAt && (
           <AlertChip
             icon={<Bot className="h-3 w-3" />}
-            label={`Last trade: ${timeAgo(lastTradeAt)}`}
+            label={`Last settled: ${timeAgo(lastTradeAt)}`}
             color="primary"
           />
         )}
