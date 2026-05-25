@@ -48,7 +48,7 @@ This is the moat. Not the code. The compounding collective intelligence that a s
   (2) Polymarket is 30%+ bot-saturated;
   (3) Kalshi posted $13.07B notional in March 2026 (up 25% MoM), $23.8B in 2025 (1,100% YoY).
 - **Stack:** React/Vite/TS frontend, Supabase (Postgres + edge functions + pg_cron), multi-provider LLM (OpenRouter, OpenAI, Anthropic, Google), Kalshi REST v2 with HMAC-SHA256 auth.
-- **Current state (April 2026):** Agent has paper traded. Core pipeline built and running. Multi-tenancy schema exists (`user_id` columns, RLS, encryption migration) but edge functions do not yet enforce `user_id` — single-user effectively. Stripe/subscriptions schema written, webhook scaffolded, not wired to billing UI. Community knowledge-sharing layer does not exist yet.
+- **Current state (May 2026):** Agent is live and paper trading. Full multi-tenancy enforced in all edge functions (`user_id` scoped queries, RLS active). Encryption end-to-end for both Kalshi and AI provider keys. Onboarding flow complete. Stripe schema + webhook exist but no billing UI yet. Community knowledge-sharing layer not started.
 - **Options agent** (`onofre-jauregui/omii-trade-agent`): shelved. Re-evaluate after Kalshi has a real track record.
 
 ## Polymarket code: do not extend
@@ -119,24 +119,28 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Memory system: agent_memory, auto-reflect hourly loop, compact-memory, confidence feedback
 - Strategy health monitor: consecutive-loss warnings (3/10/15), suspension + auto-resume
 - Multi-tenancy schema: user_id columns, RLS policies written
-- Encryption migration: api_keys ciphertext column, encryption helper module
+- Encryption end-to-end: Kalshi keys (save-kalshi-key) + AI provider keys (save-ai-key) both use AES-256-GCM; legacy plaintext fallback retained for zero-downtime
 - Stripe schema: subscriptions table, stripe_events log, webhook handler scaffolded
 - Auth page exists, Supabase auth wired
 - Landing page: CSS variable theming, trust cards, flywheel section, Terms + Privacy pages, SEO meta/sitemap
-- Onboarding flow: multi-step wizard exists (OnboardingPage.tsx), seeds S-002 + S-005 with $1k each ($2k total paper portfolio) on completion
+- Onboarding flow: 4-step wizard (OnboardingPage.tsx) — Kalshi key entry wired to save-kalshi-key + kalshi-ping test, seeds S-002 + S-005 with $1k each on completion ✅
 - S-001: KXINX/KXBTC/KXETH surface arb (bracket-sum violations)
-- S-002 fixes (2026-05-15): event-root dedup (no duplicate thresholds per event), 12h time-based auto-exit
-- S-005 fixes (2026-05-15): within-batch city dedup (seenCities), mid-price filter 5/95¢ → 10/90¢
-- Agent memory → LLM gate: agent_memory active lessons now injected into qualify prompt alongside trade_lessons
+- S-002 fixes: event-root dedup, 12h time-based auto-exit
+- S-005 fixes: within-batch city dedup (seenCities), mid-price filter 10/90¢
+- Agent memory → LLM gate: agent_memory active lessons injected into qualify prompt
 - Dashboard redesign, performance page with category breakdown + P&L histogram, PWA support
 - AgentPanel: chat-first layout, quick prompts (trimmed to 5), collapsible config
+- `was_acted_on` fix: UPDATE after S-002 + S-005 fills (2026-05-25) ✅
+- Prompt injection defense: `_shared/prompt-safety.ts`, XML-wrapped context, `parseQualifyResponse` validation (2026-05-25) ✅
+- user_id wiring: all edge function queries scoped to user; migration `20260524_agent_memory_user_id.sql` applied (2026-05-25) ✅
+- auto-settle: handles all Kalshi terminal statuses — active/closed/settled/finalized/voided/cancelled (2026-05-25) ✅
+- Dashboard: "Last settled" chip uses `settled_at`; win streak badge (≥2 days) displayed under AgentStatusBadge; gap day > 1 breaks streak in both frontend + backend (2026-05-25) ✅
+- Win streak: computed in auto-trade `computeWinStreak()`, passed as inert observability context into S-002 + S-005 qualify prompts — no decision rules tied to it (2026-05-25) ✅
+- surface-scanner cache age bug fixed: `Math.min` → `Math.max` so newest cache row is found (2026-05-25) ✅
+- Strategy leaderboard + chart: user ID suffix stripped from labels (2026-05-25) ✅
 
 ### In progress / partially done
-- Onboarding: flow exists but API key entry step not wired end-to-end to encryption
-- Edge functions: `user_id` column exists in schema but queries don't filter by it yet — single-user in practice
-- Encryption: migration written, `encrypted_secret` plaintext column still present, key management not wired end-to-end
 - Stripe: schema and webhook handler exist, no billing UI, no subscription enforcement in edge functions
-- `suspended_until` column on strategies: ✅ live in DB (verified 2026-05-23)
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
@@ -145,9 +149,10 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 
 ### Priority order
 1. ~~`suspended_until` migration~~ — already live in DB (2026-05-23)
-2. Wire `user_id` into all edge function queries (unblocks true multi-tenancy)
-3. Finish encryption key management end-to-end (security blocker)
-4. Billing UI + subscription enforcement
-5. Community knowledge-sharing layer (the moat — highest strategic value)
+2. ~~Wire `user_id` into all edge function queries~~ — done (2026-05-25)
+3. ~~Finish encryption key management end-to-end~~ — done (2026-05-25)
+4. ~~Onboarding flow end-to-end~~ — done, fully wired (2026-05-25)
+5. Billing UI + subscription enforcement
 6. User feedback mechanism
-7. Public performance page (track record artifact for uncle capital unlock)
+7. Community knowledge-sharing layer (the moat — highest strategic value)
+8. Public performance page (track record artifact for uncle capital unlock)
