@@ -6,6 +6,7 @@ import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -506,15 +507,64 @@ serve(async (req) => {
     // ── Resolve AI config ─────────────────────────────────────────────────────
     const aiConfig = await resolveAiConfig(supabase, primaryUserId);
     if (!aiConfig) {
+      // Count consecutive no-key skips in the last 11 hours (1 per hour = up to 11 chances).
+      // Alert only on the 10th consecutive miss, then go silent until the key comes back.
+      // This prevents Telegram spam while still paging once the problem is sustained.
+      const elevenHoursAgo = new Date(Date.now() - 11 * 60 * 60 * 1000).toISOString();
+      const { count: skipCount } = await supabase
+        .from("compliance_log")
+        .select("id", { count: "exact", head: true })
+        .eq("event_type", "auto_trade_skipped")
+        .ilike("message", "%no AI API key%")
+        .gte("created_at", elevenHoursAgo);
+
+      const consecutiveSkips = (skipCount ?? 0) + 1; // +1 = this current skip
+
       await supabase.from("compliance_log").insert({
         event_type: "auto_trade_skipped",
-        severity: "error",
-        message: "Auto-trade skipped: no AI API key configured",
-        metadata: { run_id: runId },
+        severity: consecutiveSkips >= 10 ? "critical" : "error",
+        message: `Auto-trade skipped: no AI API key configured (consecutive skip #${consecutiveSkips})`,
+        metadata: { run_id: runId, consecutive_skips: consecutiveSkips },
       });
-      return new Response(JSON.stringify({ skipped: true, reason: "No AI API key configured" }), {
+
+      if (consecutiveSkips === 10) {
+        // Trip point — send one alert and mark system suspended.
+        await sendTelegramAlert(
+          `🚨 <b>[TradeAgent] AI Key Missing — Trading SUSPENDED</b>\n` +
+          `No AI API key has been configured for ${consecutiveSkips} consecutive hours.\n` +
+          `All strategies are halted. Add an OpenRouter, Anthropic, or OpenAI key in Settings to resume.\n` +
+          `Run ID: ${runId}`
+        );
+        await supabase.from("compliance_log").insert({
+          event_type: "auto_trade_suspended",
+          severity: "critical",
+          message: `Auto-trade suspended: AI key missing for ${consecutiveSkips} consecutive hours`,
+          metadata: { run_id: runId, consecutive_skips: consecutiveSkips, suspended_at: new Date().toISOString() },
+        });
+      }
+      // Skip counts 1–9: log silently. Skip counts 11+: already alerted, stay quiet.
+
+      return new Response(JSON.stringify({ skipped: true, reason: "No AI API key configured", consecutive_skips: consecutiveSkips }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    // Key resolved — check if we're recovering from a suspended state and send one recovery alert.
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { data: priorSuspension } = await supabase
+      .from("compliance_log")
+      .select("id")
+      .eq("event_type", "auto_trade_suspended")
+      .gte("created_at", new Date(Date.now() - 11 * 60 * 60 * 1000).toISOString())
+      .limit(1)
+      .maybeSingle();
+
+    if (priorSuspension) {
+      await sendTelegramAlert(
+        `✅ <b>[TradeAgent] AI Key Restored — Trading Resumed</b>\n` +
+        `Provider: ${aiConfig.provider} / ${aiConfig.model}\n` +
+        `Strategies resuming this cycle.`
+      );
     }
 
     // ── Run each active strategy deterministically ───────────────────────────
@@ -707,6 +757,7 @@ serve(async (req) => {
               message: `Strategy "${strategy.name}" auto-halted after ${newFailures} consecutive failures`,
               metadata: { run_id: runId, strategy_id: strategy.id, last_error: errMsg },
             });
+            await sendTelegramAlert(`⏸️ <b>[TradeAgent] Strategy Halted</b>\n"${strategy.name}" auto-halted after ${newFailures} consecutive failures.\nLast error: ${errMsg.slice(0, 150)}`);
           }
         }
 
@@ -769,6 +820,7 @@ serve(async (req) => {
         message: `Auto-trade run failed: ${errMsg}`,
         metadata: { run_id: runId },
       });
+      await sendTelegramAlert(`🔴 <b>[TradeAgent] Auto-Trade Crashed</b>\nRun ${runId} failed: ${errMsg.slice(0, 200)}`);
     } catch {}
 
     return new Response(JSON.stringify({ error: errMsg }), {
@@ -1757,6 +1809,7 @@ async function qualifySetup(
             retry_after: resp.headers.get("retry-after"),
           },
         }).then().catch(() => {});
+        sendTelegramAlert(`⚠️ <b>[TradeAgent] LLM Rate Limit</b>\n${aiConfig.provider} returned 429 — qualify calls failing for strategy ${strategyId ?? "unknown"}.\nRetry-After: ${resp.headers.get("retry-after") ?? "unknown"}`).catch(() => {});
       }
       return { qualified: false, reason: `AI API error: ${resp.status}` };
     }
