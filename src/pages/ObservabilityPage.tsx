@@ -172,6 +172,9 @@ interface MemoryEntry {
   memory_type: string;
   title: string;
   content: string;
+  lesson: string;
+  lesson_type: string;
+  do_differently: string | null;
   confidence: number;
   exposed_confidence: number | null;
   confirmations: number;
@@ -379,6 +382,7 @@ export default function ObservabilityPage() {
   const [tradeLogEvents, setTradeLogEvents] = useState<ComplianceEvent[]>([]);
   const [tradeLogLoading, setTradeLogLoading] = useState(false);
   const [selectedError, setSelectedError] = useState<ComplianceEvent | null>(null);
+  const [selectedMemory, setSelectedMemory] = useState<MemoryEntry | null>(null);
   const [decisionDateFilter, setDecisionDateFilter] = useState<"today" | "7d" | "30d" | "all">("30d");
   const [decisionStatusFilter, setDecisionStatusFilter] = useState<"all" | "filled" | "settled">("all");
 
@@ -2945,7 +2949,42 @@ export default function ObservabilityPage() {
                   </p>
                   {selectedFailureMode === "memory_pressure" && (
                     <>
-                      <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
+                      {/* Quarantined memory preview — click any row to inspect */}
+                      {quarantinedMemories.length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">
+                            Quarantined Memories (preview)
+                          </p>
+                          <div className="rounded-xl bg-secondary/60 divide-y divide-border/60 overflow-hidden">
+                            {quarantinedMemories.slice(0, 3).map((m) => (
+                              <button
+                                key={m.id}
+                                className="w-full text-left px-4 py-3 hover:bg-secondary/80 transition-colors"
+                                onClick={() => { setSelectedFailureMode(null); setSelectedMemory(m); }}
+                              >
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-[10px] font-medium text-red-400 uppercase tracking-wide">quarantined</span>
+                                  <span className="text-[10px] text-muted-foreground ml-auto tabular-nums">
+                                    conf {((m.exposed_confidence ?? m.confidence) * 100).toFixed(0)}%
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-foreground leading-snug line-clamp-2">{m.lesson}</p>
+                                <p className="text-[10px] text-muted-foreground mt-1">
+                                  {m.lesson_type} · {m.confirmations}✓ {m.contradictions}✗
+                                </p>
+                              </button>
+                            ))}
+                            {quarantinedMemories.length > 3 && (
+                              <div className="px-4 py-2 text-center">
+                                <p className="text-[10px] text-muted-foreground">
+                                  +{quarantinedMemories.length - 3} more — open Agent Memory panel to view all
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      <p className="text-[10px] text-muted-foreground mt-3 leading-relaxed">
                         compact-memory summarizes active memories (saves tokens) and merges clusters of 3+ related entries. It does not reduce the quarantine count — quarantined entries must be reset directly in the DB.
                       </p>
                       <button
@@ -3489,6 +3528,104 @@ export default function ObservabilityPage() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      </div>
+    )}
+    {/* ── Memory Detail Panel ──────────────────────────────────────────── */}
+    {selectedMemory && (
+      <div
+        className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+        onClick={() => setSelectedMemory(null)}
+      >
+        <div
+          className="bg-card rounded-2xl apple-shadow w-full max-w-lg max-h-[90vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-border flex items-start justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-red-500/10 text-red-500">
+                  quarantined
+                </span>
+                <span className="text-[10px] text-muted-foreground">{selectedMemory.lesson_type}</span>
+                <span className="text-[10px] text-muted-foreground ml-auto">{relativeTime(selectedMemory.created_at)}</span>
+              </div>
+              <h3 className="text-sm font-semibold leading-snug">Memory Entry</h3>
+            </div>
+            <button
+              onClick={() => setSelectedMemory(null)}
+              className="shrink-0 text-muted-foreground hover:text-foreground transition-colors text-lg leading-none mt-0.5"
+            >×</button>
+          </div>
+
+          {/* Body */}
+          <div className="px-6 py-5 space-y-4">
+            {/* Lesson */}
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">Lesson</p>
+              <div className="rounded-xl bg-secondary/40 p-4">
+                <p className="text-[12px] text-foreground leading-relaxed">{selectedMemory.lesson}</p>
+              </div>
+            </div>
+
+            {/* What to do differently */}
+            {selectedMemory.do_differently && (
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-2">What Agent Should Do Differently</p>
+                <div className="rounded-xl bg-secondary/40 p-4">
+                  <p className="text-[12px] text-foreground leading-relaxed">{selectedMemory.do_differently}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Stats grid */}
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                { label: "Confidence", value: `${((selectedMemory.exposed_confidence ?? selectedMemory.confidence) * 100).toFixed(0)}%`,
+                  cls: (selectedMemory.exposed_confidence ?? selectedMemory.confidence) < 0.3 ? "text-red-500" : "text-foreground" },
+                { label: "Confirmations", value: String(selectedMemory.confirmations), cls: "text-emerald-500" },
+                { label: "Contradictions", value: String(selectedMemory.contradictions), cls: "text-red-400" },
+              ].map(({ label, value, cls }) => (
+                <div key={label} className="rounded-xl bg-secondary/40 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">{label}</p>
+                  <p className={`text-sm font-semibold tabular-nums ${cls}`}>{value}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Why quarantined */}
+            <div className="rounded-xl bg-red-500/5 border border-red-500/20 p-4">
+              <p className="text-[10px] text-red-400 uppercase tracking-wide mb-1">Why Quarantined</p>
+              <p className="text-[12px] text-foreground leading-relaxed">
+                Exposed confidence dropped below 30% after {selectedMemory.trade_sample_size}+ attributed trades. The agent accumulated contradicting evidence that this lesson had low predictive value, so it was removed from the LLM context window. It can only be re-activated by resetting <code className="text-[11px] bg-secondary px-1 rounded">is_active</code> directly in the DB.
+              </p>
+            </div>
+
+            {/* Tags + strategy */}
+            {(selectedMemory.tags?.length || selectedMemory.strategy_id) && (
+              <div className="flex flex-wrap gap-2">
+                {selectedMemory.strategy_id && (
+                  <span className="text-[10px] px-2 py-1 rounded-full bg-secondary text-muted-foreground">
+                    strategy: {selectedMemory.strategy_id}
+                  </span>
+                )}
+                {(selectedMemory.tags ?? []).map((t) => (
+                  <span key={t} className="text-[10px] px-2 py-1 rounded-full bg-secondary text-muted-foreground">{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-3 border-t border-border flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground/50">id: {selectedMemory.id.slice(0, 8)}</span>
+            <a
+              href="https://supabase.com/dashboard/project/uyfnezxmgwitpzsrnkst/editor?schema=public"
+              target="_blank" rel="noreferrer"
+              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+            >View in Supabase ↗</a>
           </div>
         </div>
       </div>
