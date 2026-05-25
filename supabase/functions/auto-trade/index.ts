@@ -473,6 +473,20 @@ serve(async (req) => {
     ]);
     const strategies = [...(systemStrategies || []), ...(userStrategies || [])];
 
+    // Update the Langfuse trace with userId now that we know the active users.
+    // Uses the first non-null user_id across strategies; system-only runs stay anonymous.
+    // This populates the Langfuse "Users" dashboard and per-user consumption views.
+    const primaryUserId = strategies.find((s: any) => s.user_id)?.user_id ?? null;
+    if (primaryUserId) {
+      langfuseIngest([{
+        id: crypto.randomUUID(),
+        type: "trace-create",
+        timestamp: new Date().toISOString(),
+        body: { id: runId, name: "auto-trade", userId: primaryUserId,
+          metadata: { strategy_count: strategies.length } },
+      }]);
+    }
+
     if (!strategies || strategies.length === 0) {
       return new Response(JSON.stringify({ skipped: true, reason: "No active strategies" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
