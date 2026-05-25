@@ -169,32 +169,31 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   const handleSaveAiKeys = async () => {
     setAiSaving(true);
     setAiSaveStatus("idle");
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { setAiSaveStatus("error"); setAiSaving(false); return; }
     try {
-      const keysToSave = [
-        aiKeys.openrouter ? { provider: "openrouter", key_id: "default", encrypted_secret: aiKeys.openrouter } : null,
-        aiKeys.openai     ? { provider: "openai",     key_id: "default", encrypted_secret: aiKeys.openai }     : null,
-        aiKeys.anthropic  ? { provider: "anthropic",  key_id: "default", encrypted_secret: aiKeys.anthropic }  : null,
-        aiKeys.google     ? { provider: "google",     key_id: "default", encrypted_secret: aiKeys.google }     : null,
-      ].filter(Boolean) as { provider: string; key_id: string; encrypted_secret: string }[];
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Not authenticated — please sign in again");
 
-      for (const key of keysToSave) {
-        // Delete existing row first so we can insert fresh without relying on a
-        // specific conflict constraint. Avoids silent upsert failures.
-        await supabase.from("api_keys").delete().eq("user_id", user.id).eq("provider", key.provider);
-        const { error } = await supabase.from("api_keys").insert({
-          ...key,
-          user_id: user.id,
-          updated_at: new Date().toISOString(),
+      const keysToSave = [
+        aiKeys.openrouter ? "openrouter" : null,
+        aiKeys.openai     ? "openai"     : null,
+        aiKeys.anthropic  ? "anthropic"  : null,
+        aiKeys.google     ? "google"     : null,
+      ].filter(Boolean) as string[];
+
+      for (const provider of keysToSave) {
+        const api_key = aiKeys[provider as keyof typeof aiKeys];
+        const resp = await fetch(SAVE_AI_KEY_URL, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ provider, api_key }),
         });
-        if (error) throw error;
+        const json = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
+        if (!resp.ok || !json.ok) throw new Error(json.error ?? `Server error ${resp.status}`);
       }
-      // Update badge state directly — don't re-read from DB which would reset state
-      // on any timing issue with the just-written rows.
+
       setSavedProviders(prev => {
         const next = new Set(prev);
-        keysToSave.forEach(k => next.add(k.provider));
+        keysToSave.forEach(p => next.add(p));
         return next;
       });
       setAiSaveStatus("success");
