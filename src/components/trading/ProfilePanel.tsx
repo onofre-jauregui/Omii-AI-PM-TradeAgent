@@ -22,8 +22,9 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [profile, setProfile] = useState({
-    displayName: "Anon Trader", email: "", kalshiUsername: "", avatarUrl: "",
+    displayName: "Anon Trader", email: "", avatarUrl: "",
   });
+  const [kalshiUsername, setKalshiUsername] = useState("");
   const [subscription, setSubscription] = useState<{ tier: string; status: string } | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -36,7 +37,7 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
   const loadProfile = useCallback(async (uid: string) => {
     setLoading(true);
     const [{ data: prof }, { data: sub }, { data: keys }] = await Promise.all([
-      supabase.from("profiles").select("display_name, avatar_url").eq("id", uid).maybeSingle(),
+      supabase.from("profiles").select("display_name, avatar_url, kalshi_username").eq("id", uid).maybeSingle(),
       supabase.from("subscriptions").select("tier, status").eq("user_id", uid).maybeSingle(),
       supabase.from("api_keys").select("provider").eq("user_id", uid),
     ]);
@@ -46,6 +47,7 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
       displayName: prof?.display_name ?? prev.displayName,
       avatarUrl: prof?.avatar_url ?? "",
     }));
+    if (prof?.kalshi_username) setKalshiUsername(prof.kalshi_username);
     setSubscription(sub ?? { tier: "free", status: "inactive" });
     if (keys) {
       const providers = new Set(keys.map(r => r.provider));
@@ -149,10 +151,6 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
               <Label className="text-sm text-muted-foreground">Email</Label>
               <Input value={profile.email} disabled className="rounded-xl border-0 bg-secondary text-sm opacity-60" />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Kalshi Username</Label>
-              <Input value={profile.kalshiUsername} onChange={(e) => setProfile(prev => ({ ...prev, kalshiUsername: e.target.value }))} placeholder="your-kalshi-username" className="rounded-xl border-0 bg-secondary text-sm" />
-            </div>
             <Button className="w-full rounded-full gap-2 text-sm" onClick={handleSaveProfile} disabled={saving || loading}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
               {saving ? "Saving…" : "Save Profile"}
@@ -162,14 +160,12 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
           <div className="border-t border-border pt-4">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs text-muted-foreground">Plan</span>
-              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                subscription?.tier === "prop"    ? "bg-amber-500/10 text-amber-500" :
-                subscription?.tier === "pro"     ? "bg-primary/10 text-primary" :
-                subscription?.tier === "starter" ? "bg-emerald-500/10 text-emerald-500" :
-                "bg-secondary text-muted-foreground"
-              }`}>
-                {tierLabel(subscription?.tier ?? "free")}
-              </span>
+              <div className="flex items-center gap-1.5">
+                {subscription?.tier && subscription.tier !== "free"
+                  ? <CheckCircle className="h-3 w-3 text-profit" />
+                  : <Circle className="h-3 w-3 text-muted-foreground" />}
+                <span className="text-sm">{tierLabel(subscription?.tier ?? "free")}</span>
+              </div>
             </div>
             {(!subscription || subscription.tier === "free" || subscription.status !== "active") && (
               <Button variant="outline" size="sm" className="w-full rounded-full gap-1.5 text-xs mt-1" onClick={() => navigate("/billing")}>
@@ -194,7 +190,7 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
             <span className="text-sm text-muted-foreground">Kalshi</span>
             <div className="flex items-center gap-1.5">
               {kalshiConnected
-                ? <><CheckCircle className="h-3 w-3 text-profit" /><span className="text-sm">Connected</span></>
+                ? <><CheckCircle className="h-3 w-3 text-profit" /><span className="text-sm">{kalshiUsername ? `@${kalshiUsername}` : "Connected"}</span></>
                 : <><Circle className="h-3 w-3 text-muted-foreground" /><span className="text-sm text-muted-foreground">Not connected</span></>}
             </div>
           </div>

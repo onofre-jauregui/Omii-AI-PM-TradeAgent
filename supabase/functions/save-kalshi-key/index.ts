@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { importMasterKey, encryptSecret } from "../_shared/encryption.ts";
+import { generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 
 /**
  * save-kalshi-key: Securely saves a user's Kalshi API credentials.
@@ -81,6 +82,11 @@ serve(async (req: Request) => {
       });
     }
 
+    // Non-blocking: fetch Kalshi username and cache on profile.
+    // Key save already succeeded above — this failure must not affect the response.
+    fetchAndStoreKalshiUsername(supabase, user.id, key_id.trim(), private_key.trim())
+      .catch((e: Error) => console.warn("kalshi username fetch failed (non-critical):", e.message));
+
     return new Response(JSON.stringify({ ok: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -91,3 +97,23 @@ serve(async (req: Request) => {
     });
   }
 });
+
+async function fetchAndStoreKalshiUsername(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  keyId: string,
+  privateKey: string,
+): Promise<void> {
+  const path = "/trade-api/v2/portfolio/members/me";
+  const timestamp = Date.now();
+  const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, timestamp);
+  const resp = await fetch(`https://api.elections.kalshi.com${path}`, { headers });
+  if (!resp.ok) {
+    console.warn(`kalshi username fetch returned ${resp.status} — skipping`);
+    return;
+  }
+  const data = await resp.json();
+  const username: string | null = data?.member?.user_name ?? data?.member_id ?? null;
+  if (!username) return;
+  await supabase.from("profiles").update({ kalshi_username: username }).eq("id", userId);
+}
