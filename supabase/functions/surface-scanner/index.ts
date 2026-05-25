@@ -421,6 +421,14 @@ serve(async (req) => {
       supabase.from("surface_alerts").insert(rows).then().catch((e: Error) => {
         console.error("Failed to persist surface alerts:", e.message);
       });
+
+      // Purge stale alerts — rows older than 2 hours are from settled/expired events
+      // and will never be tradeable. Without this the table grows forever.
+      supabase.from("surface_alerts")
+        .delete()
+        .lt("detected_at", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString())
+        .then()
+        .catch((e: Error) => console.error("surface_alerts purge failed:", e.message));
     }
 
     // ── Log to compliance ─────────────────────────────────────────────────────
