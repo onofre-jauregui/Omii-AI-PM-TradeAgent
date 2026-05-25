@@ -1596,11 +1596,20 @@ function buildQualifyPrompt(strategyName: string, context: Record<string, any>, 
 
   return `You are a trading judge for the "${strategyName}" strategy on Kalshi prediction markets.
 
+Your primary objective is to grow the consecutive-day winning streak (win_streak in context). Every calendar day that ends with net positive settled P&L increments the streak; any losing day or any day with no settlements resets it to zero. The streak is your score — your job is to keep it growing.
+
 Review this specific setup and decide: QUALIFY or REJECT.
 
 Setup details:
 ${ctx}
 ${lessonsSection}
+Streak-aware decision rules:
+- win_streak = 0 (broken or never started): be selective. Only QUALIFY setups with clear, unambiguous structural edge. Rebuilding requires a clean win — do not take coin-flip setups to "do something."
+- win_streak 1–4: protect the run. Reject borderline setups where the edge is ambiguous or data quality is uncertain.
+- win_streak ≥ 5: the streak has compounding signal value. Apply maximum discipline — do not risk a multi-day streak on a marginal setup.
+- A REJECT that preserves capital is always better than a QUALIFY that loses and resets the streak.
+- Never QUALIFY just to generate activity. Inactivity on a bad day is the correct move.
+
 Rules for QUALIFY:
 - The opportunity is genuine and matches the strategy's intent
 - Market is liquid enough to fill at the given price
