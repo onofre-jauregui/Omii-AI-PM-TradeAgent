@@ -504,7 +504,7 @@ serve(async (req) => {
     );
 
     // ── Resolve AI config ─────────────────────────────────────────────────────
-    const aiConfig = await resolveAiConfig(supabase);
+    const aiConfig = await resolveAiConfig(supabase, primaryUserId);
     if (!aiConfig) {
       await supabase.from("compliance_log").insert({
         event_type: "auto_trade_skipped",
@@ -739,6 +739,17 @@ serve(async (req) => {
         strategies: strategyResults,
       },
     });
+
+    // Emit a run-complete span so Langfuse can compute trace-level latency
+    // (p50/p75/p99 on the Traces dashboard). Without this, traces with only
+    // auto-qualify spans have no anchor for total pipeline duration.
+    langfuseIngest([spanEvent({
+      traceId: runId,
+      name: "auto-trade-pipeline",
+      startTime: runStartedAt,
+      endTime: new Date().toISOString(),
+      metadata: { ran: ranCount, traded: tradedCount, errors: errCount, strategies: ranCount },
+    })]);
 
     return new Response(JSON.stringify({
       success: true,
@@ -1279,6 +1290,7 @@ async function runS005WeatherEdge(
   userRisk?: any,
   winStreak = 0,
 ): Promise<StrategyResult> {
+  const strategyStartTime = new Date().toISOString(); // used for Langfuse span latency
   const mode = strategy.mode || "paper";
   const minEdge = config?.min_edge_cents ?? 15; // raised from 8¢ — weather needs bigger edge
   const maxPositionUsd = config?.max_position_usd ?? 30;
@@ -1443,15 +1455,16 @@ async function runS005WeatherEdge(
     .map((sig: any) => ({ sig, qualified: true, reason: `auto-qualified: edge ${sig.edge_cents}¢ >= ${AUTO_QUALIFY_EDGE}¢` }));
   const needsLlm = candidates.filter((s: any) => (s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE);
 
-  // Emit a Langfuse span for every auto-qualified signal so Langfuse shows
-  // the qualify decision even when no LLM call is made. Without this, traces
-  // have 0 observations and Langfuse cannot render cost/usage dashboards.
+  // Emit a Langfuse span per auto-qualified signal.
+  // startTime = strategy entry point, endTime = now (when qualify decision is made).
+  // This gives real latency data for observation/trace percentiles in Langfuse.
   if (autoQualified.length > 0 && runId) {
-    const now = new Date().toISOString();
+    const qualifyEndTime = new Date().toISOString();
     langfuseIngest(autoQualified.map(({ sig, reason }) => spanEvent({
       traceId: runId,
       name: `auto-qualify-s005`,
-      startTime: now,
+      startTime: strategyStartTime,
+      endTime: qualifyEndTime,
       metadata: {
         ticker: sig.ticker,
         edge_cents: sig.edge_cents,
@@ -1850,51 +1863,73 @@ async function checkPortfolioExposure(supabase: any): Promise<{ openCount: numbe
 /**
  * Resolve the best available AI config from DB api_keys or env vars.
  * Priority: OpenRouter → Anthropic → OpenAI → Google
- * Handles both legacy plaintext and AES-GCM encrypted secrets (EncryptedSecret JSON).
+ *
+ * Reads secret_ciphertext + secret_iv (AES-256-GCM) first.
+ * Falls back to encrypted_secret (legacy plaintext rows) for zero-downtime migration.
+ * Scoped to userId when provided — never reads another user's keys.
  */
-async function resolveAiConfig(supabase: any): Promise<AiConfig | null> {
-  // Check saved model preference
-  const { data: savedModel } = await supabase
+async function resolveAiConfig(supabase: any, userId?: string | null): Promise<AiConfig | null> {
+  // Check saved model preference (scoped to user when provided)
+  const modelQuery = supabase
     .from("api_keys")
     .select("key_id")
-    .eq("provider", "model_agent")
-    .maybeSingle();
+    .eq("provider", "model_agent");
+  if (userId) modelQuery.eq("user_id", userId);
+  const { data: savedModel } = await modelQuery.maybeSingle();
 
   const preferredModel = savedModel?.key_id;
 
-  // Load available keys (encrypted_secret may be plaintext or EncryptedSecret JSON)
-  const { data: keyRows } = await supabase
+  // Load available keys — primary: secret_ciphertext + secret_iv (AES-256-GCM encrypted)
+  // Fallback column encrypted_secret supports legacy plaintext rows until re-saved
+  const keysQuery = supabase
     .from("api_keys")
-    .select("provider, encrypted_secret")
+    .select("provider, secret_ciphertext, secret_iv, encrypted_secret")
     .in("provider", ["openrouter", "anthropic", "openai", "google"]);
+  if (userId) keysQuery.eq("user_id", userId);
+  const { data: keyRows } = await keysQuery;
 
-  // Decrypt a stored secret if it looks like a JSON EncryptedSecret object.
-  // Falls back to using the raw value for legacy plaintext rows.
-  async function resolveKey(raw: string | null | undefined): Promise<string | undefined> {
+  // Decrypt a row: tries AES-GCM columns first, falls back to legacy plaintext column.
+  async function resolveKey(row: any): Promise<string | undefined> {
+    if (!row) return undefined;
+
+    // Primary path: AES-256-GCM encrypted columns (new saves via save-ai-key)
+    if (row.secret_ciphertext && row.secret_iv) {
+      const masterKeyBase64 = Deno.env.get("API_KEY_ENCRYPTION_KEY");
+      if (!masterKeyBase64) {
+        console.error("resolveAiConfig: API_KEY_ENCRYPTION_KEY not set — cannot decrypt");
+        return undefined;
+      }
+      try {
+        const masterKey = await importMasterKey(masterKeyBase64);
+        return await decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv }, masterKey);
+      } catch (e) {
+        console.error("resolveAiConfig: AES-GCM decrypt failed:", e instanceof Error ? e.message : e);
+        return undefined;
+      }
+    }
+
+    // Legacy fallback: plaintext in encrypted_secret (or JSON EncryptedSecret from old schema)
+    const raw = row.encrypted_secret as string | null | undefined;
     if (!raw) return undefined;
-    // Try parsing as EncryptedSecret JSON — legacy plaintext is never valid JSON
     try {
       const parsed = JSON.parse(raw) as EncryptedSecret;
       if (parsed?.ciphertext && parsed?.iv) {
         const masterKeyBase64 = Deno.env.get("API_KEY_ENCRYPTION_KEY");
-        if (!masterKeyBase64) {
-          console.error("resolveAiConfig: API_KEY_ENCRYPTION_KEY not set — cannot decrypt stored API key");
-          return undefined;
-        }
+        if (!masterKeyBase64) return undefined;
         const masterKey = await importMasterKey(masterKeyBase64);
         return await decryptSecret(parsed, masterKey);
       }
     } catch {
-      // Not JSON — treat as legacy plaintext
+      // Not JSON — raw plaintext
     }
     return raw;
   }
 
-  const rawMap = new Map((keyRows || []).map((r: any) => [r.provider, r.encrypted_secret as string | null]));
+  const rowMap = new Map((keyRows || []).map((r: any) => [r.provider, r]));
 
-  const openrouterKey = await resolveKey(rawMap.get("openrouter")) ?? Deno.env.get("OPENROUTER_API_KEY");
-  const anthropicKey = await resolveKey(rawMap.get("anthropic")) ?? Deno.env.get("ANTHROPIC_API_KEY");
-  const openaiKey = await resolveKey(rawMap.get("openai")) ?? Deno.env.get("OPENAI_API_KEY");
+  const openrouterKey = await resolveKey(rowMap.get("openrouter")) ?? Deno.env.get("OPENROUTER_API_KEY");
+  const anthropicKey = await resolveKey(rowMap.get("anthropic")) ?? Deno.env.get("ANTHROPIC_API_KEY");
+  const openaiKey = await resolveKey(rowMap.get("openai")) ?? Deno.env.get("OPENAI_API_KEY");
 
   if (openrouterKey) {
     return {
