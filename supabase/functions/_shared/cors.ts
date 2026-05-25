@@ -12,13 +12,19 @@
  *                         functions called directly from the browser SDK
  */
 
+const SAFE_ORIGINS = [
+  "https://kalshitradeagent.com",
+  "https://omii-trade-agent.vercel.app",
+  "http://localhost:5173",
+];
+
 const ALLOWED_ORIGINS: string[] = (() => {
   const raw = Deno.env.get("ALLOWED_ORIGINS") ?? Deno.env.get("ALLOWED_ORIGIN") ?? "";
   if (!raw) {
     if (Deno.env.get("DENO_DEPLOYMENT_ID")) {
-      console.warn("CORS: ALLOWED_ORIGINS not set — defaulting to *. Set ALLOWED_ORIGINS to your frontend domain(s).");
+      console.warn("CORS: ALLOWED_ORIGINS not set — using hardcoded safe list.");
     }
-    return ["*"];
+    return SAFE_ORIGINS;
   }
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 })();
@@ -35,7 +41,6 @@ const EXTENDED_HEADERS =
  * Otherwise return the first entry (or "*" if that's what's configured).
  */
 function resolveOrigin(requestOrigin?: string | null): string {
-  if (ALLOWED_ORIGINS[0] === "*") return "*";
   if (requestOrigin && ALLOWED_ORIGINS.includes(requestOrigin)) return requestOrigin;
   // Origin not in list — return first allowed origin (browser will block, which is correct)
   return ALLOWED_ORIGINS[0];
