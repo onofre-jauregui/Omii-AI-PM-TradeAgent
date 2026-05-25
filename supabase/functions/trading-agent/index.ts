@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
@@ -176,6 +177,47 @@ const UPDATE_MEMORY_TOOL = {
         reason: { type: "string", description: "Why you're updating this memory" },
       },
       required: ["memoryId", "action"],
+    },
+  },
+};
+
+const QUERY_TRADES_TOOL = {
+  type: "function",
+  function: {
+    name: "query_trades",
+    description: "Search past trades with flexible filters. Use when the user asks about trades on a specific date, for a ticker, by strategy, or by outcome (wins/losses).",
+    parameters: {
+      type: "object",
+      properties: {
+        date_start: { type: "string", description: "ISO date string, e.g. '2026-05-01'. If omitted, no lower bound." },
+        date_end: { type: "string", description: "ISO date string, e.g. '2026-05-20'. Defaults to today." },
+        ticker: { type: "string", description: "Filter by market ticker, e.g. 'KXBTC-25MAY2026-B65000'." },
+        strategy: { type: "string", description: "Filter by strategy name or ID, e.g. 'S-002' or 'Longshot Bias'." },
+        outcome: { type: "string", enum: ["win", "loss", "any"], description: "Filter by trade outcome. 'win' = pnl > 0, 'loss' = pnl < 0." },
+        status: { type: "string", enum: ["settled", "filled", "any"], description: "Trade status. Default 'any'." },
+        limit: { type: "number", description: "Max trades to return. Default 20, max 50." },
+      },
+      required: [],
+    },
+  },
+};
+
+const REMEMBER_TOOL = {
+  type: "function",
+  function: {
+    name: "remember",
+    description: "Save something the user wants remembered across all future conversations — a preference, a goal, a fact about how they trade, or an instruction. Use when the user says 'remember that...', 'always...', 'I prefer...', 'my rule is...', etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The preference or fact to remember, in plain language." },
+        category: {
+          type: "string",
+          enum: ["preference", "goal", "rule", "fact", "instruction"],
+          description: "What kind of thing this is."
+        },
+      },
+      required: ["content", "category"],
     },
   },
 };
@@ -532,7 +574,8 @@ serve(async (req) => {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const { messages, strategies, model, temperature, systemPrompt, tradingMode } = body;
+    const { messages: rawMessages, strategies, model, temperature, systemPrompt, tradingMode, conversationId: incomingConversationId, message: incomingMessage } = body;
+    let messages = rawMessages;
 
     if (!messages || !Array.isArray(messages)) {
       return new Response(JSON.stringify({ error: "messages array is required" }), {
@@ -589,7 +632,7 @@ serve(async (req) => {
       unreflectedSettled,
     ] = await Promise.allSettled([
       authPromise,
-      supabase.from("api_keys").select("provider, encrypted_secret").in("provider", ["openrouter", "openai", "anthropic", "google"]),
+      supabase.from("api_keys").select("provider, secret_ciphertext, secret_iv, encrypted_secret").in("provider", ["openrouter", "openai", "anthropic", "google"]),
       supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
       supabase.from("risk_settings").select("*").maybeSingle(),
       supabase.from("agent_memory")
@@ -619,13 +662,77 @@ serve(async (req) => {
     const keyRows = keyRowsSettled.status === "fulfilled" ? (keyRowsSettled.value?.data ?? []) : [];
     const savedModelData = savedModelSettled.status === "fulfilled" ? (savedModelSettled.value?.data ?? null) : null;
     const riskSettings = riskSettled.status === "fulfilled" ? (riskSettled.value?.data ?? null) : null;
-    const topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
+
+    // Re-fetch memories scoped to this user (user's own + platform-shared where user_id IS NULL).
+    // The initial batch query above loaded all memories; replace with the user-scoped result.
+    let topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
+    if (userId) {
+      const { data: scopedMemories } = await supabase
+        .from("agent_memory")
+        .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
+        .eq("is_active", true)
+        .is("merged_into", null)
+        .or(`user_id.is.null,user_id.eq.${userId}`)
+        .order("confidence", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(30);
+      if (scopedMemories) topMemories = scopedMemories;
+    }
     const recentFilledTrades = tradesSettled.status === "fulfilled" ? (tradesSettled.value?.data ?? null) : null;
     const unreflectedTrades = unreflectedSettled.status === "fulfilled" ? (unreflectedSettled.value?.data ?? null) : null;
 
+    // ── Conversation persistence ──
+    // Track the current user message text so we can save it after the LLM responds.
+    const userMessage: string = incomingMessage || (messages[messages.length - 1]?.role === "user" ? messages[messages.length - 1].content : "") || "";
+    let activeConversationId: string | null = incomingConversationId ?? null;
+
+    if (userId) {
+      if (!activeConversationId) {
+        const title = userMessage.slice(0, 60) || "New conversation";
+        const { data: newConv } = await supabase.from("conversations").insert({
+          user_id: userId,
+          title,
+        }).select("id").single();
+        activeConversationId = newConv?.id ?? null;
+      }
+
+      // Load the last 40 messages from DB and use as authoritative history.
+      // The client sends its in-session rolling window; DB has the cross-session history.
+      if (activeConversationId) {
+        const { data: priorMessages } = await supabase
+          .from("chat_messages")
+          .select("role, content")
+          .eq("conversation_id", activeConversationId)
+          .order("created_at", { ascending: true })
+          .limit(40);
+
+        if (priorMessages && priorMessages.length > 0) {
+          messages = priorMessages.map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
+        }
+      }
+
+      // Emit conversationId to frontend so it can be stored in localStorage.
+      if (activeConversationId) {
+        await streamWriter.write(enc.encode(`data: ${JSON.stringify({ type: "conversation_id", conversationId: activeConversationId })}\n\n`));
+      }
+    }
+
     const keys: Record<string, string> = {};
+    const masterKeyBase64 = Deno.env.get("API_KEY_ENCRYPTION_KEY");
     for (const row of keyRows || []) {
-      if (row.encrypted_secret) keys[row.provider] = row.encrypted_secret;
+      let resolved: string | undefined;
+      // Primary: AES-256-GCM columns (keys saved via save-ai-key endpoint)
+      if (row.secret_ciphertext && row.secret_iv && masterKeyBase64) {
+        try {
+          const masterKey = await importMasterKey(masterKeyBase64);
+          resolved = await decryptSecret({ ciphertext: row.secret_ciphertext, iv: row.secret_iv }, masterKey);
+        } catch (e) {
+          console.error(`trading-agent: decrypt failed for ${row.provider}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      // Fallback: legacy plaintext in encrypted_secret (until re-saved via Settings)
+      if (!resolved && row.encrypted_secret) resolved = row.encrypted_secret;
+      if (resolved) keys[row.provider] = resolved;
     }
     if (!keys["openrouter"]) keys["openrouter"] = Deno.env.get("OPENROUTER_API_KEY") || "";
     if (!keys["openai"]) keys["openai"] = Deno.env.get("OPENAI_API_KEY") || "";
@@ -792,6 +899,12 @@ If no series ticker maps to their request, call fetch_live_markets with NO param
 - composite_score ≥ 0.65 = strong; direction "skip" = pass
 - Kalshi prices in cents (1-99); YES+NO=100; use LIMIT orders; wide spread = low liquidity
 
+## Memory Tools Available
+- **remember**: User says "remember that I prefer X", "always do X", "my rule is X" → call remember(). Category: preference/goal/rule/fact/instruction. This persists across all future conversations.
+- **recall_lessons**: Find past insights by tags or text. Call when the user references a past decision, asks "what do you know about X", or when market context warrants checking past lessons.
+- **query_trades**: User asks about past trades. "What trades did I make last Tuesday?", "Show me my weather market losses", "How did S-002 do this month?" → call query_trades() with appropriate filters. When the user references a date or asks about past trades, always use query_trades() — never guess from memory.
+- **save_insight**: For trading-domain lessons (market observations, strategy patterns). Different from remember() which is for user preferences.
+
 ## Conversation Memory
 Save user preferences via save_insight (tag "user_preference"): risk limits, market interests, style, strategy directives. Use memoryType "lesson", "market_note", or "strategy_insight".
 
@@ -818,6 +931,8 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       RECALL_LESSONS_TOOL,
       SAVE_INSIGHT_TOOL,
       UPDATE_MEMORY_TOOL,
+      QUERY_TRADES_TOOL,
+      REMEMBER_TOOL,
       SEARCH_WEB_TOOL,
       CREATE_STRATEGY_TOOL,
       TRIGGER_STRATEGY_RUN_TOOL,
@@ -842,6 +957,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
 
     let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 12; // Supports: recall → fetch_signals → scan_surface → portfolio → fetch_markets → trade chains
+    let fullReply = ""; // Accumulated assistant reply for persistence
 
     while (maxIterations > 0) {
       maxIterations--;
@@ -933,7 +1049,20 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       // which re-sent the full conversation to get a streaming response we already had).
       if (choice.finish_reason !== "tool_calls" || !choice.message?.tool_calls?.length) {
         const content = choice.message?.content || "";
+        fullReply = content;
         await streamWriter.write(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`));
+        // Persist the exchange before closing the stream
+        if (userId && activeConversationId && userMessage && fullReply) {
+          await Promise.all([
+            supabase.from("chat_messages").insert([
+              { conversation_id: activeConversationId, user_id: userId, role: "user", content: userMessage },
+              { conversation_id: activeConversationId, user_id: userId, role: "assistant", content: fullReply },
+            ]),
+            supabase.from("conversations").update({
+              updated_at: new Date().toISOString(),
+            }).eq("id", activeConversationId),
+          ]);
+        }
         await streamWriter.write(enc.encode("data: [DONE]\n\n"));
         return;
       }
@@ -965,6 +1094,8 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             save_insight: "Saving insight…",
             update_memory: "Updating memory…",
             reflect_on_trades: "Analyzing trade history…",
+            query_trades: "Searching trade history…",
+            remember: "Saving preference…",
           };
           const label = statusLabels[fnName];
           if (label) await sendStatus(label);
@@ -1621,6 +1752,49 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
           }
         }
 
+        // ── query_trades ──
+        else if (fnName === "query_trades") {
+          try {
+            const { date_start, date_end, ticker, strategy, outcome, status, limit = 20 } = args;
+            let q = supabase.from("trades").select("id, ticker, side, action, price, amount, pnl, strategy, status, settled_at, created_at").eq("user_id", userId);
+            if (date_start) q = q.gte("created_at", date_start);
+            if (date_end) q = q.lte("created_at", date_end + "T23:59:59Z");
+            if (ticker) q = q.ilike("ticker", `%${ticker}%`);
+            if (strategy) q = q.or(`strategy.ilike.%${strategy}%,strategy_id.ilike.%${strategy}%`);
+            if (status && status !== "any") q = q.eq("status", status);
+            if (outcome === "win") q = q.gt("pnl", 0);
+            if (outcome === "loss") q = q.lt("pnl", 0);
+            q = q.order("created_at", { ascending: false }).limit(Math.min(limit, 50));
+            const { data: trades, error } = await q;
+            toolResult = JSON.stringify({ trades: trades || [], count: (trades || []).length, error: error?.message });
+          } catch (e: any) {
+            toolResult = JSON.stringify({ error: "query_trades failed: " + e.message });
+          }
+        }
+
+        // ── remember ──
+        else if (fnName === "remember") {
+          try {
+            const { content, category } = args;
+            const title = content.slice(0, 80);
+            const { data: saved, error } = await supabase.from("agent_memory").insert({
+              user_id: userId,
+              memory_type: "user_preference",
+              title,
+              content,
+              source_type: "user_feedback",
+              tags: [category, "user_preference"],
+              confidence: 0.95,
+              is_active: true,
+            }).select("id").single();
+            toolResult = error
+              ? JSON.stringify({ ok: false, error: error.message })
+              : JSON.stringify({ ok: true, id: saved?.id, message: `Remembered: "${title}"` });
+          } catch (e: any) {
+            toolResult = JSON.stringify({ error: "remember failed: " + e.message });
+          }
+        }
+
         // ── Unknown tool ──
         else {
           toolResult = JSON.stringify({ error: "Unknown tool" });
@@ -1637,7 +1811,19 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
     // Exhausted iterations — final stream
     // Fallback after max iterations exhausted — write whatever we have
     const lastContent = aiMessages.filter((m: any) => m.role === "assistant").pop()?.content || "Max iterations reached without a final response.";
+    fullReply = lastContent;
     await streamWriter.write(enc.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: lastContent } }] })}\n\n`));
+    if (userId && activeConversationId && userMessage && fullReply) {
+      await Promise.all([
+        supabase.from("chat_messages").insert([
+          { conversation_id: activeConversationId, user_id: userId, role: "user", content: userMessage },
+          { conversation_id: activeConversationId, user_id: userId, role: "assistant", content: fullReply },
+        ]),
+        supabase.from("conversations").update({
+          updated_at: new Date().toISOString(),
+        }).eq("id", activeConversationId),
+      ]);
+    }
     await streamWriter.write(enc.encode("data: [DONE]\n\n"));
 
       } catch (e: any) {

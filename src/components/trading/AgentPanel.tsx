@@ -40,12 +40,14 @@ const QUICK_PROMPTS = [
 ];
 
 async function streamChat({
-  messages, strategies, model, temperature, systemPrompt, tradingMode, onDelta, onDone, onError, onStatus,
+  messages, strategies, model, temperature, systemPrompt, tradingMode, conversationId, onDelta, onDone, onError, onStatus, onConversationId,
 }: {
   messages: Msg[]; strategies: { name: string; instructions: string }[];
   model: string; temperature: number; systemPrompt: string; tradingMode: string;
+  conversationId: string | null;
   onDelta: (text: string) => void; onDone: () => void; onError: (error: string) => void;
   onStatus?: (text: string) => void;
+  onConversationId?: (id: string) => void;
 }) {
   const resp = await fetch(AGENT_URL, {
     method: "POST",
@@ -53,7 +55,7 @@ async function streamChat({
       "Content-Type": "application/json",
       Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}`,
     },
-    body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt, tradingMode }),
+    body: JSON.stringify({ messages, strategies, model, temperature, systemPrompt, tradingMode, conversationId }),
   });
   if (!resp.ok) { const err = await resp.json().catch(() => ({ error: "Unknown error" })); onError(err.error || `Error ${resp.status}`); return; }
   if (!resp.body) { onError("No response body"); return; }
@@ -75,6 +77,7 @@ async function streamChat({
       try {
         const p = JSON.parse(jsonStr);
         if (p.type === "status") { onStatus?.(p.text); continue; }
+        if (p.type === "conversation_id") { onConversationId?.(p.conversationId); continue; }
         const c = p.choices?.[0]?.delta?.content; if (c) onDelta(c);
       } catch { buffer = line + "\n" + buffer; break; }
     }
@@ -97,6 +100,8 @@ export function AgentPanel({ mode = "paper", onOpenMarket }: { mode?: "paper" | 
   const [loadingModels, setLoadingModels] = useState(false);
   const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0].id);
   const [temperature, setTemperature] = useState([0.3]);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [systemPrompt, setSystemPrompt] = useState(
     `You are the orchestration layer of an autonomous trading system on Kalshi prediction markets. You have two roles:
 
@@ -149,6 +154,34 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
 
   useEffect(() => { loadModels(); }, [loadModels]);
 
+  // Resolve current user and restore prior conversation on mount
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      const uid = data.user?.id ?? null;
+      setUserId(uid);
+      if (!uid) return;
+
+      const savedConvId = localStorage.getItem(`conversation_${uid}`);
+      if (!savedConvId) return;
+      setConversationId(savedConvId);
+
+      supabase
+        .from("chat_messages")
+        .select("role, content, created_at")
+        .eq("conversation_id", savedConvId)
+        .order("created_at", { ascending: true })
+        .limit(50)
+        .then(({ data: msgs }) => {
+          if (!msgs || msgs.length === 0) return;
+          // Only restore if chat is currently showing just the default greeting (avoid overwriting live session)
+          if (chat.messages.length > 1) return;
+          const restored = msgs.map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
+          chat.setMessages(restored);
+        });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
@@ -166,10 +199,15 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
       messages: messagesForApi.slice(1).slice(-12),
       strategies: activeStrategies.map(s => ({ id: s.id, name: s.name, instructions: s.instructions })),
       model: selectedModel, temperature: temperature[0], systemPrompt, tradingMode: mode,
+      conversationId,
       onDelta: (chunk) => { assistantSoFar += chunk; chat.upsertAssistant(assistantSoFar); },
       onDone: () => { chat.setLoading(false); setStatusText(""); },
       onError: (err) => { chat.upsertAssistant(`Error: ${err}`); chat.setLoading(false); setStatusText(""); },
       onStatus: (text) => setStatusText(text),
+      onConversationId: (id) => {
+        setConversationId(id);
+        if (userId) localStorage.setItem(`conversation_${userId}`, id);
+      },
     });
   };
 
