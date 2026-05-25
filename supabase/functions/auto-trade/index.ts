@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { langfuseIngest, traceEvent, generationEvent } from "../_shared/langfuse.ts";
+import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
@@ -1428,6 +1428,28 @@ async function runS005WeatherEdge(
     .filter((s: any) => (s.edge_cents ?? 0) >= AUTO_QUALIFY_EDGE)
     .map((sig: any) => ({ sig, qualified: true, reason: `auto-qualified: edge ${sig.edge_cents}¢ >= ${AUTO_QUALIFY_EDGE}¢` }));
   const needsLlm = candidates.filter((s: any) => (s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE);
+
+  // Emit a Langfuse span for every auto-qualified signal so Langfuse shows
+  // the qualify decision even when no LLM call is made. Without this, traces
+  // have 0 observations and Langfuse cannot render cost/usage dashboards.
+  if (autoQualified.length > 0 && runId) {
+    const now = new Date().toISOString();
+    langfuseIngest(autoQualified.map(({ sig, reason }) => spanEvent({
+      traceId: runId,
+      name: `auto-qualify-s005`,
+      startTime: now,
+      metadata: {
+        ticker: sig.ticker,
+        edge_cents: sig.edge_cents,
+        true_probability: sig.true_probability,
+        implied_probability: sig.implied_probability,
+        reason,
+        qualified: true,
+        strategy_id: strategy.id,
+        mode,
+      },
+    })));
+  }
 
   const qualifyResults = needsLlm.length > 0 ? await Promise.all(
     needsLlm.map(async (sig: any) => {

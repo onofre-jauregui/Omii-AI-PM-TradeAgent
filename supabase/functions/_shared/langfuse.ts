@@ -1,4 +1,4 @@
-const LANGFUSE_HOST = Deno.env.get("LANGFUSE_HOST") ?? "https://cloud.langfuse.com";
+const LANGFUSE_HOST = Deno.env.get("LANGFUSE_HOST") ?? Deno.env.get("LANGFUSE_BASE_URL") ?? "https://cloud.langfuse.com";
 const PUBLIC_KEY = Deno.env.get("LANGFUSE_PUBLIC_KEY") ?? "";
 const SECRET_KEY = Deno.env.get("LANGFUSE_SECRET_KEY") ?? "";
 
@@ -26,12 +26,20 @@ export function langfuseIngest(events: object[]): void {
   }).catch(() => {});
 }
 
+// userId is promoted to a top-level field in the Langfuse trace body so the
+// "Users" dashboard and per-user consumption views work correctly.
 export function traceEvent(traceId: string, name: string, meta: Record<string, unknown> = {}) {
+  const { userId, ...metadata } = meta as { userId?: string; [k: string]: unknown };
   return {
     id: crypto.randomUUID(),
     type: "trace-create",
     timestamp: new Date().toISOString(),
-    body: { id: traceId, name, metadata: meta },
+    body: {
+      id: traceId,
+      name,
+      ...(userId ? { userId } : {}),
+      metadata,
+    },
   };
 }
 
@@ -68,6 +76,32 @@ export function generationEvent(opts: {
             unit: "TOKENS",             // required for Langfuse cost calculation
           }
         : undefined,
+      metadata: opts.metadata,
+    },
+  };
+}
+
+// Span observation for non-LLM decisions (auto-qualify, rule-based filters, etc.)
+// Appears in the Langfuse trace timeline so every qualify decision is visible
+// even when no LLM call is made.
+export function spanEvent(opts: {
+  traceId: string;
+  name: string;
+  startTime: string;
+  endTime?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return {
+    id: crypto.randomUUID(),
+    type: "observation-create",
+    timestamp: new Date().toISOString(),
+    body: {
+      id: crypto.randomUUID(),
+      traceId: opts.traceId,
+      type: "SPAN",
+      name: opts.name,
+      startTime: opts.startTime,
+      endTime: opts.endTime ?? new Date().toISOString(),
       metadata: opts.metadata,
     },
   };

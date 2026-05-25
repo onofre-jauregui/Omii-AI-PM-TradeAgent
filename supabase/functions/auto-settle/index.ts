@@ -243,17 +243,26 @@ serve(async (req) => {
             outcome === "win" ? 1 : 0,
             `pnl: $${(Math.round(pnl * 100) / 100).toFixed(2)} on ${ticker}`,
           )]);
+          // Confirmation row so we can verify scores are firing from the DB
+          supabase.from("compliance_log").insert({
+            event_type: "langfuse_score_sent",
+            severity: "info",
+            message: `Langfuse score: ${outcome} · pnl=$${(Math.round(pnl * 100) / 100).toFixed(2)} · ${ticker}`,
+            trade_id: t.id,
+            metadata: { trace_id: t.trace_id, outcome, pnl: Math.round(pnl * 100) / 100 },
+          }).then(() => {}).catch(() => {});
         }
 
         // 4b. Write outcome back to the originating signal so param_sweep
         //     and signal_quality backtest modes have real win-rate data.
         //     Match: same ticker, signal created before this trade was placed.
         if (outcome !== "void") {
+          const tradeUserId = t.user_id ?? null;
           const { data: sig } = await supabase
             .from("signals")
             .select("id")
             .eq("ticker", ticker)
-            .is("user_id", null)
+            .or(tradeUserId ? `user_id.is.null,user_id.eq.${tradeUserId}` : "user_id.is.null")
             .lte("created_at", t.created_at || new Date().toISOString())
             .order("created_at", { ascending: false })
             .limit(1)
