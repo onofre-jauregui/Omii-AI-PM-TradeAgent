@@ -1162,11 +1162,7 @@ async function runS002LongshotBias(
       volume: sig.volume,
       days_to_close: sig.days_to_close,
       win_streak: winStreak,
-      performance_context: winStreak >= 3
-        ? `Agent is on a ${winStreak}-day winning streak — momentum is strong, continue qualifying sound setups.`
-        : winStreak === 0
-        ? "No active win streak — last closed day was not profitable or no recent settlements. Be disciplined: only QUALIFY setups with clear structural edge."
-        : `Agent is on day ${winStreak} of a positive run — stay selective, protect the streak.`,
+      performance_context: `Current win streak: ${winStreak} day(s). Tracked for instrumentation only — base your QUALIFY/REJECT decision purely on structural edge criteria below.`,
       note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
     });
 
@@ -1453,11 +1449,7 @@ async function runS005WeatherEdge(
         location: sig.metadata?.location,
         city_history: cityHistoryNote,
         win_streak: winStreak,
-        performance_context: winStreak >= 3
-          ? `Agent is on a ${winStreak}-day winning streak — momentum is strong, continue qualifying sound setups.`
-          : winStreak === 0
-          ? "No active win streak — last closed day was not profitable or no recent settlements. Be disciplined: only QUALIFY setups with clear structural edge."
-          : `Agent is on day ${winStreak} of a positive run — stay selective, protect the streak.`,
+        performance_context: `Current win streak: ${winStreak} day(s). Tracked for instrumentation only — base your QUALIFY/REJECT decision purely on structural edge criteria below.`,
         ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
         ...(memoryBlock ? { strategy_memory: memoryBlock } : {}),
         note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
@@ -1584,6 +1576,11 @@ function kellySize(trueP: number, marketP: number, bankroll: number, fraction = 
 /**
  * Build a focused qualify/reject prompt for the LLM.
  * Returns exactly one decision: QUALIFY or REJECT + one-sentence reason.
+ *
+ * INTENTIONAL: win_streak appears in context for observability/audit purposes only.
+ * Do NOT add decision rules tied to streak value here.
+ * Performance-aware gating belongs in the Phase 2 Sharpe regime layer,
+ * not in a consecutive-day counter that creates loss-aversion bias.
  */
 function buildQualifyPrompt(strategyName: string, context: Record<string, any>, lessons: string[] = []): string {
   const ctx = Object.entries(context)
@@ -1596,20 +1593,11 @@ function buildQualifyPrompt(strategyName: string, context: Record<string, any>, 
 
   return `You are a trading judge for the "${strategyName}" strategy on Kalshi prediction markets.
 
-Your primary objective is to grow the consecutive-day winning streak (win_streak in context). Every calendar day that ends with net positive settled P&L increments the streak; any losing day or any day with no settlements resets it to zero. The streak is your score — your job is to keep it growing.
-
 Review this specific setup and decide: QUALIFY or REJECT.
 
 Setup details:
 ${ctx}
 ${lessonsSection}
-Streak-aware decision rules:
-- win_streak = 0 (broken or never started): be selective. Only QUALIFY setups with clear, unambiguous structural edge. Rebuilding requires a clean win — do not take coin-flip setups to "do something."
-- win_streak 1–4: protect the run. Reject borderline setups where the edge is ambiguous or data quality is uncertain.
-- win_streak ≥ 5: the streak has compounding signal value. Apply maximum discipline — do not risk a multi-day streak on a marginal setup.
-- A REJECT that preserves capital is always better than a QUALIFY that loses and resets the streak.
-- Never QUALIFY just to generate activity. Inactivity on a bad day is the correct move.
-
 Rules for QUALIFY:
 - The opportunity is genuine and matches the strategy's intent
 - Market is liquid enough to fill at the given price
