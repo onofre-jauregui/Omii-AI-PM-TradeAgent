@@ -8,6 +8,7 @@ import {
   type WeatherForecast,
   WEATHER_LOCATIONS,
 } from "../_shared/weather.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 // ─── Weather market cache sync ────────────────────────────────────────────────
 
@@ -397,6 +398,23 @@ serve(async (req) => {
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("weather-signal fatal error:", errMsg);
+
+    // S-005 signals stop flowing silently without this alert — auto-trade will
+    // return "no weather signals" which looks identical to a normal low-edge day.
+    try {
+      await supabase.from("compliance_log").insert({
+        event_type: "weather_signal_crash",
+        severity: "critical",
+        message: `weather-signal CRASHED: ${errMsg}`,
+      });
+    } catch { /* don't let the error handler throw */ }
+
+    await sendTelegramAlert(
+      `🚨 <b>[TradeAgent] weather-signal CRASHED</b>\n` +
+      `S-005 weather signals are not being generated — auto-trade will silently skip weather entries.\n` +
+      `Error: ${errMsg.slice(0, 300)}`
+    ).catch(() => {});
+
     return new Response(
       JSON.stringify({ error: errMsg }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }

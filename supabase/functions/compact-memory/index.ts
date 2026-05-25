@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
  * compact-memory: Compresses the agent's memory to save tokens.
@@ -131,16 +132,16 @@ serve(async (req) => {
 
     const { data: activeMemories } = await supabase
       .from("agent_memory")
-      .select("id, title, content, summary, memory_type, tags, confidence, strategy_id, related_trade_ids, confirmations, contradictions, created_at")
+      .select("id, user_id, title, content, summary, memory_type, tags, confidence, strategy_id, related_trade_ids, confirmations, contradictions, created_at")
       .eq("is_active", true)
       .is("merged_into", null) // not already merged
       .order("confidence", { ascending: false });
 
     if (activeMemories && activeMemories.length > 0) {
-      // Group by (memory_type, strategy_id)
+      // Group by (user_id, memory_type, strategy_id) — never merge across user boundaries
       const groups: Record<string, typeof activeMemories> = {};
       for (const mem of activeMemories) {
-        const key = `${mem.memory_type}::${mem.strategy_id || "global"}`;
+        const key = `${mem.user_id || "platform"}::${mem.memory_type}::${mem.strategy_id || "global"}`;
         if (!groups[key]) groups[key] = [];
         groups[key].push(mem);
       }
@@ -291,9 +292,27 @@ serve(async (req) => {
     });
 
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("compact-memory error:", e);
+
+    try {
+      await supabase.from("compliance_log").insert({
+        event_type: "compact_memory_error",
+        severity: "critical",
+        message: `compact-memory CRASHED: ${errMsg}`,
+        metadata: { stack: e instanceof Error ? e.stack : undefined, partial_results: results },
+      });
+    } catch { /* don't let the error handler throw */ }
+
+    // Unbounded memory growth degrades signal quality and inflates LLM costs.
+    await sendTelegramAlert(
+      `🚨 <b>[TradeAgent] compact-memory CRASHED</b>\n` +
+      `Agent memory is no longer being compressed — context costs will grow until this is fixed.\n` +
+      `Error: ${errMsg.slice(0, 300)}`
+    ).catch(() => {});
+
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error", partial_results: results }),
+      JSON.stringify({ error: errMsg, partial_results: results }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

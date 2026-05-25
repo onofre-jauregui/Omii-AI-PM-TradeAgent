@@ -195,6 +195,14 @@ serve(async (req) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("health-check error:", msg);
+    // The watchdog must never fail silently — if health-check crashes, all monitoring is blind.
+    try {
+      await sendTelegram(
+        telegramToken!,
+        telegramChatId!,
+        `🚨 <b>[TradeAgent] Health-Check CRASHED</b>\nThe monitoring watchdog threw an unhandled error — all alerts are paused until this is resolved.\nError: ${msg.slice(0, 200)}`
+      );
+    } catch { /* if Telegram itself is down, at minimum the 500 response will surface in Supabase logs */ }
     return json({ error: msg }, 500);
   }
 });

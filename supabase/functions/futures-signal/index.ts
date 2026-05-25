@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
  * futures-signal: Fed funds futures vs Kalshi KXFED cross-market oracle.
@@ -176,14 +177,34 @@ serve(async (req) => {
   }
 
   if (kalshiMarkets.length === 0) {
+    // Count consecutive misses — alert on the 5th (fed markets missing for ~50 min is a data problem, not normal).
+    const fiftyMinAgo = new Date(Date.now() - 55 * 60 * 1000).toISOString();
+    const { count: missCount } = await supabase
+      .from("compliance_log")
+      .select("id", { count: "exact", head: true })
+      .eq("event_type", "futures_signal_run")
+      .eq("severity", "warning")
+      .gte("created_at", fiftyMinAgo);
+
+    const consecutiveMisses = (missCount ?? 0) + 1;
+
     await supabase.from("compliance_log").insert({
       event_type: "futures_signal_run",
       severity: "warning",
-      message: "futures-signal: No open KXFED markets found on Kalshi",
-      metadata: { run_id: runId },
+      message: `futures-signal: No open KXFED markets found on Kalshi (miss #${consecutiveMisses})`,
+      metadata: { run_id: runId, consecutive_misses: consecutiveMisses },
     });
+
+    if (consecutiveMisses === 5) {
+      await sendTelegramAlert(
+        `⚠️ <b>[TradeAgent] Futures Signal Feed Down</b>\n` +
+        `No open KXFED markets on Kalshi for ${consecutiveMisses} consecutive runs (~50 min).\n` +
+        `Fed rate signals are not flowing. Check Kalshi API and market availability.`
+      ).catch(() => {});
+    }
+
     return new Response(
-      JSON.stringify({ success: false, reason: "No KXFED markets on Kalshi" }),
+      JSON.stringify({ success: false, reason: "No KXFED markets on Kalshi", consecutive_misses: consecutiveMisses }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

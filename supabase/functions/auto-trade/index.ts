@@ -192,7 +192,8 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
   }
   let streak = 0;
   const cursor = new Date(days[0] + "T12:00:00Z");
-  while (true) {
+  const MAX_STREAK = 200; // hard cap matching the 200-row query limit
+  while (streak < MAX_STREAK) {
     const key = cursor.toISOString().slice(0, 10);
     if (!byDay[key] || byDay[key] <= 0) break;
     streak++;

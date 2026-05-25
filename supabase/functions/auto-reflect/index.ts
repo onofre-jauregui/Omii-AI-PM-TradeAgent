@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
  * auto-reflect v2: Automated learning loop — Bayesian memory, Sharpe-based
@@ -135,7 +136,7 @@ serve(async (req) => {
 
     const { data: strategies } = await supabase
       .from("strategies")
-      .select("id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason");
+      .select("id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason, user_id");
 
     const strategyResults: any[] = [];
 
@@ -478,6 +479,7 @@ serve(async (req) => {
             message: `Failed to write lesson for trade ${trade.id} (${trade.ticker}): ${lessonInsertError.message}`,
             metadata: { trade_id: trade.id, ticker: trade.ticker, error: lessonInsertError },
           });
+          await sendTelegramAlert(`⚠️ <b>[TradeAgent] Learning Loop Error</b>\ntrade_lessons INSERT failed for ${trade.ticker}: ${lessonInsertError.message}`);
           continue;
         }
 
@@ -531,27 +533,48 @@ serve(async (req) => {
         lessonsWritten++;
       }
     } catch (lessonErr) {
-      console.error("Lesson writing error:", lessonErr);
+      const msg = lessonErr instanceof Error ? lessonErr.message : String(lessonErr);
+      console.error("Lesson writing error:", msg);
+      await supabase.from("compliance_log").insert({
+        event_type: "lesson_write_error",
+        severity: "error",
+        message: `Lesson writing loop crashed: ${msg}`,
+        metadata: { partial_results: results },
+      }).catch(() => {});
     }
 
     results.lessons_written = lessonsWritten;
 
     // ── 6. Memory Compaction ─────────────────────────────────────
+    // Cooldown: only run if last compaction was >30 minutes ago.
+    // Without this, auto-settle → auto-reflect → compact-memory chains
+    // on every settlement batch, doubling LLM spend on high-volume days.
     let compactionResult: any = null;
     try {
-      const compactResp = await fetch(
-        `${supabaseUrl}/functions/v1/compact-memory`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${supabaseKey}`,
-            "Content-Type": "application/json",
-          },
-          body: "{}",
+      const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      const { data: recentCompaction } = await supabase
+        .from("compliance_log")
+        .select("id")
+        .eq("event_type", "memory_compaction_run")
+        .gte("created_at", thirtyMinAgo)
+        .limit(1)
+        .maybeSingle();
+
+      if (!recentCompaction) {
+        const compactResp = await fetch(
+          `${supabaseUrl}/functions/v1/compact-memory`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${supabaseKey}`,
+              "Content-Type": "application/json",
+            },
+            body: "{}",
+          }
+        );
+        if (compactResp.ok) {
+          compactionResult = await compactResp.json();
         }
-      );
-      if (compactResp.ok) {
-        compactionResult = await compactResp.json();
       }
     } catch (e) {
       console.error("Compaction call failed:", e);
@@ -583,7 +606,17 @@ serve(async (req) => {
           }
         }
       }
-    } catch {}
+    } catch (backfillErr) {
+      // Bayesian confidence scores depend on settled PnL — silent failure here corrupts the learning loop.
+      const msg = backfillErr instanceof Error ? backfillErr.message : String(backfillErr);
+      console.error("memory_attribution backfill failed:", msg);
+      await supabase.from("compliance_log").insert({
+        event_type: "memory_attribution_backfill_error",
+        severity: "error",
+        message: `memory_attribution backfill failed: ${msg}`,
+        metadata: { partial_results: results },
+      }).catch(() => {});
+    }
 
     // ── 8. Log this run ──────────────────────────────────────────
     await supabase.from("compliance_log").insert({
@@ -598,19 +631,27 @@ serve(async (req) => {
     });
 
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("auto-reflect error:", e);
 
     try {
       await supabase.from("compliance_log").insert({
         event_type: "auto_reflect_error",
-        severity: "error",
-        message: `Auto-reflect v2 failed: ${e instanceof Error ? e.message : "Unknown error"}`,
+        severity: "critical",
+        message: `Auto-reflect v2 CRASHED: ${errMsg}`,
         metadata: { stack: e instanceof Error ? e.stack : undefined, partial_results: results },
       });
-    } catch {}
+    } catch { /* swallow — don't let the error handler throw */ }
+
+    // Agent memory and learning loop is stopped until this is fixed. Must alert immediately.
+    await sendTelegramAlert(
+      `🚨 <b>[TradeAgent] auto-reflect CRASHED</b>\n` +
+      `The learning loop is stopped — memory updates, lessons, and strategy health checks are not running.\n` +
+      `Error: ${errMsg.slice(0, 300)}`
+    ).catch(() => {});
 
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error", partial_results: results }),
+      JSON.stringify({ error: errMsg, partial_results: results }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

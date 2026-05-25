@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
  * settle-signals: Computes shadow PnL for all signals whose markets have resolved.
@@ -168,9 +169,16 @@ serve(async (req) => {
       await supabase.from("compliance_log").insert({
         event_type: "settle_signals_error",
         severity: "error",
-        message: `Settle signals failed: ${errMsg}`,
+        message: `settle-signals CRASHED: ${errMsg}`,
       });
-    } catch {}
+    } catch { /* don't let the error handler throw */ }
+
+    // Shadow PnL stops computing — Bayesian signal scores will stale out silently.
+    await sendTelegramAlert(
+      `⚠️ <b>[TradeAgent] settle-signals CRASHED</b>\n` +
+      `Signal PnL attribution is not updating — confidence scores will degrade over time.\n` +
+      `Error: ${errMsg.slice(0, 300)}`
+    ).catch(() => {});
 
     return new Response(JSON.stringify({ error: errMsg }), {
       status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
