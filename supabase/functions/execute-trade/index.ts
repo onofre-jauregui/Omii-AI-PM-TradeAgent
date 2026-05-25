@@ -392,7 +392,12 @@ serve(async (req) => {
     const kalshiResult = await kalshiResponse.json();
 
     if (!kalshiResponse.ok) {
-      // Order rejected by Kalshi
+      // Log full Kalshi error internally — never expose raw API responses to the client
+      const kalshiErrorDetail = kalshiResult.message || kalshiResult.error || JSON.stringify(kalshiResult);
+      console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
+        ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
+      });
+
       const { data: failedTrade } = await supabase.from("trades").insert({
         user_id: userId,
         ticker: resolvedTicker,
@@ -406,12 +411,12 @@ serve(async (req) => {
         exchange: "kalshi",
         order_type: resolvedOrderType,
         expiration_time: expirationTime || null,
-        notes: `Kalshi rejected: ${kalshiResult.message || kalshiResult.error || JSON.stringify(kalshiResult)}`,
+        notes: `Kalshi order rejected (status ${kalshiResponse.status})`,
       }).select().single();
 
       await logCompliance(supabase, userId, failedTrade?.id, "order_failed", "error",
-        `Kalshi order rejected: ${kalshiResult.message || "Unknown error"}`,
-        { kalshi_response: kalshiResult, payload: kalshiOrderPayload }
+        `Kalshi order rejected (status ${kalshiResponse.status}): ${kalshiErrorDetail}`,
+        { kalshi_status: kalshiResponse.status, kalshi_response: kalshiResult, payload: kalshiOrderPayload }
       );
 
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
@@ -424,7 +429,7 @@ serve(async (req) => {
 
       return new Response(JSON.stringify({
         success: false,
-        error: `Kalshi order rejected: ${kalshiResult.message || "Unknown error"}`,
+        error: "Trade execution failed. Please try again.",
         trade: failedTrade,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -516,7 +521,7 @@ serve(async (req) => {
     } catch {}
 
     return new Response(
-      JSON.stringify({ error: errorMsg }),
+      JSON.stringify({ error: "Trade execution failed. Please try again." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
