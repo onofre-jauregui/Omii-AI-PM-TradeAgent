@@ -29,6 +29,10 @@ const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
 const KALSHI_RETRY_DELAY_MS = 500; // single retry delay for Kalshi API calls
 const CIRCUIT_TRIP_THRESHOLD = 5; // consecutive post-retry Kalshi failures before circuit opens
 const CIRCUIT_WINDOW_MS = 10 * 60 * 1000; // 10 min — circuit auto-resets after this window
+const MIN_KALSHI_REQUEST_SPACING_MS = 100; // 10 req/sec max — stay well under Kalshi rate limits
+
+// Module-level throttle state — shared across all Kalshi calls within a single edge function invocation
+let lastKalshiRequestMs = 0;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -281,11 +285,21 @@ async function kalshiFetch(
   circuit: { failures: number; open: boolean }
 ): Promise<Response> {
   if (circuit.open) throw new Error("kalshi_circuit_open");
+
+  // Enforce minimum spacing between Kalshi requests — 100ms = 10 req/sec max
+  const now = Date.now();
+  const elapsed = now - lastKalshiRequestMs;
+  if (elapsed < MIN_KALSHI_REQUEST_SPACING_MS) {
+    await new Promise((r) => setTimeout(r, MIN_KALSHI_REQUEST_SPACING_MS - elapsed));
+  }
+  lastKalshiRequestMs = Date.now();
+
   const attempt = () => fetch(url, options);
   const res = await attempt();
   if (res.status === 429 || res.status >= 500) {
     const retryAfterMs = parseInt(res.headers.get("Retry-After") ?? "0", 10) * 1000;
     await new Promise((r) => setTimeout(r, Math.max(retryAfterMs, KALSHI_RETRY_DELAY_MS)));
+    lastKalshiRequestMs = Date.now();
     return attempt();
   }
   return res;

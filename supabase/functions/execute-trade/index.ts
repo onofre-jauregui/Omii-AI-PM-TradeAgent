@@ -11,6 +11,27 @@ function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
 }
 
+// ─── Per-User Rate Limiting ──────────────────────────────────
+
+async function checkRateLimit(supabase: any, userId: string, isPaper: boolean): Promise<boolean> {
+  const limit = isPaper ? 15 : 3;
+  const windowStart = new Date(Math.floor(Date.now() / 60000) * 60000).toISOString();
+
+  const { data, error } = await supabase.rpc("upsert_rate_limit", {
+    p_user_id: userId,
+    p_endpoint: "execute-trade",
+    p_window_start: windowStart,
+    p_limit: limit,
+  });
+
+  if (error) {
+    console.error("rate limit check error:", error.message);
+    return true; // fail open on rate limit DB error — don't block trades due to infra issue
+  }
+
+  return data === true;
+}
+
 // ─── Compliance Logging ──────────────────────────────────────
 
 async function logCompliance(
@@ -160,6 +181,23 @@ serve(async (req) => {
     const { userId, authenticated } = await resolveTenant(req, supabase, parsedBody);
 
     const tradeMode = (mode || "paper") as "paper" | "live";
+
+    // ── Per-User Rate Limiting ──
+    // Paper: 15 trades/min (data collection), Live: 3 trades/min (real money)
+    if (userId) {
+      const allowed = await checkRateLimit(supabase, userId, tradeMode === "paper");
+      if (!allowed) {
+        const limitLabel = tradeMode === "paper" ? "15" : "3";
+        await logCompliance(supabase, userId, null, "rate_limit_exceeded", "warning",
+          `Rate limit exceeded on execute-trade for user ${userId} (mode: ${tradeMode})`,
+          { endpoint: "execute-trade", mode: tradeMode, limit: limitLabel }
+        );
+        return new Response(
+          JSON.stringify({ error: `Rate limit exceeded. Maximum ${limitLabel} trades per minute.` }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
 
     // ── Subscription Entitlement Check ──
     // Paper trades are always allowed. Live trades require an active paid subscription.
