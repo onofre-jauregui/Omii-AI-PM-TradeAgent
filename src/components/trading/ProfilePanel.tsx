@@ -22,9 +22,24 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [profile, setProfile] = useState({
-    displayName: "Anon Trader", email: "", avatarUrl: "",
+    displayName: "", email: "", avatarUrl: "",
   });
   const [kalshiUsername, setKalshiUsername] = useState("");
+
+  // Seed display name + avatar from Google OAuth metadata the moment the component
+  // mounts — this fires synchronously from the cached session so there's no flash.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session?.user) return;
+      const meta = session.user.user_metadata ?? {};
+      setProfile(prev => ({
+        ...prev,
+        email: session.user.email ?? prev.email,
+        displayName: prev.displayName || meta.full_name || meta.name || "",
+        avatarUrl: prev.avatarUrl || meta.avatar_url || meta.picture || "",
+      }));
+    });
+  }, []);
   const [subscription, setSubscription] = useState<{ tier: string; status: string } | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -44,8 +59,9 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
     setProfile(prev => ({
       ...prev,
       email: userEmail ?? prev.email,
+      // DB value wins; fall back to what's already in state (Google metadata set by the useEffect above)
       displayName: prof?.display_name ?? prev.displayName,
-      avatarUrl: prof?.avatar_url ?? "",
+      avatarUrl: prof?.avatar_url ?? prev.avatarUrl,
     }));
     if (prof?.kalshi_username) setKalshiUsername(prof.kalshi_username);
     setSubscription(sub ?? { tier: "free", status: "inactive" });
