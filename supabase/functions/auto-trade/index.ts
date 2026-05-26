@@ -467,13 +467,18 @@ serve(async (req) => {
 
     // Load all active user strategies. Paper users run free; live users need a subscription
     // (enforced by checkEntitlement below). System strategies (user_id=null) are legacy/demo only.
-    const [{ data: systemStrategies }, { data: userStrategies }] = await Promise.all([
+    // Guard: only run strategies whose owner has completed onboarding — prevents seeded/fake
+    // accounts from consuming compute and generating trades under a foreign user_id.
+    const [{ data: systemStrategies }, { data: userStrategies }, { data: onboardedProfiles }] = await Promise.all([
       supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
         .eq("active", true).is("user_id", null).order("id"),
       supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
         .eq("active", true).not("user_id", "is", null).order("id"),
+      supabase.from("profiles").select("id").eq("onboarding_completed", true),
     ]);
-    const strategies = [...(systemStrategies || []), ...(userStrategies || [])];
+    const onboardedIds = new Set((onboardedProfiles || []).map((p: any) => p.id));
+    const eligibleUserStrategies = (userStrategies || []).filter((s: any) => onboardedIds.has(s.user_id));
+    const strategies = [...(systemStrategies || []), ...eligibleUserStrategies];
 
     // Update the Langfuse trace with userId now that we know the active users.
     // Uses the first non-null user_id across strategies; system-only runs stay anonymous.
