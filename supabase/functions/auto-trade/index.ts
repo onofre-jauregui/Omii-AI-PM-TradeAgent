@@ -1121,13 +1121,16 @@ async function runS002LongshotBias(
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   // Longshots only: YES ask 8-11¢. We buy NO on these markets.
+  // Volume floor lowered to 100 — longshot bias is structural (behavioral overpricing of
+  // low-probability YES), not volume-dependent. 200 was borrowed from equity options and
+  // excluded too much of the Kalshi market. 100 ensures spread is tight enough for clean fills.
   const { data: rawSignals } = await applySignalTenantFilter(
     supabase
       .from("signals")
       .select("*")
       .lt("yes_ask", 12)
       .gte("yes_ask", 8)
-      .gte("volume", 200)
+      .gte("volume", 100)
       .gte("days_to_close", 0.08)
       .lte("days_to_close", 30)
       .gte("created_at", twoHoursAgo)
@@ -1165,7 +1168,7 @@ async function runS002LongshotBias(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No longshot signals (yes_ask 8-11¢, vol≥200, 2h-30d, non-sports/ETH)",
+      details: "No longshot signals (yes_ask 8-11¢, vol≥100, 2h-30d, non-sports/ETH)",
     };
   }
 
@@ -1425,32 +1428,76 @@ async function runS005WeatherEdge(
     };
   }
 
-  // Dedup: skip tickers already held AND skip cities already held (one leg per city per run).
-  // Prevents double-exposure when both a "T73" and "B70.5" signal exist for the same city.
+  // Dedup: skip exact tickers already held.
+  // City+date aware: KXHIGHLAX-26MAY25 and KXHIGHLAX-26MAY26 are independent bets
+  // (different days' temperatures). Allow up to MAX_BRACKETS_PER_CITY_DATE brackets per
+  // city+date combination — but require higher edge for 2nd and 3rd brackets to ensure
+  // each additional leg has a strong independent reason.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
     .is("exit_reason", null)
     .is("settled_at", null);
+
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
-  const openCities = new Set(
-    (openTrades || []).map((t: any) => {
-      const m = (t.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
-      return m ? m[1] : null;
-    }).filter(Boolean)
-  );
-  const seenCities = new Set<string>();
+
+  // Count open brackets per city+date (e.g. "LAX-26MAY26": 1 open)
+  const openCityDateCounts = new Map<string, number>();
+  for (const t of openTrades || []) {
+    const m = (t.ticker || "").match(/^KXHIGH([A-Z]{2,4})-(\d{2}[A-Z]{3}\d{2})-/);
+    if (m) {
+      const key = `${m[1]}-${m[2]}`;
+      openCityDateCounts.set(key, (openCityDateCounts.get(key) || 0) + 1);
+    }
+  }
+
+  // Within this run, track how many new brackets we've selected per city+date
+  const seenCityDateCounts = new Map<string, number>();
+  const MAX_BRACKETS_PER_CITY_DATE = 3;
+  const BRACKET_2_MIN_EDGE = 20; // ¢ — need meaningful edge to add a 2nd bracket
+  const BRACKET_3_MIN_EDGE = 30; // ¢ — high conviction required for a 3rd bracket
+
+  const dedupLog: string[] = [];
   const deduped = signals.filter((s: any) => {
-    if (openTickers.has(s.ticker)) return false;
-    const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
-    if (cityMatch) {
-      if (openCities.has(cityMatch[1])) return false;
-      if (seenCities.has(cityMatch[1])) return false;
-      seenCities.add(cityMatch[1]);
+    if (openTickers.has(s.ticker)) {
+      dedupLog.push(`${s.ticker}: exact ticker already held`);
+      return false;
+    }
+    const m = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-(\d{2}[A-Z]{3}\d{2})-/);
+    if (m) {
+      const key = `${m[1]}-${m[2]}`;
+      const existingOpen = openCityDateCounts.get(key) || 0;
+      const seenThisRun = seenCityDateCounts.get(key) || 0;
+      const totalBrackets = existingOpen + seenThisRun;
+      if (totalBrackets >= MAX_BRACKETS_PER_CITY_DATE) {
+        dedupLog.push(`${s.ticker}: city+date ${key} already at max ${MAX_BRACKETS_PER_CITY_DATE} brackets`);
+        return false;
+      }
+      if (totalBrackets === 1 && (s.edge_cents ?? 0) < BRACKET_2_MIN_EDGE) {
+        dedupLog.push(`${s.ticker}: 2nd bracket for ${key} needs edge>=${BRACKET_2_MIN_EDGE}¢, got ${s.edge_cents}¢`);
+        return false;
+      }
+      if (totalBrackets === 2 && (s.edge_cents ?? 0) < BRACKET_3_MIN_EDGE) {
+        dedupLog.push(`${s.ticker}: 3rd bracket for ${key} needs edge>=${BRACKET_3_MIN_EDGE}¢, got ${s.edge_cents}¢`);
+        return false;
+      }
+      seenCityDateCounts.set(key, seenThisRun + 1);
     }
     return true;
   });
+
+  // Log dedup decisions for monitoring
+  if (dedupLog.length > 0) {
+    try {
+      await supabase.from("compliance_log").insert({
+        event_type: "s005_dedup_decisions",
+        severity: "info",
+        message: `S-005 dedup filtered ${signals.length - deduped.length}/${signals.length} signals`,
+        metadata: { decisions: dedupLog, run_id: runId },
+      });
+    } catch { /* non-critical logging */ }
+  }
 
   if (deduped.length === 0) {
     return {
@@ -1459,7 +1506,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `All ${signals.length} signal(s) already have open positions — skipping`,
+      details: `All ${signals.length} signal(s) already have open positions — skipping. Dedup: ${dedupLog.slice(0, 3).join("; ")}`,
     };
   }
 
@@ -1618,6 +1665,26 @@ async function runS005WeatherEdge(
         note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
       });
       const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id, supabase);
+      // Log every qualify/reject decision for 24h monitoring
+      try {
+        await supabase.from("compliance_log").insert({
+          event_type: "s005_qualify_decision",
+          severity: "info",
+          message: `S-005 ${qualified ? "QUALIFY" : "REJECT"} ${sig.ticker} — ${reason}`,
+          metadata: {
+            ticker: sig.ticker,
+            qualified,
+            reason,
+            edge_cents: sig.edge_cents,
+            true_probability: sig.true_probability,
+            implied_probability: sig.implied_probability,
+            city: sig.metadata?.location,
+            city_history: cityWinLoss.get((sig.metadata?.location ?? "").toLowerCase()),
+            run_id: runId,
+            mode,
+          },
+        });
+      } catch { /* non-critical logging */ }
       return { sig, qualified, reason };
     })
   ) : [];
