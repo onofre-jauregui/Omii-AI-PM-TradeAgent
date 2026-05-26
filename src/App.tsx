@@ -54,13 +54,13 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
   async function handleGoogleLogin() {
     setLoggingIn(true);
     setLoginError("");
-    // Save destination so AppRoutes can redirect back after OAuth return
-    sessionStorage.setItem("admin_redirect", window.location.pathname);
+    // Encode the current path in redirectTo so Supabase lands back here after OAuth
+    const redirectTo = window.location.origin + window.location.pathname;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: window.location.origin },
+      options: { redirectTo },
     });
-    if (error) { sessionStorage.removeItem("admin_redirect"); setLoginError(error.message); setLoggingIn(false); }
+    if (error) { setLoginError(error.message); setLoggingIn(false); }
   }
 
   async function handleLogin(e: React.FormEvent) {
@@ -202,14 +202,6 @@ function AppRoutes() {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      // After Google OAuth return, restore the admin page the user was trying to reach
-      if (_event === "SIGNED_IN") {
-        const pending = sessionStorage.getItem("admin_redirect");
-        if (pending) {
-          sessionStorage.removeItem("admin_redirect");
-          window.location.replace(pending);
-        }
-      }
     });
 
     return () => subscription.unsubscribe();
