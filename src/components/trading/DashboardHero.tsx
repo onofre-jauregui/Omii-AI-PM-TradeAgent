@@ -5,6 +5,24 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchKalshiMarkets } from "@/lib/kalshiApi";
 
+// Kalshi markets cache — shared across renders, refreshed every 15 min
+let kalshiMarketsCache: { data: any[]; ts: number } | null = null;
+let kalshiMarketsFetch: Promise<any[]> | null = null;
+async function getCachedKalshiMarkets(): Promise<any[]> {
+  const now = Date.now();
+  if (kalshiMarketsCache && now - kalshiMarketsCache.ts < 15 * 60 * 1000) {
+    return kalshiMarketsCache.data;
+  }
+  if (!kalshiMarketsFetch) {
+    kalshiMarketsFetch = fetchKalshiMarkets(200).then(data => {
+      kalshiMarketsCache = { data, ts: Date.now() };
+      kalshiMarketsFetch = null;
+      return data;
+    }).catch(() => { kalshiMarketsFetch = null; return []; });
+  }
+  return kalshiMarketsFetch;
+}
+
 interface ChartPoint { date: string; value: number; }
 
 interface HeroStats {
@@ -124,9 +142,11 @@ function AlertChip({
 export function DashboardHero({
   mode,
   onNavigate,
+  userId: userIdProp,
 }: {
   mode?: "paper" | "live";
   onNavigate?: (tab: string) => void;
+  userId?: string;
 }) {
   const loadIdRef = useRef(0); // cancels stale concurrent loads
   const [stats, setStats] = useState<HeroStats>({
@@ -153,10 +173,10 @@ export function DashboardHero({
     const todayISO = todayStart.toISOString();
     const MAY_START = "2026-04-22T00:00:00.000Z";
 
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id;
+    // Use prop if available — avoids a network round-trip on every load
+    const userId = userIdProp ?? (await supabase.auth.getUser()).data.user?.id;
 
-    const [settledRes, openRes, placedTodayRes, strategiesRes, marketsRes, lastPlacedRes] = await Promise.allSettled([
+    const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
         .from("trades")
@@ -185,7 +205,6 @@ export function DashboardHero({
         .from("strategies")
         .select("starting_balance")
         .eq("user_id", userId ?? ""),
-      fetchKalshiMarkets(200),
       // Most recently SETTLED trade — "Last settled" chip aligns with streak metric
       supabase
         .from("trades")
@@ -200,8 +219,10 @@ export function DashboardHero({
     const openTrades = openRes.status === "fulfilled" ? (openRes.value.data ?? []) : [];
     const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
     const strategies = strategiesRes.status === "fulfilled" ? (strategiesRes.value.data ?? []) : [];
-    const markets = marketsRes.status === "fulfilled" ? marketsRes.value : [];
     const lastPlaced = lastPlacedRes.status === "fulfilled" ? (lastPlacedRes.value.data?.[0]?.settled_at ?? null) : null;
+
+    // Kalshi markets loaded from cache (non-blocking — won't delay hero render)
+    const markets = kalshiMarketsCache?.data ?? [];
 
     // Starting balance from DB — what was allocated when strategies were set up
     const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
@@ -299,7 +320,7 @@ export function DashboardHero({
       chartPoints,
       loading: false,
     });
-  }, [mode]);
+  }, [mode, userIdProp]);
 
   useEffect(() => {
     load();
@@ -309,6 +330,14 @@ export function DashboardHero({
       .subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [load]);
+
+  // Lazy-load Kalshi markets after initial render — primes cache, then re-runs load()
+  // so marketsClosingToday is computed without blocking the hero's first paint.
+  useEffect(() => {
+    getCachedKalshiMarkets().then(markets => {
+      if (markets.length > 0) load();
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;

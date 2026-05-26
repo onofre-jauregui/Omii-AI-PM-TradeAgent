@@ -231,7 +231,7 @@ const Index = () => {
           {/* ── Dashboard ──────────────────────────────────────────── */}
           {activeTab === "dashboard" && (
             <div className="space-y-6 apple-reveal">
-              <DashboardHero mode={mode} onNavigate={handleNavigate} />
+              <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
               <StrategyPerformance mode={mode} />
               <PortfolioOverview mode={mode} />
               <TradeLog filterMode={mode} />
