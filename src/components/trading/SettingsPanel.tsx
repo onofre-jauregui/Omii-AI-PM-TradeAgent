@@ -33,6 +33,7 @@ interface AIModel { id: string; name: string; provider: string; providerLabel: s
 
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string)?.trim() ?? "";
 const SAVE_KALSHI_KEY_URL = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
+const SAVE_AI_KEY_URL = `${SUPABASE_URL}/functions/v1/save-ai-key`;
 
 function StatusBadge({ saved }: { saved: boolean }) {
   return saved ? (
@@ -77,12 +78,24 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   const [phone, setPhone] = useState("");
   const [channel, setChannel] = useState<"email" | "sms" | "both">("email");
 
+  // Maps camelCase UI state to the snake_case keys stored in the DB.
+  // loadAll reads snake_case; without this, every page reload resets all prefs.
+  function toDbPrefs(notifs: typeof DEFAULT_NOTIFS, ch: string) {
+    return {
+      channel:         ch,
+      trade_executed:  notifs.tradeExecuted,
+      position_closed: notifs.positionClosed,
+      stop_loss_hit:   notifs.stopLossHit,
+      daily_summary:   notifs.dailySummary,
+      agent_alerts:    notifs.agentAlerts,
+    };
+  }
+
   const updateNotif = (key: string, value: boolean | string) => {
     setNotifications(prev => {
       const next = { ...prev, [key]: value };
       if (userId) {
-        const prefs = { channel, ...next };
-        supabase.from("profiles").update({ notification_prefs: prefs }).eq("id", userId);
+        supabase.from("profiles").update({ notification_prefs: toDbPrefs(next, channel) }).eq("id", userId);
       }
       return next;
     });
@@ -91,8 +104,7 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   const handleChannelChange = (next: "email" | "sms" | "both") => {
     setChannel(next);
     if (userId) {
-      const prefs = { ...notifications, channel: next };
-      supabase.from("profiles").update({ notification_prefs: prefs }).eq("id", userId);
+      supabase.from("profiles").update({ notification_prefs: toDbPrefs(notifications, next) }).eq("id", userId);
     }
   };
 
