@@ -26,6 +26,7 @@ export function RiskControlsPanel() {
     defaultOrderType:  "limit",
     allocatedCapital:  [500],
   });
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
@@ -88,6 +89,7 @@ export function RiskControlsPanel() {
         allocatedCapital: [data.allocated_capital ?? 500],
       });
     }
+    setLoaded(true);
   }, []);
 
   useEffect(() => { loadAll(); loadRiskState(); }, [loadAll, loadRiskState]);
@@ -311,7 +313,14 @@ export function RiskControlsPanel() {
         </span>
       </div>
 
-      <div className="px-5 py-5 space-y-5">
+      {!loaded && (
+        <div className="px-5 py-8 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading your settings…
+        </div>
+      )}
+
+      <div className={`px-5 py-5 space-y-5 ${!loaded ? "opacity-0 pointer-events-none h-0 overflow-hidden" : ""}`}>
         <div className="grid sm:grid-cols-2 gap-6">
           <div className="space-y-5">
             {[
@@ -389,7 +398,7 @@ export function RiskControlsPanel() {
       </div>
 
       <div className="px-5 pb-5">
-        <Button className="rounded-full gap-2 text-sm" onClick={handleSave} disabled={saving}>
+        <Button className="rounded-full gap-2 text-sm" onClick={handleSave} disabled={saving || !loaded}>
           {saving             ? <Loader2 className="h-4 w-4 animate-spin" /> :
            saveStatus === "success" ? <CheckCircle className="h-4 w-4" /> :
            saveStatus === "error"   ? <AlertCircle className="h-4 w-4" /> :
