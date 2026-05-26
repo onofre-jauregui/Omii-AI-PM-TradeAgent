@@ -3,19 +3,28 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 
 /**
- * health-check: Monitors the trading agent and alerts via Telegram when:
- *   1. No trades placed in SILENCE_HOURS (default 4h) while strategies are active
- *   2. Win rate collapses (last 20 settled trades < 70%)
- *   3. A strategy has been auto-suspended
+ * health-check: Monitors the trading agent and alerts via Telegram.
  *
- * Triggered by pg_cron every hour. Also callable manually for diagnostics.
+ * Deduplication: each alert type has a fingerprint (captures what condition
+ * is detected) and a cooldown window. An alert only fires if the same
+ * fingerprint has NOT been sent within the cooldown period. This prevents
+ * hourly spam for persistent conditions while still paging on new ones.
+ *
+ * Alert types and their re-alert cadence:
+ *   trading_silence   — once per 4h bucket (re-alerts at 8h, 12h, 16h…)
+ *   win_rate_collapse — once per unique W/L count per 24h
+ *   volume_spike      — once per 1h
+ *   blocked_series    — once per unique ticker set per 1h
+ *   strategy_suspended — once per unique strategy set per 6h
+ *   system_errors     — once per unique error message per 2h
+ *   rate_limits       — once per unique series set per 2h
  */
 
 const SILENCE_HOURS = 4;
 const WIN_RATE_FLOOR = 0.70;
 const WIN_RATE_SAMPLE = 20;
-const VOLUME_SPIKE_MULTIPLIER = 3;   // alert if last-hour trades > 3x prior-day hourly avg
-const BLOCKED_SERIES = ["KXETH"];    // series that must never appear in trades
+const VOLUME_SPIKE_MULTIPLIER = 3;
+const BLOCKED_SERIES = ["KXETH"];
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -34,6 +43,27 @@ async function sendTelegram(token: string, chatId: string, text: string) {
   return resp.ok;
 }
 
+// Returns true if we should SKIP sending this alert (already sent same fingerprint within cooldown).
+// Uses compliance_log as state store — no new tables needed.
+async function isDuped(
+  supabase: any,
+  alertType: string,
+  fingerprint: string,
+  cooldownHours: number
+): Promise<boolean> {
+  const since = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
+  const { data } = await supabase
+    .from("compliance_log")
+    .select("id")
+    .eq("event_type", "health_check_alert")
+    .eq("metadata->>alert_type", alertType)
+    .eq("metadata->>fingerprint", fingerprint)
+    .gte("created_at", since)
+    .limit(1)
+    .maybeSingle();
+  return !!data;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -46,7 +76,8 @@ serve(async (req) => {
   if (!telegramToken || !telegramChatId) return json({ error: "Missing Telegram credentials" }, 500);
 
   const supabase = createClient(supabaseUrl, supabaseKey);
-  const alerts: string[] = [];
+  // Each entry: { type, fingerprint, cooldownHours, message }
+  const pendingAlerts: { type: string; fingerprint: string; cooldownHours: number; message: string }[] = [];
   const now = new Date();
 
   try {
@@ -81,16 +112,25 @@ serve(async (req) => {
         : 999;
 
       if (hoursSinceLastTrade >= SILENCE_HOURS) {
+        // Re-alert each time we cross a SILENCE_HOURS boundary (4h, 8h, 12h…).
+        // bucket 1 = 4–8h, bucket 2 = 8–12h, etc. Fingerprint includes bucket
+        // so crossing a boundary always produces a new, unseen fingerprint.
+        const bucket = Math.floor(hoursSinceLastTrade / SILENCE_HOURS);
+        const fingerprint = `silence_bucket_${bucket}`;
         const sinceStr = lastTradeTime
           ? `${hoursSinceLastTrade.toFixed(1)}h ago (${lastTradeTime.toISOString().slice(0, 16)} UTC)`
           : "never";
-        alerts.push(
-          `⚠️ <b>[TradeAgent] Trading Silence</b>\n` +
-          `No trades placed in ${hoursSinceLastTrade.toFixed(1)}h.\n` +
-          `Last trade: ${sinceStr}\n` +
-          `Strategies active: ${[...new Set((activeStrategies || []).map((s) => s.name))].join(", ")}\n` +
-          `Signals present: yes — check compliance_log for errors.`
-        );
+        pendingAlerts.push({
+          type: "trading_silence",
+          fingerprint,
+          cooldownHours: SILENCE_HOURS,
+          message:
+            `⚠️ <b>[TradeAgent] Trading Silence</b>\n` +
+            `No trades placed in ${hoursSinceLastTrade.toFixed(1)}h.\n` +
+            `Last trade: ${sinceStr}\n` +
+            `Strategies active: ${[...new Set((activeStrategies || []).map((s: any) => s.name))].join(", ")}\n` +
+            `Signals present: yes — check compliance_log for errors.`,
+        });
       }
     }
 
@@ -104,19 +144,27 @@ serve(async (req) => {
       .limit(WIN_RATE_SAMPLE);
 
     if (recentSettled && recentSettled.length >= 10) {
-      const wins = recentSettled.filter((t) => Number(t.pnl) > 0).length;
+      const wins = recentSettled.filter((t: any) => Number(t.pnl) > 0).length;
+      const losses = recentSettled.length - wins;
       const winRate = wins / recentSettled.length;
       if (winRate < WIN_RATE_FLOOR) {
-        alerts.push(
-          `🔴 <b>[TradeAgent] Win Rate Collapse</b>\n` +
-          `Last ${recentSettled.length} settled trades: ${wins}W/${recentSettled.length - wins}L (${(winRate * 100).toFixed(1)}% — floor is ${(WIN_RATE_FLOOR * 100).toFixed(0)}%)\n` +
-          `Review recent signals and strategy filters.`
-        );
+        // Fingerprint includes the exact W/L count — a new alert fires only if
+        // the numbers actually change (new trades settle with a different outcome).
+        // Same 11W/9L sitting for days → one alert per 24h max.
+        const fingerprint = `winrate_${wins}W${losses}L_of${recentSettled.length}`;
+        pendingAlerts.push({
+          type: "win_rate_collapse",
+          fingerprint,
+          cooldownHours: 24,
+          message:
+            `🔴 <b>[TradeAgent] Win Rate Collapse</b>\n` +
+            `Last ${recentSettled.length} settled trades: ${wins}W/${losses}L (${(winRate * 100).toFixed(1)}% — floor is ${(WIN_RATE_FLOOR * 100).toFixed(0)}%)\n` +
+            `Review recent signals and strategy filters.`,
+        });
       }
     }
 
     // ── 3. Volume spike check ─────────────────────────────────────────
-    // Compare last-hour trade count against 24h prior hourly average.
     const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
     const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
 
@@ -131,18 +179,23 @@ serve(async (req) => {
       .gte("created_at", twentyFourHoursAgo)
       .lt("created_at", oneHourAgo);
 
-    const priorHourlyAvg = (priorDayCount ?? 0) / 23; // 23 hours prior to the last hour
+    const priorHourlyAvg = (priorDayCount ?? 0) / 23;
     if ((lastHourCount ?? 0) > 5 && priorHourlyAvg > 0 && (lastHourCount ?? 0) > priorHourlyAvg * VOLUME_SPIKE_MULTIPLIER) {
-      alerts.push(
-        `🚨 <b>[TradeAgent] Volume Spike</b>\n` +
-        `Last hour: ${lastHourCount} trades\n` +
-        `Prior 23h hourly avg: ${priorHourlyAvg.toFixed(1)}\n` +
-        `Ratio: ${((lastHourCount ?? 0) / priorHourlyAvg).toFixed(1)}x — check cron schedule and strategy loop.`
-      );
+      // Fingerprint on the current hour so the same spike doesn't re-alert within 1h.
+      const fingerprint = `spike_${now.toISOString().slice(0, 13)}`;
+      pendingAlerts.push({
+        type: "volume_spike",
+        fingerprint,
+        cooldownHours: 1,
+        message:
+          `🚨 <b>[TradeAgent] Volume Spike</b>\n` +
+          `Last hour: ${lastHourCount} trades\n` +
+          `Prior 23h hourly avg: ${priorHourlyAvg.toFixed(1)}\n` +
+          `Ratio: ${((lastHourCount ?? 0) / priorHourlyAvg).toFixed(1)}x — check cron schedule and strategy loop.`,
+      });
     }
 
     // ── 4. Blocked series check ───────────────────────────────────────
-    // Alert immediately if any blocked series appears in recent trades.
     const { data: blockedTrades } = await supabase
       .from("trades")
       .select("ticker, strategy_id, created_at")
@@ -154,43 +207,136 @@ serve(async (req) => {
     );
     if (violations.length > 0) {
       const sample = violations.slice(0, 3).map((t: any) => t.ticker).join(", ");
-      alerts.push(
-        `🚫 <b>[TradeAgent] Blocked Series Trading</b>\n` +
-        `${violations.length} trade(s) on blocked series in last hour.\n` +
-        `Sample: ${sample}\n` +
-        `Blocked series: ${BLOCKED_SERIES.join(", ")} — fix ALLOWED_PREFIXES in auto-trade immediately.`
-      );
+      // Fingerprint on the sorted ticker set — same violation within 1h = 1 alert.
+      const fingerprint = `blocked_${[...new Set(violations.map((t: any) => t.ticker))].sort().join(",")}`;
+      pendingAlerts.push({
+        type: "blocked_series",
+        fingerprint,
+        cooldownHours: 1,
+        message:
+          `🚫 <b>[TradeAgent] Blocked Series Trading</b>\n` +
+          `${violations.length} trade(s) on blocked series in last hour.\n` +
+          `Sample: ${sample}\n` +
+          `Blocked series: ${BLOCKED_SERIES.join(", ")} — fix ALLOWED_PREFIXES in auto-trade immediately.`,
+      });
     }
 
     // ── 5. Suspended strategy check ───────────────────────────────────
     const suspended = (activeStrategies ?? []).filter(
-      (s) => s.suspended_until && new Date(s.suspended_until) > now
+      (s: any) => s.suspended_until && new Date(s.suspended_until) > now
     );
     if (suspended.length > 0) {
-      alerts.push(
-        `⏸️ <b>[TradeAgent] Strategy Suspended</b>\n` +
-        suspended.map((s) =>
-          `${s.name}: suspended until ${new Date(s.suspended_until).toISOString().slice(0, 16)} UTC`
-        ).join("\n")
-      );
+      // Fingerprint on sorted strategy IDs — same strategies suspended = 1 alert per 6h.
+      const fingerprint = `suspended_${suspended.map((s: any) => s.id).sort().join(",")}`;
+      pendingAlerts.push({
+        type: "strategy_suspended",
+        fingerprint,
+        cooldownHours: 6,
+        message:
+          `⏸️ <b>[TradeAgent] Strategy Suspended</b>\n` +
+          suspended.map((s: any) =>
+            `${s.name}: suspended until ${new Date(s.suspended_until).toISOString().slice(0, 16)} UTC`
+          ).join("\n"),
+      });
     }
 
-    // ── Send alerts ──────────────────────────────────────────────────
-    for (const alert of alerts) {
-      await sendTelegram(telegramToken, telegramChatId, alert);
+    // ── 6. Compliance log errors + 429s (last 2h) ────────────────────
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
+
+    const { data: recentErrors } = await supabase
+      .from("compliance_log")
+      .select("event_type, severity, message, created_at")
+      .in("severity", ["error", "critical"])
+      .gte("created_at", twoHoursAgo)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const { data: recent429s } = await supabase
+      .from("compliance_log")
+      .select("message, created_at")
+      .eq("severity", "warning")
+      .ilike("message", "%429%")
+      .gte("created_at", twoHoursAgo)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    if (recentErrors && recentErrors.length > 0) {
+      const sample = recentErrors.slice(0, 3)
+        .map((e: any) => `• ${e.event_type}: ${e.message.slice(0, 80)}`)
+        .join("\n");
+      // Fingerprint on the first error message so the same repeated error doesn't spam.
+      const fingerprint = `errors_${recentErrors[0].event_type}_${recentErrors[0].message.slice(0, 60)}`;
+      pendingAlerts.push({
+        type: "system_errors",
+        fingerprint,
+        cooldownHours: 2,
+        message:
+          `🔴 <b>[TradeAgent] System Errors (last 2h)</b>\n` +
+          `${recentErrors.length} error/critical event(s):\n${sample}`,
+      });
     }
 
-    // Log to compliance_log
+    if (recent429s && recent429s.length > 0) {
+      const series = [...new Set(recent429s.map((e: any) => {
+        const m = (e.message as string).match(/series (\w+)/);
+        return m ? m[1] : "unknown";
+      }))].sort().join(", ");
+      const fingerprint = `rate_limit_${series}`;
+      pendingAlerts.push({
+        type: "rate_limits",
+        fingerprint,
+        cooldownHours: 2,
+        message:
+          `⚠️ <b>[TradeAgent] Kalshi Rate Limits (last 2h)</b>\n` +
+          `${recent429s.length} series hit 429 after retries.\n` +
+          `Series: ${series}\n` +
+          `Market data for these series may be stale.`,
+      });
+    }
+
+    // ── Deduplicate and send ──────────────────────────────────────────
+    // For each pending alert, check compliance_log to see if the same fingerprint
+    // was already sent within the cooldown window. Only send new or escalating alerts.
+    const alertsSent: string[] = [];
+    const alertsSkipped: string[] = [];
+
+    for (const alert of pendingAlerts) {
+      const skip = await isDuped(supabase, alert.type, alert.fingerprint, alert.cooldownHours);
+      if (skip) {
+        alertsSkipped.push(alert.type);
+        continue;
+      }
+
+      await sendTelegram(telegramToken, telegramChatId, alert.message);
+
+      // Record this send so future runs can deduplicate against it.
+      await supabase.from("compliance_log").insert({
+        event_type: "health_check_alert",
+        severity: "warning",
+        message: `Alert sent: ${alert.type}`,
+        metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
+      });
+
+      alertsSent.push(alert.type);
+    }
+
+    // Log the run result — distinguish sent vs suppressed.
     await supabase.from("compliance_log").insert({
       event_type: "health_check_run",
-      severity: alerts.length > 0 ? "warning" : "info",
-      message: alerts.length > 0
-        ? `Health check: ${alerts.length} alert(s) sent to Telegram`
-        : "Health check: all clear",
-      metadata: { alerts_sent: alerts.length, checked_at: now.toISOString() },
+      severity: alertsSent.length > 0 ? "warning" : "info",
+      message: alertsSent.length > 0
+        ? `Health check: ${alertsSent.length} alert(s) sent, ${alertsSkipped.length} suppressed (deduped)`
+        : alertsSkipped.length > 0
+          ? `Health check: ${alertsSkipped.length} condition(s) active but suppressed (deduped)`
+          : "Health check: all clear",
+      metadata: {
+        alerts_sent: alertsSent,
+        alerts_skipped: alertsSkipped,
+        checked_at: now.toISOString(),
+      },
     });
 
-    return json({ ok: true, alerts_sent: alerts.length, alerts });
+    return json({ ok: true, alerts_sent: alertsSent, alerts_skipped: alertsSkipped });
 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
