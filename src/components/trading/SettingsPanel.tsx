@@ -77,6 +77,8 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   const [notifications, setNotifications] = useState(DEFAULT_NOTIFS);
   const [phone, setPhone] = useState("");
   const [channel, setChannel] = useState<"email" | "sms" | "both">("email");
+  const [phoneSaving, setPhoneSaving] = useState(false);
+  const [phoneSaveStatus, setPhoneSaveStatus] = useState<"idle" | "success" | "error">("idle");
 
   // Maps camelCase UI state to the snake_case keys stored in the DB.
   // loadAll reads snake_case; without this, every page reload resets all prefs.
@@ -105,6 +107,26 @@ export function SettingsPanel({ userId }: { userId?: string }) {
     setChannel(next);
     if (userId) {
       supabase.from("profiles").update({ notification_prefs: toDbPrefs(notifications, next) }).eq("id", userId);
+    }
+  };
+
+  const handleSavePhone = async () => {
+    if (!userId) return;
+    setPhoneSaving(true);
+    setPhoneSaveStatus("idle");
+    try {
+      const { error } = await supabase.from("profiles").update({
+        phone: phone.trim() || null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", userId);
+      if (error) throw error;
+      setPhoneSaveStatus("success");
+      setTimeout(() => setPhoneSaveStatus("idle"), 3000);
+    } catch {
+      setPhoneSaveStatus("error");
+      setTimeout(() => setPhoneSaveStatus("idle"), 3000);
+    } finally {
+      setPhoneSaving(false);
     }
   };
 
@@ -450,18 +472,35 @@ export function SettingsPanel({ userId }: { userId?: string }) {
         <div className="px-6 pt-5 pb-4 border-b border-border space-y-4">
           <div className="space-y-1.5">
             <Label className="text-sm text-muted-foreground">Phone number (for SMS alerts)</Label>
-            <Input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              onBlur={() => {
-                if (userId && phone !== undefined) {
-                  supabase.from("profiles").update({ phone: phone.trim() || null }).eq("id", userId);
-                }
-              }}
-              placeholder="+1 (___) ___-____"
-              className="rounded-xl border-0 bg-secondary text-sm"
-            />
+            <div className="flex gap-2">
+              <Input
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSavePhone()}
+                placeholder="+1 (___) ___-____"
+                className="rounded-xl border-0 bg-secondary text-sm flex-1"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full shrink-0 gap-1.5 text-xs"
+                onClick={handleSavePhone}
+                disabled={phoneSaving}
+              >
+                {phoneSaving
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                  : phoneSaveStatus === "success"
+                    ? <CheckCircle className="h-3 w-3 text-profit" />
+                    : phoneSaveStatus === "error"
+                      ? <AlertCircle className="h-3 w-3 text-destructive" />
+                      : <Save className="h-3 w-3" />}
+                {phoneSaveStatus === "success" ? "Saved" : phoneSaveStatus === "error" ? "Failed" : "Save"}
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Required for SMS alerts. Enter in E.164 format: +1XXXXXXXXXX
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label className="text-sm text-muted-foreground">Notification channel</Label>

@@ -7,6 +7,7 @@ import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
+import { sendUserNotification } from "../_shared/notifications.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -764,6 +765,24 @@ serve(async (req) => {
               metadata: { run_id: runId, strategy_id: strategy.id, last_error: errMsg },
             });
             await sendTelegramAlert(`⏸️ <b>[TradeAgent] Strategy Halted</b>\n"${strategy.name}" auto-halted after ${newFailures} consecutive failures.\nLast error: ${errMsg.slice(0, 150)}`);
+
+            // Notify the strategy's owner (fire-and-forget, user strategies only)
+            if (strategy.user_id) {
+              sendUserNotification(supabase, {
+                userId: strategy.user_id,
+                eventType: "agent_alerts",
+                subject: `Agent Alert: "${strategy.name}" auto-halted`,
+                htmlBody: `
+                  <h2 style="color:#f59e0b;font-size:22px;font-weight:700;margin:0 0 4px;">Strategy Halted</h2>
+                  <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">"${strategy.name}" has been automatically paused</p>
+                  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px;">
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Consecutive failures</td><td style="color:#f59e0b;text-align:right;">${newFailures}</td></tr>
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Last error</td><td style="color:rgba(255,255,255,0.6);text-align:right;font-size:12px;">${errMsg.slice(0, 120)}</td></tr>
+                  </table>
+                  <p style="color:rgba(255,255,255,0.6);font-size:13px;">Resume the strategy from your dashboard after investigating the issue.</p>`,
+                smsBody: `TradeAgent: "${strategy.name}" halted after ${newFailures} failures. Check dashboard.`,
+              }).catch(() => {});
+            }
           }
         }
 
@@ -1130,7 +1149,7 @@ async function runS002LongshotBias(
       .select("*")
       .lt("yes_ask", 12)
       .gte("yes_ask", 8)
-      .gte("volume", 100)
+      .gte("volume", 200)
       .gte("days_to_close", 0.08)
       .lte("days_to_close", 30)
       .gte("created_at", twoHoursAgo)
@@ -1237,6 +1256,13 @@ async function runS002LongshotBias(
     // a market at 10¢ YES when the signal was written may have moved significantly.
     if (yesAsk < 8 || yesAsk > 11) {
       return { sig, success: false, detail: `skipped: yes_ask=${yesAsk}¢ out of 8-11¢ range at execution time` };
+    }
+
+    // Edge floor: require at least 3¢ of true-vs-implied divergence.
+    // Cuts signals where the market is already well-calibrated (no exploitable longshot bias).
+    const s002EdgeCents = sig.edge_cents ?? 0;
+    if (s002EdgeCents < 3) {
+      return { sig, success: false, detail: `skipped: edge_cents=${s002EdgeCents}¢ below 3¢ floor` };
     }
 
     // All signals are in the 8-11¢ YES range — we always buy NO.
@@ -1603,10 +1629,26 @@ async function runS005WeatherEdge(
   //    NWS/Kalshi divergence is structural, not sentiment-driven. Same logic as S-001 arb.
   //    Low-edge signals still go through the LLM gate for discretionary review.
   const AUTO_QUALIFY_EDGE = 25;
+  // Cities with >= 3 NO losses in 14d must go through LLM even at high edge.
+  // GFS has systematic bias on these cities in current season — the large "edge"
+  // is a model artifact, not a real market mispricing.
+  const forceLlmCities = new Set<string>();
+  for (const [city, stat] of cityWinLoss) {
+    if (stat.losses >= 3) forceLlmCities.add(city);
+  }
   const autoQualified = candidates
-    .filter((s: any) => (s.edge_cents ?? 0) >= AUTO_QUALIFY_EDGE)
+    .filter((s: any) => {
+      if ((s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE) return false;
+      const city = (s.metadata?.location ?? "").toLowerCase();
+      if (forceLlmCities.has(city)) return false;
+      return true;
+    })
     .map((sig: any) => ({ sig, qualified: true, reason: `auto-qualified: edge ${sig.edge_cents}¢ >= ${AUTO_QUALIFY_EDGE}¢` }));
-  const needsLlm = candidates.filter((s: any) => (s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE);
+  const needsLlm = candidates.filter((s: any) => {
+    if ((s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE) return true;
+    const city = (s.metadata?.location ?? "").toLowerCase();
+    return forceLlmCities.has(city);
+  });
 
   // Emit a Langfuse span per auto-qualified signal.
   // startTime = strategy entry point, endTime = now (when qualify decision is made).
@@ -1902,13 +1944,20 @@ async function qualifySetup(
   const startTime = new Date().toISOString();
 
   try {
-    const resp = await fetch(`${aiConfig.baseUrl}/chat/completions`, {
+    // Anthropic native API uses /messages with a different request/response shape.
+    // OpenRouter and OpenAI use /chat/completions (OpenAI-compatible).
+    const isAnthropic = aiConfig.provider === "anthropic";
+    const endpoint = isAnthropic
+      ? `${aiConfig.baseUrl}/messages`
+      : `${aiConfig.baseUrl}/chat/completions`;
+
+    const resp = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${aiConfig.apiKey}`,
         "Content-Type": "application/json",
-        ...(aiConfig.provider === "anthropic" ? { "anthropic-version": "2023-06-01" } : {}),
-        ...(aiConfig.provider === "openrouter" ? { "HTTP-Referer": "https://omii-ai-pm-trade-agent.vercel.app" } : {}),
+        ...(isAnthropic ? { "anthropic-version": "2023-06-01" } : {}),
+        ...(aiConfig.provider === "openrouter" ? { "HTTP-Referer": "https://kalshitradeagent.com" } : {}),
       },
       body: JSON.stringify({
         model: aiConfig.model,
@@ -1939,7 +1988,11 @@ async function qualifySetup(
 
     const data = await resp.json();
     const endTime = new Date().toISOString();
-    const rawText = (data?.choices?.[0]?.message?.content || "").trim();
+    // Anthropic /messages response: { content: [{ type: "text", text: "..." }] }
+    // OpenAI /chat/completions response: { choices: [{ message: { content: "..." } }] }
+    const rawText = isAnthropic
+      ? (data?.content?.[0]?.text || "").trim()
+      : (data?.choices?.[0]?.message?.content || "").trim();
     const parsed = parseQualifyResponse(rawText);
 
     if (!parsed && supabaseClient) {

@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
+import { sendUserNotification } from "../_shared/notifications.ts";
 import { langfuseIngest, scoreEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 
@@ -297,6 +298,27 @@ serve(async (req) => {
           metadata: { run_id: runId, resolution, outcome, original_price: t.price, amount: t.amount },
         });
 
+        // Notify user of position settlement (live trades only, fire-and-forget)
+        if (t.mode === "live" && t.user_id) {
+          const settledPnl = Math.round(pnl * 100) / 100;
+          const isWin = settledPnl > 0;
+          const pnlColor = isWin ? "#22c55e" : "#ef4444";
+          const pnlLabel = isWin ? "WIN" : outcome === "void" ? "VOID" : "LOSS";
+          sendUserNotification(supabase, {
+            userId: t.user_id,
+            eventType: "position_closed",
+            subject: `Position settled: ${ticker} — ${pnlLabel} ${isWin ? "+" : ""}$${Math.abs(settledPnl).toFixed(2)}`,
+            htmlBody: `
+              <h2 style="color:${pnlColor};font-size:28px;font-weight:700;margin:0 0 4px;">${isWin ? "+" : ""}$${Math.abs(settledPnl).toFixed(2)}</h2>
+              <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">${ticker} — ${pnlLabel}</p>
+              <table style="width:100%;border-collapse:collapse;font-size:14px;">
+                <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Market resolved</td><td style="color:#fff;text-align:right;">${resolution.toUpperCase()}</td></tr>
+                <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Position size</td><td style="color:#fff;text-align:right;">$${t.amount}</td></tr>
+              </table>`,
+            smsBody: `TradeAgent: ${ticker} settled ${pnlLabel} ${isWin ? "+" : ""}$${Math.abs(settledPnl).toFixed(2)}`,
+          }).catch(() => {});
+        }
+
         // 7. Auto stop-loss: if the trade settled at a loss ≥ stop_loss_pct% of amount,
         //    halt trading for the rest of today for this user.
         if (pnl < 0 && t.user_id) {
@@ -328,6 +350,25 @@ serve(async (req) => {
                 message: `Auto stop-loss halted trading: ${ticker} lost ${lossPct.toFixed(1)}% (threshold: ${riskRow.stop_loss_pct}%)`,
                 metadata: { pnl: Math.round(pnl * 100) / 100, amount: t.amount, lossPct, threshold: riskRow.stop_loss_pct, run_id: runId },
               });
+
+              // Critical alert — force both email + SMS regardless of user channel preference
+              const lossAmt = Math.abs(Math.round(pnl * 100) / 100).toFixed(2);
+              sendUserNotification(supabase, {
+                userId: t.user_id,
+                eventType: "stop_loss_hit",
+                forceChannel: "both",
+                subject: `STOP LOSS: ${ticker} — trading halted`,
+                htmlBody: `
+                  <h2 style="color:#ef4444;font-size:22px;font-weight:700;margin:0 0 4px;">Stop Loss Triggered</h2>
+                  <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">${ticker} — trading halted for today</p>
+                  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px;">
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Loss on position</td><td style="color:#ef4444;text-align:right;">${lossPct.toFixed(1)}% (-$${lossAmt})</td></tr>
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Threshold</td><td style="color:#fff;text-align:right;">${riskRow.stop_loss_pct}%</td></tr>
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Status</td><td style="color:#ef4444;text-align:right;font-weight:600;">HALTED</td></tr>
+                  </table>
+                  <p style="color:rgba(255,255,255,0.6);font-size:13px;">All trading is paused for today. Resume from the dashboard when ready.</p>`,
+                smsBody: `TradeAgent ALERT: Stop-loss hit on ${ticker} (${lossPct.toFixed(1)}%, -$${lossAmt}). Trading HALTED today.`,
+              }).catch(() => {});
             }
           }
         }

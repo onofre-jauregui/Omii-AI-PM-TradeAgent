@@ -7,6 +7,7 @@ import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/te
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
+import { sendUserNotification } from "../_shared/notifications.ts";
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -529,6 +530,25 @@ serve(async (req) => {
       `Kalshi order ${kalshiOrder.order_id}: ${orderStatus} - ${action} ${contractCount}x ${side} ${resolvedTicker} @ ${price}c`,
       { order_id: kalshiOrder.order_id, kalshi_status: kalshiOrder.status, remaining: kalshiOrder.remaining_count }
     );
+
+    // Notify user of live fill (fire-and-forget — never blocks response)
+    if (orderStatus === "filled") {
+      const fillPrice = (kalshiOrder.avg_price ?? price) / 100;
+      sendUserNotification(supabase, {
+        userId,
+        eventType: "trade_executed",
+        subject: `Trade filled: ${side.toUpperCase()} ${resolvedTicker}`,
+        htmlBody: `
+          <h2 style="color:#fff;font-size:22px;font-weight:700;margin:0 0 4px;">${action.toUpperCase()} ${side.toUpperCase()}</h2>
+          <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">${resolvedTicker}</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px;">
+            <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Fill price</td><td style="color:#fff;text-align:right;">${fillPrice.toFixed(2)}¢</td></tr>
+            <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Amount</td><td style="color:#fff;text-align:right;">$${amount}</td></tr>
+            <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Order ID</td><td style="color:rgba(255,255,255,0.4);text-align:right;font-family:monospace;font-size:11px;">${kalshiOrder.order_id}</td></tr>
+          </table>`,
+        smsBody: `TradeAgent: ${action} ${side.toUpperCase()} ${resolvedTicker} @ ${fillPrice.toFixed(0)}¢ filled ($${amount})`,
+      }).catch(() => {});
+    }
 
     // Update risk state for this tenant
     await updateRiskState(supabase, userId, 0);
