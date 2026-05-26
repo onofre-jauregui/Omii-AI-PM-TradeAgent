@@ -43,7 +43,13 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
     setState((data as any)?.is_admin ? "ok" : "denied");
   }, []);
 
-  useEffect(() => { checkAdmin(); }, [checkAdmin]);
+  useEffect(() => {
+    // getSession() may race with localStorage rehydration — also listen for auth
+    // state changes so the check re-runs once the session is fully available.
+    checkAdmin();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => checkAdmin());
+    return () => subscription.unsubscribe();
+  }, [checkAdmin]);
 
   async function handleGoogleLogin() {
     setLoggingIn(true);
