@@ -43,44 +43,53 @@ export default function TermsPage() {
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">4. API Key Security</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">4. Agent Capital Budget and Limits</h2>
+            <p className="text-muted-foreground mb-3">TradeAgent allows you to configure an Agent Capital Limit — a maximum dollar amount the agent is permitted to hold in open live positions at any given time. This limit is enforced server-side before every order is submitted. If your open exposure equals or exceeds this limit, no new live orders will be placed until existing positions close.</p>
+            <p className="text-muted-foreground mb-3">It is your responsibility to configure this limit appropriately before enabling live trading. The platform provides this control as a protective mechanism, but does not guarantee that it will prevent all losses. Market conditions, network failures, or Kalshi API delays may in rare cases result in orders being placed or settled outside expected parameters.</p>
+            <p className="text-muted-foreground">Omii AI is not responsible for losses that occur because you configured an Agent Capital Limit that you later determined was higher than intended, or failed to configure the limit at all. You are solely responsible for setting, reviewing, and updating this parameter. We strongly recommend starting with the lowest capital limit you are comfortable risking and increasing it only after reviewing the agent's paper trading performance.</p>
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-base font-semibold text-foreground">5. API Key Security</h2>
             <p className="text-muted-foreground">Your Kalshi API key is encrypted using AES-256 encryption at rest. We do not log, display, or transmit your API key in plaintext. The key is decrypted only at the moment a trade is executed and is immediately discarded from memory afterward.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">5. Community Knowledge Sharing</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">6. Community Knowledge Sharing</h2>
             <p className="text-muted-foreground mb-3">By default, users are opted in to contribute anonymized trade outcome data (win/loss signals, confidence scores, market categories) to the shared AI memory pool. This data does not include your name, account information, exact position sizes, or any personally identifiable information.</p>
             <p className="text-muted-foreground mb-3">Contributed data is used to improve the platform's AI trading models for all opted-in users. High-confidence lessons may be promoted to the platform-wide memory pool after automated validation.</p>
             <p className="text-muted-foreground">You may opt out of community knowledge sharing at any time from your account settings. Opted-out users trade using only their own trade history and do not receive updates from the platform memory pool.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">6. Paper Trading</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">7. Paper Trading</h2>
             <p className="text-muted-foreground">Paper trading mode simulates trades against live Kalshi market prices without placing real orders. No real money is used in paper mode. Paper trading results do not guarantee equivalent results in live trading. Market conditions, liquidity, and execution timing may differ between paper and live environments.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">7. Platform Availability</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">8. Platform Availability</h2>
             <p className="text-muted-foreground">We do not guarantee uninterrupted availability of the platform. Scheduled maintenance, unexpected outages, or third-party service failures (including Kalshi API downtime) may prevent trade execution. We are not liable for losses resulting from platform unavailability.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">8. Limitation of Liability</h2>
-            <p className="text-muted-foreground">To the maximum extent permitted by law, Omii AI and its operators are not liable for any trading losses, lost profits, or damages of any kind arising from your use of TradeAgent. Our total liability to you for any claim is limited to the amount you paid us in subscription fees in the 30 days prior to the claim.</p>
+            <h2 className="mb-3 text-base font-semibold text-foreground">9. Limitation of Liability</h2>
+            <p className="text-muted-foreground mb-3">To the maximum extent permitted by law, Omii AI and its operators are not liable for any trading losses, lost profits, or indirect, incidental, consequential, or special damages of any kind arising from your use of TradeAgent. This includes, without limitation: losses from automated trades placed by the agent on your behalf, losses resulting from misconfigured capital limits or risk settings, losses caused by Kalshi API failures or market illiquidity, losses resulting from AI model errors or unexpected strategy behavior, and losses that occur during platform outages or maintenance windows.</p>
+            <p className="text-muted-foreground mb-3">You expressly acknowledge that you are using an automated trading system and that automated systems can behave unexpectedly. You accept full responsibility for all trading outcomes, including losses that exceed any limits you configured. Our platform controls (capital limits, stop-losses, position size caps) are best-effort protections — they do not guarantee that losses will not occur or will be limited to configured thresholds.</p>
+            <p className="text-muted-foreground">Our total aggregate liability to you for any claim is limited to the amount you paid us in subscription fees in the 30 days prior to the claim. If you have not paid any subscription fees, our total liability is limited to $10.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">9. Account Termination</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">10. Account Termination</h2>
             <p className="text-muted-foreground">We reserve the right to suspend or terminate accounts that violate these terms, engage in abusive behavior, or attempt to misuse the platform's API access. Upon termination, your API key data is deleted from our systems within 30 days.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">10. Changes to These Terms</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">11. Changes to These Terms</h2>
             <p className="text-muted-foreground">We may update these terms from time to time. Continued use of TradeAgent after changes are posted constitutes acceptance of the updated terms. Material changes will be communicated via email to registered users.</p>
           </section>
 
           <section>
-            <h2 className="mb-3 text-base font-semibold text-foreground">11. Contact</h2>
+            <h2 className="mb-3 text-base font-semibold text-foreground">12. Contact</h2>
             <p className="text-muted-foreground">Questions about these terms: <a href="mailto:omiiaiagency@gmail.com" className="text-primary hover:underline">omiiaiagency@gmail.com</a></p>
           </section>
 

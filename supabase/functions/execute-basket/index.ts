@@ -55,6 +55,48 @@ serve(async (req) => {
       reasoning = "",
     } = body;
 
+    // ── Capital allocation guard (live trades only) ───────────────────────────
+    // Prevent the agent from deploying more than the user's configured cap.
+    // Paper trades bypass this check — no real money at risk.
+    if (mode === "live" && tenant.userId) {
+      const { data: riskRow } = await supabase
+        .from("risk_settings")
+        .select("allocated_capital")
+        .eq("user_id", tenant.userId)
+        .maybeSingle();
+
+      const cap: number = riskRow?.allocated_capital ?? 500;
+
+      // Sum cost of all currently open live positions for this user
+      const { data: openTrades } = await supabase
+        .from("trades")
+        .select("amount")
+        .eq("user_id", tenant.userId)
+        .eq("mode", "live")
+        .eq("status", "open");
+
+      const openExposure: number = (openTrades ?? []).reduce(
+        (sum: number, t: { amount: number }) => sum + (t.amount ?? 0),
+        0
+      );
+
+      // Sum cost of every leg in this incoming basket
+      const basketCost: number = legs.reduce(
+        (sum: number, l: { amount: number }) => sum + (l.amount ?? 0),
+        0
+      );
+
+      if (openExposure + basketCost > cap) {
+        return new Response(
+          JSON.stringify({
+            error: `Capital cap exceeded. Allocated: $${cap}, current open exposure: $${openExposure.toFixed(2)}, basket cost: $${basketCost.toFixed(2)}. Adjust your allocated capital in Risk Controls or close open positions.`,
+            code: "CAPITAL_CAP_EXCEEDED",
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     // ── Validate ──────────────────────────────────────────────────────────────
     if (!legs || !Array.isArray(legs) || legs.length < 2) {
       return new Response(JSON.stringify({ error: "legs must be an array of 2 or more leg specs" }), {

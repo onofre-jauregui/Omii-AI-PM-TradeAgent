@@ -10,8 +10,8 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
 const SAVE_KEY_URL    = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
 
-type Step = "welcome" | "name" | "ai_key" | "connect" | "mode" | "live";
-const STEPS: Step[] = ["welcome", "name", "ai_key", "connect", "mode", "live"];
+type Step = "welcome" | "name" | "ai_key" | "connect" | "risk_ack" | "mode" | "live";
+const STEPS: Step[] = ["welcome", "name", "ai_key", "connect", "risk_ack", "mode", "live"];
 
 const AI_PROVIDERS = [
   { id: "openrouter", label: "OpenRouter",  placeholder: "sk-or-v1-…",       recommended: true  },
@@ -176,6 +176,14 @@ export default function OnboardingPage() {
       setPingError(e instanceof Error ? e.message : "Connection failed");
     }
   }
+
+  // ── risk_ack step ─────────────────────────────────────────────────────
+  const [ackChecked, setAckChecked] = useState({
+    understand_risk: false,
+    agent_trades:    false,
+    own_funds:       false,
+  });
+  const allAcksChecked = Object.values(ackChecked).every(Boolean);
 
   // ── finish ────────────────────────────────────────────────────────────
   async function finishOnboarding(destination: string, mode?: "paper" | "live") {
@@ -421,7 +429,7 @@ export default function OnboardingPage() {
 
             <div className="space-y-2">
               {pingStatus === "ok" ? (
-                <Button className="w-full rounded-full gap-2" onClick={() => setStep("mode")}>
+                <Button className="w-full rounded-full gap-2" onClick={() => setStep("risk_ack")}>
                   <ArrowRight className="h-4 w-4" /> Continue
                 </Button>
               ) : (
@@ -439,7 +447,7 @@ export default function OnboardingPage() {
                 <Button
                   variant="ghost"
                   className="w-full rounded-full text-muted-foreground text-sm"
-                  onClick={() => setStep("mode")}
+                  onClick={() => setStep("risk_ack")}
                 >
                   Skip — start with paper trading
                 </Button>
@@ -448,7 +456,62 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* ── Step 5: Choose mode ──────────────────────────────────────── */}
+        {/* ── Step 5: Risk acknowledgment ──────────────────────────────── */}
+        {step === "risk_ack" && (
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight mb-1">Before you trade</h1>
+            <p className="text-sm text-muted-foreground mb-6">
+              Please read and confirm each of the following. This is required to continue.
+            </p>
+            <div className="space-y-4 mb-8">
+              {[
+                {
+                  key: "understand_risk" as const,
+                  text: "I understand that trading prediction markets involves substantial risk of loss, and I may lose some or all of the funds I allocate to this agent.",
+                },
+                {
+                  key: "agent_trades" as const,
+                  text: "I understand that TradeAgent places real orders on my Kalshi account automatically. I am responsible for configuring and monitoring the agent's capital limits and risk settings.",
+                },
+                {
+                  key: "own_funds" as const,
+                  text: "I am only trading with funds I can afford to lose. I have read and agree to the Terms of Service, including the Limitation of Liability section.",
+                },
+              ].map(({ key, text }) => (
+                <label
+                  key={key}
+                  className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 cursor-pointer transition-colors ${
+                    ackChecked[key]
+                      ? "border-emerald-500/40 bg-emerald-500/8"
+                      : "border-border bg-secondary/30 hover:bg-secondary/50"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={ackChecked[key]}
+                    onChange={(e) => setAckChecked(prev => ({ ...prev, [key]: e.target.checked }))}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-500"
+                  />
+                  <span className="text-sm leading-relaxed">{text}</span>
+                </label>
+              ))}
+            </div>
+            <div className="space-y-2">
+              <Button
+                className="w-full rounded-full gap-2"
+                onClick={() => setStep("mode")}
+                disabled={!allAcksChecked}
+              >
+                <ArrowRight className="h-4 w-4" /> I agree — continue
+              </Button>
+              <p className="text-[11px] text-center text-muted-foreground">
+                Full terms at <a href="/terms" target="_blank" className="underline hover:text-foreground">/terms</a>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Step 6: Choose mode ──────────────────────────────────────── */}
         {step === "mode" && (
           <div>
             <h1 className="text-2xl font-semibold tracking-tight mb-1">How do you want to trade?</h1>
@@ -484,7 +547,7 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* ── Step 6: Agent is live ────────────────────────────────────── */}
+        {/* ── Step 7: Agent is live ────────────────────────────────────── */}
         {step === "live" && (
           <div className="text-center">
             <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-6">

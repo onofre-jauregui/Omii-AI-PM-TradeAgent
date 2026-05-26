@@ -16,14 +16,15 @@ export function RiskControlsPanel() {
   const [totalBudget, setTotalBudget] = useState<string>("3000");
   const [allocations, setAllocations] = useState<Record<string, number>>({}); // strategy id → % (0-100)
   const [riskSettings, setRiskSettings] = useState({
-    maxDailyLoss:     [500],
-    maxDrawdown:      [20],
-    maxPositionSize:  [500],
-    maxOpenPositions: [10],
-    maxDailyTrades:   [30],
-    autoStopLoss:     true,
-    stopLossPct:      [15],
-    defaultOrderType: "limit",
+    maxDailyLoss:      [500],
+    maxDrawdown:       [20],
+    maxPositionSize:   [500],
+    maxOpenPositions:  [10],
+    maxDailyTrades:    [30],
+    autoStopLoss:      true,
+    stopLossPct:       [15],
+    defaultOrderType:  "limit",
+    allocatedCapital:  [500],
   });
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
@@ -84,6 +85,7 @@ export function RiskControlsPanel() {
         autoStopLoss:     data.auto_stop_loss,
         stopLossPct:      [data.stop_loss_pct],
         defaultOrderType: data.default_order_type,
+        allocatedCapital: [data.allocated_capital ?? 500],
       });
     }
   }, []);
@@ -110,15 +112,16 @@ export function RiskControlsPanel() {
       const { data: { user } } = await supabase.auth.getUser();
       const userId = user?.id ?? "";
       const riskPayload = {
-        user_id:            userId,
-        max_daily_loss:     riskSettings.maxDailyLoss[0],
-        max_drawdown_pct:   riskSettings.maxDrawdown[0],
-        max_position_size:  riskSettings.maxPositionSize[0],
-        max_open_positions: riskSettings.maxOpenPositions[0],
-        max_daily_trades:   riskSettings.maxDailyTrades[0],
-        auto_stop_loss:     riskSettings.autoStopLoss,
-        stop_loss_pct:      riskSettings.stopLossPct[0],
-        default_order_type: riskSettings.defaultOrderType,
+        user_id:             userId,
+        max_daily_loss:      riskSettings.maxDailyLoss[0],
+        max_drawdown_pct:    riskSettings.maxDrawdown[0],
+        max_position_size:   riskSettings.maxPositionSize[0],
+        max_open_positions:  riskSettings.maxOpenPositions[0],
+        max_daily_trades:    riskSettings.maxDailyTrades[0],
+        auto_stop_loss:      riskSettings.autoStopLoss,
+        stop_loss_pct:       riskSettings.stopLossPct[0],
+        default_order_type:  riskSettings.defaultOrderType,
+        allocated_capital:   riskSettings.allocatedCapital[0],
         updated_at: new Date().toISOString(),
       };
       const { data: existing } = await supabase.from("risk_settings").select("id")
@@ -209,13 +212,34 @@ export function RiskControlsPanel() {
       </div>
 
       <div className="px-5 py-5 space-y-4 border-b border-border">
+        {/* Allocated capital — hard server-side cap for live trading */}
+        <div className="space-y-2">
+          <div className="flex justify-between">
+            <div>
+              <Label className="text-sm">Agent Capital Limit</Label>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Max live exposure the agent can hold at once — enforced server-side before every order.
+              </p>
+            </div>
+            <span className="text-sm font-medium tabular-nums shrink-0 ml-4">${riskSettings.allocatedCapital[0].toLocaleString()}</span>
+          </div>
+          <Slider
+            value={riskSettings.allocatedCapital}
+            onValueChange={(v) => setRiskSettings(prev => ({ ...prev, allocatedCapital: v }))}
+            min={50} max={10000} step={50}
+          />
+          <p className="text-[10px] text-warning">
+            If open positions already equal this amount, no new live orders will be placed until positions close.
+          </p>
+        </div>
+
         {strategies.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No strategies configured yet.</p>
+          <p className="text-sm text-muted-foreground border-t border-border pt-4">No strategies configured yet.</p>
         ) : (
           <>
-            {/* Total budget */}
-            <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Total Budget</Label>
+            {/* Total budget (reference only — for ROI tracking) */}
+            <div className="space-y-1.5 border-t border-border pt-4">
+              <Label className="text-sm text-muted-foreground">Reference Budget (ROI tracking)</Label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">$</span>
                 <Input
@@ -228,7 +252,7 @@ export function RiskControlsPanel() {
                 />
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Your Kalshi balance is the real constraint for live trades — this is the reference capital used for ROI and Kelly sizing. Revoke access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
+                Used for P&L % calculations only — not a trading limit. Revoke API access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
               </p>
             </div>
 
