@@ -33,14 +33,18 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
   const [loggingIn, setLoggingIn] = useState(false);
 
   const checkAdmin = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.user) return setState("login");
-    const { data } = await supabase
-      .from("profiles")
-      .select("is_admin")
-      .eq("id", session.user.id)
-      .maybeSingle();
-    setState((data as any)?.is_admin ? "ok" : "denied");
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) return setState("login");
+      const { data } = await supabase
+        .from("profiles")
+        .select("is_admin")
+        .eq("id", session.user.id)
+        .maybeSingle();
+      setState((data as any)?.is_admin ? "ok" : "denied");
+    } catch {
+      setState("login");
+    }
   }, []);
 
   useEffect(() => {
@@ -72,7 +76,11 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
     checkAdmin();
   }
 
-  if (state === "loading") return null;
+  if (state === "loading") return (
+    <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0f0d0b" }}>
+      <div className="h-4 w-4 rounded-full border-2 border-white/20 border-t-white/60 animate-spin" />
+    </div>
+  );
 
   if (state === "login") {
     return (
