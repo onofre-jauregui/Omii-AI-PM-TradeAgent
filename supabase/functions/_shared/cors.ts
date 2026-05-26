@@ -15,6 +15,7 @@
 const SAFE_ORIGINS = [
   "https://kalshitradeagent.com",
   "https://omii-trade-agent.vercel.app",
+  "https://omii-ai-pm-trade-agent.vercel.app",
   "http://localhost:5173",
 ];
 
