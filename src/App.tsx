@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
@@ -26,31 +26,79 @@ const queryClient = new QueryClient();
 
 /** Gate that checks profiles.is_admin — DB is the source of truth, works for any admin. */
 function AdminRoute({ element }: { element: React.ReactElement }) {
-  const [state, setState] = useState<"loading" | "ok" | "denied">("loading");
+  const [state, setState] = useState<"loading" | "ok" | "denied" | "login">("loading");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (!session?.user) return setState("denied");
-      const { data } = await supabase
-        .from("profiles")
-        .select("is_admin")
-        .eq("id", session.user.id)
-        .maybeSingle();
-      setState((data as any)?.is_admin ? "ok" : "denied");
-    });
+  const checkAdmin = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return setState("login");
+    const { data } = await supabase
+      .from("profiles")
+      .select("is_admin")
+      .eq("id", session.user.id)
+      .maybeSingle();
+    setState((data as any)?.is_admin ? "ok" : "denied");
   }, []);
 
+  useEffect(() => { checkAdmin(); }, [checkAdmin]);
+
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setLoggingIn(true);
+    setLoginError("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) { setLoginError(error.message); setLoggingIn(false); return; }
+    checkAdmin();
+  }
+
   if (state === "loading") return null;
-  if (state === "denied") {
+
+  if (state === "login") {
     return (
-      <div
-        className="min-h-screen flex items-center justify-center"
-        style={{ backgroundColor: "#0f0d0b" }}
-      >
-        <p className="text-sm text-muted-foreground">Access denied.</p>
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0f0d0b" }}>
+        <form onSubmit={handleLogin} className="w-full max-w-sm space-y-4 p-8 rounded-2xl" style={{ background: "#1a1714" }}>
+          <p className="text-xs text-muted-foreground uppercase tracking-widest mb-6">Admin access</p>
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            required
+            className="w-full rounded-lg px-4 py-3 text-sm bg-black/40 border border-white/10 text-foreground placeholder:text-muted-foreground outline-none focus:border-white/30"
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            required
+            className="w-full rounded-lg px-4 py-3 text-sm bg-black/40 border border-white/10 text-foreground placeholder:text-muted-foreground outline-none focus:border-white/30"
+          />
+          {loginError && <p className="text-xs text-red-400">{loginError}</p>}
+          <button
+            type="submit"
+            disabled={loggingIn}
+            className="w-full rounded-lg py-3 text-sm font-medium text-white disabled:opacity-50"
+            style={{ background: "#0071e3" }}
+          >
+            {loggingIn ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
       </div>
     );
   }
+
+  if (state === "denied") {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0f0d0b" }}>
+        <p className="text-sm text-muted-foreground">Access denied — admin only.</p>
+      </div>
+    );
+  }
+
   return element;
 }
 
