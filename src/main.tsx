@@ -2,6 +2,14 @@ import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
 
+// Canonical domain enforcement — redirect any non-production origin before React mounts.
+// Handles both edge-cached responses and stale PWA service workers serving old origins.
+const CANONICAL = "kalshitradeagent.com";
+const host = window.location.hostname;
+if (host !== CANONICAL && host !== `www.${CANONICAL}` && host !== "localhost" && host !== "127.0.0.1") {
+  window.location.replace(`https://${CANONICAL}${window.location.pathname}${window.location.search}${window.location.hash}`);
+}
+
 // Apply dark class from saved preference or system default
 const saved = localStorage.getItem("theme");
 if (saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
