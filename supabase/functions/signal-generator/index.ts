@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { alertOnce } from "../_shared/telegram.ts";
 
 /**
  * signal-generator: Systematic, quantitative signal scoring for Kalshi markets.
@@ -403,6 +404,10 @@ serve(async (req) => {
           message: `signal-generator persist failed: ${insertErr.message}`,
           metadata: { row_count: rows.length, first_ticker: rows[0]?.ticker },
         });
+        // Stale signals silently degrade trade quality — alert on first occurrence.
+        await alertOnce(supabase, "signal_persist_error", insertErr.message.slice(0, 60), 2,
+          `⚠️ <b>[TradeAgent] Signal Persist Failed</b>\nFailed to write ${rows.length} signals to DB — auto-trade will use stale data.\nError: ${insertErr.message.slice(0, 200)}`
+        );
       }
     }
 
@@ -425,19 +430,24 @@ serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("signal-generator error:", e);
 
     if (supabase) {
       supabase.from("compliance_log").insert({
         event_type: "signal_generator_error",
         severity: "error",
-        message: `Signal generator failed: ${e instanceof Error ? e.message : "Unknown error"}`,
+        message: `Signal generator failed: ${errMsg}`,
         metadata: { stack: e instanceof Error ? e.stack : undefined },
       }).then().catch(() => {});
+
+      await alertOnce(supabase, "signal_generator_fatal", errMsg.slice(0, 60), 1,
+        `🚨 <b>[TradeAgent] signal-generator CRASHED</b>\nNo new signals will be scored — auto-trade runs blind until this is fixed.\nError: ${errMsg.slice(0, 300)}`
+      ).catch(() => {});
     }
 
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
+      JSON.stringify({ error: errMsg }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

@@ -6,6 +6,7 @@ import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk
 import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { alertOnce } from "../_shared/telegram.ts";
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -374,6 +375,11 @@ serve(async (req) => {
         "Live trade failed: Kalshi API credentials not configured",
         { ticker: resolvedTicker });
 
+      // Alert once per user — creds missing blocks ALL live trades until fixed.
+      await alertOnce(supabase, "kalshi_creds_missing", userId || "unknown", 6,
+        `🔑 <b>[TradeAgent] Kalshi Credentials Missing</b>\nA live trade was attempted but no Kalshi API key found for user <code>${userId}</code>.\nTicker: ${resolvedTicker}\nAdd keys in Settings → Kalshi API Key.`
+      );
+
       return new Response(JSON.stringify({
         success: false,
         error: "Kalshi API credentials not configured. Add KALSHI_API_KEY_ID and KALSHI_API_PRIVATE_KEY in Settings.",
@@ -455,6 +461,11 @@ serve(async (req) => {
       await logCompliance(supabase, userId, failedTrade?.id, "order_failed", "error",
         `Kalshi order rejected (status ${kalshiResponse.status}): ${kalshiErrorDetail}`,
         { kalshi_status: kalshiResponse.status, kalshi_response: kalshiResult, payload: kalshiOrderPayload }
+      );
+
+      // Alert on first rejection per ticker — persistent rejections on the same market warrant investigation.
+      await alertOnce(supabase, "kalshi_order_rejected", `${resolvedTicker}_${kalshiResponse.status}`, 1,
+        `❌ <b>[TradeAgent] Kalshi Order Rejected</b>\nStatus: ${kalshiResponse.status}\nTicker: ${resolvedTicker} (${side.toUpperCase()} ${action})\nReason: ${kalshiErrorDetail.slice(0, 200)}`
       );
 
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
@@ -546,7 +557,7 @@ serve(async (req) => {
 
     captureException(e instanceof Error ? e : new Error(errorMsg), { function: "execute-trade" });
 
-    // Log system error
+    // Log system error and alert
     try {
       const supabase = createClient(
         Deno.env.get("SUPABASE_URL")!,
@@ -555,6 +566,9 @@ serve(async (req) => {
       await logCompliance(supabase, null, null, "system_event", "error",
         `Trade execution error: ${errorMsg}`,
         { raw_error: errorDetail, stack: errorStack }
+      );
+      await alertOnce(supabase, "execute_trade_fatal", errorMsg.slice(0, 80), 1,
+        `🚨 <b>[TradeAgent] execute-trade CRASHED</b>\nUnhandled error in trade execution — live orders may not have been placed.\nError: ${errorMsg.slice(0, 300)}`
       );
     } catch {}
 

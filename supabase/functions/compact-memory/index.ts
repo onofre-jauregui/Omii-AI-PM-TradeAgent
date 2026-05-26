@@ -138,10 +138,25 @@ serve(async (req) => {
       .order("confidence", { ascending: false });
 
     if (activeMemories && activeMemories.length > 0) {
-      // Group by (user_id, memory_type, strategy_id) — never merge across user boundaries
+      // Market category extractor — keeps weather/crypto/equity lessons from merging together
+      const getMarketCategory = (tags: string[]): string => {
+        if (tags.some((t: string) => ["weather", "kxhigh", "temperature", "forecast_bias"].includes(t))) return "weather";
+        if (tags.some((t: string) => ["kxbtc", "kxeth", "crypto"].includes(t))) return "crypto";
+        if (tags.some((t: string) => ["kxinx", "equity", "sp500"].includes(t))) return "equity";
+        if (tags.some((t: string) => ["kxfed", "rates", "federal_reserve"].includes(t))) return "rates";
+        return "other";
+      };
+
+      // Group by (user_id, memory_type, strategy_id, lesson_type, market_category).
+      // Previously grouped only by (user_id, memory_type, strategy_id) — this merged e.g.
+      // weather forecast_bias lessons with crypto market_timing lessons, destroying specificity.
       const groups: Record<string, typeof activeMemories> = {};
       for (const mem of activeMemories) {
-        const key = `${mem.user_id || "platform"}::${mem.memory_type}::${mem.strategy_id || "global"}`;
+        const lessonType = (mem.tags || []).find((t: string) =>
+          ["forecast_bias", "signal_quality", "market_timing", "market_structure", "execution"].includes(t)
+        ) || "general";
+        const category = getMarketCategory(mem.tags || []);
+        const key = `${mem.user_id || "platform"}::${mem.memory_type}::${mem.strategy_id || "global"}::${lessonType}::${category}`;
         if (!groups[key]) groups[key] = [];
         groups[key].push(mem);
       }
@@ -200,11 +215,11 @@ serve(async (req) => {
               messages: [
                 {
                   role: "system",
-                  content: "You merge multiple trading insights into one actionable memory. Output exactly two lines:\nLine 1: A title (max 10 words)\nLine 2: The merged insight (max 150 words). Preserve all specific numbers, thresholds, and edge cases from the originals. Do not generalise away details.",
+                  content: "You merge multiple trading filter rules into one actionable memory. Output exactly two lines:\nLine 1: A title (max 10 words)\nLine 2: A merged rule in IF/THEN format (max 150 words) that lists ALL specific conditions, price thresholds, cities, and market categories from the originals. Do NOT generalize away any specific number or condition. If rules conflict, keep the most conservative version.",
                 },
                 {
                   role: "user",
-                  content: `Merge these ${cluster.length} related insights into one:\n\n${clusterText}`,
+                  content: `Merge these ${cluster.length} related trading rules into one IF/THEN rule that preserves every specific condition:\n\n${clusterText}`,
                 },
               ],
               temperature: 0,

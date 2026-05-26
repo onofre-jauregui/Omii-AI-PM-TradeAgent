@@ -1244,6 +1244,21 @@ async function runS002LongshotBias(
     // YES ask 8¢ → NO price 93¢; YES ask 11¢ → NO price 90¢
     const price = Math.min(99, (100 - yesAsk) + 1);
 
+    // Pull agent_memory and recent lessons for S-002 (were previously missing)
+    const { data: s002Memories } = await supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("merged_into", null)
+      .order("confidence", { ascending: false })
+      .limit(5);
+    const s002MemBlock = (s002Memories ?? [])
+      .map((m: any) => `[conf ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
+      .join("\n");
+    const s002MemoryIds = (s002Memories ?? []).map((m: any) => m.id);
+    const s002Lessons = await fetchStrategyLessons(supabase, strategy.id);
+
     const qualifyPrompt = buildQualifyPrompt("S-002 Longshot Bias", {
       ticker: sig.ticker,
       market_question: sig.market_question,
@@ -1254,6 +1269,8 @@ async function runS002LongshotBias(
       days_to_close: sig.days_to_close,
       win_streak: winStreak,
       performance_context: `Current win streak: ${winStreak} day(s). Tracked for instrumentation only — base your QUALIFY/REJECT decision purely on structural edge criteria below.`,
+      ...(s002Lessons.length > 0 ? { past_lessons: s002Lessons.join("\n") } : {}),
+      ...(s002MemBlock ? { strategy_memory: s002MemBlock } : {}),
       note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
     });
 
@@ -1284,6 +1301,8 @@ async function runS002LongshotBias(
         traceId: runId,
         sourceSignalId: sig.id || null,
         systemVersion: 'v2',
+        // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
+        influenced_by_memory_ids: s002MemoryIds,
       }),
     });
 
@@ -1450,25 +1469,54 @@ async function runS005WeatherEdge(
   const lessonsByCity = new Map<string, any[]>();
   const cityWinLoss = new Map<string, { wins: number; losses: number; totalPnl: number }>();
 
-  // Bayesian agent_memory: high-confidence distilled lessons for this strategy
-  const { data: strategyMemories } = await supabase
+  // Bayesian agent_memory: high-confidence distilled lessons for this strategy.
+  // Market-scoped: prioritize memories whose tags overlap with the candidate cities
+  // so irrelevant geography doesn't crowd out the relevant signal (Gap 6 fix).
+  const tagFilter = cityTags.length > 0
+    ? cityTags.map((c: string) => `tags.cs.{${c}}`).join(",")
+    : null;
+
+  const memBaseQuery = supabase
     .from("agent_memory")
-    .select("title, content, confidence")
+    .select("id, title, content, confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
+    .is("merged_into", null)
     .order("confidence", { ascending: false })
     .limit(5);
+
+  let { data: strategyMemories } = tagFilter
+    ? await memBaseQuery.or(tagFilter)
+    : await memBaseQuery;
+
+  // Fallback: if tag filter returned nothing, use top 5 by confidence globally
+  if (!strategyMemories || strategyMemories.length === 0) {
+    const fallback = await supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("merged_into", null)
+      .order("confidence", { ascending: false })
+      .limit(5);
+    strategyMemories = fallback.data;
+  }
+
+  const activeMemoryIds = (strategyMemories ?? []).map((m: any) => m.id);
   const memoryBlock = (strategyMemories ?? [])
-    .map((m: any) => `[confidence ${m.confidence.toFixed(2)}] ${m.title}: ${m.content}`)
+    .map((m: any) => `[confidence ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
     .join("\n");
 
   if (cityTags.length > 0) {
-    // Settled trades for weather tickers to get per-city win rates
+    // Rolling 14-day city win/loss stats — all-time averaging hides regime shifts
+    // (e.g. March wins masking a May losing streak on the same city). Gap 5 fix.
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const { data: weatherTrades } = await supabase
       .from("trades")
       .select("ticker, pnl, notes")
       .eq("status", "settled")
-      .eq("strategy_id", strategy.id);
+      .eq("strategy_id", strategy.id)
+      .gte("settled_at", fourteenDaysAgo);
 
     for (const t of weatherTrades || []) {
       const pnl = Number(t.pnl) || 0;
@@ -1628,6 +1676,8 @@ async function runS005WeatherEdge(
           traceId: runId,
           sourceSignalId: sig.id || null,
           systemVersion: 'v2',
+          // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
+          influenced_by_memory_ids: activeMemoryIds,
         }),
       });
       const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));

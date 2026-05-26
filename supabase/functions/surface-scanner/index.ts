@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { alertOnce } from "../_shared/telegram.ts";
 
 /**
  * surface-scanner: Cross-market consistency scanner for Kalshi prediction markets.
@@ -473,19 +474,24 @@ serve(async (req) => {
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("surface-scanner error:", e);
 
     if (supabase) {
       supabase.from("compliance_log").insert({
         event_type: "surface_scanner_error",
         severity: "error",
-        message: `Surface scanner failed: ${e instanceof Error ? e.message : "Unknown error"}`,
+        message: `Surface scanner failed: ${errMsg}`,
         metadata: { stack: e instanceof Error ? e.stack : undefined },
       }).then().catch(() => {});
+
+      await alertOnce(supabase, "surface_scanner_fatal", errMsg.slice(0, 60), 1,
+        `🚨 <b>[TradeAgent] surface-scanner CRASHED</b>\nS-001 cross-market arbitrage detection is down — no new surface alerts will be generated.\nError: ${errMsg.slice(0, 300)}`
+      ).catch(() => {});
     }
 
     return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
+      JSON.stringify({ error: errMsg }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

@@ -655,16 +655,40 @@ serve(async (req) => {
         .limit(1),
     ]);
 
-    // Extract values — any failed query falls back to null/[] to match prior behavior
+    // Resolve userId early so profile fetch can be user-scoped
     if (authSettled.status === "fulfilled" && authSettled.value?.data?.user?.id) {
       userId = authSettled.value.data.user.id;
     }
+
+    // Load profile + user_preference memories in parallel (userId now known)
+    const [profileSettled, prefMemoriesSettled] = await Promise.allSettled([
+      userId
+        ? supabase.from("profiles").select("display_name").eq("id", userId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      userId
+        ? supabase.from("agent_memory")
+            .select("id, title, content, summary, tags, confidence, created_at")
+            .eq("is_active", true)
+            .eq("memory_type", "user_preference")
+            .or(`user_id.is.null,user_id.eq.${userId}`)
+            .order("confidence", { ascending: false })
+            .limit(20)
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+    // Extract values — any failed query falls back to null/[] to match prior behavior
+    // userId already resolved above from authSettled
     const keyRows = keyRowsSettled.status === "fulfilled" ? (keyRowsSettled.value?.data ?? []) : [];
     const savedModelData = savedModelSettled.status === "fulfilled" ? (savedModelSettled.value?.data ?? null) : null;
     const riskSettings = riskSettled.status === "fulfilled" ? (riskSettled.value?.data ?? null) : null;
 
-    // Re-fetch memories scoped to this user (user's own + platform-shared where user_id IS NULL).
-    // The initial batch query above loaded all memories; replace with the user-scoped result.
+    const displayName: string | null =
+      profileSettled.status === "fulfilled" ? (profileSettled.value?.data?.display_name ?? null) : null;
+    const userPrefMemories =
+      prefMemoriesSettled.status === "fulfilled" ? (prefMemoriesSettled.value?.data ?? []) : [];
+
+    // Re-fetch trading memories scoped to this user (excludes user_preference — those are in userPrefMemories).
+    // The initial batch query above was unscoped; replace with the user-scoped result.
     let topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
     if (userId) {
       const { data: scopedMemories } = await supabase
@@ -672,6 +696,7 @@ serve(async (req) => {
         .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
         .eq("is_active", true)
         .is("merged_into", null)
+        .neq("memory_type", "user_preference")
         .or(`user_id.is.null,user_id.eq.${userId}`)
         .order("confidence", { ascending: false })
         .order("created_at", { ascending: false })
@@ -826,12 +851,38 @@ serve(async (req) => {
       ? "\n\n> **Note:** You have trades that haven't been reflected on yet. Consider calling `reflect_on_trades` to learn from recent outcomes.\n"
       : "";
 
+    // ── Build per-user identity block ──
+    // Loads the user's display name and persisted preferences so the agent
+    // addresses them by name and applies their rules from the first message.
+    let userIdentityBlock = "";
+    {
+      const nameStr = displayName
+        ? `**${displayName}**`
+        : "unknown (you haven't introduced yourself yet — on first message, ask the user for their name and use the `remember` tool to save it)";
+
+      let prefLines = "";
+      if (userPrefMemories && userPrefMemories.length > 0) {
+        prefLines = userPrefMemories.map(m => `- ${m.title}: ${m.summary || m.content}`).join("\n");
+      }
+
+      userIdentityBlock =
+        `\n\n## About This User\nYou are speaking with ${nameStr}. Address them by first name when natural.\n` +
+        (prefLines
+          ? `\n**Their preferences and rules:**\n${prefLines}\n\nAlways apply these preferences — they persist across all conversations.`
+          : `\nNo preferences saved yet. As you learn about how they trade and what they care about, use the \`remember\` tool to build their profile.`);
+    }
+
+    const nowUtc = new Date();
+    const todayStr = nowUtc.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "America/New_York" });
+    const timeStr = nowUtc.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "America/New_York", timeZoneName: "short" });
+
     const baseSystemPrompt =
       systemPrompt ||
-      `You are an expert algorithmic trading agent for Kalshi event contracts.`;
+      `You are an expert algorithmic trading agent for Kalshi event contracts.\n\n## Current Date & Time\nToday is **${todayStr}** (${timeStr}). Always use this date when the user asks about trades "today", "this week", or any relative time reference. Never guess or invent a date.`;
 
     const fullSystemPrompt =
       baseSystemPrompt +
+      userIdentityBlock +
       strategyBlock +
       riskContext +
       memoryBlock +
@@ -1756,7 +1807,10 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "query_trades") {
           try {
             const { date_start, date_end, ticker, strategy, outcome, status, limit = 20 } = args;
-            let q = supabase.from("trades").select("id, ticker, side, action, price, amount, pnl, strategy, status, settled_at, created_at").eq("user_id", userId);
+            // Use OR-null pattern: return the user's trades + any trades with no user_id (placed
+            // before multi-tenancy enforcement). Falls back to no filter if userId is null.
+            let q = supabase.from("trades").select("id, ticker, side, action, price, amount, pnl, strategy, status, settled_at, created_at");
+            if (userId) q = q.or(`user_id.is.null,user_id.eq.${userId}`);
             if (date_start) q = q.gte("created_at", date_start);
             if (date_end) q = q.lte("created_at", date_end + "T23:59:59Z");
             if (ticker) q = q.ilike("ticker", `%${ticker}%`);

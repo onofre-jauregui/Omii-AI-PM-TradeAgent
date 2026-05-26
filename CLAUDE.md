@@ -60,6 +60,14 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Pending user decision on whether to delete these files outright. Until then,
   treat them as dead code.
 
+## Deploy & Credentials
+
+- **Supabase project ref:** `uyfnezxmgwitpzsrnkst`
+- **Supabase access token (project-scoped):** `$SUPABASE_ACCESS_TOKEN_KTA` — defined in `~/.omii_env`. Use this, never the global `$SUPABASE_ACCESS_TOKEN`, for all `supabase functions deploy` and management API calls in this project.
+- **Deploy edge functions:** `source ~/.omii_env && SUPABASE_ACCESS_TOKEN=$SUPABASE_ACCESS_TOKEN_KTA npx supabase functions deploy <function-name> --project-ref uyfnezxmgwitpzsrnkst`
+- **Apply migrations:** `source ~/.omii_env && curl -s -X POST "https://api.supabase.com/v1/projects/uyfnezxmgwitpzsrnkst/database/query" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN_KTA" -H "Content-Type: application/json" -d '{"query": "..."}'`
+- **Never use** `npx supabase db push` — migration history is out of sync with remote.
+
 ## Rules specific to this project
 
 ### On trading performance claims
