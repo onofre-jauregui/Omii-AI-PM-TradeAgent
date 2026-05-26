@@ -204,6 +204,15 @@ function AppRoutes() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
 
   useEffect(() => {
+    // Strip OAuth error params from the URL before doing anything — Supabase sometimes
+    // lands back on the app with ?error=bad_oauth_state when the flow expired or was
+    // abandoned. These params leave the page stuck with session=undefined forever.
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("error") || params.has("error_code")) {
+      const cleanUrl = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, "", cleanUrl);
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
     });
