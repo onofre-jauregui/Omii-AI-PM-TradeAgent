@@ -342,7 +342,7 @@ serve(async (req) => {
       );
 
       // Update daily risk state for this tenant
-      await updateRiskState(supabase, userId, 0);
+      await updateRiskState(supabase, userId, 0, settings);
 
       return new Response(JSON.stringify({
         success: true, trade,
@@ -570,7 +570,8 @@ serve(async (req) => {
 async function updateRiskState(
   supabase: any,
   userId: string | null,
-  _pnlChange: number  // kept for API compat — daily_pnl now computed from settled trades directly
+  _pnlChange: number,  // kept for API compat — daily_pnl now computed from settled trades directly
+  riskSettings?: any   // used to seed peak_portfolio_value on first trade of day
 ) {
   const today = new Date().toISOString().split("T")[0];
 
@@ -619,6 +620,9 @@ async function updateRiskState(
       await updateQuery.is("user_id", null);
     }
   } else {
+    // Seed peak_portfolio_value from user's allocated capital so the drawdown
+    // and concentration checks have a meaningful baseline from day one.
+    const seedPeak = riskSettings?.allocated_capital ?? 500;
     await supabase.from("risk_state").insert({
       user_id: userId,
       date: today,
@@ -626,6 +630,7 @@ async function updateRiskState(
       daily_trades: 1,
       open_position_count: openPositionCount || 0,
       max_drawdown_today: Math.min(0, actualDailyPnl),
+      peak_portfolio_value: seedPeak,
     });
   }
 }

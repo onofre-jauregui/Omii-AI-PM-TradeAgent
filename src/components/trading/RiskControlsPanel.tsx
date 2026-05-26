@@ -108,9 +108,10 @@ export function RiskControlsPanel() {
     setSaving(true);
     setSaveStatus("idle");
     try {
-      // Save risk settings scoped to current user
       const { data: { user } } = await supabase.auth.getUser();
-      const userId = user?.id ?? "";
+      const userId = user?.id;
+      if (!userId) throw new Error("Not authenticated — sign in before saving settings.");
+
       const riskPayload = {
         user_id:             userId,
         max_daily_loss:      riskSettings.maxDailyLoss[0],
@@ -124,26 +125,35 @@ export function RiskControlsPanel() {
         allocated_capital:   riskSettings.allocatedCapital[0],
         updated_at: new Date().toISOString(),
       };
-      const { data: existing } = await supabase.from("risk_settings").select("id")
-        .eq("user_id", userId).maybeSingle();
+
+      const { data: existing, error: selectErr } = await supabase
+        .from("risk_settings").select("id").eq("user_id", userId).maybeSingle();
+      if (selectErr) throw new Error(`Failed to check existing settings: ${selectErr.message}`);
+
       if (existing) {
-        await supabase.from("risk_settings").update(riskPayload).eq("id", existing.id);
+        const { error } = await supabase.from("risk_settings").update(riskPayload).eq("id", existing.id);
+        if (error) throw new Error(`Failed to update risk settings: ${error.message}`);
       } else {
-        await supabase.from("risk_settings").insert(riskPayload);
+        const { error } = await supabase.from("risk_settings").insert(riskPayload);
+        if (error) throw new Error(`Failed to save risk settings: ${error.message}`);
       }
 
       // Save per-strategy starting_balance = totalBudget × allocation%
       const total = Math.max(0, parseInt(totalBudget, 10) || 0);
-      await Promise.all(
-        Object.entries(allocations).map(([id, pct]) => {
+      const strategyErrors = await Promise.all(
+        Object.entries(allocations).map(async ([id, pct]) => {
           const amount = Math.round(total * (pct / 100));
-          return supabase.from("strategies").update({ starting_balance: amount }).eq("id", id);
+          const { error } = await supabase.from("strategies").update({ starting_balance: amount }).eq("id", id);
+          return error;
         })
       );
+      const firstStratErr = strategyErrors.find(Boolean);
+      if (firstStratErr) throw new Error(`Failed to save strategy allocations: ${firstStratErr.message}`);
 
       setSaveStatus("success");
       setTimeout(() => setSaveStatus("idle"), 3000);
-    } catch {
+    } catch (err) {
+      console.error("RiskControlsPanel save failed:", err);
       setSaveStatus("error");
       setTimeout(() => setSaveStatus("idle"), 3000);
     } finally {

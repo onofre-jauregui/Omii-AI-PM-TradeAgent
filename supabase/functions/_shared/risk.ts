@@ -16,6 +16,9 @@ export interface RiskSettings {
   max_daily_loss: number;
   max_open_positions: number;
   max_drawdown_pct: number;
+  auto_stop_loss: boolean;
+  stop_loss_pct: number;
+  allocated_capital: number;
 }
 
 export interface RiskState {
@@ -46,15 +49,19 @@ export interface RiskEvaluationResult {
 /**
  * Pure evaluation of whether a proposed order passes risk checks.
  *
- * Paper mode bypasses all checks. Live mode runs the full gauntlet.
+ * Both paper and live mode run the same checks — paper mode must simulate
+ * real trading faithfully so users discover misconfigured limits before going live.
  *
- * Order of checks matches the production policy in execute-trade:
- *  1. position size
- *  2. trading halted state
- *  3. daily loss limit
- *  4. open positions limit
- *  5. drawdown limit
- *  6. single-order concentration (>25% of peak portfolio)
+ * The single exception: the 25%-concentration check is live-only. Paper
+ * portfolios start at $500 and the cap would block most early paper trades.
+ *
+ * Order of checks:
+ *  1. position size         (both modes)
+ *  2. trading halted state  (both modes)
+ *  3. daily loss limit      (both modes)
+ *  4. open positions limit  (both modes)
+ *  5. drawdown limit        (both modes)
+ *  6. concentration limit   (live only)
  */
 export function evaluateRisk(
   amount: number,
@@ -62,7 +69,6 @@ export function evaluateRisk(
   settings: RiskSettings | null,
   riskState: RiskState | null
 ): RiskEvaluationResult {
-  if (mode === "paper") return { passed: true };
   if (!settings) return { passed: true };
 
   // 1. Position size
@@ -124,8 +130,9 @@ export function evaluateRisk(
     }
   }
 
-  // 6. Single-order concentration: no trade > 25% of peak portfolio value
-  if (riskState.peak_portfolio_value > 0) {
+  // 6. Single-order concentration: no trade > 25% of peak portfolio — live only.
+  // Paper portfolios start at $500; the cap would block most early simulation trades.
+  if (mode === "live" && riskState.peak_portfolio_value > 0) {
     const concentrationPct = (amount / riskState.peak_portfolio_value) * 100;
     if (concentrationPct > 25) {
       return {

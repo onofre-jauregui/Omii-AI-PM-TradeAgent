@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { langfuseIngest, scoreEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 
@@ -197,7 +198,7 @@ serve(async (req) => {
       // 3. Fetch the actual trade rows so we can compute per-trade pnl
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
-        .select("id, side, action, price, amount, created_at, trace_id")
+        .select("id, user_id, side, action, price, amount, created_at, trace_id")
         .in("id", tradeIds);
 
       if (tradesErr || !trades) {
@@ -296,6 +297,41 @@ serve(async (req) => {
           metadata: { run_id: runId, resolution, outcome, original_price: t.price, amount: t.amount },
         });
 
+        // 7. Auto stop-loss: if the trade settled at a loss ≥ stop_loss_pct% of amount,
+        //    halt trading for the rest of today for this user.
+        if (pnl < 0 && t.user_id) {
+          const { data: riskRow } = await supabase
+            .from("risk_settings")
+            .select("auto_stop_loss, stop_loss_pct")
+            .eq("user_id", t.user_id)
+            .maybeSingle();
+
+          if (riskRow?.auto_stop_loss && (riskRow.stop_loss_pct ?? 0) > 0) {
+            const lossPct = (Math.abs(pnl) / (Number(t.amount) || 1)) * 100;
+            if (lossPct >= riskRow.stop_loss_pct) {
+              const today = new Date().toISOString().split("T")[0];
+              await supabase.from("risk_state").upsert(
+                {
+                  user_id: t.user_id,
+                  date: today,
+                  is_trading_halted: true,
+                  halt_reason: `Auto stop-loss: ${ticker} lost ${lossPct.toFixed(1)}% (threshold: ${riskRow.stop_loss_pct}%)`,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: "user_id,date" }
+              );
+              await supabase.from("compliance_log").insert({
+                event_type: "auto_stop_loss_triggered",
+                severity: "warning",
+                trade_id: t.id,
+                user_id: t.user_id,
+                message: `Auto stop-loss halted trading: ${ticker} lost ${lossPct.toFixed(1)}% (threshold: ${riskRow.stop_loss_pct}%)`,
+                metadata: { pnl: Math.round(pnl * 100) / 100, amount: t.amount, lossPct, threshold: riskRow.stop_loss_pct, run_id: runId },
+              });
+            }
+          }
+        }
+
         settledInTicker += 1;
       }
 
@@ -350,6 +386,7 @@ serve(async (req) => {
         message: `auto-settle fatal: ${errMsg}`,
         metadata: { run_id: runId, stack: e instanceof Error ? e.stack : undefined },
       });
+      await sendTelegramAlert(`🔴 <b>[TradeAgent] Settlement Crashed</b>\n${errMsg.slice(0, 200)}\nPositions may not be settling — P&L is not realizing. Check immediately.`);
     } catch {}
     return new Response(
       JSON.stringify({ error: errMsg }),
