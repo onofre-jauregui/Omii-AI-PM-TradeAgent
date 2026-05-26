@@ -20,7 +20,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
  *   rate_limits       — once per unique series set per 2h
  */
 
-const SILENCE_HOURS = 4;
+const SILENCE_HOURS = 24;
 const WIN_RATE_FLOOR = 0.70;
 const WIN_RATE_SAMPLE = 20;
 const VOLUME_SPIKE_MULTIPLIER = 3;
@@ -112,11 +112,9 @@ serve(async (req) => {
         : 999;
 
       if (hoursSinceLastTrade >= SILENCE_HOURS) {
-        // Re-alert each time we cross a SILENCE_HOURS boundary (4h, 8h, 12h…).
-        // bucket 1 = 4–8h, bucket 2 = 8–12h, etc. Fingerprint includes bucket
-        // so crossing a boundary always produces a new, unseen fingerprint.
-        const bucket = Math.floor(hoursSinceLastTrade / SILENCE_HOURS);
-        const fingerprint = `silence_bucket_${bucket}`;
+        // One alert per calendar day — fingerprint on today's UTC date so the
+        // same silence condition never fires more than once in a 24h window.
+        const fingerprint = `silence_day_${now.toISOString().slice(0, 10)}`;
         const sinceStr = lastTradeTime
           ? `${hoursSinceLastTrade.toFixed(1)}h ago (${lastTradeTime.toISOString().slice(0, 16)} UTC)`
           : "never";
