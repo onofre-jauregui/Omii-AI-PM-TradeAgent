@@ -371,10 +371,14 @@ serve(async (req) => {
     }
 
     // ── Parse and deduplicate ─────────────────────────────────────────────────
+    const nowMs = Date.now();
     const parsedRaw = rawMarkets.map(parseMarket).filter((m): m is ParsedMarket => m !== null);
     const seen = new Set<string>();
     const markets = parsedRaw.filter((m) => {
       if (seen.has(m.ticker)) return false;
+      // Skip markets that have already closed — their prices are stale and will
+      // generate phantom violations that S-001 can never act on.
+      if (m.close_time && new Date(m.close_time).getTime() <= nowMs) return false;
       seen.add(m.ticker);
       return true;
     });
