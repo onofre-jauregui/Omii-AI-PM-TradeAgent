@@ -1,5 +1,12 @@
 {
-  "alias": ["omii-trade-agent.vercel.app"],
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "destination": "https://kalshitradeagent.com/$1",
+      "permanent": true,
+      "has": [{ "type": "host", "value": "omii-trade-agent.vercel.app" }]
+    }
+  ],
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
   "headers": [
     {
