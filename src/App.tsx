@@ -155,43 +155,31 @@ const Spinner = () => (
   </div>
 );
 
-/** Protected portion of the app — requires a valid session. */
-function ProtectedApp({ session }: { session: Session | null | undefined }) {
-  const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
+/**
+ * Protected portion of the app — requires a valid session.
+ * onboardingCompleted is owned by AppRoutes (never unmounts) so it
+ * survives navigation between explicit routes and the * wildcard.
+ */
+function ProtectedApp({
+  session,
+  onboardingCompleted,
+}: {
+  session: Session | null | undefined;
+  onboardingCompleted: boolean | null;
+}) {
+  // Still loading session or profile check
+  if (session === undefined || (session && onboardingCompleted === null)) return <Spinner />;
 
-  // Still loading session
-  if (session === undefined) return <Spinner />;
-
-  // Auth gate: every user must sign in before reaching the trading UI.
-  // Set VITE_DISABLE_AUTH=true in .env.local for solo-developer / NULL-tenant mode.
+  // Auth gate
   const authDisabled = import.meta.env.VITE_DISABLE_AUTH === "true";
   if (!authDisabled && !session) {
-    // Root path shows the marketing landing page; everything else redirects to /login.
     if (window.location.pathname === "/") return <LandingPage />;
     window.location.replace("/login");
     return null;
   }
 
-  // Check onboarding completion for authenticated users (skip in auth-disabled dev mode)
-  if (session && !authDisabled && onboardingCompleted === null) {
-    supabase
-      .from("profiles")
-      .select("onboarding_completed")
-      .eq("id", session.user.id)
-      .maybeSingle()
-      .then(({ data }) => {
-        setOnboardingCompleted(data?.onboarding_completed ?? false);
-      })
-      .catch(() => {
-        // If profile fetch fails, assume onboarding is done so the user isn't locked out
-        setOnboardingCompleted(true);
-      });
-    return <Spinner />;
-  }
-
   // New user — hasn't completed onboarding yet
   if (session && !authDisabled && onboardingCompleted === false) {
-    // Use window.location to avoid needing useNavigate outside Router context
     if (window.location.pathname !== "/onboarding") {
       window.location.replace("/onboarding");
     }
@@ -212,15 +200,15 @@ function ProtectedApp({ session }: { session: Session | null | undefined }) {
 
 function AppRoutes() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
+  // Owned here so it survives ProtectedApp unmount/remount on route changes
+  const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
 
   useEffect(() => {
-    // Strip OAuth error params from the URL before doing anything — Supabase sometimes
-    // lands back on the app with ?error=bad_oauth_state when the flow expired or was
-    // abandoned. These params leave the page stuck with session=undefined forever.
+    // Strip OAuth error params — Supabase sometimes lands back with
+    // ?error=bad_oauth_state which leaves session stuck at undefined.
     const params = new URLSearchParams(window.location.search);
     if (params.has("error") || params.has("error_code")) {
-      const cleanUrl = window.location.pathname + window.location.hash;
-      window.history.replaceState({}, "", cleanUrl);
+      window.history.replaceState({}, "", window.location.pathname + window.location.hash);
     }
 
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -233,6 +221,23 @@ function AppRoutes() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Run the onboarding check once per authenticated user — keyed on user id
+  // so it re-runs on sign-out/sign-in but not on every route navigation.
+  useEffect(() => {
+    const userId = session?.user?.id;
+    if (!userId) {
+      setOnboardingCompleted(null);
+      return;
+    }
+    supabase
+      .from("profiles")
+      .select("onboarding_completed")
+      .eq("id", userId)
+      .maybeSingle()
+      .then(({ data }) => setOnboardingCompleted(data?.onboarding_completed ?? false))
+      .catch(() => setOnboardingCompleted(true)); // network failure → don't lock user out
+  }, [session?.user?.id]);
 
   return (
     <BrowserRouter>
@@ -251,7 +256,7 @@ function AppRoutes() {
         <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/billing" element={<BillingPage />} />
         {/* Everything else goes through the auth gate */}
-        <Route path="*" element={<ProtectedApp session={session} />} />
+        <Route path="*" element={<ProtectedApp session={session} onboardingCompleted={onboardingCompleted} />} />
       </Routes>
     </BrowserRouter>
   );
