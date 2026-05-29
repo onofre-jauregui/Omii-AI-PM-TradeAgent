@@ -55,6 +55,37 @@ const MODEL_COSTS: Record<string, ModelInfo> = {
 };
 const DEFAULT_MODEL_INFO: ModelInfo = { label: "gpt-4o-mini", provider: "OpenRouter", input: 0.15, output: 0.60 };
 
+// ── Platform billing registry ─────────────────────────────────────────────────
+// Payment method labels are edited in-place and stored in localStorage so no migration is needed.
+interface PlatformEntry {
+  id: string;
+  name: string;
+  category: "llm" | "infra" | "exchange" | "monitoring";
+  purpose: string;
+  billingCycle: "usage" | "monthly" | "deposit";
+  staticCostLabel: string; // shown when no computed value; use "computed" to pull from runtime
+}
+const PLATFORM_REGISTRY: PlatformEntry[] = [
+  { id: "openrouter", name: "OpenRouter",  category: "llm",        purpose: "LLM API gateway — qualify calls",        billingCycle: "usage",   staticCostLabel: "computed" },
+  { id: "supabase",   name: "Supabase",    category: "infra",      purpose: "Database · auth · edge functions · cron", billingCycle: "monthly", staticCostLabel: "$25/mo" },
+  { id: "vercel",     name: "Vercel",      category: "infra",      purpose: "Frontend hosting · CDN",                 billingCycle: "monthly", staticCostLabel: "$20/mo" },
+  { id: "langfuse",   name: "Langfuse",    category: "monitoring", purpose: "LLM observability · trace analytics",    billingCycle: "monthly", staticCostLabel: "Free tier" },
+  { id: "sentry",     name: "Sentry",      category: "monitoring", purpose: "Error tracking · alerting",              billingCycle: "monthly", staticCostLabel: "Free tier" },
+  { id: "kalshi",     name: "Kalshi",      category: "exchange",   purpose: "Prediction market exchange",             billingCycle: "deposit", staticCostLabel: "Deposit" },
+];
+const PLATFORM_CATEGORY_COLORS: Record<PlatformEntry["category"], string> = {
+  llm:        "bg-violet-500/15 text-violet-400",
+  infra:      "bg-blue-500/15 text-blue-400",
+  monitoring: "bg-yellow-500/15 text-yellow-400",
+  exchange:   "bg-emerald-500/15 text-emerald-400",
+};
+const BILLING_CYCLE_LABELS: Record<PlatformEntry["billingCycle"], string> = {
+  usage:   "Pay-as-you-go",
+  monthly: "Monthly subscription",
+  deposit: "Deposited funds",
+};
+const LS_BILLING_KEY = "tradeagent_platform_billing";
+
 // ── Failure Mode Details ───────────────────────────────────────────────────────
 
 const FAILURE_MODE_DETAILS: Record<string, { title: string; description: string; resolution: string }> = {
@@ -391,6 +422,10 @@ export default function ObservabilityPage() {
   const [equityData, setEquityData] = useState<EquityPoint[]>([]);
 
   // Cost / tools
+  const [platformBilling, setPlatformBilling] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem(LS_BILLING_KEY) ?? "{}"); } catch { return {}; }
+  });
+  const [platformBillingEdit, setPlatformBillingEdit] = useState<string | null>(null);
   const [complianceLast30d, setComplianceLast30d] = useState<ComplianceEvent[]>([]);
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [tradesLast30dCount, setTradesLast30dCount] = useState(0);
@@ -2149,6 +2184,104 @@ export default function ObservabilityPage() {
                 </div>
               </details>
             )}
+
+            {/* ── Platform Billing Breakdown ───────────────────────────── */}
+            <details className="border-t border-border/60" open={false}>
+              <summary className="flex items-center justify-between px-6 py-3 cursor-pointer select-none list-none hover:bg-secondary/30 transition-colors">
+                <div className="flex items-center gap-2">
+                  <p className="text-[11px] font-medium text-foreground">Platform Billing</p>
+                  <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">
+                    {PLATFORM_REGISTRY.length} services
+                  </span>
+                </div>
+                <ChevronDown className="w-3.5 h-3.5 text-muted-foreground transition-transform [[open]>summary>&]:rotate-180" />
+              </summary>
+              <div className="px-6 pb-5 pt-2 space-y-2">
+                <p className="text-[10px] text-muted-foreground mb-3">
+                  All platforms running this agent. Click any payment method field to edit — saved locally in your browser.
+                </p>
+                {/* Header row */}
+                <div className="grid grid-cols-[1fr_auto_auto_1fr] gap-x-4 px-3 mb-1">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Platform</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide text-right">Est. Cost</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide text-right">Billing</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide pl-2">Payment Method</p>
+                </div>
+                <div className="rounded-xl border border-border overflow-hidden divide-y divide-border/50">
+                  {PLATFORM_REGISTRY.map((p) => {
+                    const computedCost = p.id === "openrouter" && totalSpend30d > 0
+                      ? `$${totalSpend30d.toFixed(4)}/30d`
+                      : null;
+                    const costDisplay = computedCost ?? p.staticCostLabel;
+                    const paymentLabel = platformBilling[p.id] ?? "";
+                    const isEditing = platformBillingEdit === p.id;
+
+                    return (
+                      <div key={p.id} className="grid grid-cols-[1fr_auto_auto_1fr] gap-x-4 items-center px-4 py-3 hover:bg-secondary/20 transition-colors">
+                        {/* Platform name + purpose */}
+                        <div className="flex items-start gap-2 min-w-0">
+                          <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${PLATFORM_CATEGORY_COLORS[p.category]}`}>
+                            {p.category}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="text-[12px] font-medium text-foreground truncate">{p.name}</p>
+                            <p className="text-[10px] text-muted-foreground truncate leading-snug">{p.purpose}</p>
+                          </div>
+                        </div>
+                        {/* Cost */}
+                        <p className={`text-[12px] font-mono font-semibold text-right tabular-nums ${computedCost ? "text-foreground" : "text-muted-foreground"}`}>
+                          {costDisplay}
+                        </p>
+                        {/* Billing cycle */}
+                        <p className="text-[10px] text-muted-foreground text-right whitespace-nowrap">
+                          {BILLING_CYCLE_LABELS[p.billingCycle]}
+                        </p>
+                        {/* Payment method — editable in-place */}
+                        <div className="pl-2">
+                          {isEditing ? (
+                            <input
+                              autoFocus
+                              defaultValue={paymentLabel}
+                              placeholder="e.g. Chase Visa ••••1234"
+                              className="w-full text-[11px] bg-secondary/60 border border-border rounded px-2 py-1 text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-ring"
+                              onBlur={(e) => {
+                                const next = { ...platformBilling, [p.id]: e.currentTarget.value };
+                                setPlatformBilling(next);
+                                localStorage.setItem(LS_BILLING_KEY, JSON.stringify(next));
+                                setPlatformBillingEdit(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") e.currentTarget.blur();
+                                if (e.key === "Escape") setPlatformBillingEdit(null);
+                              }}
+                            />
+                          ) : (
+                            <button
+                              onClick={() => setPlatformBillingEdit(p.id)}
+                              className={`w-full text-left text-[11px] px-2 py-1 rounded border transition-colors ${
+                                paymentLabel
+                                  ? "border-border text-foreground hover:border-ring"
+                                  : "border-dashed border-border/60 text-muted-foreground/50 hover:border-ring hover:text-muted-foreground"
+                              }`}
+                            >
+                              {paymentLabel || "— add payment method"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Footer totals */}
+                <div className="flex items-center justify-between px-4 py-2 rounded-xl bg-secondary/30 mt-1">
+                  <p className="text-[11px] text-muted-foreground">Est. monthly infrastructure</p>
+                  <p className="text-[12px] font-semibold tabular-nums">
+                    ~${(45 + totalSpend30d).toFixed(2)}/mo
+                    <span className="text-[10px] font-normal text-muted-foreground ml-1">(Supabase + Vercel + LLM)</span>
+                  </p>
+                </div>
+              </div>
+            </details>
 
           </div>
         </Section>
