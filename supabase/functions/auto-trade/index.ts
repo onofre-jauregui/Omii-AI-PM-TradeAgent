@@ -1187,7 +1187,7 @@ async function runS002LongshotBias(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No longshot signals (yes_ask 8-11¢, vol≥100, 2h-30d, non-sports/ETH)",
+      details: "No longshot signals (yes_ask 8-11¢, vol≥200, 2h-30d, non-sports/ETH)",
     };
   }
 
@@ -1625,10 +1625,12 @@ async function runS005WeatherEdge(
     }
   }
 
-  // 3. LLM-gate signals. High-edge signals (>= 25¢) bypass the LLM entirely — the
+  // 3. LLM-gate signals. High-edge signals (>= 30¢) bypass the LLM entirely — the
   //    NWS/Kalshi divergence is structural, not sentiment-driven. Same logic as S-001 arb.
   //    Low-edge signals still go through the LLM gate for discretionary review.
-  const AUTO_QUALIFY_EDGE = 25;
+  //    Raised from 25¢ to 30¢ after win-rate collapse (NY 0W/5L, 50% overall) — tighter
+  //    gate forces LLM review on borderline signals until city lessons stabilize.
+  const AUTO_QUALIFY_EDGE = 30;
   // Cities with >= 3 NO losses in 14d must go through LLM even at high edge.
   // GFS has systematic bias on these cities in current season — the large "edge"
   // is a model artifact, not a real market mispricing.
@@ -1679,7 +1681,7 @@ async function runS005WeatherEdge(
       const cityLessons = lessonsByCity.get(city) ?? [];
       const stat = cityWinLoss.get(city);
       const cityHistoryNote = stat
-        ? `City track record: ${stat.wins}W/${stat.losses}L, total P&L $${stat.totalPnl.toFixed(2)}.${stat.losses >= 2 ? " CAUTION: multiple prior losses — REJECT unless edge is exceptionally large (>25¢)." : ""}`
+        ? `City track record: ${stat.wins}W/${stat.losses}L, total P&L $${stat.totalPnl.toFixed(2)}.${stat.losses >= 2 ? " CAUTION: multiple prior losses — REJECT unless edge is exceptionally large (>30¢)." : ""}`
         : "No prior weather trades for this city.";
       const lessonBlock = cityLessons.length > 0
         ? cityLessons.slice(0, 3).map((l: any) =>

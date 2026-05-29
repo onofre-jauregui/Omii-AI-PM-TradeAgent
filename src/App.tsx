@@ -149,12 +149,18 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
   return element;
 }
 
+const Spinner = () => (
+  <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: "#0f0d0b" }}>
+    <div className="h-4 w-4 rounded-full border-2 border-white/20 border-t-white/60 animate-spin" />
+  </div>
+);
+
 /** Protected portion of the app — requires a valid session. */
 function ProtectedApp({ session }: { session: Session | null | undefined }) {
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
 
-  // Still loading — show nothing (avoids flash)
-  if (session === undefined) return null;
+  // Still loading session
+  if (session === undefined) return <Spinner />;
 
   // Auth gate: every user must sign in before reaching the trading UI.
   // Set VITE_DISABLE_AUTH=true in .env.local for solo-developer / NULL-tenant mode.
@@ -175,8 +181,12 @@ function ProtectedApp({ session }: { session: Session | null | undefined }) {
       .maybeSingle()
       .then(({ data }) => {
         setOnboardingCompleted(data?.onboarding_completed ?? false);
+      })
+      .catch(() => {
+        // If profile fetch fails, assume onboarding is done so the user isn't locked out
+        setOnboardingCompleted(true);
       });
-    return null; // wait for profile check
+    return <Spinner />;
   }
 
   // New user — hasn't completed onboarding yet
