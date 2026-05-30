@@ -229,60 +229,55 @@ const Index = () => {
         )}>
 
           {/* ── Dashboard ──────────────────────────────────────────── */}
-          {activeTab === "dashboard" && (
-            <div className="space-y-6 apple-reveal">
-              <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
-              <StrategyPerformance mode={mode} />
-              <PortfolioOverview mode={mode} />
-              <TradeLog filterMode={mode} />
-            </div>
-          )}
+          {/* All tabs stay mounted — hidden with CSS so state/data survive tab switches.
+              Conditional rendering (unmount/remount) caused dashoard to hang in loading
+              state on every return because all useEffect data fetches re-fired from scratch. */}
+          <div className={cn("space-y-6", activeTab !== "dashboard" && "hidden")}>
+            <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
+            <StrategyPerformance mode={mode} />
+            <PortfolioOverview mode={mode} />
+            <TradeLog filterMode={mode} />
+          </div>
 
           {/* ── Agent ──────────────────────────────────────────────── */}
-          {activeTab === "agent" && (
-            <div className="space-y-5 apple-reveal">
-              {/* Sub-tabs — Claude/OpenAI style */}
-              <div className="flex gap-1 overflow-x-auto scrollbar-none">
-                {([
-                  { id: "chat",       label: "Chat"       },
-                  { id: "strategies", label: "Strategies" },
-                  { id: "risk",       label: "Risk"       },
-                  { id: "memory",     label: "Memory"     },
-                ] as const).map(({ id, label }) => (
-                  <button
-                    key={id}
-                    onClick={() => setAgentSubTab(id)}
-                    className={`shrink-0 px-4 py-2 text-sm font-medium rounded-full transition-all duration-150 ${
-                      agentSubTab === id
-                        ? "bg-foreground text-background"
-                        : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
-              {agentSubTab === "strategies" && <StrategiesPanel />}
-              {agentSubTab === "risk"       && <RiskControlsPanel />}
-              {agentSubTab === "memory"     && <AgentMemoryCard full />}
+          <div className={cn("space-y-5", activeTab !== "agent" && "hidden")}>
+            {/* Sub-tabs — Claude/OpenAI style */}
+            <div className="flex gap-1 overflow-x-auto scrollbar-none">
+              {([
+                { id: "chat",       label: "Chat"       },
+                { id: "strategies", label: "Strategies" },
+                { id: "risk",       label: "Risk"       },
+                { id: "memory",     label: "Memory"     },
+              ] as const).map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setAgentSubTab(id)}
+                  className={`shrink-0 px-4 py-2 text-sm font-medium rounded-full transition-all duration-150 ${
+                    agentSubTab === id
+                      ? "bg-foreground text-background"
+                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          )}
+            {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
+            {agentSubTab === "strategies" && <StrategiesPanel />}
+            {agentSubTab === "risk"       && <RiskControlsPanel />}
+            {agentSubTab === "memory"     && <AgentMemoryCard full />}
+          </div>
 
           {/* ── Markets ────────────────────────────────────────────── */}
-          {activeTab === "markets" && (
-            <div className="apple-reveal">
-              <MarketsPanel mode={mode} openMarketTicker={marketToOpen} onMarketOpened={() => setMarketToOpen(null)} />
-            </div>
-          )}
+          <div className={cn(activeTab !== "markets" && "hidden")}>
+            <MarketsPanel mode={mode} openMarketTicker={marketToOpen} onMarketOpened={() => setMarketToOpen(null)} />
+          </div>
 
           {/* ── Settings ───────────────────────────────────────────── */}
-          {activeTab === "settings" && (
-            <div className="space-y-6 apple-reveal">
-              <ProfilePanel mode={mode} userEmail={userEmail} userId={userId} />
-              <SettingsPanel userId={userId} />
-            </div>
-          )}
+          <div className={cn("space-y-6", activeTab !== "settings" && "hidden")}>
+            <ProfilePanel mode={mode} userEmail={userEmail} userId={userId} />
+            <SettingsPanel userId={userId} />
+          </div>
 
         </main>
       </div>
