@@ -20,10 +20,23 @@ export default defineConfig(({ mode }) => ({
       workbox: {
         clientsClaim: true,
         skipWaiting: true,
-        // Pre-cache all built static assets. API calls (Supabase, Kalshi) are
-        // intentionally excluded from caching so trading data is always live.
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
-        runtimeCaching: [],
+        // Only precache hashed JS/CSS/icon assets — NOT index.html.
+        // index.html references hashed filenames that change on every deploy;
+        // if the SW serves a stale index.html the browser requests old JS bundles
+        // that no longer exist → blank screen. Navigation always hits the network.
+        globPatterns: ["**/*.{js,css,ico,png,svg,woff2}"],
+        // Navigation requests (HTML) → network first, fall back to cached index.html
+        // if offline. This guarantees the app shell is always fresh after a deploy.
+        runtimeCaching: [
+          {
+            urlPattern: ({ request }) => request.mode === "navigate",
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "navigation",
+              networkTimeoutSeconds: 5,
+            },
+          },
+        ],
       },
 
       manifest: {
