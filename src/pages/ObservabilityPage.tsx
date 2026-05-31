@@ -66,7 +66,8 @@ interface PlatformEntry {
   staticCostLabel: string; // shown when no computed value; use "computed" to pull from runtime
 }
 const PLATFORM_REGISTRY: PlatformEntry[] = [
-  { id: "openrouter", name: "OpenRouter",  category: "llm",        purpose: "LLM API gateway — qualify calls",        billingCycle: "usage",   staticCostLabel: "computed" },
+  { id: "anthropic",  name: "Anthropic",   category: "llm",        purpose: "Direct API — qualify calls (active)",    billingCycle: "usage",   staticCostLabel: "computed" },
+  { id: "openrouter", name: "OpenRouter",  category: "llm",        purpose: "LLM gateway — system fallback key",      billingCycle: "usage",   staticCostLabel: "Fallback" },
   { id: "supabase",   name: "Supabase",    category: "infra",      purpose: "Database · auth · edge functions · cron", billingCycle: "monthly", staticCostLabel: "$25/mo" },
   { id: "vercel",     name: "Vercel",      category: "infra",      purpose: "Frontend hosting · CDN",                 billingCycle: "monthly", staticCostLabel: "$20/mo" },
   { id: "langfuse",   name: "Langfuse",    category: "monitoring", purpose: "LLM observability · trace analytics",    billingCycle: "monthly", staticCostLabel: "Free tier" },
@@ -437,7 +438,12 @@ export default function ObservabilityPage() {
     avgOutputTokens: number | null;
     totalInputTokens: number;
     totalOutputTokens: number;
+    totalCost30d: number;
+    topModel: string | null;
+    topProvider: string | null;
   } | null>(null);
+  // Connected AI provider accounts from api_keys table
+  const [connectedProviders, setConnectedProviders] = useState<{provider: string; keyId: string; userId: string | null}[]>([]);
 
   const [chatTokenStats, setChatTokenStats] = useState<{
     calls: number;
@@ -913,7 +919,6 @@ export default function ObservabilityPage() {
 
   const loadRealTokenStats = useCallback(async () => {
     const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    // llm_usage events are system-level (user_id = NULL) — no uid filter
     const { data } = await supabase
       .from("compliance_log")
       .select("metadata")
@@ -926,13 +931,43 @@ export default function ObservabilityPage() {
     const withOutput = rows.filter((r) => r.metadata?.completion_tokens != null);
     const totalInput = withInput.reduce((s, r) => s + (r.metadata.prompt_tokens as number), 0);
     const totalOutput = withOutput.reduce((s, r) => s + (r.metadata.completion_tokens as number), 0);
+
+    // Compute actual cost per-call using the model field logged in each event.
+    // This is the only accurate path — estimated token counts are unreliable.
+    const totalCost = rows.reduce((s, r) => {
+      const m = MODEL_COSTS[r.metadata?.model ?? ""] ?? DEFAULT_MODEL_INFO;
+      const inCost = ((r.metadata?.prompt_tokens ?? 0) / 1_000_000) * m.input;
+      const outCost = ((r.metadata?.completion_tokens ?? 0) / 1_000_000) * m.output;
+      return s + inCost + outCost;
+    }, 0);
+
+    const modelFreq = rows.reduce<Record<string, number>>((acc, r) => {
+      const m = r.metadata?.model ?? "unknown"; acc[m] = (acc[m] ?? 0) + 1; return acc;
+    }, {});
+    const providerFreq = rows.reduce<Record<string, number>>((acc, r) => {
+      const p = r.metadata?.provider ?? "unknown"; acc[p] = (acc[p] ?? 0) + 1; return acc;
+    }, {});
+    const topModel = Object.entries(modelFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    const topProvider = Object.entries(providerFreq).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
     setRealTokenStats({
       calls: rows.length,
       avgInputTokens: withInput.length > 0 ? Math.round(totalInput / withInput.length) : null,
       avgOutputTokens: withOutput.length > 0 ? Math.round(totalOutput / withOutput.length) : null,
       totalInputTokens: totalInput,
       totalOutputTokens: totalOutput,
+      totalCost30d: totalCost,
+      topModel,
+      topProvider,
     });
+  }, []);
+
+  const loadConnectedProviders = useCallback(async () => {
+    const { data } = await supabase
+      .from("api_keys")
+      .select("provider, key_id, user_id")
+      .in("provider", ["openrouter", "anthropic", "openai", "google", "model_agent", "kalshi_live", "kalshi_paper"]);
+    setConnectedProviders((data ?? []) as {provider: string; keyId: string; userId: string | null}[]);
   }, []);
 
   const loadChatStats = useCallback(async () => {
@@ -1162,12 +1197,13 @@ export default function ObservabilityPage() {
       loadExecutionGaps(),
       loadRealTokenStats(),
       loadChatStats(),
+      loadConnectedProviders(),
     ]);
   }, [
     loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
     loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
     loadMemories, loadLatencyData, loadSurfaceScanLatency, loadExecutionGaps, loadActiveModel,
-    loadRealTokenStats, loadChatStats,
+    loadRealTokenStats, loadChatStats, loadConnectedProviders,
   ]);
 
   // Session init — fires once on mount. Gets userId for profile display + populates user list.
@@ -1386,9 +1422,19 @@ export default function ObservabilityPage() {
     : null;
 
   // Model usage stats (30d)
-  const inputTokens30d = llmCallsLast30d * QUALIFY_INPUT_TOKENS;
-  const outputTokens30d = llmCallsLast30d * QUALIFY_OUTPUT_TOKENS;
-  const totalSpend30d = dailyLLMSpend * 30;
+  // When realTokenStats is available (llm_usage events logged), use measured values.
+  // Fall back to estimates based on strategy run counts when no real data exists yet.
+  const inputTokens30d = realTokenStats ? realTokenStats.totalInputTokens : llmCallsLast30d * QUALIFY_INPUT_TOKENS;
+  const outputTokens30d = realTokenStats ? realTokenStats.totalOutputTokens : llmCallsLast30d * QUALIFY_OUTPUT_TOKENS;
+  const totalSpend30d = realTokenStats ? realTokenStats.totalCost30d : dailyLLMSpend * 30;
+  const costIsEstimated = !realTokenStats;
+
+  // Active LLM provider based on connected accounts (Anthropic direct beats OpenRouter if user has a key)
+  const hasAnthropicKey = connectedProviders.some(p => p.provider === "anthropic");
+  const hasOpenRouterKey = connectedProviders.some(p => p.provider === "openrouter");
+  const hasOpenAIKey = connectedProviders.some(p => p.provider === "openai");
+  const activeLLMProvider = realTokenStats?.topProvider ?? (hasAnthropicKey ? "anthropic" : hasOpenRouterKey ? "openrouter" : hasOpenAIKey ? "openai" : "openrouter");
+  const activeLLMProviderLabel = activeLLMProvider === "anthropic" ? "Anthropic" : activeLLMProvider === "openrouter" ? "OpenRouter" : activeLLMProvider === "openai" ? "OpenAI" : activeLLMProvider;
   const cycleLabel = avgCycleMs !== null
     ? avgCycleMs >= 1000 ? `${(avgCycleMs / 1000).toFixed(1)}s` : `${avgCycleMs}ms`
     : null;
@@ -2036,8 +2082,13 @@ export default function ObservabilityPage() {
               <div className="grid grid-cols-4 gap-4 mb-3">
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
-                  <p className="text-xl font-bold tabular-nums">${dailyLLMSpend.toFixed(4)}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">avg daily · last 30d</p>
+                  <p className="text-xl font-bold tabular-nums">
+                    {costIsEstimated && <span className="text-yellow-500 text-sm font-normal mr-0.5">~</span>}
+                    ${(totalSpend30d / 30).toFixed(4)}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {costIsEstimated ? "estimated daily · last 30d" : "measured daily · last 30d"}
+                  </p>
                 </div>
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Decision</p>
@@ -2107,8 +2158,15 @@ export default function ObservabilityPage() {
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
-                  <p className="text-base font-bold tabular-nums">${totalSpend30d.toFixed(4)}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">${(LLM_INPUT_PER_M / 1000).toFixed(3)}/1K in · ${(LLM_OUTPUT_PER_M / 1000).toFixed(3)}/1K out</p>
+                  <p className="text-base font-bold tabular-nums">
+                    {costIsEstimated && <span className="text-yellow-500 text-xs font-normal">~</span>}
+                    ${totalSpend30d.toFixed(4)}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {costIsEstimated
+                      ? `est. · ${activeLLMProviderLabel} · ${activeModel ?? "?"}`
+                      : `measured · ${activeLLMProviderLabel}`}
+                  </p>
                 </div>
               </div>
             </div>
@@ -2193,43 +2251,88 @@ export default function ObservabilityPage() {
                   <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">
                     {PLATFORM_REGISTRY.length} services
                   </span>
+                  {costIsEstimated && (
+                    <span className="text-[10px] text-yellow-500 bg-yellow-500/10 px-2 py-0.5 rounded-full">LLM cost estimated</span>
+                  )}
                 </div>
                 <ChevronDown className="w-3.5 h-3.5 text-muted-foreground transition-transform [[open]>summary>&]:rotate-180" />
               </summary>
               <div className="px-6 pb-5 pt-2 space-y-2">
+                {costIsEstimated && (
+                  <div className="rounded-lg bg-yellow-500/8 border border-yellow-500/20 px-3 py-2 mb-2">
+                    <p className="text-[10px] text-yellow-400 leading-snug">
+                      LLM cost is estimated — no <code className="font-mono">llm_usage</code> events in compliance_log yet.
+                      Token counts will be measured after the next hourly run post-deploy.
+                      {realTokenStats?.topProvider && ` Active provider confirmed: ${realTokenStats.topProvider}.`}
+                    </p>
+                  </div>
+                )}
                 <p className="text-[10px] text-muted-foreground mb-3">
                   All platforms running this agent. Click any payment method field to edit — saved locally in your browser.
                 </p>
                 {/* Header row */}
                 <div className="grid grid-cols-[1fr_auto_auto_1fr] gap-x-4 px-3 mb-1">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Platform</p>
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide text-right">Est. Cost</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Platform / Status</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide text-right">30d Cost</p>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide text-right">Billing</p>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide pl-2">Payment Method</p>
                 </div>
                 <div className="rounded-xl border border-border overflow-hidden divide-y divide-border/50">
                   {PLATFORM_REGISTRY.map((p) => {
-                    const computedCost = p.id === "openrouter" && totalSpend30d > 0
-                      ? `$${totalSpend30d.toFixed(4)}/30d`
-                      : null;
-                    const costDisplay = computedCost ?? p.staticCostLabel;
+                    // Determine if this platform is actually connected / active
+                    const isLLMRow = p.category === "llm";
+                    // The real LLM provider may differ from what's in the registry (e.g. Anthropic direct vs OpenRouter)
+                    const isActiveLLM = isLLMRow && p.id === activeLLMProvider;
+                    const isInactiveLLM = isLLMRow && p.id !== activeLLMProvider;
+
+                    // Key connection status for LLM providers
+                    const providerKey = connectedProviders.find(cp => cp.provider === p.id);
+                    const isConnected = p.id === "kalshi" ? connectedProviders.some(cp => cp.provider === "kalshi_live" || cp.provider === "kalshi_paper")
+                      : !!providerKey;
+
+                    // Cost: for the active LLM provider use computed/estimated value; others use static
+                    let computedCostDisplay: string | null = null;
+                    if (isActiveLLM && totalSpend30d > 0) {
+                      computedCostDisplay = costIsEstimated
+                        ? `~$${totalSpend30d.toFixed(4)}`
+                        : `$${totalSpend30d.toFixed(4)}`;
+                    }
+                    const costDisplay = computedCostDisplay ?? (isInactiveLLM ? "—" : p.staticCostLabel);
+
                     const paymentLabel = platformBilling[p.id] ?? "";
                     const isEditing = platformBillingEdit === p.id;
 
                     return (
-                      <div key={p.id} className="grid grid-cols-[1fr_auto_auto_1fr] gap-x-4 items-center px-4 py-3 hover:bg-secondary/20 transition-colors">
-                        {/* Platform name + purpose */}
+                      <div key={p.id} className={`grid grid-cols-[1fr_auto_auto_1fr] gap-x-4 items-center px-4 py-3 hover:bg-secondary/20 transition-colors ${isInactiveLLM ? "opacity-40" : ""}`}>
+                        {/* Platform name + purpose + connection badge */}
                         <div className="flex items-start gap-2 min-w-0">
                           <span className={`shrink-0 mt-0.5 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${PLATFORM_CATEGORY_COLORS[p.category]}`}>
                             {p.category}
                           </span>
                           <div className="min-w-0">
-                            <p className="text-[12px] font-medium text-foreground truncate">{p.name}</p>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-[12px] font-medium text-foreground truncate">{p.name}</p>
+                              {isActiveLLM && (
+                                <span className="text-[9px] bg-emerald-500/15 text-emerald-400 px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide">active</span>
+                              )}
+                              {isLLMRow && !isActiveLLM && isConnected && (
+                                <span className="text-[9px] bg-secondary text-muted-foreground px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide">fallback</span>
+                              )}
+                              {!isLLMRow && isConnected && (
+                                <span className="text-[9px] text-emerald-500/70">●</span>
+                              )}
+                            </div>
                             <p className="text-[10px] text-muted-foreground truncate leading-snug">{p.purpose}</p>
+                            {isActiveLLM && realTokenStats?.topModel && (
+                              <p className="text-[10px] font-mono text-violet-400 truncate">{realTokenStats.topModel}</p>
+                            )}
+                            {isActiveLLM && !realTokenStats && activeModel && (
+                              <p className="text-[10px] font-mono text-violet-400/60 truncate">{activeModel}</p>
+                            )}
                           </div>
                         </div>
                         {/* Cost */}
-                        <p className={`text-[12px] font-mono font-semibold text-right tabular-nums ${computedCost ? "text-foreground" : "text-muted-foreground"}`}>
+                        <p className={`text-[12px] font-mono font-semibold text-right tabular-nums ${computedCostDisplay ? "text-foreground" : "text-muted-foreground"}`}>
                           {costDisplay}
                         </p>
                         {/* Billing cycle */}
@@ -2274,9 +2377,17 @@ export default function ObservabilityPage() {
                 </div>
                 {/* Footer totals */}
                 <div className="flex items-center justify-between px-4 py-2 rounded-xl bg-secondary/30 mt-1">
-                  <p className="text-[11px] text-muted-foreground">Est. monthly infrastructure</p>
+                  <div>
+                    <p className="text-[11px] text-muted-foreground">Monthly infrastructure estimate</p>
+                    <p className="text-[10px] text-muted-foreground/60">
+                      Active LLM: <span className="text-foreground/70">{activeLLMProviderLabel}</span>
+                      {connectedProviders.filter(p => ["openrouter","anthropic","openai","google"].includes(p.provider)).length > 0 && (
+                        <> · {connectedProviders.filter(p => ["openrouter","anthropic","openai","google"].includes(p.provider)).length} provider key{connectedProviders.filter(p => ["openrouter","anthropic","openai","google"].includes(p.provider)).length !== 1 ? "s" : ""} connected</>
+                      )}
+                    </p>
+                  </div>
                   <p className="text-[12px] font-semibold tabular-nums">
-                    ~${(45 + totalSpend30d).toFixed(2)}/mo
+                    {costIsEstimated ? "~" : ""}${(45 + totalSpend30d).toFixed(2)}/mo
                     <span className="text-[10px] font-normal text-muted-foreground ml-1">(Supabase + Vercel + LLM)</span>
                   </p>
                 </div>

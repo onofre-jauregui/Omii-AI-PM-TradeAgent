@@ -2019,29 +2019,34 @@ async function qualifySetup(
         completion: text,
         startTime,
         endTime,
-        inputTokens: data?.usage?.prompt_tokens,
-        outputTokens: data?.usage?.completion_tokens,
+        inputTokens: data?.usage?.prompt_tokens ?? data?.usage?.input_tokens,
+        outputTokens: data?.usage?.completion_tokens ?? data?.usage?.output_tokens,
         metadata: { qualified, reason, mode, strategyId },
       })]);
     }
 
-    // Log actual token usage to compliance_log so the dashboard can compute real costs.
-    // This is the source of truth — prompt_tokens / completion_tokens come directly from the API response.
-    if (supabaseClient && data?.usage) {
+    // Normalize token fields: Anthropic native uses input_tokens/output_tokens;
+    // OpenAI-compatible (OpenRouter, OpenAI) uses prompt_tokens/completion_tokens.
+    // Both paths must populate the same fields so the dashboard cost calc works.
+    const promptTokens = data?.usage?.prompt_tokens ?? data?.usage?.input_tokens ?? null;
+    const completionTokens = data?.usage?.completion_tokens ?? data?.usage?.output_tokens ?? null;
+    const totalTokens = data?.usage?.total_tokens ?? (promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null);
+
+    if (supabaseClient && (promptTokens != null || completionTokens != null)) {
       supabaseClient.from("compliance_log").insert({
         event_type: "llm_usage",
         severity: "info",
-        message: `qualify: ${data.usage.prompt_tokens ?? "?"} in / ${data.usage.completion_tokens ?? "?"} out · ${qualified ? "QUALIFY" : "REJECT"}`,
+        message: `qualify: ${promptTokens ?? "?"} in / ${completionTokens ?? "?"} out · ${qualified ? "QUALIFY" : "REJECT"}`,
         metadata: {
           model: aiConfig.model,
           provider: aiConfig.provider,
-          prompt_tokens: data.usage.prompt_tokens ?? null,
-          completion_tokens: data.usage.completion_tokens ?? null,
-          total_tokens: data.usage.total_tokens ?? null,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: totalTokens,
           qualified,
           strategy_id: strategyId ?? null,
         },
-      });
+      }).then(() => {}).catch(() => {});
     }
 
     return { qualified, reason };
