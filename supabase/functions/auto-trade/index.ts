@@ -2032,21 +2032,31 @@ async function qualifySetup(
     const completionTokens = data?.usage?.completion_tokens ?? data?.usage?.output_tokens ?? null;
     const totalTokens = data?.usage?.total_tokens ?? (promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null);
 
-    if (supabaseClient && (promptTokens != null || completionTokens != null)) {
-      supabaseClient.from("compliance_log").insert({
-        event_type: "llm_usage",
-        severity: "info",
-        message: `qualify: ${promptTokens ?? "?"} in / ${completionTokens ?? "?"} out · ${qualified ? "QUALIFY" : "REJECT"}`,
-        metadata: {
-          model: aiConfig.model,
-          provider: aiConfig.provider,
-          prompt_tokens: promptTokens,
-          completion_tokens: completionTokens,
-          total_tokens: totalTokens,
-          qualified,
-          strategy_id: strategyId ?? null,
-        },
-      }).then(() => {}).catch(() => {});
+    // Explicit await so the insert isn't dropped when the handler returns.
+    // console.log confirms code path is reached; error log exposes any schema/RLS failures.
+    if (supabaseClient) {
+      console.log(`[llm_usage] provider=${aiConfig.provider} model=${aiConfig.model} in=${promptTokens} out=${completionTokens}`);
+      if (promptTokens != null || completionTokens != null) {
+        const { error: usageInsertErr } = await supabaseClient.from("compliance_log").insert({
+          event_type: "llm_usage",
+          severity: "info",
+          message: `qualify: ${promptTokens ?? "?"} in / ${completionTokens ?? "?"} out · ${qualified ? "QUALIFY" : "REJECT"}`,
+          metadata: {
+            model: aiConfig.model,
+            provider: aiConfig.provider,
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: totalTokens,
+            qualified,
+            strategy_id: strategyId ?? null,
+          },
+        });
+        if (usageInsertErr) {
+          console.error(`[llm_usage] insert failed: ${usageInsertErr.message}`, usageInsertErr.code);
+        }
+      } else {
+        console.warn(`[llm_usage] no token data — usage field: ${JSON.stringify(data?.usage)}`);
+      }
     }
 
     return { qualified, reason };
