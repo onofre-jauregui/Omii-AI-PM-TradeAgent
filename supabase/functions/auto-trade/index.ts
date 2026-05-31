@@ -8,6 +8,15 @@ import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
+import {
+  computeWinStreakFromTrades,
+  s002VolumeCheck,
+  s002EdgeCentsCheck,
+  buildForceLlmCities,
+  s005IsAutoQualified,
+  buildQualifyEndpoint,
+  buildQualifyHeaders,
+} from "../_shared/trading-logic.ts";
 
 /**
  * auto-trade: Autonomous trading loop — deterministic per-strategy orchestration.
@@ -175,31 +184,7 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
     .eq("status", "settled")
     .order("settled_at", { ascending: false })
     .limit(200);
-  if (!data || data.length === 0) { winStreakCache.set(userId, 0); return 0; }
-  const byDay: Record<string, number> = {};
-  for (const t of data) {
-    const day = (t.settled_at ?? "").slice(0, 10);
-    if (day) byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
-  }
-  const days = Object.keys(byDay).sort().reverse();
-  const lastDay = new Date(days[0] + "T12:00:00Z");
-  const nowNoon = new Date();
-  nowNoon.setUTCHours(12, 0, 0, 0);
-  const daysSinceLast = Math.floor((nowNoon.getTime() - lastDay.getTime()) / 86_400_000);
-  if (daysSinceLast > 1) {
-    // No positive traction in the last 24h — streak is broken
-    winStreakCache.set(userId, 0);
-    return 0;
-  }
-  let streak = 0;
-  const cursor = new Date(days[0] + "T12:00:00Z");
-  const MAX_STREAK = 200; // hard cap matching the 200-row query limit
-  while (streak < MAX_STREAK) {
-    const key = cursor.toISOString().slice(0, 10);
-    if (!byDay[key] || byDay[key] <= 0) break;
-    streak++;
-    cursor.setUTCDate(cursor.getUTCDate() - 1);
-  }
+  const streak = computeWinStreakFromTrades(data ?? []);
   winStreakCache.set(userId, streak);
   return streak;
 }
@@ -1259,10 +1244,9 @@ async function runS002LongshotBias(
     }
 
     // Edge floor: require at least 3¢ of true-vs-implied divergence.
-    // Cuts signals where the market is already well-calibrated (no exploitable longshot bias).
-    const s002EdgeCents = sig.edge_cents ?? 0;
-    if (s002EdgeCents < 3) {
-      return { sig, success: false, detail: `skipped: edge_cents=${s002EdgeCents}¢ below 3¢ floor` };
+    const edgeCheck = s002EdgeCentsCheck(sig.edge_cents ?? 0);
+    if (!edgeCheck.passes) {
+      return { sig, success: false, detail: edgeCheck.detail };
     }
 
     // All signals are in the 8-11¢ YES range — we always buy NO.
@@ -1634,23 +1618,13 @@ async function runS005WeatherEdge(
   // Cities with >= 3 NO losses in 14d must go through LLM even at high edge.
   // GFS has systematic bias on these cities in current season — the large "edge"
   // is a model artifact, not a real market mispricing.
-  const forceLlmCities = new Set<string>();
-  for (const [city, stat] of cityWinLoss) {
-    if (stat.losses >= 3) forceLlmCities.add(city);
-  }
+  const forceLlmCities = buildForceLlmCities(cityWinLoss);
   const autoQualified = candidates
-    .filter((s: any) => {
-      if ((s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE) return false;
-      const city = (s.metadata?.location ?? "").toLowerCase();
-      if (forceLlmCities.has(city)) return false;
-      return true;
-    })
+    .filter((s: any) => s005IsAutoQualified(s.edge_cents ?? 0, s.metadata?.location ?? "", forceLlmCities, AUTO_QUALIFY_EDGE))
     .map((sig: any) => ({ sig, qualified: true, reason: `auto-qualified: edge ${sig.edge_cents}¢ >= ${AUTO_QUALIFY_EDGE}¢` }));
-  const needsLlm = candidates.filter((s: any) => {
-    if ((s.edge_cents ?? 0) < AUTO_QUALIFY_EDGE) return true;
-    const city = (s.metadata?.location ?? "").toLowerCase();
-    return forceLlmCities.has(city);
-  });
+  const needsLlm = candidates.filter(
+    (s: any) => !s005IsAutoQualified(s.edge_cents ?? 0, s.metadata?.location ?? "", forceLlmCities, AUTO_QUALIFY_EDGE)
+  );
 
   // Emit a Langfuse span per auto-qualified signal.
   // startTime = strategy entry point, endTime = now (when qualify decision is made).
@@ -1946,21 +1920,12 @@ async function qualifySetup(
   const startTime = new Date().toISOString();
 
   try {
-    // Anthropic native API uses /messages with a different request/response shape.
-    // OpenRouter and OpenAI use /chat/completions (OpenAI-compatible).
     const isAnthropic = aiConfig.provider === "anthropic";
-    const endpoint = isAnthropic
-      ? `${aiConfig.baseUrl}/messages`
-      : `${aiConfig.baseUrl}/chat/completions`;
+    const endpoint = buildQualifyEndpoint(aiConfig.provider, aiConfig.baseUrl);
 
     const resp = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${aiConfig.apiKey}`,
-        "Content-Type": "application/json",
-        ...(isAnthropic ? { "anthropic-version": "2023-06-01" } : {}),
-        ...(aiConfig.provider === "openrouter" ? { "HTTP-Referer": "https://kalshitradeagent.com" } : {}),
-      },
+      headers: buildQualifyHeaders(aiConfig.provider, aiConfig.apiKey),
       body: JSON.stringify({
         model: aiConfig.model,
         messages: [{ role: "user", content: prompt }],

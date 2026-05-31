@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  # ─── Job 1: Lint + risk-surface unit tests + build (every PR and push) ────
+  test:
+    name: Lint + unit tests + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  # ─── Job 2: Apply migrations → staging DB (dev push only) ─────────────────
+  migrate-staging:
+    name: Apply migrations → staging DB
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Apply pending migrations to staging
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx supabase db push \
+            --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+
+  # ─── Job 3: Deploy edge functions → staging Supabase (dev push only) ──────
+  deploy-staging-functions:
+    name: Deploy edge functions → staging Supabase
+    runs-on: ubuntu-latest
+    needs: migrate-staging
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Deploy all functions to staging
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
+            npx supabase functions deploy "$fn" \
+              --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+          done
+
+  # ─── Job 4: E2E smoke tests → kalshitradeagent.live (dev push only) ───────
+  e2e-staging:
+    name: E2E smoke tests → kalshitradeagent.live
+    runs-on: ubuntu-latest
+    needs: deploy-staging-functions
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npx playwright install chromium --with-deps
+      - name: Wait for Vercel staging deploy (poll, max 3 min)
+        run: |
+          for i in $(seq 1 18); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://kalshitradeagent.live)
+            [ "$STATUS" = "200" ] && break
+            echo "Attempt $i: HTTP $STATUS — waiting 10s..."
+            sleep 10
+          done
+      - name: Run E2E against staging
+        run: npm run test:e2e:staging
+        env:
+          BASE_URL: https://kalshitradeagent.live
+
+  # ─── Job 5: Apply migrations → production DB (main push only) ─────────────
+  # NOTE: requires one-time migration history repair on prod before enabling
+  migrate-production:
+    name: Apply migrations → production DB
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Apply pending migrations to production
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          npx supabase db push \
+            --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+
+  # ─── Job 6: Deploy edge functions → production Supabase (main push only) ──
+  deploy-production-functions:
+    name: Deploy edge functions → production Supabase
+    runs-on: ubuntu-latest
+    needs: migrate-production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - name: Store prior SHA for canary rollback
+        run: echo "PRIOR_FUNCTIONS_SHA=$(git rev-parse HEAD~1)" >> $GITHUB_ENV
+      - name: Deploy all functions to production
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
+            npx supabase functions deploy "$fn" \
+              --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+          done
+      - name: Save prior SHA as artifact for canary gate
+        run: echo "$PRIOR_FUNCTIONS_SHA" > prior-sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prior-sha
+          path: prior-sha.txt
+          retention-days: 1
+
+  # ─── Job 7: Automated canary gate — 30-min monitor + auto-rollback ─────────
+  canary-gate:
+    name: Canary health gate (30 min)
+    runs-on: ubuntu-latest
+    needs: deploy-production-functions
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: prior-sha
+      - name: Monitor canary — auto-rollback on breach
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROD_PROJECT_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          #!/bin/bash
+          set -e
+          PRIOR_SHA=$(cat prior-sha.txt)
+          DEADLINE=$((SECONDS + 1800))
+          POLL=60
+          ERROR_THRESHOLD=5
+
+          echo "Canary at 10%. Prior SHA: $PRIOR_SHA. Monitoring for 30 min..."
+
+          rollback() {
+            echo "CANARY ABORT — rolling back edge functions to $PRIOR_SHA..."
+            git checkout "$PRIOR_SHA" -- supabase/functions/
+            for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
+              npx supabase functions deploy "$fn" \
+                --project-ref "$PROD_PROJECT_REF" \
+                || echo "WARNING: rollback failed for $fn — manual action required"
+            done
+            git checkout HEAD -- supabase/functions/
+
+            echo "Rolling back Vercel frontend..."
+            npx vercel rollback --token "$VERCEL_TOKEN" --yes \
+              || echo "WARNING: Vercel rollback failed — run 'vercel rollback' manually"
+
+            echo "ROLLBACK COMPLETE. Investigate compliance_log before re-deploying."
+            exit 1
+          }
+
+          while [ $SECONDS -lt $DEADLINE ]; do
+            sleep $POLL
+
+            ERRORS=$(curl -sf -X POST \
+              "https://api.supabase.com/v1/projects/$PROD_PROJECT_REF/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\": \"SELECT COUNT(*)::int AS n FROM compliance_log WHERE created_at > NOW() - INTERVAL '5 minutes' AND event_type IN ('auto_trade_error','auto_trade_strategy_error','strategy_auto_halted','kalshi_circuit_open','risk_check_failed')\"}" \
+              | jq -r '.data[0].n // 0')
+
+            if [ "${ERRORS:-0}" -gt "$ERROR_THRESHOLD" ]; then
+              echo "THRESHOLD BREACHED: $ERRORS error/halt events in last 5 min (limit: $ERROR_THRESHOLD)"
+              rollback
+            fi
+
+            echo "$(date -u +%H:%M:%S): OK ($ERRORS errors). ~$((DEADLINE - SECONDS))s remaining..."
+          done
+
+          echo "Canary clean for 30 minutes. Vercel auto-promotes to 100%."

@@ -1,0 +1,2 @@
+# Any PR touching migrations requires explicit review before merging to main
+supabase/migrations/   @onofre-jauregui

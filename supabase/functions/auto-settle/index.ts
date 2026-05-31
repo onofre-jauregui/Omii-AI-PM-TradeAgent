@@ -5,6 +5,7 @@ import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 import { langfuseIngest, scoreEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
+import { computePnl, resolveKalshiMarketAction } from "../_shared/trading-logic.ts";
 
 /**
  * auto-settle: Resolve paper trades against real Kalshi market outcomes.
@@ -49,39 +50,6 @@ async function fetchKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
   }
 }
 
-/**
- * Compute realized PnL in dollars for a single trade given the market result.
- * Kalshi contracts pay $1 per contract if correct, $0 otherwise.
- * Amount here is USD deployed, price is entry price in cents (1-99).
- */
-function computePnl(
-  side: string,
-  action: string,
-  priceInCents: number,
-  amountUsd: number,
-  result: string
-): { pnl: number; outcome: "win" | "loss" | "void" } {
-  if (result !== "yes" && result !== "no") {
-    return { pnl: 0, outcome: "void" };
-  }
-  const priceDollars = priceInCents / 100;
-  // Number of contracts we hold = amount / price_per_contract
-  const contracts = priceDollars > 0 ? amountUsd / priceDollars : 0;
-
-  if (action !== "buy") {
-    // Sell trades aren't handled for paper pnl yet (would need to track the
-    // matching buy leg). Mark as void for now.
-    return { pnl: 0, outcome: "void" };
-  }
-
-  const correctSide = (side === "yes" && result === "yes") || (side === "no" && result === "no");
-  if (correctSide) {
-    // Win: each contract pays $1; profit per contract = 1 - price
-    return { pnl: contracts * (1 - priceDollars), outcome: "win" };
-  }
-  // Loss: entire position lost
-  return { pnl: -contracts * priceDollars, outcome: "loss" };
-}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
@@ -152,25 +120,16 @@ serve(async (req) => {
       //   settled         → settle with P&L (normal path)
       //   finalized       → settle with P&L (same as settled)
       //   voided/cancelled → refund at cost, pnl = 0
-      const hasResult =
-        typeof market.result === "string" &&
-        market.result !== "" &&
-        market.result !== "undetermined";
-      const isVoided = ["voided", "cancelled"].includes(market.status);
-      const isSettled =
-        isVoided ||
-        market.status === "finalized" ||
-        market.status === "settled" ||
-        hasResult;
+      const marketAction = resolveKalshiMarketAction(market.status, market.result);
 
-      if (!isSettled) {
+      if (marketAction === "skip") {
         results.push({ ticker, state: "still_open", status: market.status, trades: tradeIds.length });
         totalStillPending += tradeIds.length;
         continue;
       }
 
       // Voided/cancelled: refund at cost (no gain, no loss)
-      if (isVoided) {
+      if (marketAction === "void") {
         const { data: voidedTrades } = await supabase
           .from("trades")
           .select("id")
