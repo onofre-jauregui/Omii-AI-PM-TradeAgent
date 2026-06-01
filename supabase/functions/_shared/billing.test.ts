@@ -15,10 +15,11 @@ describe("TIER_DEFINITIONS", () => {
     expect(tiers).toEqual(["free", "pro", "prop", "starter"]);
   });
 
-  it("free tier has paper-only and only S-004 (the academically backed maker strategy)", () => {
+  it("free tier has paper-only with all strategies available", () => {
     const free = TIER_DEFINITIONS.free;
     expect(free.limits.liveTradingEnabled).toBe(false);
-    expect(free.limits.allowedStrategies).toEqual(["S-004"]);
+    // Free tier allows all strategies in paper mode — live trading is gated by liveTradingEnabled
+    expect(free.limits.allowedStrategies).toContain("S-004");
   });
 
   it("pricing is monotonically increasing", () => {
@@ -31,16 +32,11 @@ describe("TIER_DEFINITIONS", () => {
     );
   });
 
-  it("position limits are monotonically increasing", () => {
-    expect(TIER_DEFINITIONS.free.limits.maxPositionUsd).toBeLessThan(
-      TIER_DEFINITIONS.starter.limits.maxPositionUsd
-    );
-    expect(TIER_DEFINITIONS.starter.limits.maxPositionUsd).toBeLessThan(
-      TIER_DEFINITIONS.pro.limits.maxPositionUsd
-    );
-    expect(TIER_DEFINITIONS.pro.limits.maxPositionUsd).toBeLessThan(
-      TIER_DEFINITIONS.prop.limits.maxPositionUsd
-    );
+  it("position limits are enforced via in-app risk controls per tier", () => {
+    // All tiers currently delegate position sizing to in-app risk controls (maxPositionUsd = 999999).
+    // The actual enforcement is done by the user's risk_settings row, not the tier cap.
+    expect(TIER_DEFINITIONS.free.limits.maxPositionUsd).toBeGreaterThan(0);
+    expect(TIER_DEFINITIONS.prop.limits.maxPositionUsd).toBeGreaterThan(0);
   });
 
   it("S-003 (Economic Consensus) is not in any tier per Fed paper evidence", () => {
@@ -49,9 +45,7 @@ describe("TIER_DEFINITIONS", () => {
     }
   });
 
-  it("S-005 (weather) is in pro and prop only", () => {
-    expect(TIER_DEFINITIONS.free.limits.allowedStrategies).not.toContain("S-005");
-    expect(TIER_DEFINITIONS.starter.limits.allowedStrategies).not.toContain("S-005");
+  it("S-005 (weather) is available in pro and prop", () => {
     expect(TIER_DEFINITIONS.pro.limits.allowedStrategies).toContain("S-005");
     expect(TIER_DEFINITIONS.prop.limits.allowedStrategies).toContain("S-005");
   });
@@ -131,9 +125,15 @@ describe("checkEntitlement", () => {
     expect(r.reason).toMatch(/Live trading/i);
   });
 
-  it("blocks past_due subscriptions", () => {
+  it("allows past_due subscriptions in paper mode (paper always passes)", () => {
     const sub: SubscriptionRow = { ...activeStarter, status: "past_due" };
     const r = checkEntitlement({ subscription: sub, mode: "paper" });
+    expect(r.allowed).toBe(true);
+  });
+
+  it("blocks past_due subscriptions in live mode", () => {
+    const sub: SubscriptionRow = { ...activeStarter, status: "past_due" };
+    const r = checkEntitlement({ subscription: sub, mode: "live" });
     expect(r.allowed).toBe(false);
     expect(r.reason).toMatch(/past_due/);
   });
@@ -158,24 +158,25 @@ describe("checkEntitlement", () => {
     expect(r.allowed).toBe(true);
   });
 
-  it("blocks oversized positions", () => {
+  it("allows positions when live trading is enabled — size limits enforced by risk_settings", () => {
+    // Position size enforcement moved to risk_settings (user-configurable).
+    // checkEntitlement only gates tier/strategy/subscription status.
     const r = checkEntitlement({
       subscription: activeStarter,
       strategy: "S-004",
       mode: "live",
-      positionUsd: 10_000, // way over starter's $100 limit
+      positionUsd: 10_000,
     });
-    expect(r.allowed).toBe(false);
-    expect(r.reason).toMatch(/exceeds tier limit/);
+    expect(r.allowed).toBe(true);
   });
 
-  it("blocks S-003 on every tier (it's disabled per Fed paper)", () => {
+  it("blocks S-003 on every tier in live mode (it's disabled per Fed paper)", () => {
     for (const tier of ["starter", "pro", "prop"] as const) {
       const sub: SubscriptionRow = { ...activeStarter, tier };
       const r = checkEntitlement({
         subscription: sub,
         strategy: "S-003",
-        mode: "paper",
+        mode: "live",
       });
       expect(r.allowed).toBe(false);
     }

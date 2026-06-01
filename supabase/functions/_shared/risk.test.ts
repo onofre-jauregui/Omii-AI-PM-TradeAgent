@@ -19,13 +19,16 @@ const baseState: RiskState = {
 
 describe("evaluateRisk", () => {
   describe("paper mode", () => {
-    it("bypasses all checks in paper mode", () => {
+    it("applies same risk checks in paper mode as live mode", () => {
+      // Paper mode intentionally mirrors live — training must match production behavior.
+      // A halted state in paper mode should still block, same as live.
       const result = evaluateRisk(999_999, "paper", baseSettings, {
         ...baseState,
         is_trading_halted: true,
         halt_reason: "stopped",
       });
-      expect(result.passed).toBe(true);
+      expect(result.passed).toBe(false);
+      expect(result.code).toBe("position_size");
     });
   });
 
