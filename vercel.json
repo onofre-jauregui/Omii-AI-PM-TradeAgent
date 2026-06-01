@@ -1,10 +1,4 @@
 {
-  "rollingRelease": {
-    "stages": [
-      { "targetPercent": 10, "duration": "30m" },
-      { "targetPercent": 100 }
-    ]
-  },
   "redirects": [
     {
       "source": "/(.*)",
