@@ -538,7 +538,7 @@ export default function ObservabilityPage() {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
 
-    let complianceQ = supabase
+    const complianceQ = supabase
       .from("compliance_log")
       .select("created_at")
       .in("event_type", ["auto_trade_run", "auto_trade_skipped"])
@@ -682,7 +682,7 @@ export default function ObservabilityPage() {
       "s005_qualify_decision",      // S-005 qualify decisions (measured lower bound)
     ];
 
-    let eventsQ = supabase
+    const eventsQ = supabase
       .from("compliance_log")
       .select("id, created_at, event_type, severity, message, trade_id, metadata")
       .gte("created_at", since)
@@ -721,7 +721,7 @@ export default function ObservabilityPage() {
 
   const loadModelLatency = useCallback(async (uid?: string | null) => {
     // Fetch last 50 auto_trade_run events — matches Market Scan sample size
-    let runsQ = supabase
+    const runsQ = supabase
       .from("compliance_log")
       .select("id, created_at")
       .eq("event_type", "auto_trade_run")
@@ -761,13 +761,13 @@ export default function ObservabilityPage() {
     const since24h = new Date(Date.now() - 86_400_000).toISOString();
     const since6h  = new Date(Date.now() - 21_600_000).toISOString();
 
-    let runsQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+    const runsQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
       .eq("event_type", "auto_trade_run").gte("created_at", since24h);
-    let stratRuns24hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+    const stratRuns24hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
       .eq("event_type", "auto_trade_strategy_run").gte("created_at", since24h);
-    let stratRuns6hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+    const stratRuns6hQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
       .eq("event_type", "auto_trade_strategy_run").gte("created_at", since6h);
-    let scansQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
+    const scansQ = supabase.from("compliance_log").select("*", { count: "exact", head: true })
       .eq("event_type", "surface_scan_complete").gte("created_at", since24h);
     let tradesQ = supabase.from("trades").select("*", { count: "exact", head: true })
       .gte("created_at", since24h);
@@ -1083,7 +1083,7 @@ export default function ObservabilityPage() {
     // surface_scan_complete metadata doesn't include elapsed_seconds.
     // Derive scan duration from auto_trade_run → surface_scan_complete time delta —
     // the scan is the first step in each run, so the delta is the scan latency.
-    let runsQ = supabase
+    const runsQ = supabase
       .from("compliance_log")
       .select("id, created_at")
       .eq("event_type", "auto_trade_run")

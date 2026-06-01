@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider";
 import {
   Cpu, Send, MessageSquare, Loader2, BookOpen, RefreshCw,
-  Settings2, ChevronDown, ChevronUp, Zap, ExternalLink,
+  Settings2, ChevronDown, ChevronUp, Zap, ExternalLink, Check,
 } from "lucide-react";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
@@ -117,6 +117,10 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   const [configOpen, setConfigOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [statusText, setStatusText] = useState("");
+  // Per-strategy max position size (in USD) — saved to strategy_config.max_position_usd
+  const [positionSizes, setPositionSizes] = useState<Record<string, string>>({});
+  const [savingPositionSize, setSavingPositionSize] = useState<Record<string, boolean>>({});
+  const [savedPositionSize, setSavedPositionSize] = useState<Record<string, boolean>>({});
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const activeStrategies = getActiveStrategies();
 
@@ -153,6 +157,37 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   }, []);
 
   useEffect(() => { loadModels(); }, [loadModels]);
+
+  // Load per-strategy max_position_usd from strategy_config
+  const loadPositionSizes = useCallback(async () => {
+    if (activeStrategies.length === 0) return;
+    const ids = activeStrategies.map(s => s.id);
+    const { data } = await supabase
+      .from("strategy_config")
+      .select("strategy_id, max_position_usd")
+      .in("strategy_id", ids);
+    if (!data) return;
+    const map: Record<string, string> = {};
+    for (const row of data) {
+      if (row.max_position_usd != null) map[row.strategy_id] = String(row.max_position_usd);
+    }
+    setPositionSizes(map);
+  }, [activeStrategies]);
+
+  useEffect(() => { loadPositionSizes(); }, [loadPositionSizes]);
+
+  const savePositionSize = async (strategyId: string, value: string) => {
+    const parsed = parseInt(value, 10);
+    if (!value || isNaN(parsed) || parsed < 1) return;
+    setSavingPositionSize(prev => ({ ...prev, [strategyId]: true }));
+    await supabase.from("strategy_config").upsert(
+      { strategy_id: strategyId, max_position_usd: parsed, updated_at: new Date().toISOString() },
+      { onConflict: "strategy_id" }
+    );
+    setSavingPositionSize(prev => ({ ...prev, [strategyId]: false }));
+    setSavedPositionSize(prev => ({ ...prev, [strategyId]: true }));
+    setTimeout(() => setSavedPositionSize(prev => ({ ...prev, [strategyId]: false })), 2000);
+  };
 
   // Resolve current user and restore prior conversation on mount
   useEffect(() => {
@@ -315,12 +350,35 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
             </span>
           </div>
           {activeStrategies.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <BookOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-              <span className="text-xs text-muted-foreground">Active:</span>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                <span className="text-xs text-muted-foreground">Max order size per strategy</span>
+              </div>
               {activeStrategies.map(s => (
-                <Badge key={s.id} variant="secondary" className="text-[10px] rounded-full font-normal">{s.name}</Badge>
+                <div key={s.id} className="flex items-center gap-2">
+                  <Badge variant="secondary" className="text-[10px] rounded-full font-normal shrink-0 min-w-[90px] justify-center">{s.name}</Badge>
+                  <div className="relative flex-1">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">$</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      step={5}
+                      placeholder="default"
+                      value={positionSizes[s.id] ?? ""}
+                      onChange={e => setPositionSizes(prev => ({ ...prev, [s.id]: e.target.value }))}
+                      onBlur={e => savePositionSize(s.id, e.target.value)}
+                      onKeyDown={e => e.key === "Enter" && savePositionSize(s.id, positionSizes[s.id] ?? "")}
+                      className="h-7 pl-6 rounded-lg border-0 bg-background text-xs tabular-nums"
+                    />
+                  </div>
+                  <div className="w-4 shrink-0">
+                    {savingPositionSize[s.id] && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+                    {savedPositionSize[s.id] && <Check className="h-3.5 w-3.5 text-profit" />}
+                  </div>
+                </div>
               ))}
+              <p className="text-[10px] text-muted-foreground pl-0.5">Max USD per individual trade. Leave blank to use strategy defaults (S-001: $15/leg, S-005: $30).</p>
             </div>
           )}
           <button
