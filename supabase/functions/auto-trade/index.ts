@@ -2138,7 +2138,15 @@ async function resolveAiConfig(supabase: any, userId?: string | null): Promise<A
 
   const rowMap = new Map((keyRows || []).map((r: any) => [r.provider, r]));
 
-  const openrouterKey = await resolveKey(rowMap.get("openrouter")) ?? Deno.env.get("OPENROUTER_API_KEY");
+  // Track key source separately so model selection can use the right context.
+  // When the key comes from the env var (system secret), use TRADE_MODEL — the
+  // trading pipeline model. When it comes from the user's DB row, use their
+  // saved model preference (they explicitly configured OpenRouter for trading).
+  const openrouterDbKey = await resolveKey(rowMap.get("openrouter"));
+  const openrouterEnvKey = Deno.env.get("OPENROUTER_API_KEY");
+  const openrouterKey = openrouterDbKey ?? openrouterEnvKey;
+  const openrouterFromEnv = !openrouterDbKey && !!openrouterEnvKey;
+
   const anthropicKey = await resolveKey(rowMap.get("anthropic")) ?? Deno.env.get("ANTHROPIC_API_KEY");
   const openaiKey = await resolveKey(rowMap.get("openai")) ?? Deno.env.get("OPENAI_API_KEY");
 
@@ -2146,7 +2154,11 @@ async function resolveAiConfig(supabase: any, userId?: string | null): Promise<A
     return {
       apiKey: openrouterKey,
       baseUrl: "https://openrouter.ai/api/v1",
-      model: preferredModel || "openai/gpt-4o-mini",
+      // System env key → TRADE_MODEL env var (valid OpenRouter slug, not user's chat model)
+      // User DB key → their saved model preference
+      model: openrouterFromEnv
+        ? (Deno.env.get("TRADE_MODEL") ?? "openai/gpt-4o-mini")
+        : (preferredModel ?? "openai/gpt-4o-mini"),
       provider: "openrouter",
     };
   }

@@ -20,19 +20,17 @@ import {
 // ── Token counts (estimated from qualify prompt structure) ────────────────────
 // Input: system rules (~300) + market context (~600) + memory lessons (~300) = ~1200
 // Output: "QUALIFY/REJECT\nReason: [one sentence]" — actual avg ~25 tokens; max_tokens=100
-// Note: auto-qualify bypass (edge >= 25¢) skips the LLM — these counts include all strategy
-// runs, so LLM call count is an upper bound (actual calls = runs - auto-qualified).
-const QUALIFY_INPUT_TOKENS = 1_200;
-const QUALIFY_OUTPUT_TOKENS = 25; // corrected from 50 — actual response is ~1 word + 1 sentence
-
 // ── Model cost lookup (per million tokens) ────────────────────────────────────
 // Key = model identifier as stored in api_keys.key_id / as sent to OpenRouter
-interface ModelInfo { label: string; provider: string; input: number; output: number }
+interface ModelInfo { label: string; provider: string; input: number; output: number; dynamicCost?: boolean }
 const MODEL_COSTS: Record<string, ModelInfo> = {
   // OpenRouter-routed models (prefix "openai/" etc)
   "openai/gpt-4o-mini":                  { label: "gpt-4o-mini",          provider: "OpenRouter", input: 0.15,  output: 0.60  },
   "openai/gpt-4o":                        { label: "gpt-4o",               provider: "OpenRouter", input: 2.50,  output: 10.00 },
   "openai/gpt-4-turbo":                   { label: "gpt-4-turbo",          provider: "OpenRouter", input: 10.00, output: 30.00 },
+  "openai/gpt-4.1":                       { label: "gpt-4.1",              provider: "OpenRouter", input: 2.00,  output: 8.00  },
+  "openai/gpt-4.1-mini":                  { label: "gpt-4.1-mini",         provider: "OpenRouter", input: 0.40,  output: 1.60  },
+  "openrouter/auto":                      { label: "auto-routed",          provider: "OpenRouter", input: 0,     output: 0, dynamicCost: true },
   "anthropic/claude-3-5-haiku":           { label: "claude-3.5-haiku",     provider: "OpenRouter", input: 0.80,  output: 4.00  },
   "anthropic/claude-3-5-haiku-20241022":  { label: "claude-3.5-haiku",     provider: "OpenRouter", input: 0.80,  output: 4.00  },
   "anthropic/claude-3-5-sonnet":          { label: "claude-3.5-sonnet",    provider: "OpenRouter", input: 3.00,  output: 15.00 },
@@ -454,6 +452,7 @@ export default function ObservabilityPage() {
     dailySpend: number;
     totalSpend30d: number;
     topModel: string | null;
+    autoRoutedCalls: number;
   } | null>(null);
 
   const [chatLatencyStats, setChatLatencyStats] = useState<{
@@ -671,7 +670,7 @@ export default function ObservabilityPage() {
     const toolEventTypes = [
       "surface_scan_complete",
       "auto_trade_run",
-      "auto_trade_strategy_run",   // 1 LLM qualify call per strategy per run
+      "auto_trade_strategy_run",
       "auto_trade_strategy_error",
       "basket_completed",           // order sent to Kalshi (not "order_submitted")
       "order_cancelled",
@@ -679,6 +678,8 @@ export default function ObservabilityPage() {
       "auto_reflect_run",
       "auto_trade_skipped",        // risk/filter guard blocks
       "strategy_auto_halted",
+      "llm_usage",                  // actual LLM calls from qualifySetup — real measured count
+      "s005_qualify_decision",      // S-005 qualify decisions (measured lower bound)
     ];
 
     let eventsQ = supabase
@@ -986,8 +987,14 @@ export default function ObservabilityPage() {
     const withInput = rows.filter((r) => r.metadata?.prompt_tokens != null);
     const withOutput = rows.filter((r) => r.metadata?.completion_tokens != null);
 
-    const totalCost = rows.reduce((s, r) => {
+    // openrouter/auto uses dynamic model selection — cost is unverifiable from token counts.
+    // Exclude it from computed totals and track separately for the UI flag.
+    const autoRoutedCalls = rows.filter((r) => r.metadata?.model === "openrouter/auto").length;
+    const billableRows = rows.filter((r) => r.metadata?.model !== "openrouter/auto");
+
+    const totalCost = billableRows.reduce((s, r) => {
       const m = MODEL_COSTS[r.metadata?.model ?? ""] ?? DEFAULT_MODEL_INFO;
+      if (m.dynamicCost) return s;
       const inCost = ((r.metadata?.prompt_tokens ?? 0) / 1_000_000) * m.input;
       const outCost = ((r.metadata?.completion_tokens ?? 0) / 1_000_000) * m.output;
       return s + inCost + outCost;
@@ -1009,6 +1016,7 @@ export default function ObservabilityPage() {
       dailySpend: totalCost / 30,
       totalSpend30d: totalCost,
       topModel,
+      autoRoutedCalls,
     });
 
     // Latency from duration_ms field (logged after deploy — may be null for older rows)
@@ -1397,37 +1405,31 @@ export default function ObservabilityPage() {
   const LLM_OUTPUT_PER_M = modelInfo.output;
   const unknownModel = !!activeModel && !MODEL_COSTS[activeModel];
 
-  // Cost stats — auto_trade_strategy_run is exactly 1 LLM qualify call per strategy per run
-  const llmCallsLast30d = toolCounts["auto_trade_strategy_run"] ?? 0;
-  const dailyLLMSpend =
-    llmCallsLast30d > 0
-      ? (llmCallsLast30d *
-          ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M +
-            (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M)) /
-        30
-      : 0;
-  const avgTokensPerDecision = QUALIFY_INPUT_TOKENS + QUALIFY_OUTPUT_TOKENS;
-  const costPerTrade =
-    tradesLast30dCount > 0 ? (dailyLLMSpend * 30) / tradesLast30dCount : null;
+  // LLM call count — use measured llm_usage events (real), fall back to s005_qualify_decision
+  // as a lower bound. Never use auto_trade_strategy_run — that counts all strategy evaluations
+  // including rule-based S-001 runs that never touch the LLM (650× inflation).
+  const llmCallsLast30d = toolCounts["llm_usage"] ?? toolCounts["s005_qualify_decision"] ?? 0;
+  const llmCallsLabel = toolCounts["llm_usage"] != null
+    ? "measured · qualify events"
+    : toolCounts["s005_qualify_decision"] != null
+    ? "S-005 calls · lower bound"
+    : "waiting for qualifying run";
 
-  // Cost per run
-  const autoTradeRunCount = toolCounts["auto_trade_run"] ?? 0;
-  const avgStrategiesPerRun = autoTradeRunCount > 0
-    ? llmCallsLast30d / autoTradeRunCount
-    : 0;
-  const costPerRun = avgStrategiesPerRun > 0
-    ? avgStrategiesPerRun *
-      ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M +
-       (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M)
+  // All cost values come from real llm_usage data only — no estimates.
+  const totalSpend30d = realTokenStats ? realTokenStats.totalCost30d : 0;
+  const costIsEstimated = !realTokenStats;
+
+  const costPerTrade = realTokenStats && tradesLast30dCount > 0
+    ? realTokenStats.totalCost30d / tradesLast30dCount
     : null;
 
-  // Model usage stats (30d)
-  // When realTokenStats is available (llm_usage events logged), use measured values.
-  // Fall back to estimates based on strategy run counts when no real data exists yet.
-  const inputTokens30d = realTokenStats ? realTokenStats.totalInputTokens : llmCallsLast30d * QUALIFY_INPUT_TOKENS;
-  const outputTokens30d = realTokenStats ? realTokenStats.totalOutputTokens : llmCallsLast30d * QUALIFY_OUTPUT_TOKENS;
-  const totalSpend30d = realTokenStats ? realTokenStats.totalCost30d : dailyLLMSpend * 30;
-  const costIsEstimated = !realTokenStats;
+  const autoTradeRunCount = toolCounts["auto_trade_run"] ?? 0;
+  const avgStrategiesPerRun = autoTradeRunCount > 0 && realTokenStats
+    ? realTokenStats.calls / autoTradeRunCount
+    : null;
+  const costPerRun = avgStrategiesPerRun != null && realTokenStats
+    ? realTokenStats.totalCost30d / autoTradeRunCount
+    : null;
 
   // Active LLM provider based on connected accounts (Anthropic direct beats OpenRouter if user has a key)
   const hasAnthropicKey = connectedProviders.some(p => p.provider === "anthropic");
@@ -2083,22 +2085,25 @@ export default function ObservabilityPage() {
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
                   <p className="text-xl font-bold tabular-nums">
-                    {costIsEstimated && <span className="text-yellow-500 text-sm font-normal mr-0.5">~</span>}
-                    ${(totalSpend30d / 30).toFixed(4)}
+                    {costIsEstimated ? "—" : `$${(totalSpend30d / 30).toFixed(4)}`}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {costIsEstimated ? "estimated daily · last 30d" : "measured daily · last 30d"}
+                    {costIsEstimated ? "pending first qualifying run" : "measured daily · last 30d"}
                   </p>
                 </div>
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Decision</p>
                   <p className="text-xl font-bold tabular-nums">
-                    {(() => {
-                      const c = ((QUALIFY_INPUT_TOKENS / 1_000_000) * LLM_INPUT_PER_M + (QUALIFY_OUTPUT_TOKENS / 1_000_000) * LLM_OUTPUT_PER_M);
-                      return c < 0.000001 ? "<$0.000001" : `$${c.toFixed(6)}`;
-                    })()}
+                    {realTokenStats && realTokenStats.calls > 0
+                      ? (() => {
+                          const c = realTokenStats.totalCost30d / realTokenStats.calls;
+                          return c < 0.000001 ? "<$0.000001" : `$${c.toFixed(6)}`;
+                        })()
+                      : "—"}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">{avgTokensPerDecision.toLocaleString()} tokens est.</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    {realTokenStats ? "measured · per qualify call" : "pending data"}
+                  </p>
                 </div>
                 <div className="rounded-xl border border-border p-4">
                   <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Trade</p>
@@ -2113,7 +2118,7 @@ export default function ObservabilityPage() {
                     {costPerRun !== null ? costPerRun < 0.000001 ? "<$0.000001" : `$${costPerRun.toFixed(6)}` : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {autoTradeRunCount > 0 ? `${avgStrategiesPerRun.toFixed(1)} strat/run avg` : "no run data"}
+                    {avgStrategiesPerRun != null ? `${avgStrategiesPerRun.toFixed(1)} calls/run avg` : "no run data"}
                   </p>
                 </div>
               </div>
@@ -2122,49 +2127,48 @@ export default function ObservabilityPage() {
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">LLM Calls</p>
                   <p className="text-base font-bold tabular-nums">
-                    {(realTokenStats?.calls ?? llmCallsLast30d).toLocaleString()}
+                    {llmCallsLast30d > 0 ? llmCallsLast30d.toLocaleString() : "—"}
                   </p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {realTokenStats ? "measured · qualify events" : "strategy evaluations est."}
-                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{llmCallsLabel}</p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Input Tokens</p>
                   <p className="text-base font-bold tabular-nums">
-                    {(() => {
-                      const n = realTokenStats ? realTokenStats.totalInputTokens : inputTokens30d;
-                      return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : `${(n / 1_000).toFixed(0)}K`;
-                    })()}
+                    {realTokenStats
+                      ? realTokenStats.totalInputTokens >= 1_000_000
+                        ? `${(realTokenStats.totalInputTokens / 1_000_000).toFixed(2)}M`
+                        : `${(realTokenStats.totalInputTokens / 1_000).toFixed(0)}K`
+                      : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
                     {realTokenStats?.avgInputTokens != null
-                      ? `${realTokenStats.avgInputTokens.toLocaleString()} / call measured`
-                      : `~${QUALIFY_INPUT_TOKENS.toLocaleString()} / call est.`}
+                      ? `${realTokenStats.avgInputTokens.toLocaleString()} / call`
+                      : "pending data"}
                   </p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Output Tokens</p>
                   <p className="text-base font-bold tabular-nums">
-                    {(() => {
-                      const n = realTokenStats ? realTokenStats.totalOutputTokens : outputTokens30d;
-                      return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : `${(n / 1_000).toFixed(0)}K`;
-                    })()}
+                    {realTokenStats
+                      ? realTokenStats.totalOutputTokens >= 1_000_000
+                        ? `${(realTokenStats.totalOutputTokens / 1_000_000).toFixed(2)}M`
+                        : `${(realTokenStats.totalOutputTokens / 1_000).toFixed(0)}K`
+                      : "—"}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
                     {realTokenStats?.avgOutputTokens != null
-                      ? `${realTokenStats.avgOutputTokens} / call measured`
-                      : `~${QUALIFY_OUTPUT_TOKENS} / call est.`}
+                      ? `${realTokenStats.avgOutputTokens} / call`
+                      : "pending data"}
                   </p>
                 </div>
                 <div className="rounded-xl border border-border p-3">
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
                   <p className="text-base font-bold tabular-nums">
-                    {costIsEstimated && <span className="text-yellow-500 text-xs font-normal">~</span>}
-                    ${totalSpend30d.toFixed(4)}
+                    {costIsEstimated ? "—" : `$${totalSpend30d.toFixed(4)}`}
                   </p>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
                     {costIsEstimated
-                      ? `est. · ${activeLLMProviderLabel} · ${activeModel ?? "?"}`
+                      ? "pending first qualifying run"
                       : `measured · ${activeLLMProviderLabel}`}
                   </p>
                 </div>
@@ -2177,11 +2181,20 @@ export default function ObservabilityPage() {
                   <p className="text-[11px] font-medium text-foreground">Chat Assistant</p>
                 </summary>
                 <div className="px-6 pb-5 pt-3 space-y-3">
+                  {chatTokenStats.autoRoutedCalls > 0 && (
+                    <div className="rounded-lg bg-yellow-500/8 border border-yellow-500/20 px-3 py-2">
+                      <p className="text-[10px] text-yellow-400 leading-snug">
+                        {chatTokenStats.autoRoutedCalls} call{chatTokenStats.autoRoutedCalls !== 1 ? "s" : ""} used <code className="font-mono">openrouter/auto</code> — dynamic model selection, cost unverifiable from token counts. Excluded from totals below.
+                      </p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-4 gap-4 mb-3">
                     <div className="rounded-xl border border-border p-4">
                       <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">LLM Spend</p>
                       <p className="text-xl font-bold tabular-nums">${chatTokenStats.dailySpend.toFixed(4)}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">avg daily · last 30d</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        avg daily · last 30d{chatTokenStats.autoRoutedCalls > 0 ? " (excl. auto)" : ""}
+                      </p>
                     </div>
                     <div className="rounded-xl border border-border p-4">
                       <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Cost / Turn</p>
@@ -2198,7 +2211,9 @@ export default function ObservabilityPage() {
                     <div className="rounded-xl border border-border p-4">
                       <p className="text-[11px] text-muted-foreground uppercase tracking-wide mb-1">Total Spend</p>
                       <p className="text-xl font-bold tabular-nums">${chatTokenStats.totalSpend30d.toFixed(4)}</p>
-                      <p className="text-[10px] text-muted-foreground mt-0.5">last 30d</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        last 30d{chatTokenStats.autoRoutedCalls > 0 ? " · + auto-routed" : ""}
+                      </p>
                     </div>
                   </div>
                   <div className="grid grid-cols-4 gap-3">
@@ -2252,7 +2267,7 @@ export default function ObservabilityPage() {
                     {PLATFORM_REGISTRY.length} services
                   </span>
                   {costIsEstimated && (
-                    <span className="text-[10px] text-yellow-500 bg-yellow-500/10 px-2 py-0.5 rounded-full">LLM cost estimated</span>
+                    <span className="text-[10px] text-yellow-500 bg-yellow-500/10 px-2 py-0.5 rounded-full">LLM cost pending</span>
                   )}
                 </div>
                 <ChevronDown className="w-3.5 h-3.5 text-muted-foreground transition-transform [[open]>summary>&]:rotate-180" />
@@ -2261,9 +2276,7 @@ export default function ObservabilityPage() {
                 {costIsEstimated && (
                   <div className="rounded-lg bg-yellow-500/8 border border-yellow-500/20 px-3 py-2 mb-2">
                     <p className="text-[10px] text-yellow-400 leading-snug">
-                      LLM cost is estimated — no <code className="font-mono">llm_usage</code> events in compliance_log yet.
-                      Token counts will be measured after the next hourly run post-deploy.
-                      {realTokenStats?.topProvider && ` Active provider confirmed: ${realTokenStats.topProvider}.`}
+                      LLM cost will appear after the next qualifying run — waiting for <code className="font-mono">llm_usage</code> events in compliance_log.
                     </p>
                   </div>
                 )}
@@ -2290,12 +2303,10 @@ export default function ObservabilityPage() {
                     const isConnected = p.id === "kalshi" ? connectedProviders.some(cp => cp.provider === "kalshi_live" || cp.provider === "kalshi_paper")
                       : !!providerKey;
 
-                    // Cost: for the active LLM provider use computed/estimated value; others use static
+                    // Cost: for the active LLM provider use measured value when available; others use static
                     let computedCostDisplay: string | null = null;
-                    if (isActiveLLM && totalSpend30d > 0) {
-                      computedCostDisplay = costIsEstimated
-                        ? `~$${totalSpend30d.toFixed(4)}`
-                        : `$${totalSpend30d.toFixed(4)}`;
+                    if (isActiveLLM && !costIsEstimated && totalSpend30d > 0) {
+                      computedCostDisplay = `$${totalSpend30d.toFixed(4)}`;
                     }
                     const costDisplay = computedCostDisplay ?? (isInactiveLLM ? "—" : p.staticCostLabel);
 
@@ -2387,8 +2398,9 @@ export default function ObservabilityPage() {
                     </p>
                   </div>
                   <p className="text-[12px] font-semibold tabular-nums">
-                    {costIsEstimated ? "~" : ""}${(45 + totalSpend30d).toFixed(2)}/mo
-                    <span className="text-[10px] font-normal text-muted-foreground ml-1">(Supabase + Vercel + LLM)</span>
+                    ${(45 + totalSpend30d).toFixed(2)}/mo
+                    {costIsEstimated && <span className="text-[10px] font-normal text-yellow-500 ml-1">(LLM pending)</span>}
+                    {!costIsEstimated && <span className="text-[10px] font-normal text-muted-foreground ml-1">(Supabase + Vercel + LLM)</span>}
                   </p>
                 </div>
               </div>
