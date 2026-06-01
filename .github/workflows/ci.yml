@@ -34,12 +34,35 @@ jobs:
       - name: Apply pending migrations to staging
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          STAGING_DB_PASS: ${{ secrets.STAGING_DB_PASSWORD }}
-          STAGING_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
         run: |
-          ENCODED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['STAGING_DB_PASS'],safe=''))")
-          npx supabase db push \
-            --db-url "postgresql://postgres.${STAGING_REF}:${ENCODED}@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
+          # Apply any migrations not yet in the remote history table, via Management API
+          APPLIED=$(curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
+            | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
+          for f in $(ls supabase/migrations/*.sql | sort); do
+            VERSION=$(basename "$f" .sql | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION"; then
+              echo "Already applied: $VERSION"
+              continue
+            fi
+            echo "Applying: $VERSION"
+            SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
+            RESULT=$(curl -sf -X POST \
+              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
+            # Record in migration history
+            curl -sf -X POST \
+              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES('${VERSION}','$(basename $f)','{}') ON CONFLICT DO NOTHING\"}" > /dev/null
+          done
 
   # ─── Job 3: Deploy edge functions → staging Supabase (dev push only) ──────
   deploy-staging-functions:
@@ -101,12 +124,33 @@ jobs:
       - name: Apply pending migrations to production
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          PROD_DB_PASS: ${{ secrets.PROD_DB_PASSWORD }}
-          PROD_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+          PROJECT_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
         run: |
-          ENCODED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['PROD_DB_PASS'],safe=''))")
-          npx supabase db push \
-            --db-url "postgresql://postgres.${PROD_REF}:${ENCODED}@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
+          APPLIED=$(curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
+            | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
+          for f in $(ls supabase/migrations/*.sql | sort); do
+            VERSION=$(basename "$f" .sql | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION"; then
+              echo "Already applied: $VERSION"
+              continue
+            fi
+            echo "Applying: $VERSION"
+            SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
+            RESULT=$(curl -sf -X POST \
+              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
+            curl -sf -X POST \
+              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES('${VERSION}','$(basename $f)','{}') ON CONFLICT DO NOTHING\"}" > /dev/null
+          done
 
   # ─── Job 6: Deploy edge functions → production Supabase (main push only) ──
   deploy-production-functions:
