@@ -563,7 +563,7 @@ serve(async (req) => {
   } catch (e) {
     // Handle Error objects, plain objects (e.g. Supabase errors), and anything else
     let errorMsg: string;
-    let errorDetail: any = e;
+    const errorDetail: any = e;
     if (e instanceof Error) {
       errorMsg = e.message;
     } else if (typeof e === "object" && e !== null) {

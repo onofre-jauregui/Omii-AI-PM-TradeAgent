@@ -1006,7 +1006,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       }
     }
 
-    let aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
+    const aiMessages = [{ role: "system", content: fullSystemPrompt }, ...messages];
     let maxIterations = 12; // Supports: recall → fetch_signals → scan_surface → portfolio → fetch_markets → trade chains
     let fullReply = ""; // Accumulated assistant reply for persistence
 
