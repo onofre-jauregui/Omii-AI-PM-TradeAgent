@@ -36,7 +36,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx supabase db push \
-            --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+            --db-url "postgresql://postgres.${{ secrets.STAGING_SUPABASE_PROJECT_REF }}:${{ secrets.STAGING_DB_PASSWORD }}@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
 
   # ─── Job 3: Deploy edge functions → staging Supabase (dev push only) ──────
   deploy-staging-functions:
@@ -100,7 +100,7 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
           npx supabase db push \
-            --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+            --db-url "postgresql://postgres.${{ secrets.PROD_SUPABASE_PROJECT_REF }}:${{ secrets.PROD_DB_PASSWORD }}@aws-0-us-east-1.pooler.supabase.com:6543/postgres"
 
   # ─── Job 6: Deploy edge functions → production Supabase (main push only) ──
   deploy-production-functions:
