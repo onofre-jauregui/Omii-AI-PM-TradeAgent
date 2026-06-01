@@ -6,9 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, Loader2, AlertCircle, ArrowRight, Zap } from "lucide-react";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
+const SUPABASE_URL    = import.meta.env.VITE_SUPABASE_URL ?? "";
 const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
 const SAVE_KEY_URL    = `${SUPABASE_URL}/functions/v1/save-kalshi-key`;
+const SAVE_AI_KEY_URL = `${SUPABASE_URL}/functions/v1/save-ai-key`;
 
 type Step = "welcome" | "name" | "ai_key" | "connect" | "risk_ack" | "mode" | "live";
 const STEPS: Step[] = ["welcome", "name", "ai_key", "connect", "risk_ack", "mode", "live"];
@@ -38,14 +39,18 @@ export default function OnboardingPage() {
   const [nameSaving, setNameSaving] = useState(false);
 
   useEffect(() => {
-    // Pre-populate display name from Google OAuth metadata the moment component mounts
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (!session?.user) return;
+      // Pre-populate display name from OAuth metadata
       const meta = session.user.user_metadata ?? {};
       const name = meta.full_name ?? meta.name ?? "";
       if (name) setDisplayName(name);
+      // Already-onboarded users who navigate back go straight to dashboard
+      const { data: profile } = await supabase
+        .from("profiles").select("onboarding_completed").eq("id", session.user.id).single();
+      if (profile?.onboarding_completed) navigate("/");
     });
-  }, []);
+  }, [navigate]);
 
   async function saveName() {
     const { data: { user } } = await supabase.auth.getUser();
@@ -77,36 +82,27 @@ export default function OnboardingPage() {
     setAiSaving(true);
     setAiStatus("idle");
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) throw new Error("Not authenticated");
 
-      // Delete-then-insert matches the Settings page pattern exactly.
-      // AI provider keys are stored the same way: encrypted_secret holds the
-      // raw key value; the column name reflects a legacy intent — RLS on
-      // api_keys enforces per-user isolation so no server-side encryption is
-      // needed for provider keys (only Kalshi RSA keys use the edge function).
-      await supabase.from("api_keys")
-        .delete()
-        .eq("user_id", user.id)
-        .eq("provider", selectedProvider);
-
-      const { error } = await supabase.from("api_keys").insert({
-        provider:          selectedProvider,
-        key_id:            "default",
-        encrypted_secret:  apiKey.trim(),
-        user_id:           user.id,
-        updated_at:        new Date().toISOString(),
+      // Use the save-ai-key edge function for AES-256-GCM encryption at rest —
+      // same path as SettingsPanel so keys are consistent in the DB schema.
+      const resp = await fetch(SAVE_AI_KEY_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: selectedProvider, api_key: apiKey.trim() }),
       });
-      if (error) throw error;
+      const json = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
+      if (!resp.ok || !json.ok) throw new Error(json.error ?? `Server error ${resp.status}`);
 
       // Set the default model for this provider so the agent has something
       // to use immediately without a second visit to Settings.
-      await supabase.from("api_keys").delete().eq("user_id", user.id).eq("provider", "model_agent");
+      await supabase.from("api_keys").delete().eq("user_id", session.user.id).eq("provider", "model_agent");
       await supabase.from("api_keys").insert({
         provider:         "model_agent",
         key_id:           DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
         encrypted_secret: DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
-        user_id:          user.id,
+        user_id:          session.user.id,
         updated_at:       new Date().toISOString(),
       });
 
