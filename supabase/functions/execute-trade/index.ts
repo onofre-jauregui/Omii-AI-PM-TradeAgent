@@ -142,7 +142,7 @@ serve(async (req) => {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
       expectedOutcome, confidenceLevel, traceId, expirationTime,
-      sourceSignalId, influencedByMemoryIds, systemVersion,
+      sourceSignalId, influencedByMemoryIds, systemVersion, exitReason,
     } = parsedBody;
 
     const resolvedTicker = ticker || marketId;
@@ -307,6 +307,7 @@ serve(async (req) => {
         source_signal_id: sourceSignalId || null,
         influenced_by_memory_ids: influencedByMemoryIds || [],
         system_version: systemVersion || 'v1',
+        exit_reason: exitReason ?? null,
       }).select().single();
 
       if (insertError) {
@@ -512,6 +513,7 @@ serve(async (req) => {
         source_signal_id: sourceSignalId || null,
         influenced_by_memory_ids: influencedByMemoryIds || [],
         system_version: systemVersion || 'v1',
+        exit_reason: exitReason ?? null,
       }).select().single();
 
     if (insertError) throw insertError;

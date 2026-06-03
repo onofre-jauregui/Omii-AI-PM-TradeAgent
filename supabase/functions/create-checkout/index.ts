@@ -38,15 +38,15 @@ serve(async (req) => {
   const tier = body?.tier as string;
 
   const priceIds: Record<string, string | undefined> = {
-    starter: Deno.env.get("STRIPE_STARTER_PRICE_ID"),
-    pro:     Deno.env.get("STRIPE_PRO_PRICE_ID"),
-    prop:    Deno.env.get("STRIPE_PROP_PRICE_ID"),
+    starter: Deno.env.get("STRIPE_PRICE_STARTER"),
+    pro:     Deno.env.get("STRIPE_PRICE_PRO"),
+    prop:    Deno.env.get("STRIPE_PRICE_PROP"),
   };
 
   const priceId = priceIds[tier];
   if (!priceId) {
     return json({
-      error: `No Stripe price ID configured for tier "${tier}". Set STRIPE_${tier.toUpperCase()}_PRICE_ID in Supabase secrets.`,
+      error: `No Stripe price ID configured for tier "${tier}". Set STRIPE_PRICE_${tier.toUpperCase()} in Supabase secrets.`,
     }, 400);
   }
 

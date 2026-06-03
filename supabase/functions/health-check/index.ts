@@ -193,7 +193,39 @@ serve(async (req) => {
       });
     }
 
-    // ── 4. Blocked series check ───────────────────────────────────────
+    // ── 4. Duplicate open positions check ────────────────────────────
+    // Detects the exit-loop failure mode: same (user_id, ticker) with >2 open
+    // filled trades means an exit ran but failed to tombstone the original.
+    const { data: openPositions } = await supabase
+      .from("trades")
+      .select("ticker, user_id")
+      .eq("status", "filled")
+      .is("settled_at", null)
+      .is("exit_reason", null);
+
+    const positionCounts = new Map<string, number>();
+    for (const t of openPositions ?? []) {
+      const key = `${(t as any).user_id}::${(t as any).ticker}`;
+      positionCounts.set(key, (positionCounts.get(key) ?? 0) + 1);
+    }
+    const duplicateEntries = [...positionCounts.entries()].filter(([, n]) => n > 2);
+    if (duplicateEntries.length > 0) {
+      const tickerList = [...new Set(duplicateEntries.map(([k]) => k.split("::")[1]))].sort();
+      // Fingerprint on the sorted ticker set — same set within 1h = 1 alert.
+      const fingerprint = `dupes_${tickerList.join(",")}`;
+      pendingAlerts.push({
+        type: "duplicate_positions_detected",
+        fingerprint,
+        cooldownHours: 1,
+        message:
+          `🔄 <b>[TradeAgent] Duplicate Open Positions</b>\n` +
+          `${duplicateEntries.length} (user, ticker) pair(s) with >2 open filled rows.\n` +
+          `Tickers: ${tickerList.join(", ")}\n` +
+          `Exit loop may be running — check that tombstone UPDATE fires after each exit order in auto-trade.`,
+      });
+    }
+
+    // ── 6. Blocked series check ───────────────────────────────────────
     const { data: blockedTrades } = await supabase
       .from("trades")
       .select("ticker, strategy_id, created_at")
@@ -219,7 +251,7 @@ serve(async (req) => {
       });
     }
 
-    // ── 5. Suspended strategy check ───────────────────────────────────
+    // ── 7. Suspended strategy check ───────────────────────────────────
     const suspended = (activeStrategies ?? []).filter(
       (s: any) => s.suspended_until && new Date(s.suspended_until) > now
     );
@@ -238,7 +270,7 @@ serve(async (req) => {
       });
     }
 
-    // ── 6. Compliance log errors + 429s (last 2h) ────────────────────
+    // ── 8. Compliance log errors + 429s (last 2h) ────────────────────
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
 
     const { data: recentErrors } = await supabase

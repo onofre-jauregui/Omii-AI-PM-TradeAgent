@@ -155,11 +155,16 @@ serve(async (req) => {
 
       const resolution = (market.result || "").toLowerCase();
 
-      // 3. Fetch the actual trade rows so we can compute per-trade pnl
+      // 3. Fetch the actual trade rows so we can compute per-trade pnl.
+      //    Filter to status=filled + settled_at IS NULL so re-runs on the same
+      //    market resolution are no-ops — prevents double-settlement and double
+      //    Langfuse scoring if auto-settle fires twice before the first run commits.
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
         .select("id, user_id, side, action, price, amount, created_at, trace_id")
-        .in("id", tradeIds);
+        .in("id", tradeIds)
+        .eq("status", "filled")
+        .is("settled_at", null);
 
       if (tradesErr || !trades) {
         results.push({ ticker, state: "fetch_trades_failed", error: tradesErr?.message });

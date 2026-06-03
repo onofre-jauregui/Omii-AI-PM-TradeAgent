@@ -903,12 +903,15 @@ async function runS001SurfaceArb(
   }
 
   // 2. Dedup: which tickers are already open under this strategy?
+  //    exit_reason IS NULL excludes positions that have been exited but not yet
+  //    settled — without this S-001 could re-enter an already-exited position.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
     .eq("status", "filled")
     .eq("strategy_id", strategy.id)
-    .is("settled_at", null);
+    .is("settled_at", null)
+    .is("exit_reason", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
@@ -1120,6 +1123,16 @@ async function runS002LongshotBias(
     });
     const closeResult = await closeResp.json().catch(() => ({ success: false }));
     timeExitResults.push(`${pos.ticker}: ${closeResult.success ? "closed" : "close_failed"}`);
+
+    // Mark the original position as exited regardless of fill success — prevents
+    // the query from re-finding it every cycle if the exit order isn't filled
+    // (paper mode always fills, but live may not; either way the intent is clear).
+    try {
+      await supabase
+        .from("trades")
+        .update({ exit_reason: "time_exit_12h" })
+        .eq("id", pos.id);
+    } catch { /* non-critical — worst case is one duplicate next cycle */ }
   }
 
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
