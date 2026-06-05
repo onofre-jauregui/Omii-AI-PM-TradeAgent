@@ -21,9 +21,9 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
  */
 
 const SILENCE_HOURS = 24;
-const WIN_RATE_FLOOR = 0.70;
+const WIN_RATE_FLOOR = 0.60;
 const WIN_RATE_SAMPLE = 20;
-const VOLUME_SPIKE_MULTIPLIER = 3;
+const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not manual burst sessions
 const BLOCKED_SERIES = ["KXETH"];
 
 function json(body: unknown, status = 200) {
@@ -178,7 +178,7 @@ serve(async (req) => {
       .lt("created_at", oneHourAgo);
 
     const priorHourlyAvg = (priorDayCount ?? 0) / 23;
-    if ((lastHourCount ?? 0) > 5 && priorHourlyAvg > 0 && (lastHourCount ?? 0) > priorHourlyAvg * VOLUME_SPIKE_MULTIPLIER) {
+    if ((lastHourCount ?? 0) > 15 && priorHourlyAvg > 0 && (lastHourCount ?? 0) > priorHourlyAvg * VOLUME_SPIKE_MULTIPLIER) {
       // Fingerprint on the current hour so the same spike doesn't re-alert within 1h.
       const fingerprint = `spike_${now.toISOString().slice(0, 13)}`;
       pendingAlerts.push({
@@ -283,7 +283,7 @@ serve(async (req) => {
 
     const { data: recent429s } = await supabase
       .from("compliance_log")
-      .select("message, created_at")
+      .select("message, metadata, created_at")
       .eq("severity", "warning")
       .ilike("message", "%429%")
       .gte("created_at", twoHoursAgo)
@@ -307,10 +307,19 @@ serve(async (req) => {
     }
 
     if (recent429s && recent429s.length > 0) {
-      const series = [...new Set(recent429s.map((e: any) => {
-        const m = (e.message as string).match(/series (\w+)/);
-        return m ? m[1] : "unknown";
-      }))].sort().join(", ");
+      const extractSource = (e: any): string => {
+        // Try "series KXINX" format (market-data-fetcher)
+        const bySeriesSpace = (e.message as string).match(/series (\w+)/);
+        if (bySeriesSpace) return bySeriesSpace[1];
+        // Try "series=KXINX" format (URL query params)
+        const bySeriesEq = (e.message as string).match(/series=(\w+)/);
+        if (bySeriesEq) return bySeriesEq[1];
+        // Fall back to metadata endpoint (kalshi-proxy generic calls)
+        const ep: string = e.metadata?.endpoint || "";
+        if (ep) return ep.split("?")[0].replace(/^markets\/?/, "") || "markets (bulk)";
+        return "unknown";
+      };
+      const series = [...new Set(recent429s.map(extractSource))].sort().join(", ");
       const fingerprint = `rate_limit_${series}`;
       pendingAlerts.push({
         type: "rate_limits",
@@ -318,9 +327,9 @@ serve(async (req) => {
         cooldownHours: 2,
         message:
           `⚠️ <b>[TradeAgent] Kalshi Rate Limits (last 2h)</b>\n` +
-          `${recent429s.length} series hit 429 after retries.\n` +
-          `Series: ${series}\n` +
-          `Market data for these series may be stale.`,
+          `${recent429s.length} request(s) hit 429 after retries.\n` +
+          `Source: ${series}\n` +
+          `Market data for affected series may be stale.`,
       });
     }
 

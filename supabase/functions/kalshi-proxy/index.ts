@@ -67,7 +67,7 @@ serve(async (req) => {
         event_type: "api_error",
         severity: response.status >= 500 ? "error" : "warning",
         message: `Kalshi API error on ${req.method} ${endpoint}: ${response.status}`,
-        metadata: { status: response.status, response: data, endpoint },
+        metadata: { status: response.status, response: data, endpoint, full_path: apiPath },
       });
       return new Response(JSON.stringify(data), {
         status: response.status,
