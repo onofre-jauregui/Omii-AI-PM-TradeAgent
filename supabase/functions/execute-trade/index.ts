@@ -142,8 +142,12 @@ serve(async (req) => {
       ticker, marketId, marketQuestion, side, action, price, amount,
       strategy, strategyId, mode, notes, orderType, timeInForce,
       expectedOutcome, confidenceLevel, traceId, expirationTime,
-      sourceSignalId, influencedByMemoryIds, systemVersion, exitReason,
+      sourceSignalId, systemVersion, exitReason,
     } = parsedBody;
+    // Accept both camelCase (trading-agent) and snake_case (auto-trade) — the naming
+    // mismatch was silently zeroing out all memory attributions and starving the Bayesian loop.
+    const influencedByMemoryIds: string[] =
+      parsedBody.influencedByMemoryIds ?? parsedBody.influenced_by_memory_ids ?? [];
 
     const resolvedTicker = ticker || marketId;
 
