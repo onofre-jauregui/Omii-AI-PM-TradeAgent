@@ -1328,7 +1328,7 @@ async function runS002LongshotBias(
         sourceSignalId: sig.id || null,
         systemVersion: 'v2',
         // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
-        influenced_by_memory_ids: s002MemoryIds,
+        influencedByMemoryIds: s002MemoryIds,
       }),
     });
 
@@ -1775,7 +1775,7 @@ async function runS005WeatherEdge(
           sourceSignalId: sig.id || null,
           systemVersion: 'v2',
           // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
-          influenced_by_memory_ids: activeMemoryIds,
+          influencedByMemoryIds: activeMemoryIds,
         }),
       });
       const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));

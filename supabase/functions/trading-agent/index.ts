@@ -834,6 +834,8 @@ serve(async (req) => {
       }
     }
 
+    const activeMemoryIds = (topMemories ?? []).map((m: any) => m.id);
+
     // ── Build performance block (data already loaded in parallel above) ──
     // P&L only exists on settled trades; filled trades always have pnl=0
     let performanceBlock = "";
@@ -1364,6 +1366,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
                   notes: `Agent trade: ${args.reasoning}`,
                   expectedOutcome: args.expectedOutcome || null,
                   confidenceLevel: args.confidenceLevel || null,
+                  influencedByMemoryIds: activeMemoryIds,
                 }),
               });
               const rawText = await execResp.text();
