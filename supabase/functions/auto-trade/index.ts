@@ -1400,6 +1400,27 @@ async function runS005WeatherEdge(
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
+  // GFS accuracy time gate — Sunday GFS runs have ~15% higher RMSE (fewer radiosonde launches).
+  // Pre-14:00 UTC (before ~10am ET) trades on the 00z GFS run which hasn't been corrected
+  // by morning upper-air obs. Both windows show 0-22% win rates vs 51%+ in the trading window.
+  // Skip to avoid systematic model bias rather than burning capital on low-accuracy forecasts.
+  const utcNow = new Date();
+  const utcHour = utcNow.getUTCHours();
+  const utcDay = utcNow.getUTCDay(); // 0 = Sunday
+  if (utcDay === 0 || utcHour < 14) {
+    const reason = utcDay === 0 ? "Sunday GFS accuracy window (elevated RMSE)" : "pre-14:00 UTC (before 10am ET, 00z run not yet corrected)";
+    await logCompliance(supabase, strategy.user_id, null, "s005_time_gate", "info",
+      `S-005 skipped: ${reason}`, { utcHour, utcDay, runId });
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "skipped",
+      action: "no_setup",
+      details: `time_gate: ${reason}`,
+    };
+  }
+
   // 12h window: GFS model updates at ~04:00 and ~07:00 UTC, then weather-signal deduplicates
   // and skips re-insertion until the next model run. Signals are valid all trading day —
   // same-day bucket markets don't change their forecast meaningfully between model runs.
@@ -1742,14 +1763,20 @@ async function runS005WeatherEdge(
       const price = sig.direction === "buy_yes"
         ? Math.max(1, (sig.yes_bid || 50) + 1)
         : Math.max(1, (100 - (sig.yes_ask || 50)) + 1);
-      // Tiered sizing: scale position by edge magnitude.
-      // Larger edge = more confident GFS divergence = bigger bet, capped at maxPositionUsd.
-      const edgeCents = sig.edge_cents ?? 0;
-      const amount = edgeCents >= 35
-        ? maxPositionUsd                          // high-conviction: full size ($20)
-        : edgeCents >= 20
-          ? Math.round(maxPositionUsd * 0.65)    // medium: 65% ($13)
-          : Math.round(maxPositionUsd * 0.40);   // threshold-level: 40% ($8)
+      // Kelly-based sizing: accounts for binary contract payout geometry.
+      // A NO bet at 65¢ (paying 35¢, winning 65¢) has different Kelly fraction than
+      // a YES bet at the same edge — raw edge-only sizing ignores this asymmetry.
+      // Half-Kelly cap (0.25) prevents over-sizing on high-edge but narrow-spread signals.
+      const contractPrice = sig.direction === "buy_yes"
+        ? (sig.yes_ask ?? 50)
+        : (100 - (sig.yes_bid ?? 50));
+      const priceFrac = Math.max(1, Math.min(99, contractPrice)) / 100;
+      const payoutOdds = (1 - priceFrac) / priceFrac;
+      const trueProb = sig.true_probability ?? 0.5;
+      const winProb = sig.direction === "buy_yes" ? trueProb : (1 - trueProb);
+      const loseProb = 1 - winProb;
+      const kellyFraction = Math.max(0, Math.min(0.25, (winProb * payoutOdds - loseProb) / payoutOdds));
+      const amount = Math.max(5, Math.round(maxPositionUsd * kellyFraction));
 
       const tradeResp = await fetch(executeUrl, {
         method: "POST",

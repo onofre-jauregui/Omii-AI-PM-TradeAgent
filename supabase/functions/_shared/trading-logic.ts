@@ -122,11 +122,14 @@ export function s002EdgeCentsCheck(
  */
 export function buildForceLlmCities(
   cityWinLoss: Map<string, { wins: number; losses: number; totalPnl: number }>,
-  lossThreshold = 3
+  lossThreshold = 5,
+  minLossRate = 0.60,
 ): Set<string> {
   const forced = new Set<string>();
   for (const [city, stat] of cityWinLoss) {
-    if (stat.losses >= lossThreshold) forced.add(city);
+    const total = stat.wins + stat.losses;
+    const lossRate = total > 0 ? stat.losses / total : 0;
+    if (stat.losses >= lossThreshold && lossRate >= minLossRate) forced.add(city);
   }
   return forced;
 }

@@ -53,10 +53,16 @@ describe("S-005 city gate", () => {
     expect(s005IsAutoQualified(30, "miami", forced)).toBe(true);
   });
 
-  it("city with exactly 3 NO losses in 14d + edge >= 30¢ → forced through LLM gate", () => {
-    const cityWinLoss = makeWinLoss([["miami", { wins: 1, losses: 3 }]]);
+  it("city with 5 losses + 83% loss rate → forced through LLM gate (strong bias signal)", () => {
+    const cityWinLoss = makeWinLoss([["miami", { wins: 1, losses: 5 }]]);
     const forced = buildForceLlmCities(cityWinLoss);
     expect(s005IsAutoQualified(30, "miami", forced)).toBe(false);
+  });
+
+  it("city with 3 losses but only 43% loss rate → NOT forced (normal variance, not bias)", () => {
+    const cityWinLoss = makeWinLoss([["miami", { wins: 4, losses: 3 }]]);
+    const forced = buildForceLlmCities(cityWinLoss);
+    expect(s005IsAutoQualified(30, "miami", forced)).toBe(true);
   });
 
   it("city with 4 NO losses in 14d + edge < 30¢ → LLM gate (below auto-qualify threshold)", () => {
@@ -65,16 +71,18 @@ describe("S-005 city gate", () => {
     expect(s005IsAutoQualified(20, "lax", forced)).toBe(false);
   });
 
-  it("forceLlmCities set contains exactly the cities with losses >= 3", () => {
+  it("forceLlmCities requires both >= 5 losses AND >= 60% loss rate", () => {
     const cityWinLoss = makeWinLoss([
-      ["miami", { wins: 0, losses: 4 }],
-      ["lax",   { wins: 1, losses: 2 }],
-      ["nyc",   { wins: 0, losses: 3 }],
+      ["miami", { wins: 0, losses: 6 }],   // 100% loss rate, 6 losses → forced
+      ["lax",   { wins: 3, losses: 5 }],   // 63% loss rate, 5 losses → forced
+      ["nyc",   { wins: 0, losses: 4 }],   // 100% but only 4 losses → not forced
+      ["chi",   { wins: 5, losses: 5 }],   // 5 losses but only 50% → not forced
     ]);
     const forced = buildForceLlmCities(cityWinLoss);
     expect(forced.has("miami")).toBe(true);
-    expect(forced.has("nyc")).toBe(true);
-    expect(forced.has("lax")).toBe(false);
+    expect(forced.has("lax")).toBe(true);
+    expect(forced.has("nyc")).toBe(false);
+    expect(forced.has("chi")).toBe(false);
   });
 });
 
