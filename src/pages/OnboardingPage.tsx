@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
 import { CheckCircle, Loader2, AlertCircle, ArrowRight, Zap } from "lucide-react";
 
 const SUPABASE_URL    = import.meta.env.VITE_SUPABASE_URL ?? "";
@@ -97,14 +98,16 @@ export default function OnboardingPage() {
 
       // Set the default model for this provider so the agent has something
       // to use immediately without a second visit to Settings.
-      await supabase.from("api_keys").delete().eq("user_id", session.user.id).eq("provider", "model_agent");
-      await supabase.from("api_keys").insert({
-        provider:         "model_agent",
-        key_id:           DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
-        encrypted_secret: DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
-        user_id:          session.user.id,
-        updated_at:       new Date().toISOString(),
-      });
+      await supabase.from("api_keys").upsert(
+        {
+          provider:         "model_agent",
+          key_id:           DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
+          encrypted_secret: DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
+          user_id:          session.user.id,
+          updated_at:       new Date().toISOString(),
+        },
+        { onConflict: "user_id,provider" }
+      );
 
       setAiStatus("saved");
     } catch (err) {
@@ -181,17 +184,24 @@ export default function OnboardingPage() {
   });
   const allAcksChecked = Object.values(ackChecked).every(Boolean);
 
+  const [finishing, setFinishing] = useState(false);
+
   // ── finish ────────────────────────────────────────────────────────────
   async function finishOnboarding(destination: string, mode?: "paper" | "live") {
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      await supabase.from("profiles").upsert(
+    if (!user) { toast.error("Session expired — please sign in again."); return; }
+
+    setFinishing(true);
+    try {
+      const { error: profileErr } = await supabase.from("profiles").upsert(
         { id: user.id, onboarding_completed: true, ...(mode ? { trading_mode: mode } : {}) },
         { onConflict: "id" }
       );
+      if (profileErr) throw profileErr;
+
       const tradeMode = mode ?? "paper";
       const uid8 = user.id.replace(/-/g, "").slice(0, 8);
-      await supabase.from("strategies").upsert(
+      const { error: stratErr } = await supabase.from("strategies").upsert(
         [
           {
             id: `S-001-${uid8}`, template_id: "S-001", name: "Surface Arbitrage",
@@ -200,10 +210,12 @@ export default function OnboardingPage() {
             active: true, mode: tradeMode, starting_balance: 500, user_id: user.id,
           },
           {
+            // S-002 seeded inactive — negative EV in current market conditions.
+            // User can enable it manually from the Strategies panel after reviewing track record.
             id: `S-002-${uid8}`, template_id: "S-002", name: "Resolution Fade",
             description: "Fade overreaction price moves in markets 2–7 days from resolution.",
             instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range.",
-            active: true, mode: tradeMode, starting_balance: 1000, user_id: user.id,
+            active: false, mode: tradeMode, starting_balance: 1000, user_id: user.id,
           },
           {
             id: `S-005-${uid8}`, template_id: "S-005", name: "Weather Edge",
@@ -214,8 +226,10 @@ export default function OnboardingPage() {
         ],
         { onConflict: "id" }
       );
+      if (stratErr) throw stratErr;
+
       // Seed risk_settings so auto-trade doesn't fall back to the system default (10 positions)
-      await supabase.from("risk_settings").upsert(
+      const { error: riskErr } = await supabase.from("risk_settings").upsert(
         {
           user_id: user.id,
           max_position_size: 20,
@@ -227,13 +241,20 @@ export default function OnboardingPage() {
         },
         { onConflict: "user_id" }
       );
+      if (riskErr) throw riskErr;
+
+      navigate(destination);
+    } catch (err) {
+      console.error("Onboarding finalize failed:", err);
+      toast.error("Setup failed — please try again or contact support.");
+    } finally {
+      setFinishing(false);
     }
-    navigate(destination);
   }
 
-  function chooseModeAndContinue(mode: "paper" | "live") {
+  async function chooseModeAndContinue(mode: "paper" | "live") {
     setChosenMode(mode);
-    if (mode === "live") finishOnboarding("/billing", "live");
+    if (mode === "live") await finishOnboarding("/billing", "live");
     else setStep("live");
   }
 
@@ -530,7 +551,8 @@ export default function OnboardingPage() {
             <div className="space-y-3 mb-8">
               <button
                 onClick={() => chooseModeAndContinue("paper")}
-                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
+                disabled={finishing}
+                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm">Paper Trading</span>
@@ -542,7 +564,8 @@ export default function OnboardingPage() {
               </button>
               <button
                 onClick={() => chooseModeAndContinue("live")}
-                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4"
+                disabled={finishing}
+                className="w-full text-left rounded-2xl border border-border bg-secondary/30 hover:bg-secondary/60 transition-colors px-5 py-4 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm">Live Trading</span>
@@ -581,8 +604,13 @@ export default function OnboardingPage() {
                 </div>
               ))}
             </div>
-            <Button className="w-full rounded-full gap-2" onClick={() => finishOnboarding("/", chosenMode)}>
-              Go to dashboard <ArrowRight className="h-4 w-4" />
+            <Button
+              className="w-full rounded-full gap-2"
+              onClick={() => finishOnboarding("/", chosenMode)}
+              disabled={finishing}
+            >
+              {finishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
+              {finishing ? "Setting up…" : "Go to dashboard"}
             </Button>
           </div>
         )}
