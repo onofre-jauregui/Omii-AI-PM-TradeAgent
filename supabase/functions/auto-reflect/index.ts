@@ -292,15 +292,19 @@ serve(async (req) => {
         strategyResults.push({ id: strat.id, name: strat.name, hit_rate: hitRate, action: "suspended_hitrate" });
 
       } else if (consecutiveLosses >= 5) {
-        // Soft warning only
+        // Suspend for 12h — auto-resume is handled by the loop above.
+        const suspendUntil = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+        await supabase.from("strategies")
+          .update({ suspended_until: suspendUntil, suspension_reason: "consecutive_loss_streak", active: false })
+          .eq("id", strat.id);
         await supabase.from("compliance_log").insert({
-          event_type: "strategy_loss_streak",
+          event_type: "strategy_suspended_loss_streak",
           severity: "warning",
-          message: `Strategy "${strat.name}" — ${consecutiveLosses} consecutive losses (soft signal). Sharpe: ${sharpe.toFixed(2)}, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
+          message: `Strategy "${strat.name}" suspended 12h — ${consecutiveLosses} consecutive losses. Sharpe: ${sharpe.toFixed(2)}, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
           metadata: { strategy_id: strat.id, consecutiveLosses, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "warned" });
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "suspended_loss_streak" });
 
       } else {
         strategyResults.push({ id: strat.id, name: strat.name, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate, consecutiveLosses, action: "healthy" });

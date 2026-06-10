@@ -4,6 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { evaluateRisk } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
@@ -514,12 +515,12 @@ serve(async (req) => {
 
       await supabase.from("compliance_log").insert({
         event_type: "auto_trade_skipped",
-        severity: consecutiveSkips >= 10 ? "critical" : "error",
+        severity: consecutiveSkips >= 2 ? "critical" : "error",
         message: `Auto-trade skipped: no AI API key configured (consecutive skip #${consecutiveSkips})`,
         metadata: { run_id: runId, consecutive_skips: consecutiveSkips },
       });
 
-      if (consecutiveSkips === 10) {
+      if (consecutiveSkips === 2) {
         // Trip point — send one alert and mark system suspended.
         await sendTelegramAlert(
           `🚨 <b>[TradeAgent] AI Key Missing — Trading SUSPENDED</b>\n` +
@@ -534,7 +535,7 @@ serve(async (req) => {
           metadata: { run_id: runId, consecutive_skips: consecutiveSkips, suspended_at: new Date().toISOString() },
         });
       }
-      // Skip counts 1–9: log silently. Skip counts 11+: already alerted, stay quiet.
+      // Skip count 1: log silently. Skip count 2: alert once. Skip counts 3+: already alerted, stay quiet.
 
       return new Response(JSON.stringify({ skipped: true, reason: "No AI API key configured", consecutive_skips: consecutiveSkips }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -655,6 +656,46 @@ serve(async (req) => {
               status: "skipped",
               action: "risk_blocked",
               details: `Global daily trade cap reached: ${dailyTradeCount}/${maxDailyTrades} trades today (set in Risk Controls)`,
+            });
+            continue;
+          }
+
+          // ── Drawdown / daily-loss check ───────────────────────────────────────
+          // evaluateRisk enforces max_drawdown_pct and max_daily_loss per user.
+          // Pass amount=0 to skip position-size and concentration checks (those
+          // are per-order and handled inside execute-trade).
+          const { data: userRiskState } = await supabase
+            .from("risk_state")
+            .select("is_trading_halted, halt_reason, daily_pnl, daily_trades, open_position_count, peak_portfolio_value")
+            .eq("user_id", strategy.user_id)
+            .eq("date", today)
+            .maybeSingle();
+
+          const riskCheck = evaluateRisk(0, strategy.mode as "paper" | "live", userRisk, userRiskState ?? null);
+          if (!riskCheck.passed && riskCheck.code !== "position_size" && riskCheck.code !== "open_positions_limit") {
+            if (riskCheck.newHaltReason && userRiskState) {
+              await supabase.from("risk_state").upsert({
+                user_id: strategy.user_id,
+                date: today,
+                is_trading_halted: true,
+                halt_reason: riskCheck.newHaltReason,
+                updated_at: new Date().toISOString(),
+              }, { onConflict: "user_id,date" });
+            }
+            await supabase.from("compliance_log").insert({
+              event_type: "risk_check_failed",
+              severity: "warning",
+              message: `Strategy ${strategy.id} skipped: ${riskCheck.reason}`,
+              metadata: { strategy_id: strategy.id, code: riskCheck.code },
+              user_id: strategy.user_id,
+            });
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              action: "risk_blocked",
+              details: riskCheck.reason,
             });
             continue;
           }
@@ -942,6 +983,12 @@ async function runS001SurfaceArb(
       );
       if (!resp.ok) {
         kalshiCircuit.failures++;
+        await supabase.from("compliance_log").insert({
+          event_type: "api_error",
+          severity: "warning",
+          message: `S-001: Kalshi ${resp.status} fetching markets for ${eventTicker}`,
+          metadata: { provider: "kalshi", status: resp.status, endpoint: `markets?event_ticker=${eventTicker}` },
+        }).catch(() => {});
         if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
           kalshiCircuit.open = true;
           await tripCircuitBreaker(supabase, runId);
@@ -1276,6 +1323,7 @@ async function runS002LongshotBias(
       .select("id, title, content, confidence")
       .eq("strategy_id", strategy.id)
       .eq("is_active", true)
+      .is("quarantined_at", null)
       .is("merged_into", null)
       .order("confidence", { ascending: false })
       .limit(5);
@@ -1409,8 +1457,13 @@ async function runS005WeatherEdge(
   const utcDay = utcNow.getUTCDay(); // 0 = Sunday
   if (utcDay === 0 || utcHour < 14) {
     const reason = utcDay === 0 ? "Sunday GFS accuracy window (elevated RMSE)" : "pre-14:00 UTC (before 10am ET, 00z run not yet corrected)";
-    await logCompliance(supabase, strategy.user_id, null, "s005_time_gate", "info",
-      `S-005 skipped: ${reason}`, { utcHour, utcDay, runId });
+    await supabase.from("compliance_log").insert({
+      user_id: strategy.user_id,
+      event_type: "s005_time_gate",
+      severity: "info",
+      message: `S-005 skipped: ${reason}`,
+      metadata: { utcHour, utcDay, runId },
+    });
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
@@ -1572,6 +1625,7 @@ async function runS005WeatherEdge(
     .select("id, title, content, confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
+    .is("quarantined_at", null)
     .is("merged_into", null)
     .order("confidence", { ascending: false })
     .limit(5);
