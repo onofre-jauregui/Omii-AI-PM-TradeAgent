@@ -79,8 +79,21 @@ serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
+    const errMsg = error instanceof Error ? error.message : "Internal proxy error";
     console.error("kalshi-proxy error:", error);
-    return new Response(JSON.stringify({ error: error instanceof Error ? error.message : "Internal proxy error" }), {
+    try {
+      const adminClient = createClient(
+        Deno.env.get("SUPABASE_URL")!,
+        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      );
+      await adminClient.from("compliance_log").insert({
+        event_type: "api_error",
+        severity: "error",
+        message: `kalshi-proxy exception: ${errMsg.slice(0, 200)}`,
+        metadata: { provider: "kalshi", error: errMsg },
+      });
+    } catch { /* never throw from catch */ }
+    return new Response(JSON.stringify({ error: errMsg }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

@@ -227,6 +227,46 @@ serve(async (req) => {
       }
     }
 
+    // ── Expiration guard — reject trades on already-closed markets ──
+    // Enforced at the transaction boundary so no strategy (present or future) can
+    // place a trade on an expired market regardless of its own pre-flight checks.
+    if (expirationTime && new Date(expirationTime) < new Date()) {
+      await logCompliance(supabase, userId, null, "trade_rejected_expired", "warning",
+        `Trade rejected: market ${resolvedTicker} expired at ${expirationTime}`,
+        { ticker: resolvedTicker, expirationTime }
+      );
+      return new Response(JSON.stringify({
+        success: false,
+        error: `Market ${resolvedTicker} has already expired.`,
+      }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // ── Atomic position cap — race-condition-proof enforcement ──
+    // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
+    // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
+    if (userId) {
+      const capSettings = await getRiskSettings(supabase, userId);
+      const maxPos = (capSettings as any)?.max_open_positions ?? 10;
+      const { count: openCount } = await supabase
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("status", "filled")
+        .is("settled_at", null)
+        .is("exit_reason", null);
+
+      if ((openCount ?? 0) >= maxPos) {
+        await logCompliance(supabase, userId, null, "position_cap_enforced", "warning",
+          `Trade rejected: position cap (${maxPos}) reached for user ${userId} — ${openCount} open`,
+          { ticker: resolvedTicker, open: openCount, limit: maxPos }
+        );
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Position limit (${maxPos}) reached. Settle existing positions before opening new ones.`,
+        }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+
     // ── Risk Management (tenant-scoped) ──
     const settings = await getRiskSettings(supabase, userId);
     const riskState = await getRiskStateToday(supabase, userId);

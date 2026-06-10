@@ -281,15 +281,6 @@ serve(async (req) => {
       .order("created_at", { ascending: false })
       .limit(10);
 
-    const { data: recent429s } = await supabase
-      .from("compliance_log")
-      .select("message, metadata, created_at")
-      .eq("severity", "warning")
-      .ilike("message", "%429%")
-      .gte("created_at", twoHoursAgo)
-      .order("created_at", { ascending: false })
-      .limit(10);
-
     if (recentErrors && recentErrors.length > 0) {
       const sample = recentErrors.slice(0, 3)
         .map((e: any) => `• ${e.event_type}: ${e.message.slice(0, 80)}`)
@@ -306,30 +297,58 @@ serve(async (req) => {
       });
     }
 
-    if (recent429s && recent429s.length > 0) {
-      const extractSource = (e: any): string => {
-        // Try "series KXINX" format (market-data-fetcher)
-        const bySeriesSpace = (e.message as string).match(/series (\w+)/);
-        if (bySeriesSpace) return bySeriesSpace[1];
-        // Try "series=KXINX" format (URL query params)
-        const bySeriesEq = (e.message as string).match(/series=(\w+)/);
-        if (bySeriesEq) return bySeriesEq[1];
-        // Fall back to metadata endpoint (kalshi-proxy generic calls)
-        const ep: string = e.metadata?.endpoint || "";
-        if (ep) return ep.split("?")[0].replace(/^markets\/?/, "") || "markets (bulk)";
-        return "unknown";
-      };
-      const series = [...new Set(recent429s.map(extractSource))].sort().join(", ");
-      const fingerprint = `rate_limit_${series}`;
+    // Structured API error sweep — covers all providers + all HTTP status codes.
+    // Uses event_type filter (structured) instead of text-match on message — eliminates
+    // false positives from messages that contain status codes as substrings (e.g. "14297m old").
+    const API_ERROR_TYPES = ["api_error", "llm_rate_limit", "api_timeout", "kalshi_circuit_open"];
+    const extractProvider = (row: any): string => {
+      if (row.metadata?.provider) return row.metadata.provider;
+      const ep: string = row.metadata?.endpoint || row.metadata?.full_path || "";
+      if (/openrouter/i.test(ep)) return "openrouter";
+      if (/anthropic/i.test(ep)) return "anthropic";
+      if (/openai/i.test(ep)) return "openai";
+      if (/kalshi|trade-api|markets/i.test(ep)) return "kalshi";
+      const msg: string = row.message || "";
+      if (/openrouter/i.test(msg)) return "openrouter";
+      if (/anthropic/i.test(msg)) return "anthropic";
+      if (/openai/i.test(msg)) return "openai";
+      if (/kalshi/i.test(msg)) return "kalshi";
+      if (row.event_type === "kalshi_circuit_open") return "kalshi";
+      return "unknown";
+    };
+
+    const { data: apiErrors } = await supabase
+      .from("compliance_log")
+      .select("event_type, message, metadata, created_at")
+      .in("event_type", API_ERROR_TYPES)
+      .gte("created_at", twoHoursAgo)
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    const errorMap = new Map<string, { count: number; message: string }>();
+    for (const row of apiErrors ?? []) {
+      const status = row.metadata?.status ?? row.metadata?.http_status ?? row.event_type;
+      const provider = extractProvider(row);
+      const key = `${provider}:${status}`;
+      const existing = errorMap.get(key);
+      if (!existing) {
+        errorMap.set(key, { count: 1, message: row.message });
+      } else {
+        existing.count++;
+      }
+    }
+
+    for (const [key, info] of errorMap.entries()) {
+      const [provider, status] = key.split(":");
+      const isRateLimit = String(status) === "429" || status === "llm_rate_limit";
       pendingAlerts.push({
-        type: "rate_limits",
-        fingerprint,
+        type: `api_error_${provider}`,
+        fingerprint: `api_error_${key}`,
         cooldownHours: 2,
         message:
-          `⚠️ <b>[TradeAgent] Kalshi Rate Limits (last 2h)</b>\n` +
-          `${recent429s.length} request(s) hit 429 after retries.\n` +
-          `Source: ${series}\n` +
-          `Market data for affected series may be stale.`,
+          `🔴 <b>[TradeAgent] ${provider.toUpperCase()} ${isRateLimit ? "Rate Limited (429)" : `HTTP ${status}`}</b>\n` +
+          `${info.count} hit(s) in last 2h\n` +
+          `${info.message.slice(0, 120)}`,
       });
     }
 

@@ -350,7 +350,41 @@ serve(async (req) => {
 
     }
 
-    // 6. Trigger auto-reflect once per settle run (not once per ticker).
+    // 6. Expiration sweep: force-expire any trade that is past deadline and unreachable
+    //    by Kalshi. This covers trades placed on markets that have since finalized and
+    //    left the Kalshi API — fetchKalshiMarket() returns null for them, leaving them
+    //    stuck open forever unless this sweep runs. 4h grace period prevents premature
+    //    closure of markets in final settlement processing.
+    const expiryCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    const { data: expiredByTime } = await supabase
+      .from("trades")
+      .select("id, ticker")
+      .eq("status", "filled")
+      .is("settled_at", null)
+      .not("expiration_time", "is", null)
+      .lt("expiration_time", expiryCutoff);
+
+    if (expiredByTime && expiredByTime.length > 0) {
+      await supabase.from("trades").update({
+        status: "expired",
+        settled_at: new Date().toISOString(),
+        resolution: "expired",
+        pnl: 0,
+      }).in("id", expiredByTime.map((t: any) => t.id));
+      await supabase.from("compliance_log").insert({
+        event_type: "auto_settle_expiry_sweep",
+        severity: "info",
+        message: `auto-settle: force-expired ${expiredByTime.length} trade(s) past deadline with no Kalshi result`,
+        metadata: {
+          run_id: runId,
+          trade_count: expiredByTime.length,
+          tickers: [...new Set(expiredByTime.map((t: any) => t.ticker))],
+        },
+      });
+      totalSettled += expiredByTime.length;
+    }
+
+    // 7. Trigger auto-reflect once per settle run (not once per ticker).
     //    Moved outside the ticker loop to prevent concurrent duplicate runs
     //    when multiple tickers settle in the same batch.
     if (totalSettled > 0) {
@@ -361,7 +395,7 @@ serve(async (req) => {
       }).catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e));
     }
 
-    // 7. Run-level rollup compliance entry
+    // 8. Run-level rollup compliance entry
     await supabase.from("compliance_log").insert({
       event_type: "auto_settle_run",
       severity: "info",
