@@ -315,16 +315,15 @@ serve(async (req) => {
           const effectiveEdge = rawEdgeCents * confidenceMultiplier;
           if (effectiveEdge < MIN_EDGE_TO_SIGNAL_CENTS) continue;
 
-          const edgeCentsAbs = rawEdgeCents;
           signals.push({
             ticker: m.ticker,
             market_question: m.market_question || `${loc.name} high temp ${m.bucket_low}-${m.bucket_high}°F`,
             direction: edge.direction,
-            signal_strength: signalStrength(edgeCentsAbs),
+            signal_strength: signalStrength(Math.round(effectiveEdge)),
             yes_bid: m.yes_bid,
             yes_ask: m.yes_ask,
             mid_price: m.yes_bid && m.yes_ask ? Math.round((m.yes_bid + m.yes_ask) / 2) : null,
-            edge_cents: Math.round(edgeCentsAbs),
+            edge_cents: Math.round(effectiveEdge),
             true_probability: trueProb,
             implied_probability: edge.impliedProb,
             liquidity_score: m.yes_bid && m.yes_ask ? Math.min(1, (100 - (m.yes_ask - m.yes_bid)) / 100) : 0,
@@ -347,6 +346,7 @@ serve(async (req) => {
               forecast_std_dev: calibratedForecast.stdDev,
               ecmwf_expected_high: ecmwfExpectedHighF,
               model_agreement_f: modelAgreementF,
+              raw_edge_cents: Math.round(rawEdgeCents),
               confidence_multiplier: confidenceMultiplier,
               run_id: runId,
             },

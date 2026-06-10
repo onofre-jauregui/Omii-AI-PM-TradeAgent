@@ -28,3 +28,9 @@ dist-ssr
 *.sw?
 .vercel
 .claude/session.md
+
+# Playwright MCP snapshots
+.playwright-mcp/
+
+# Debug screenshots
+*.png
