@@ -214,6 +214,19 @@ export default function OnboardingPage() {
         ],
         { onConflict: "id" }
       );
+      // Seed risk_settings so auto-trade doesn't fall back to the system default (10 positions)
+      await supabase.from("risk_settings").upsert(
+        {
+          user_id: user.id,
+          max_position_size: 20,
+          max_open_positions: 25,
+          max_daily_trades: 50,
+          allocated_capital: 500,
+          max_daily_loss: 100,
+          max_drawdown_pct: 20,
+        },
+        { onConflict: "user_id" }
+      );
     }
     navigate(destination);
   }
