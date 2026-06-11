@@ -132,7 +132,7 @@ serve(async (req) => {
     //   Sharpe < -1.0 with n≥20 → suspend 24h (sharpe_collapse)
     //   Max drawdown > max_acceptable_drawdown → suspend 24h (drawdown_breach)
     //   Hit rate < expected - 0.20 with n≥20 → suspend 72h (hit_rate_regime_shift)
-    // Consecutive losses remain as a soft warning only (5+ losses).
+    //   5+ consecutive losses → suspend 12h (consecutive_loss_streak)
 
     const { data: strategies } = await supabase
       .from("strategies")
