@@ -587,7 +587,7 @@ export default function OnboardingPage() {
             </div>
             <h1 className="text-2xl font-semibold tracking-tight mb-2">Your agent is running.</h1>
             <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
-              Three strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
+              Two strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
             </p>
             <div className="space-y-2 text-left mb-8">
               {[
