@@ -1,12 +1,18 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { generateAuthHeaders, KALSHI_BASE_URL, fetchWithRetry } from "../_shared/kalshi-auth.ts";
+import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
+import { resolveTenant } from "../_shared/tenant.ts";
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight(req, "extended");
 
   const corsHeaders = makeCorsHeaders(req.headers.get("origin"), "extended");
+
+  const adminClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+  );
 
   try {
     const url = new URL(req.url);
@@ -20,18 +26,9 @@ serve(async (req) => {
     let headers: Record<string, string> = { "Content-Type": "application/json" };
 
     if (!isPublicEndpoint) {
-      const adminClient = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-      );
-      const { data: keyRow } = await adminClient
-        .from("api_keys")
-        .select("key_id, encrypted_secret")
-        .eq("provider", "kalshi_live")
-        .single();
-
-      const kalshiKeyId = keyRow?.key_id || Deno.env.get("KALSHI_API_KEY_ID");
-      const kalshiPrivateKey = keyRow?.encrypted_secret || Deno.env.get("KALSHI_API_PRIVATE_KEY");
+      const { userId } = await resolveTenant(req, adminClient);
+      const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } =
+        await getKalshiCredentials(adminClient, userId);
 
       if (!kalshiKeyId || !kalshiPrivateKey) {
         return new Response(
@@ -59,11 +56,7 @@ serve(async (req) => {
     const data = await response.json();
 
     if (!response.ok) {
-      const supabase = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-      );
-      await supabase.from("compliance_log").insert({
+      await adminClient.from("compliance_log").insert({
         event_type: "api_error",
         severity: response.status >= 500 ? "error" : "warning",
         message: `Kalshi API error on ${req.method} ${endpoint}: ${response.status}`,
@@ -82,10 +75,6 @@ serve(async (req) => {
     const errMsg = error instanceof Error ? error.message : "Internal proxy error";
     console.error("kalshi-proxy error:", error);
     try {
-      const adminClient = createClient(
-        Deno.env.get("SUPABASE_URL")!,
-        Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-      );
       await adminClient.from("compliance_log").insert({
         event_type: "api_error",
         severity: "error",
