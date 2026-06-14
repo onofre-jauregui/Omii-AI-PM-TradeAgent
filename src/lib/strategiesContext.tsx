@@ -116,6 +116,8 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     if (!trades) return;
 
     const statsMap: Record<string, StrategyStats> = {};
+    const knownStrategyIds = new Set(strategies.map(s => s.id));
+    const knownStrategyNames = new Set(strategies.map(s => s.name));
 
     for (const strat of strategies) {
       // Primary: match by strategy_id. Fallback: match by strategy name/id only for
@@ -139,6 +141,29 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
         winRate: totalTrades > 0 ? Math.round((winningTrades / totalTrades) * 100) : 0,
         roi: strat.starting_balance > 0 ? Math.round((totalPnl / strat.starting_balance) * 10000) / 100 : 0,
         balance: strat.starting_balance + totalPnl,
+      };
+    }
+
+    // Capture trades that don't match any known strategy (pre-user_id-fix orphan trades).
+    // These are real settled trades under this user's account but reference strategy IDs
+    // from other test accounts. Surface them as "_unattributed" so totals reconcile.
+    const orphanTrades = trades.filter(t =>
+      !knownStrategyIds.has(t.strategy_id ?? "") &&
+      !(t.strategy && (knownStrategyNames.has(t.strategy) || knownStrategyIds.has(t.strategy)))
+    );
+    if (orphanTrades.length > 0) {
+      const totalPnl = orphanTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const winningTrades = orphanTrades.filter(t => (t.pnl || 0) > 0).length;
+      const losingTrades = orphanTrades.filter(t => (t.pnl || 0) < 0).length;
+      statsMap["_unattributed"] = {
+        strategyId: "_unattributed",
+        totalTrades: orphanTrades.length,
+        winningTrades,
+        losingTrades,
+        totalPnl: Math.round(totalPnl * 100) / 100,
+        winRate: orphanTrades.length > 0 ? Math.round((winningTrades / orphanTrades.length) * 100) : 0,
+        roi: 0,
+        balance: totalPnl,
       };
     }
 
