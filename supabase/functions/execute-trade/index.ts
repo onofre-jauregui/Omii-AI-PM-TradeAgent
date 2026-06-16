@@ -4,6 +4,7 @@ import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
 import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
+import { isServiceRoleBearer } from "../_shared/auth-helpers.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
@@ -181,6 +182,20 @@ serve(async (req) => {
 
     // ── Tenant Resolution (multi-tenancy) ──
     const { userId, authenticated } = await resolveTenant(req, supabase, parsedBody);
+
+    // Reject unauthenticated external callers. The only legitimate unauthenticated
+    // path is internal service-role calls (auto-trade → execute-trade), which supply
+    // the service role key in the Authorization header and a user_id in the body.
+    if (!authenticated) {
+      const bearer = (req.headers.get("Authorization") || req.headers.get("authorization") || "").replace(/^[Bb]earer\s+/, "");
+      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      if (!isServiceRoleBearer(bearer, serviceKey)) {
+        return new Response(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
 
     const tradeMode = (mode || "paper") as "paper" | "live";
 
