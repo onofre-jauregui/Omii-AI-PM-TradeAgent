@@ -185,7 +185,6 @@ export function SettingsPanel({ userId }: { userId?: string }) {
       const { error } = await supabase.from("api_keys").insert({
         provider: "model_agent",
         key_id: selectedModel,
-        encrypted_secret: selectedModel,
         user_id: user.id,
         updated_at: new Date().toISOString(),
       });

@@ -100,11 +100,10 @@ export default function OnboardingPage() {
       // to use immediately without a second visit to Settings.
       await supabase.from("api_keys").upsert(
         {
-          provider:         "model_agent",
-          key_id:           DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
-          encrypted_secret: DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
-          user_id:          session.user.id,
-          updated_at:       new Date().toISOString(),
+          provider:   "model_agent",
+          key_id:     DEFAULT_MODEL[selectedProvider] ?? "openai/gpt-4o-mini",
+          user_id:    session.user.id,
+          updated_at: new Date().toISOString(),
         },
         { onConflict: "user_id,provider" }
       );
