@@ -181,6 +181,7 @@ export default function OnboardingPage() {
     understand_risk: false,
     agent_trades:    false,
     own_funds:       false,
+    is_us_person:    false,
   });
   const allAcksChecked = Object.values(ackChecked).every(Boolean);
 
@@ -506,6 +507,10 @@ export default function OnboardingPage() {
                 {
                   key: "own_funds" as const,
                   text: "I am only trading with funds I can afford to lose. I have read and agree to the Terms of Service, including the Limitation of Liability section.",
+                },
+                {
+                  key: "is_us_person" as const,
+                  text: "I confirm I am a US resident and am legally eligible to trade prediction markets on Kalshi. I understand that Kalshi is a CFTC-regulated exchange restricted to US persons.",
                 },
               ].map(({ key, text }) => (
                 <label

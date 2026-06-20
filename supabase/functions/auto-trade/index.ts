@@ -4,7 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
-import { evaluateRisk } from "../_shared/risk.ts";
+import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
@@ -201,7 +201,7 @@ async function fetchUserRiskSettings(supabase: any, userId: string): Promise<any
   if (riskSettingsCache.has(userId)) return riskSettingsCache.get(userId);
   const { data } = await supabase.from("risk_settings").select("*")
     .eq("user_id", userId).maybeSingle();
-  const settings = data ?? { max_open_positions: 10, max_position_size: 500, max_daily_loss: 500, max_drawdown_pct: 20 };
+  const settings = data ?? DEFAULT_RISK_SETTINGS;
   riskSettingsCache.set(userId, settings);
   return settings;
 }

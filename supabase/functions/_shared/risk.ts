@@ -63,13 +63,23 @@ export interface RiskEvaluationResult {
  *  5. drawdown limit        (both modes)
  *  6. concentration limit   (live only)
  */
+export const DEFAULT_RISK_SETTINGS: RiskSettings = {
+  max_position_size: 20,
+  max_open_positions: 3,
+  max_daily_loss: 100,
+  max_drawdown_pct: 10,
+  auto_stop_loss: false,
+  stop_loss_pct: 0,
+  allocated_capital: 1000,
+};
+
 export function evaluateRisk(
   amount: number,
   mode: "paper" | "live",
   settings: RiskSettings | null,
   riskState: RiskState | null
 ): RiskEvaluationResult {
-  if (!settings) return { passed: true };
+  if (!settings) settings = DEFAULT_RISK_SETTINGS;
 
   // 1. Position size
   if (amount > settings.max_position_size) {
