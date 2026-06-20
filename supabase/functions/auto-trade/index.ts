@@ -928,6 +928,7 @@ async function callExecuteTrade(
   if (resp.status === 401) {
     await supabase.from("compliance_log").insert({
       event_type: "auth_rejected",
+      category: "compliance",
       severity: "critical",
       message: "auto-trade: execute-trade returned 401 — service-role key missing or rotated; trading halted",
       metadata: { execute_url: executeUrl, user_id: payload.user_id ?? null },

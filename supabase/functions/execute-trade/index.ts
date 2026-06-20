@@ -195,6 +195,7 @@ serve(async (req) => {
         // makes these failures visible on the observability page instead of dark.
         await supabase.from("compliance_log").insert({
           event_type: "auth_rejected",
+          category: "compliance",
           severity: "error",
           message: "execute-trade: request rejected — unauthenticated and not service-role",
           metadata: {
