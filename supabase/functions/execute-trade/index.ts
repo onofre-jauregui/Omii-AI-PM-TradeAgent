@@ -190,6 +190,21 @@ serve(async (req) => {
       const bearer = (req.headers.get("Authorization") || req.headers.get("authorization") || "").replace(/^[Bb]earer\s+/, "");
       const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
       if (!isServiceRoleBearer(bearer, serviceKey)) {
+        // Log every rejection — the most common cause is an internal misconfiguration
+        // (missing/rotated service role key), not an external attacker. Logging here
+        // makes these failures visible on the observability page instead of dark.
+        await supabase.from("compliance_log").insert({
+          event_type: "auth_rejected",
+          severity: "error",
+          message: "execute-trade: request rejected — unauthenticated and not service-role",
+          metadata: {
+            bearer_present: !!bearer,
+            service_key_configured: !!serviceKey,
+            ticker: resolvedTicker,
+            user_id_in_body: parsedBody?.user_id ?? null,
+          },
+          user_id: null,
+        }).catch(() => {}); // never block the rejection on a log failure
         return new Response(
           JSON.stringify({ error: "Unauthorized" }),
           { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
