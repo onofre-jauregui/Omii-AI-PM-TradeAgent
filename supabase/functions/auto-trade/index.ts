@@ -714,11 +714,11 @@ serve(async (req) => {
         const templateId = (strategy as any).template_id ?? strategy.id;
 
         if (templateId === "S-001") {
-          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, kalshiCircuit);
+          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, kalshiCircuit);
         } else if (templateId === "S-002") {
-          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, userRisk, winStreak);
         } else if (templateId === "S-005") {
-          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, userRisk, winStreak);
         } else {
           // Unknown strategy — hard reject. All strategies require an explicit handler.
           // This prevents a bad strategy_config row from triggering unguarded LLM usage.
