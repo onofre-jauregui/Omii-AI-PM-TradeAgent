@@ -4,6 +4,7 @@ import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
 import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
+import { isServiceRoleBearer } from "../_shared/auth-helpers.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
@@ -182,6 +183,36 @@ serve(async (req) => {
     // ── Tenant Resolution (multi-tenancy) ──
     const { userId, authenticated } = await resolveTenant(req, supabase, parsedBody);
 
+    // Reject unauthenticated external callers. The only legitimate unauthenticated
+    // path is internal service-role calls (auto-trade → execute-trade), which supply
+    // the service role key in the Authorization header and a user_id in the body.
+    if (!authenticated) {
+      const bearer = (req.headers.get("Authorization") || req.headers.get("authorization") || "").replace(/^[Bb]earer\s+/, "");
+      const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      if (!isServiceRoleBearer(bearer, serviceKey)) {
+        // Log every rejection — the most common cause is an internal misconfiguration
+        // (missing/rotated service role key), not an external attacker. Logging here
+        // makes these failures visible on the observability page instead of dark.
+        await supabase.from("compliance_log").insert({
+          event_type: "auth_rejected",
+          category: "compliance",
+          severity: "error",
+          message: "execute-trade: request rejected — unauthenticated and not service-role",
+          metadata: {
+            bearer_present: !!bearer,
+            service_key_configured: !!serviceKey,
+            ticker: resolvedTicker,
+            user_id_in_body: parsedBody?.user_id ?? null,
+          },
+          user_id: null,
+        }).catch(() => {}); // never block the rejection on a log failure
+        return new Response(
+          JSON.stringify({ error: "Unauthorized" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     const tradeMode = (mode || "paper") as "paper" | "live";
 
     // ── Per-User Rate Limiting ──
@@ -224,6 +255,46 @@ serve(async (req) => {
           JSON.stringify({ error: entitlement.reason }),
           { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+      }
+    }
+
+    // ── Expiration guard — reject trades on already-closed markets ──
+    // Enforced at the transaction boundary so no strategy (present or future) can
+    // place a trade on an expired market regardless of its own pre-flight checks.
+    if (expirationTime && new Date(expirationTime) < new Date()) {
+      await logCompliance(supabase, userId, null, "trade_rejected_expired", "warning",
+        `Trade rejected: market ${resolvedTicker} expired at ${expirationTime}`,
+        { ticker: resolvedTicker, expirationTime }
+      );
+      return new Response(JSON.stringify({
+        success: false,
+        error: `Market ${resolvedTicker} has already expired.`,
+      }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    // ── Atomic position cap — race-condition-proof enforcement ──
+    // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
+    // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
+    if (userId) {
+      const capSettings = await getRiskSettings(supabase, userId);
+      const maxPos = (capSettings as any)?.max_open_positions ?? 10;
+      const { count: openCount } = await supabase
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("status", "filled")
+        .is("settled_at", null)
+        .is("exit_reason", null);
+
+      if ((openCount ?? 0) >= maxPos) {
+        await logCompliance(supabase, userId, null, "position_cap_enforced", "warning",
+          `Trade rejected: position cap (${maxPos}) reached for user ${userId} — ${openCount} open`,
+          { ticker: resolvedTicker, open: openCount, limit: maxPos }
+        );
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Position limit (${maxPos}) reached. Settle existing positions before opening new ones.`,
+        }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
 

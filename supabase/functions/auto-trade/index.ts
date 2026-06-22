@@ -4,6 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
@@ -141,6 +142,14 @@ function parseSettlementDate(ticker: string): Date | null {
   // Clamp day to valid range
   day = Math.min(day, lastDayOfMonth(year, month));
 
+  // KXHIGH (daily temperature) markets close ~04:59-05:59 UTC the following day
+  // (midnight local ET). Defaulting to 00:00 UTC of the settlement date causes the
+  // expiration guard to reject same-day signals from 00:00 UTC onward, which is 5+
+  // hours before the market actually closes. Shift to next-day 06:00 UTC.
+  if (!hourStr && /^KXHIGH/.test(ticker)) {
+    return new Date(Date.UTC(year, month, day + 1, 6, 0, 0));
+  }
+
   return new Date(Date.UTC(year, month, day, hour, minute, 0));
 }
 
@@ -192,7 +201,7 @@ async function fetchUserRiskSettings(supabase: any, userId: string): Promise<any
   if (riskSettingsCache.has(userId)) return riskSettingsCache.get(userId);
   const { data } = await supabase.from("risk_settings").select("*")
     .eq("user_id", userId).maybeSingle();
-  const settings = data ?? { max_open_positions: 10, max_position_size: 500, max_daily_loss: 500, max_drawdown_pct: 20 };
+  const settings = data ?? DEFAULT_RISK_SETTINGS;
   riskSettingsCache.set(userId, settings);
   return settings;
 }
@@ -514,12 +523,12 @@ serve(async (req) => {
 
       await supabase.from("compliance_log").insert({
         event_type: "auto_trade_skipped",
-        severity: consecutiveSkips >= 10 ? "critical" : "error",
+        severity: consecutiveSkips >= 2 ? "critical" : "error",
         message: `Auto-trade skipped: no AI API key configured (consecutive skip #${consecutiveSkips})`,
         metadata: { run_id: runId, consecutive_skips: consecutiveSkips },
       });
 
-      if (consecutiveSkips === 10) {
+      if (consecutiveSkips === 2) {
         // Trip point — send one alert and mark system suspended.
         await sendTelegramAlert(
           `🚨 <b>[TradeAgent] AI Key Missing — Trading SUSPENDED</b>\n` +
@@ -534,7 +543,7 @@ serve(async (req) => {
           metadata: { run_id: runId, consecutive_skips: consecutiveSkips, suspended_at: new Date().toISOString() },
         });
       }
-      // Skip counts 1–9: log silently. Skip counts 11+: already alerted, stay quiet.
+      // Skip count 1: log silently. Skip count 2: alert once. Skip counts 3+: already alerted, stay quiet.
 
       return new Response(JSON.stringify({ skipped: true, reason: "No AI API key configured", consecutive_skips: consecutiveSkips }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -658,6 +667,46 @@ serve(async (req) => {
             });
             continue;
           }
+
+          // ── Drawdown / daily-loss check ───────────────────────────────────────
+          // evaluateRisk enforces max_drawdown_pct and max_daily_loss per user.
+          // Pass amount=0 to skip position-size and concentration checks (those
+          // are per-order and handled inside execute-trade).
+          const { data: userRiskState } = await supabase
+            .from("risk_state")
+            .select("is_trading_halted, halt_reason, daily_pnl, daily_trades, open_position_count, peak_portfolio_value")
+            .eq("user_id", strategy.user_id)
+            .eq("date", today)
+            .maybeSingle();
+
+          const riskCheck = evaluateRisk(0, strategy.mode as "paper" | "live", userRisk, userRiskState ?? null);
+          if (!riskCheck.passed && riskCheck.code !== "position_size" && riskCheck.code !== "open_positions_limit") {
+            if (riskCheck.newHaltReason && userRiskState) {
+              await supabase.from("risk_state").upsert({
+                user_id: strategy.user_id,
+                date: today,
+                is_trading_halted: true,
+                halt_reason: riskCheck.newHaltReason,
+                updated_at: new Date().toISOString(),
+              }, { onConflict: "user_id,date" });
+            }
+            await supabase.from("compliance_log").insert({
+              event_type: "risk_check_failed",
+              severity: "warning",
+              message: `Strategy ${strategy.id} skipped: ${riskCheck.reason}`,
+              metadata: { strategy_id: strategy.id, code: riskCheck.code },
+              user_id: strategy.user_id,
+            });
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              action: "risk_blocked",
+              details: riskCheck.reason,
+            });
+            continue;
+          }
         }
 
         let result: StrategyResult;
@@ -665,11 +714,11 @@ serve(async (req) => {
         const templateId = (strategy as any).template_id ?? strategy.id;
 
         if (templateId === "S-001") {
-          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, kalshiCircuit);
+          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, kalshiCircuit);
         } else if (templateId === "S-002") {
-          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
+          result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, userRisk, winStreak);
         } else if (templateId === "S-005") {
-          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseAnonKey, runId, userRisk, winStreak);
+          result = await runS005WeatherEdge(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, userRisk, winStreak);
         } else {
           // Unknown strategy — hard reject. All strategies require an explicit handler.
           // This prevents a bad strategy_config row from triggering unguarded LLM usage.
@@ -857,6 +906,45 @@ serve(async (req) => {
 
 const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
+// Wrapper around every execute-trade HTTP call. Detects 401 (service-role key
+// missing/rotated) and fires a Telegram alert + compliance_log entry so the
+// failure is visible instead of being silently swallowed as a failed trade.
+async function callExecuteTrade(
+  executeUrl: string,
+  supabaseKey: string,
+  supabase: any,
+  payload: Record<string, unknown>
+): Promise<{ success: boolean; error?: string; [key: string]: unknown }> {
+  const resp = await fetch(executeUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${supabaseKey}`,
+      apikey: supabaseKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (resp.status === 401) {
+    await supabase.from("compliance_log").insert({
+      event_type: "auth_rejected",
+      category: "compliance",
+      severity: "critical",
+      message: "auto-trade: execute-trade returned 401 — service-role key missing or rotated; trading halted",
+      metadata: { execute_url: executeUrl, user_id: payload.user_id ?? null },
+      user_id: payload.user_id ?? null,
+    }).catch(() => {});
+
+    await sendTelegramAlert(
+      `🔴 <b>[TradeAgent] CRITICAL: Trading Halted</b>\nexecute-trade returned 401. Service-role key is missing or was rotated. No trades can be placed until the env var is restored.`
+    ).catch(() => {});
+
+    return { success: false, error: "execute-trade 401 — service-role key misconfigured" };
+  }
+
+  return resp.json().catch(() => ({ success: false, error: "response parse failed" }));
+}
+
 async function runS001SurfaceArb(
   supabase: any,
   strategy: any,
@@ -942,6 +1030,12 @@ async function runS001SurfaceArb(
       );
       if (!resp.ok) {
         kalshiCircuit.failures++;
+        await supabase.from("compliance_log").insert({
+          event_type: "api_error",
+          severity: "warning",
+          message: `S-001: Kalshi ${resp.status} fetching markets for ${eventTicker}`,
+          metadata: { provider: "kalshi", status: resp.status, endpoint: `markets?event_ticker=${eventTicker}` },
+        }).catch(() => {});
         if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
           kalshiCircuit.open = true;
           await tripCircuitBreaker(supabase, runId);
@@ -998,10 +1092,7 @@ async function runS001SurfaceArb(
     // 5. Execute NO buys on the top overpriced markets — no LLM gate needed.
     //    The arb is structural: bracket must sum to 100¢, market says it sums to >100¢.
     const legResults = await Promise.all(tradeable.map(async (leg: any) => {
-      const tradeResp = await fetch(executeUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
           ticker: leg.ticker,
           marketId: leg.ticker,
           marketQuestion: leg.title,
@@ -1019,9 +1110,7 @@ async function runS001SurfaceArb(
           user_id: strategy.user_id || null,
           traceId: runId,
           systemVersion: "v2",
-        }),
       });
-      const result = await tradeResp.json().catch(() => ({ success: false }));
       return { ticker: leg.ticker, success: result.success, price: leg.noPrice };
     }));
 
@@ -1098,30 +1187,25 @@ async function runS002LongshotBias(
   for (const pos of expiringPositions ?? []) {
     // We bought NO to open — sell NO to close (or equivalently buy YES).
     // Use a market-price sell at 1¢ above NO bid (aggressive close).
-    const closeResp = await fetch(executeUrl, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ticker: pos.ticker,
-        marketId: pos.ticker,
-        marketQuestion: pos.market_question || pos.ticker,
-        side: pos.side || "no",
-        action: "sell",
-        price: 2, // aggressive: accept near-zero to guarantee fill before expiry
-        amount: pos.amount || AMOUNT_PER_TRADE,
-        strategy: strategy.name,
-        strategyId: strategy.id,
-        orderType: "limit",
-        time_in_force: "day",
-        mode,
-        exit_reason: "time_exit_12h",
-        notes: `S-002 time-based exit: position within 12h of expiry — closing to prevent full-resolution loss`,
-        user_id: strategy.user_id || null,
-        traceId: runId,
-        systemVersion: "v2",
-      }),
+    const closeResult = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
+      ticker: pos.ticker,
+      marketId: pos.ticker,
+      marketQuestion: pos.market_question || pos.ticker,
+      side: pos.side || "no",
+      action: "sell",
+      price: 2, // aggressive: accept near-zero to guarantee fill before expiry
+      amount: pos.amount || AMOUNT_PER_TRADE,
+      strategy: strategy.name,
+      strategyId: strategy.id,
+      orderType: "limit",
+      time_in_force: "day",
+      mode,
+      exit_reason: "time_exit_12h",
+      notes: `S-002 time-based exit: position within 12h of expiry — closing to prevent full-resolution loss`,
+      user_id: strategy.user_id || null,
+      traceId: runId,
+      systemVersion: "v2",
     });
-    const closeResult = await closeResp.json().catch(() => ({ success: false }));
     timeExitResults.push(`${pos.ticker}: ${closeResult.success ? "closed" : "close_failed"}`);
 
     // Mark the original position as exited regardless of fill success — prevents
@@ -1276,6 +1360,7 @@ async function runS002LongshotBias(
       .select("id, title, content, confidence")
       .eq("strategy_id", strategy.id)
       .eq("is_active", true)
+      .is("quarantined_at", null)
       .is("merged_into", null)
       .order("confidence", { ascending: false })
       .limit(5);
@@ -1303,36 +1388,29 @@ async function runS002LongshotBias(
     const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id, supabase);
     if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
 
-    const tradeResp = await fetch(executeUrl, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ticker: sig.ticker,
-        marketId: sig.ticker,
-        marketQuestion: sig.market_question || sig.ticker,
-        side,
-        action: "buy",
-        price: Math.round(price),
-        amount: AMOUNT_PER_TRADE,
-        strategy: strategy.name,
-        strategyId: strategy.id,
-        orderType: "limit",
-        time_in_force: "day",
-        mode,
-        expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
-        notes: `S-002 Longshot Bias: longshot NO, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
-        expectedOutcome: `${direction} on ${sig.ticker} — bias edge ~5pp`,
-        confidenceLevel: 0.55,
-        user_id: strategy.user_id || null,
-        traceId: runId,
-        sourceSignalId: sig.id || null,
-        systemVersion: 'v2',
-        // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
-        influencedByMemoryIds: s002MemoryIds,
-      }),
+    const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
+      ticker: sig.ticker,
+      marketId: sig.ticker,
+      marketQuestion: sig.market_question || sig.ticker,
+      side,
+      action: "buy",
+      price: Math.round(price),
+      amount: AMOUNT_PER_TRADE,
+      strategy: strategy.name,
+      strategyId: strategy.id,
+      orderType: "limit",
+      time_in_force: "day",
+      mode,
+      expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
+      notes: `S-002 Longshot Bias: longshot NO, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
+      expectedOutcome: `${direction} on ${sig.ticker} — bias edge ~5pp`,
+      confidenceLevel: 0.55,
+      user_id: strategy.user_id || null,
+      traceId: runId,
+      sourceSignalId: sig.id || null,
+      systemVersion: 'v2',
+      influencedByMemoryIds: s002MemoryIds,
     });
-
-    const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
     if (!result.success) {
       const errDetail = result.error || result.message || "unknown error";
       captureMessage(`S-002 execute-trade failed: ${errDetail}`, "warning", {
@@ -1401,16 +1479,22 @@ async function runS005WeatherEdge(
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
   // GFS accuracy time gate — Sunday GFS runs have ~15% higher RMSE (fewer radiosonde launches).
-  // Pre-14:00 UTC (before ~10am ET) trades on the 00z GFS run which hasn't been corrected
-  // by morning upper-air obs. Both windows show 0-22% win rates vs 51%+ in the trading window.
-  // Skip to avoid systematic model bias rather than burning capital on low-accuracy forecasts.
+  // Pre-14:00 UTC gate removed: weather-signal upserts overwrite edge_cents every 10 min, so
+  // by 14:00 UTC same-day Kalshi markets have priced in the forecast and edge has eroded below
+  // threshold. The original pre-14:00 losses were caused by poisoned memories + bad sizing
+  // (both fixed), not by GFS model quality. Keep only the Sunday structural RMSE block.
   const utcNow = new Date();
   const utcHour = utcNow.getUTCHours();
   const utcDay = utcNow.getUTCDay(); // 0 = Sunday
-  if (utcDay === 0 || utcHour < 14) {
-    const reason = utcDay === 0 ? "Sunday GFS accuracy window (elevated RMSE)" : "pre-14:00 UTC (before 10am ET, 00z run not yet corrected)";
-    await logCompliance(supabase, strategy.user_id, null, "s005_time_gate", "info",
-      `S-005 skipped: ${reason}`, { utcHour, utcDay, runId });
+  if (utcDay === 0) {
+    const reason = "Sunday GFS accuracy window (elevated RMSE)";
+    await supabase.from("compliance_log").insert({
+      user_id: strategy.user_id,
+      event_type: "s005_time_gate",
+      severity: "info",
+      message: `S-005 skipped: ${reason}`,
+      metadata: { utcHour, utcDay, runId },
+    });
     return {
       strategy_id: strategy.id,
       strategy_name: strategy.name,
@@ -1421,16 +1505,17 @@ async function runS005WeatherEdge(
     };
   }
 
-  // 12h window: GFS model updates at ~04:00 and ~07:00 UTC, then weather-signal deduplicates
-  // and skips re-insertion until the next model run. Signals are valid all trading day —
-  // same-day bucket markets don't change their forecast meaningfully between model runs.
-  const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+  // 24h window: GFS model updates at ~04:00 and ~07:00 UTC. KXHIGH markets trade until
+  // ~05:00 UTC the following day (midnight ET), so signals created at 04:00 UTC must remain
+  // visible for ~25h. The expiration pre-filter below (parseSettlementDate check) handles
+  // stale signals from prior days — extending this window does not risk re-trading expired markets.
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { data: rawSignals } = await applySignalTenantFilter(
     supabase
       .from("signals")
       .select("*")
       .eq("source", "weather_signal_s005")
-      .gte("created_at", twelveHoursAgo)
+      .gte("created_at", twentyFourHoursAgo)
       .gte("edge_cents", minEdge)
       .not("direction", "is", null)
       .eq("was_acted_on", false)
@@ -1439,13 +1524,21 @@ async function runS005WeatherEdge(
     null // signals are system-generated — no user_id column on signals table
   );
 
-  // Filter out cities where S-005 has persistent forecast_bias losses
-  const signals = excludedCities.length > 0
-    ? (rawSignals || []).filter((s: any) => {
+  // Filter out cities where S-005 has persistent forecast_bias losses, and drop any
+  // signals whose settlement date has already passed — prevents Kalshi API calls for
+  // expired markets (which drives rate-limit hits before the execute-trade guard fires).
+  const nowMs = Date.now();
+  const signals = (rawSignals || [])
+    .filter((s: any) => {
+      const expiry = parseSettlementDate(s.ticker);
+      if (expiry && expiry.getTime() <= nowMs) return false;
+      if (excludedCities.length > 0) {
         const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
-        return !cityMatch || !excludedCities.includes(cityMatch[1]);
-      }).slice(0, MAX_PARALLEL_SIGNALS)
-    : (rawSignals || []).slice(0, MAX_PARALLEL_SIGNALS);
+        if (cityMatch && excludedCities.includes(cityMatch[1])) return false;
+      }
+      return true;
+    })
+    .slice(0, MAX_PARALLEL_SIGNALS);
 
   if (!signals || signals.length === 0) {
     return {
@@ -1572,6 +1665,7 @@ async function runS005WeatherEdge(
     .select("id, title, content, confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
+    .is("quarantined_at", null)
     .is("merged_into", null)
     .order("confidence", { ascending: false })
     .limit(5);
@@ -1778,10 +1872,7 @@ async function runS005WeatherEdge(
       const kellyFraction = Math.max(0, Math.min(0.25, (winProb * payoutOdds - loseProb) / payoutOdds));
       const amount = Math.max(5, Math.round(maxPositionUsd * kellyFraction));
 
-      const tradeResp = await fetch(executeUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey, "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
           ticker: sig.ticker,
           marketId: sig.ticker,
           marketQuestion: sig.market_question || sig.ticker,
@@ -1801,11 +1892,8 @@ async function runS005WeatherEdge(
           traceId: runId,
           sourceSignalId: sig.id || null,
           systemVersion: 'v2',
-          // Wire memory attribution: Bayesian loop needs these IDs to track which memories influenced the trade
           influencedByMemoryIds: activeMemoryIds,
-        }),
       });
-      const result = await tradeResp.json().catch(() => ({ success: false, error: "parse failed" }));
       return { sig, side, price, amount, result };
     })
   );

@@ -42,11 +42,14 @@ function StrategyDetailModal({
 
   const buildChart = useCallback(async () => {
     setLoadingChart(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    // P&L only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
     const { data: trades } = await supabase
       .from("trades")
-      .select("strategy, strategy_id, pnl, created_at, status")
-      .eq("status", "filled")
-      .order("created_at", { ascending: true });
+      .select("strategy, strategy_id, pnl, settled_at")
+      .eq("status", "settled")
+      .eq("user_id", user?.id ?? "")
+      .order("settled_at", { ascending: true });
 
     if (!trades || trades.length === 0) {
       setChartData([{ date: "Start", balance: strategy.starting_balance }]);
@@ -65,7 +68,8 @@ function StrategyDetailModal({
 
     const dayMap = new Map<string, typeof trades>();
     for (const t of relevant) {
-      const day = new Date(t.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      if (!t.settled_at) continue;
+      const day = new Date(t.settled_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       if (!dayMap.has(day)) dayMap.set(day, []);
       dayMap.get(day)!.push(t);
     }
@@ -429,6 +433,40 @@ export function StrategiesPanel() {
           );
         })}
       </div>
+
+      {/* Unattributed legacy trades — only shows if orphan trades exist */}
+      {(() => {
+        const legacy = strategyStats["_unattributed"];
+        if (!legacy || legacy.totalTrades === 0) return null;
+        const pnl = legacy.totalPnl;
+        return (
+          <div className="rounded-2xl bg-secondary/40 border border-dashed border-border p-5 mt-0">
+            <div className="flex items-center gap-2 mb-2">
+              <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-2 opacity-60">Legacy</Badge>
+              <h3 className="text-sm font-medium text-muted-foreground">Pre-audit trades</h3>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              {legacy.totalTrades} settled trades from before multi-tenancy enforcement (May 25). Included in your account total but not attributable to a current strategy.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded-lg bg-secondary p-2">
+                <span className="text-[9px] text-muted-foreground">P&L</span>
+                <p className={`text-xs font-medium tabular-nums mt-0.5 ${pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                  {pnl >= 0 ? "+" : ""}${pnl.toFixed(0)}
+                </p>
+              </div>
+              <div className="rounded-lg bg-secondary p-2">
+                <span className="text-[9px] text-muted-foreground">Win Rate</span>
+                <p className="text-xs font-medium tabular-nums mt-0.5">{legacy.winRate}%</p>
+              </div>
+              <div className="rounded-lg bg-secondary p-2">
+                <span className="text-[9px] text-muted-foreground">Trades</span>
+                <p className="text-xs font-medium tabular-nums mt-0.5">{legacy.winningTrades}W / {legacy.losingTrades}L</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Strategy Detail Modal */}
       {detailStrategy && (

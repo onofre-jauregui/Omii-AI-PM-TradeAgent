@@ -93,7 +93,7 @@ export default function PrivacyPage() {
 
           <section>
             <h2 className="mb-3 text-base font-semibold text-foreground">Account deletion</h2>
-            <p className="text-muted-foreground">When you delete your account, your email, API key, and strategy settings are deleted immediately. Anonymized trade signal data already contributed to the shared model is retained (it cannot be attributed back to you). Your personal trade history is deleted within 30 days.</p>
+            <p className="text-muted-foreground">You may request deletion of your account and associated personal data (email, API keys, strategy settings, and trade history) by contacting us at support@kalshitradeagent.com. We will process deletion requests within 30 days as required by applicable law. Anonymized trade signal data already contributed to the shared model is retained as it cannot be attributed back to you.</p>
           </section>
 
           <section>

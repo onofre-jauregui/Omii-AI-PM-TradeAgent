@@ -91,35 +91,6 @@ interface PlatformStats {
   recentTrades: RecentTrade[];
 }
 
-// Fallback data used when fetch fails
-const FALLBACK_STATS: PlatformStats = {
-  totalPnl: 940.30,
-  winRate: 81.3,
-  tradeCount: 150,
-  startDate: "2026-04-23",
-  startingBalance: 2500,
-  dailyCumulative: [
-    { date: "2026-04-23", cumPnl: 130.92 },
-    { date: "2026-04-24", cumPnl: 246.27 },
-    { date: "2026-04-25", cumPnl: 306.56 },
-    { date: "2026-04-27", cumPnl: 119.77 },
-    { date: "2026-04-28", cumPnl: 133.85 },
-    { date: "2026-05-05", cumPnl: 350.43 },
-    { date: "2026-05-07", cumPnl: 272.68 },
-    { date: "2026-05-08", cumPnl: 412.16 },
-    { date: "2026-05-09", cumPnl: 396.12 },
-    { date: "2026-05-11", cumPnl: 1085.89 },
-    { date: "2026-05-12", cumPnl: 969.85 },
-    { date: "2026-05-13", cumPnl: 1008.06 },
-    { date: "2026-05-14", cumPnl: 953.30 },
-    { date: "2026-05-16", cumPnl: 940.30 },
-  ],
-  recentTrades: [
-    { ticker: "KXBTC-26MAY1619-B74000", side: "NO", amount: 50, pnl: -13.00 },
-    { ticker: "KXBTC-26MAY1619-B72000", side: "YES", amount: 50, pnl: 38.21 },
-    { ticker: "KXBTC-26MAY1619-B70000", side: "YES", amount: 50, pnl: -54.76 },
-  ],
-};
 
 function buildChartPath(points: DailyCumulative[], startingBalance: number): { fill: string; line: string } {
   if (points.length < 2) {
@@ -169,16 +140,18 @@ function HeroDashboardMockup() {
         if (data && typeof data.totalPnl === "number") {
           setStats(data);
         } else {
-          setStats(FALLBACK_STATS);
+          setStats(null);
         }
       })
-      .catch(() => setStats(FALLBACK_STATS))
+      .catch(() => setStats(null))
       .finally(() => setLoading(false));
   }, []);
 
-  const s = stats ?? FALLBACK_STATS;
-  const roiPct = ((s.totalPnl / s.startingBalance) * 100).toFixed(1);
-  const { fill: chartFill, line: chartLine } = buildChartPath(s.dailyCumulative, s.startingBalance);
+  const s = stats;
+  const roiPct = s ? ((s.totalPnl / s.startingBalance) * 100).toFixed(1) : null;
+  const { fill: chartFill, line: chartLine } = s
+    ? buildChartPath(s.dailyCumulative, s.startingBalance)
+    : { fill: "M0,85 L800,85 L800,85 L0,85 Z", line: "M0,85 L800,85" };
 
   return (
     <div
@@ -218,7 +191,7 @@ function HeroDashboardMockup() {
               <div className="h-2 w-16 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.06)" }} />
             </div>
           ))
-        ) : (
+        ) : s ? (
           [
             { label: "Return", value: `+${roiPct}%`, sub: "cumulative ROI", color: "#34d058" },
             { label: "Win Rate", value: `${Math.round(s.winRate)}%`, sub: "", color: "#f5f5f7" },
@@ -234,6 +207,10 @@ function HeroDashboardMockup() {
               <div style={{ color: "#6e6e73", fontSize: 10, marginTop: 2 }}>{stat.sub}</div>
             </div>
           ))
+        ) : (
+          <div className="col-span-3 flex items-center justify-center" style={{ minHeight: 56, color: "#6e6e73", fontSize: 12 }}>
+            Live performance data temporarily unavailable
+          </div>
         )}
       </div>
 
@@ -774,8 +751,11 @@ export default function LandingPage() {
           </div>
 
           {/* Product mockup */}
-          <div className="flex justify-center">
+          <div className="flex flex-col items-center gap-3">
             <HeroDashboardMockup />
+            <p style={{ color: "#6e6e73", fontSize: 11, textAlign: "center", maxWidth: 480, lineHeight: 1.5 }}>
+              Paper trading performance — simulated funds, live market prices. Past performance is not necessarily indicative of future results. Trading prediction markets involves risk of loss.
+            </p>
           </div>
         </div>
       </section>

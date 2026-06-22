@@ -275,7 +275,14 @@ serve(async (req) => {
             }
           }
         } catch (ecmwfErr) {
-          console.warn(`ECMWF fetch failed for ${loc.code}:`, ecmwfErr instanceof Error ? ecmwfErr.message : ecmwfErr);
+          const ecmwfMsg = ecmwfErr instanceof Error ? ecmwfErr.message : String(ecmwfErr);
+          console.warn(`ECMWF fetch failed for ${loc.code}:`, ecmwfMsg);
+          await supabase.from("compliance_log").insert({
+            event_type: "api_error",
+            severity: "warning",
+            message: `weather-signal: open-meteo ECMWF fetch failed for ${loc.code}: ${ecmwfMsg.slice(0, 120)}`,
+            metadata: { provider: "open-meteo", city: loc.code, error: ecmwfMsg },
+          }).catch(() => {});
         }
 
         // Dual-model consensus: adjust effective edge based on model agreement

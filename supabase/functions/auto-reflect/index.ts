@@ -132,7 +132,7 @@ serve(async (req) => {
     //   Sharpe < -1.0 with n≥20 → suspend 24h (sharpe_collapse)
     //   Max drawdown > max_acceptable_drawdown → suspend 24h (drawdown_breach)
     //   Hit rate < expected - 0.20 with n≥20 → suspend 72h (hit_rate_regime_shift)
-    // Consecutive losses remain as a soft warning only (5+ losses).
+    //   5+ consecutive losses → suspend 12h (consecutive_loss_streak)
 
     const { data: strategies } = await supabase
       .from("strategies")
@@ -292,15 +292,19 @@ serve(async (req) => {
         strategyResults.push({ id: strat.id, name: strat.name, hit_rate: hitRate, action: "suspended_hitrate" });
 
       } else if (consecutiveLosses >= 5) {
-        // Soft warning only
+        // Suspend for 12h — auto-resume is handled by the loop above.
+        const suspendUntil = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+        await supabase.from("strategies")
+          .update({ suspended_until: suspendUntil, suspension_reason: "consecutive_loss_streak", active: false })
+          .eq("id", strat.id);
         await supabase.from("compliance_log").insert({
-          event_type: "strategy_loss_streak",
+          event_type: "strategy_suspended_loss_streak",
           severity: "warning",
-          message: `Strategy "${strat.name}" — ${consecutiveLosses} consecutive losses (soft signal). Sharpe: ${sharpe.toFixed(2)}, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
+          message: `Strategy "${strat.name}" suspended 12h — ${consecutiveLosses} consecutive losses. Sharpe: ${sharpe.toFixed(2)}, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
           metadata: { strategy_id: strat.id, consecutiveLosses, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "warned" });
+        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "suspended_loss_streak" });
 
       } else {
         strategyResults.push({ id: strat.id, name: strat.name, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate, consecutiveLosses, action: "healthy" });
@@ -416,7 +420,7 @@ serve(async (req) => {
 
       const { data: recentSettled } = await supabase
         .from("trades")
-        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at")
+        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating")
         .not("settled_at", "is", null)
         .not("pnl", "is", null)
         .neq("pnl", 0)
@@ -431,7 +435,7 @@ serve(async (req) => {
 
       const { data: catchUpSettled } = await supabase
         .from("trades")
-        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at")
+        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating")
         .not("settled_at", "is", null)
         .not("pnl", "is", null)
         .neq("pnl", 0)
@@ -493,7 +497,7 @@ Trade details:
 - Side bought: ${trade.side} at ${price}¢ (implied ${price}% probability)
 - Outcome: ${outcome.toUpperCase()} — P&L: $${pnl.toFixed(2)}
 - Market resolved: ${trade.resolution || "unknown"}
-- Signal notes: ${notes.slice(0, 300) || "none"}
+- Signal notes: ${notes.slice(0, 300) || "none"}${trade.user_rating ? `\n- User rating: ${trade.user_rating === "good" ? "GOOD — user explicitly approved this trade decision" : "BAD — user explicitly flagged this as a poor decision"}` : ""}
 
 Recent lessons from same strategy (last 7 days):
 ${priorContext}
@@ -590,7 +594,7 @@ Return ONLY valid JSON, no markdown, no extra text:
             do_differently,
             confidence: 0.8,
             tags: lessonTags,
-            trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200), llm_generated: llmUsed },
+            trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200), llm_generated: llmUsed, user_rating: trade.user_rating ?? null },
           })
           .select("id")
           .single();
@@ -624,7 +628,9 @@ Return ONLY valid JSON, no markdown, no extra text:
           .contains("tags", [tickerBase])
           .gte("created_at", sevenDaysAgo);
         const isPattern = (recentLossesSameTicker?.length ?? 0) >= 2;
-        const shouldPromote = llmShouldPromote || isPattern || absP >= 25;
+        // User explicitly flagged bad trades always promote — direct human signal
+        const userFlaggedBad = trade.user_rating === "bad";
+        const shouldPromote = llmShouldPromote || isPattern || absP >= 25 || userFlaggedBad;
 
         if (shouldPromote) {
           // Memory content = the IF/THEN rule the qualify prompt should act on
@@ -647,7 +653,8 @@ Return ONLY valid JSON, no markdown, no extra text:
           if (existingMem) {
             await supabase.from("agent_memory").update({
               confirmations: (existingMem.confirmations || 1) + 1,
-              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + 0.02),
+              // User-flagged bad trades get a stronger confidence bump
+              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + (userFlaggedBad ? 0.05 : 0.02)),
               // Update content with latest rule — LLM may have refined it
               ...(llmUsed ? { content: memoryContent, summary: memoryContent.slice(0, 120) } : {}),
               updated_at: new Date().toISOString(),
@@ -661,8 +668,8 @@ Return ONLY valid JSON, no markdown, no extra text:
               source_type: "trade_outcome",
               user_id: trade.user_id ?? null,
               strategy_id: trade.strategy_id,
-              tags: memoryTags,
-              confidence: outcome === "loss" ? 0.85 : 0.75,
+              tags: [...memoryTags, ...(trade.user_rating ? ["user_rated", `user_${trade.user_rating}`] : [])],
+              confidence: userFlaggedBad ? 0.90 : (outcome === "loss" ? 0.85 : 0.75),
               confirmations: 1,
               is_active: true,
               summary: memoryContent.slice(0, 120),

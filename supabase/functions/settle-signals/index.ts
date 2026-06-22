@@ -79,7 +79,12 @@ serve(async (req) => {
         });
 
         if (!marketResp.ok) {
-          // Market not found or API error — mark as error and skip
+          await supabase.from("compliance_log").insert({
+            event_type: "api_error",
+            severity: "warning",
+            message: `settle-signals: Kalshi ${marketResp.status} fetching ${ticker}`,
+            metadata: { provider: "kalshi", status: marketResp.status, endpoint: ticker },
+          }).catch(() => {});
           results.push({ ticker, status: "api_error" });
           continue;
         }

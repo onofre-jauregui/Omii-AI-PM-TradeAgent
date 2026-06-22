@@ -443,6 +443,9 @@ export default function ObservabilityPage() {
   // Connected AI provider accounts from api_keys table
   const [connectedProviders, setConnectedProviders] = useState<{provider: string; keyId: string; userId: string | null}[]>([]);
 
+  // Connection health — per-provider API error counts (last 24h)
+  const [connectionHealth, setConnectionHealth] = useState<Record<string, { errorCount: number; lastErrorAt: string | null; lastStatus: string | null }>>({});
+
   const [chatTokenStats, setChatTokenStats] = useState<{
     calls: number;
     totalInputTokens: number;
@@ -845,6 +848,7 @@ export default function ObservabilityPage() {
   const operationalEventTypes = [
     "surface_scan_complete",
     "health_check_run",
+    "health_check_alert",  // dedup receipt — "Alert sent: X"; underlying condition is in detectFailureModes
     "auto_trade_run",
     "auto_trade_strategy_run",
     "auto_trade_skipped",
@@ -969,6 +973,52 @@ export default function ObservabilityPage() {
       .select("provider, key_id, user_id")
       .in("provider", ["openrouter", "anthropic", "openai", "google", "model_agent", "kalshi_live", "kalshi_paper"]);
     setConnectedProviders((data ?? []) as {provider: string; keyId: string; userId: string | null}[]);
+  }, []);
+
+  const loadConnectionHealth = useCallback(async () => {
+    const since24h = new Date(Date.now() - 86_400_000).toISOString();
+    const { data } = await supabase
+      .from("compliance_log")
+      .select("event_type, message, metadata, created_at")
+      .in("event_type", ["api_error", "llm_rate_limit", "api_timeout", "kalshi_circuit_open"])
+      .gte("created_at", since24h)
+      .order("created_at", { ascending: false })
+      .limit(500);
+
+    const providerMap: Record<string, { errorCount: number; lastErrorAt: string | null; lastStatus: string | null }> = {};
+    const inferProvider = (row: any): string => {
+      if (row.metadata?.provider) return row.metadata.provider;
+      const ep: string = row.metadata?.endpoint || row.metadata?.full_path || "";
+      if (/openrouter/i.test(ep)) return "openrouter";
+      if (/anthropic/i.test(ep)) return "anthropic";
+      if (/openai/i.test(ep)) return "openai";
+      if (/kalshi|trade-api|markets/i.test(ep)) return "kalshi";
+      const msg: string = row.message || "";
+      if (/openrouter/i.test(msg)) return "openrouter";
+      if (/anthropic/i.test(msg)) return "anthropic";
+      if (/openai/i.test(msg)) return "openai";
+      if (/kalshi/i.test(msg)) return "kalshi";
+      if (/open.meteo/i.test(msg)) return "open-meteo";
+      if (/nws|weather\.gov/i.test(msg)) return "nws";
+      if (row.event_type === "kalshi_circuit_open") return "kalshi";
+      return "unknown";
+    };
+
+    for (const row of data ?? []) {
+      const provider = inferProvider(row);
+      const status = row.metadata?.status ?? row.metadata?.http_status ?? null;
+      const existing = providerMap[provider];
+      if (!existing) {
+        providerMap[provider] = { errorCount: 1, lastErrorAt: row.created_at, lastStatus: status ? String(status) : null };
+      } else {
+        existing.errorCount++;
+        if (!existing.lastErrorAt || row.created_at > existing.lastErrorAt) {
+          existing.lastErrorAt = row.created_at;
+          if (status) existing.lastStatus = String(status);
+        }
+      }
+    }
+    setConnectionHealth(providerMap);
   }, []);
 
   const loadChatStats = useCallback(async () => {
@@ -1206,12 +1256,13 @@ export default function ObservabilityPage() {
       loadRealTokenStats(),
       loadChatStats(),
       loadConnectedProviders(),
+      loadConnectionHealth(),
     ]);
   }, [
     loadHeroStatus, loadHeroFeed, loadPerformance, loadComplianceLast30d,
     loadModelLatency, loadActivity24h, loadErrors24h, loadErrors, loadStrategies,
     loadMemories, loadLatencyData, loadSurfaceScanLatency, loadExecutionGaps, loadActiveModel,
-    loadRealTokenStats, loadChatStats, loadConnectedProviders,
+    loadRealTokenStats, loadChatStats, loadConnectedProviders, loadConnectionHealth,
   ]);
 
   // Session init — fires once on mount. Gets userId for profile display + populates user list.
@@ -2049,6 +2100,65 @@ export default function ObservabilityPage() {
             )}
           </div>
         </div>
+
+        {/* ── 4b. Connection Health ─────────────────────────────────────── */}
+        <Section
+          title="Connection Health"
+          action={
+            <span className="text-[10px] text-muted-foreground tabular-nums">last 24h</span>
+          }
+        >
+          <div className="p-6">
+            {(() => {
+              const PROVIDERS: { key: string; label: string; icon: string }[] = [
+                { key: "kalshi",      label: "Kalshi",       icon: "K" },
+                { key: "openrouter",  label: "OpenRouter",   icon: "R" },
+                { key: "anthropic",   label: "Anthropic",    icon: "A" },
+                { key: "openai",      label: "OpenAI",       icon: "O" },
+                { key: "open-meteo",  label: "Open-Meteo",   icon: "M" },
+                { key: "nws",         label: "NWS",          icon: "N" },
+              ];
+
+              return (
+                <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+                  {PROVIDERS.map(({ key, label, icon }) => {
+                    const h = connectionHealth[key];
+                    const count = h?.errorCount ?? 0;
+                    const isGreen  = count === 0;
+                    const isYellow = count >= 1 && count <= 3;
+                    const isRed    = count > 3;
+                    const dotColor = isGreen ? "bg-emerald-500" : isYellow ? "bg-yellow-500" : "bg-red-500";
+                    const borderColor = isGreen ? "border-border" : isYellow ? "border-yellow-500/30" : "border-red-500/30";
+                    const badgeBg = isGreen ? "bg-emerald-500/10 text-emerald-400" : isYellow ? "bg-yellow-500/10 text-yellow-400" : "bg-red-500/10 text-red-400";
+                    return (
+                      <div
+                        key={key}
+                        className={`rounded-xl border ${borderColor} p-4 flex flex-col gap-2`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold bg-secondary text-muted-foreground`}>
+                            {icon}
+                          </span>
+                          <span className="text-[11px] font-medium truncate flex-1">{label}</span>
+                          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
+                        </div>
+                        <div className={`text-[10px] px-1.5 py-0.5 rounded-full self-start font-medium ${badgeBg}`}>
+                          {isGreen ? "Clean" : `${count} error${count !== 1 ? "s" : ""}`}
+                        </div>
+                        <p className="text-[10px] text-muted-foreground leading-tight">
+                          {h?.lastStatus ? `Last: HTTP ${h.lastStatus}` : isGreen ? "No errors" : "No status"}
+                          {h?.lastErrorAt && (
+                            <span className="block text-muted-foreground/60">{relativeTime(h.lastErrorAt)}</span>
+                          )}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+        </Section>
 
         {/* ── 5. Cost & Efficiency ─────────────────────────────────────── */}
         <Section
