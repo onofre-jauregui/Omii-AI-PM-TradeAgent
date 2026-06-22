@@ -130,11 +130,17 @@ export async function fetchWithRetry(
   baseDelayMs = 1000,
 ): Promise<Response> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const res = await fetch(url, options);
-    if (res.status !== 429 || attempt === maxRetries) return res;
-    const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
-    await new Promise((r) => setTimeout(r, delay));
+    try {
+      const res = await fetch(url, options);
+      if (res.status !== 429 || attempt === maxRetries) return res;
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
+      await new Promise((r) => setTimeout(r, delay));
+    } catch (err) {
+      // Network-level errors (TCP reset, connection refused, timeout) — retry before giving up.
+      if (attempt === maxRetries) throw err;
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
+      await new Promise((r) => setTimeout(r, delay));
+    }
   }
-  // TypeScript requires a return; the loop always returns before here.
   throw new Error("fetchWithRetry: exhausted retries");
 }

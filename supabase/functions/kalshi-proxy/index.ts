@@ -74,11 +74,14 @@ serve(async (req) => {
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : "Internal proxy error";
     console.error("kalshi-proxy error:", error);
+    // TCP-level failures (connection reset, refused, timeout) are infrastructure blips —
+    // not Kalshi API errors. Classify separately so health-check doesn't alert on them.
+    const isNetworkBlip = /connection reset|connection refused|timed out|network error/i.test(errMsg);
     try {
       await adminClient.from("compliance_log").insert({
-        event_type: "api_error",
-        severity: "error",
-        message: `kalshi-proxy exception: ${errMsg.slice(0, 200)}`,
+        event_type: isNetworkBlip ? "kalshi_network_blip" : "api_error",
+        severity: isNetworkBlip ? "info" : "error",
+        message: `kalshi-proxy ${isNetworkBlip ? "network blip (after retries)" : "exception"}: ${errMsg.slice(0, 200)}`,
         metadata: { provider: "kalshi", error: errMsg },
       });
     } catch { /* never throw from catch */ }

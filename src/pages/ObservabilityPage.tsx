@@ -848,6 +848,7 @@ export default function ObservabilityPage() {
   const operationalEventTypes = [
     "surface_scan_complete",
     "health_check_run",
+    "health_check_alert",  // dedup receipt — "Alert sent: X"; underlying condition is in detectFailureModes
     "auto_trade_run",
     "auto_trade_strategy_run",
     "auto_trade_skipped",
