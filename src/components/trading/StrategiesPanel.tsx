@@ -298,7 +298,7 @@ export function StrategiesPanel({
         <div className="rounded-2xl bg-secondary/40 border border-dashed border-border p-10 text-center">
           <p className="text-sm text-muted-foreground">
             {mode === "live"
-              ? "No live strategies yet. Switch to Paper view and click "→ Run Live" on any strategy to create one."
+              ? "No live strategies yet. Switch to Paper view and click “→ Run Live” on any strategy to create one."
               : "No paper strategies yet. Create one to get started."}
           </p>
         </div>
