@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo, type ReactNode } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
 export interface Strategy {
@@ -26,6 +26,7 @@ export interface StrategyStats {
 interface StrategiesContextType {
   strategies: Strategy[];
   strategyStats: Record<string, StrategyStats>;
+  instanceExists: Record<string, { paper: boolean; live: boolean }>;
   loading: boolean;
   updateStrategy: (id: string, updates: Partial<Strategy>) => void;
   addStrategy: (strategy: Omit<Strategy, "id">) => void;
@@ -66,6 +67,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     if (!error && data) {
       setStrategies(data.map(s => ({
         id: s.id,
+        template_id: s.template_id ?? undefined,
         name: s.name,
         description: s.description,
         instructions: s.instructions,
@@ -240,9 +242,19 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     return strategies.filter(s => s.active);
   }, [strategies]);
 
+  const instanceExists = useMemo(() => {
+    const map: Record<string, { paper: boolean; live: boolean }> = {};
+    for (const s of strategies) {
+      if (!s.template_id) continue;
+      if (!map[s.template_id]) map[s.template_id] = { paper: false, live: false };
+      map[s.template_id][s.mode] = true;
+    }
+    return map;
+  }, [strategies]);
+
   return (
     <StrategiesContext.Provider value={{
-      strategies, strategyStats, loading,
+      strategies, strategyStats, instanceExists, loading,
       updateStrategy, addStrategy, deleteStrategy, getActiveStrategies, refreshStats,
     }}>
       {children}

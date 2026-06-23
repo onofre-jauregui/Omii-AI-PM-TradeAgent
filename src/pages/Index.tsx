@@ -198,23 +198,28 @@ const Index = () => {
                 {TAB_LABELS[activeTab]}
               </h1>
               {(activeTab === "dashboard" || activeTab === "agent") && (
-                <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
-                  <button
-                    onClick={() => handleModeChange("paper")}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                      mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    Paper
-                  </button>
-                  <button
-                    onClick={() => handleModeChange("live")}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                      mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    Live
-                  </button>
+                <div className="flex flex-col items-end gap-0.5">
+                  <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
+                    <button
+                      onClick={() => handleModeChange("paper")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Paper
+                    </button>
+                    <button
+                      onClick={() => handleModeChange("live")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Live
+                    </button>
+                  </div>
+                  {mode === "paper" && (
+                    <span className="text-[10px] text-muted-foreground/60 pr-1">Live strategies still running</span>
+                  )}
                 </div>
               )}
             </div>
@@ -263,7 +268,7 @@ const Index = () => {
               ))}
             </div>
             {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
-            {agentSubTab === "strategies" && <StrategiesPanel />}
+            {agentSubTab === "strategies" && <StrategiesPanel mode={mode} subscriptionTier={subscriptionTier} />}
             {agentSubTab === "risk"       && <RiskControlsPanel />}
             {agentSubTab === "memory"     && <AgentMemoryCard full />}
           </div>
