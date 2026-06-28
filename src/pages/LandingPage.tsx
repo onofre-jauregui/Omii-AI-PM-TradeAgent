@@ -134,7 +134,9 @@ function HeroDashboardMockup() {
 
   useEffect(() => {
     const STATS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/platform-stats`;
-    fetch(STATS_URL)
+    fetch(STATS_URL, {
+      headers: { apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "" },
+    })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data: PlatformStats) => {
         if (data && typeof data.totalPnl === "number") {
@@ -242,6 +244,8 @@ function HeroDashboardMockup() {
               <div className="h-3 w-16 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.06)" }} />
             </div>
           ))
+        ) : !s || !s.recentTrades?.length ? (
+          <p className="text-center text-xs py-4" style={{ color: "rgba(255,255,255,0.3)" }}>No recent trades</p>
         ) : (
           s.recentTrades.map((t, i) => {
             // Strip everything after the first hyphen-separated segment that looks like a date/price suffix
