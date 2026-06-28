@@ -134,8 +134,12 @@ function HeroDashboardMockup() {
 
   useEffect(() => {
     const STATS_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/platform-stats`;
+    const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "";
     fetch(STATS_URL, {
-      headers: { apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "" },
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+      },
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((data: PlatformStats) => {
