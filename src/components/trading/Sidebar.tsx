@@ -1,11 +1,10 @@
 import { useState } from "react";
 import {
   LayoutDashboard, BarChart2, Settings, ChevronLeft, ChevronRight,
-  Activity, Bot, LogOut,
+  Activity, Bot,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/integrations/supabase/client";
 
 interface SidebarProps {
   activeTab: string;
@@ -114,24 +113,18 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
           );
         })}
 
-        {/* Avatar + sign out */}
+        {/* Avatar */}
         <div className={cn(
           "flex items-center gap-2 rounded-lg px-2.5 py-2 mt-1",
-          collapsed ? "justify-center px-0" : "justify-between"
+          collapsed ? "justify-center px-0" : "justify-start"
         )}>
           <Avatar className="h-6 w-6 shrink-0">
             <AvatarFallback className="bg-secondary text-foreground text-[9px] font-medium">
               {userEmail ? userEmail[0].toUpperCase() : "T"}
             </AvatarFallback>
           </Avatar>
-          {!collapsed && (
-            <button
-              onClick={() => supabase.auth.signOut()}
-              className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-              title="Sign out"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
+          {!collapsed && userEmail && (
+            <span className="text-[11px] text-muted-foreground truncate">{userEmail}</span>
           )}
         </div>
       </div>

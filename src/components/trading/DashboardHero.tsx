@@ -28,6 +28,7 @@ interface ChartPoint { date: string; value: number; }
 interface HeroStats {
   startingBalance: number;
   portfolioValue: number;
+  kalshiBalance: number | null;
   totalReturn: number;
   totalReturnPct: number;
   todayPnl: number;
@@ -152,6 +153,7 @@ export function DashboardHero({
   const [stats, setStats] = useState<HeroStats>({
     startingBalance: 0,
     portfolioValue: 0,
+    kalshiBalance: null,
     totalReturn: 0,
     totalReturnPct: 0,
     todayPnl: 0,
@@ -176,6 +178,18 @@ export function DashboardHero({
     // Use prop if available — avoids a network round-trip on every load
     const userId = userIdProp ?? (await supabase.auth.getUser()).data.user?.id;
 
+    // Fetch Kalshi wallet balance when in live mode (non-blocking — may fail if no key set)
+    const kalshiBalanceFetch: Promise<number | null> = mode === "live"
+      ? supabase.auth.getSession().then(({ data: { session } }) => {
+          if (!session) return null;
+          const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
+          return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` } })
+            .then(r => r.ok ? r.json() : null)
+            .then(j => (j?.balance_usd != null ? Number(j.balance_usd) : null))
+            .catch(() => null);
+        })
+      : Promise.resolve(null);
+
     const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
@@ -199,12 +213,12 @@ export function DashboardHero({
         .select("id")
         .eq("user_id", userId ?? "")
         .gte("created_at", todayISO),
-      // Starting balance = sum of ALL strategy starting_balances (active or not — base must
-      // include deactivated strategies whose historical trades still count toward P&L)
-      supabase
-        .from("strategies")
-        .select("starting_balance")
-        .eq("user_id", userId ?? ""),
+      // Starting balance — sum of strategies matching the current mode
+      (() => {
+        let q = supabase.from("strategies").select("starting_balance, mode").eq("user_id", userId ?? "");
+        if (mode) q = q.eq("mode", mode);
+        return q;
+      })(),
       // Most recently SETTLED trade — "Last settled" chip aligns with streak metric
       supabase
         .from("trades")
@@ -215,6 +229,8 @@ export function DashboardHero({
         .limit(1),
     ]);
 
+    const kalshiBalance = await kalshiBalanceFetch;
+
     const settledTrades = settledRes.status === "fulfilled" ? (settledRes.value.data ?? []) : [];
     const openTrades = openRes.status === "fulfilled" ? (openRes.value.data ?? []) : [];
     const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
@@ -224,7 +240,7 @@ export function DashboardHero({
     // Kalshi markets loaded from cache (non-blocking — won't delay hero render)
     const markets = kalshiMarketsCache?.data ?? [];
 
-    // Starting balance from DB — what was allocated when strategies were set up
+    // Starting balance from mode-filtered strategies
     const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
 
     // Filter by mode if specified
@@ -307,6 +323,7 @@ export function DashboardHero({
     setStats({
       startingBalance,
       portfolioValue,
+      kalshiBalance,
       totalReturn: totalPnl,
       totalReturnPct,
       todayPnl,
@@ -339,9 +356,12 @@ export function DashboardHero({
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { startingBalance, portfolioValue, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
+  const { startingBalance, portfolioValue, kalshiBalance, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;
   const isTodayUp = todayPnl >= 0;
+  // In live mode, prefer real Kalshi wallet balance over synthetic portfolio value
+  const displayValue = mode === "live" && kalshiBalance != null ? kalshiBalance : portfolioValue;
+  const isLiveWallet = mode === "live" && kalshiBalance != null;
 
   return (
     <div className="space-y-3 apple-reveal">
@@ -351,7 +371,7 @@ export function DashboardHero({
         {/* Top row: label + status */}
         <div className="flex items-center justify-between mb-3">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
-            {mode === "paper" ? "Portfolio" : "Live Portfolio"}
+            {isLiveWallet ? "Kalshi Wallet" : mode === "paper" ? "Portfolio" : "Live Portfolio"}
           </p>
           <div className="flex flex-col items-end gap-1">
             <AgentStatusBadge />
@@ -370,7 +390,7 @@ export function DashboardHero({
         >
           {stats.loading
             ? <span className="text-muted-foreground">--</span>
-            : `$${portfolioValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : `$${displayValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
           }
         </h1>
 
