@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bot, Loader2, Eye, EyeOff } from "lucide-react";
+import { Bot, Loader2, Eye, EyeOff, ChevronLeft } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
@@ -62,15 +62,27 @@ export function AuthPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-background">
-      <div className="w-full max-w-sm">
-        {/* Back link */}
-        <div className="mb-6">
-          <a href="/" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-            ← Back to home
-          </a>
-        </div>
+    <div className="min-h-screen flex flex-col bg-background">
+      {/* Sticky top bar */}
+      <header
+        className="sticky top-0 z-50 shrink-0 flex items-center px-4"
+        style={{
+          height: 44,
+          background: "#ffffff",
+          borderBottom: "1px solid rgba(0,0,0,0.08)",
+        }}
+      >
+        <a
+          href="/"
+          className="inline-flex items-center gap-0.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Home
+        </a>
+      </header>
 
+      <div className="flex-1 flex items-center justify-center px-4 py-8">
+      <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <div className="flex items-center gap-2 mb-2">
@@ -173,6 +185,7 @@ export function AuthPage() {
             </button>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

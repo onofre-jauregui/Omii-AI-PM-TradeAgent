@@ -535,6 +535,13 @@ const TIERS = [
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function LandingPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   return (
     <div className="min-h-screen" style={{ background: "#ffffff", color: "#1d1d1f" }}>
@@ -543,11 +550,12 @@ export default function LandingPage() {
       <nav
         className="sticky top-0 z-50"
         style={{
-          background: "rgba(255,255,255,0.8)",
-          backdropFilter: "blur(20px)",
-          WebkitBackdropFilter: "blur(20px)",
+          background: scrolled || mobileMenuOpen ? "#ffffff" : "rgba(255,255,255,0.8)",
+          backdropFilter: scrolled || mobileMenuOpen ? "none" : "blur(20px)",
+          WebkitBackdropFilter: scrolled || mobileMenuOpen ? "none" : "blur(20px)",
           borderBottom: "1px solid rgba(0,0,0,0.1)",
           height: 44,
+          transition: "background 0.2s ease",
         }}
       >
         <div
@@ -616,7 +624,7 @@ export default function LandingPage() {
         {mobileMenuOpen && (
           <div
             className="fixed inset-0 z-40 flex flex-col px-6 pt-16 pb-10 md:hidden"
-            style={{ background: "rgba(255,255,255,0.97)", backdropFilter: "blur(20px)" }}
+            style={{ background: "#ffffff" }}
           >
             <div className="flex flex-col gap-8">
               {["How it works", "Features", "Pricing"].map((label) => (

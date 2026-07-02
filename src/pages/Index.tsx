@@ -178,11 +178,11 @@ const Index = () => {
                 )}
               </div>
 
-              {/* Right: profile avatar → taps to settings */}
+              {/* Right: profile avatar — toggles settings/dashboard */}
               <button
-                onClick={() => handleNavigate("settings")}
+                onClick={() => handleNavigate(activeTab === "settings" ? "dashboard" : "settings")}
                 className="shrink-0 active:scale-95 transition-transform"
-                title="Settings"
+                title={activeTab === "settings" ? "Back to dashboard" : "Profile & settings"}
               >
                 <Avatar className="h-8 w-8">
                   <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
