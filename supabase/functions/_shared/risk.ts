@@ -79,7 +79,8 @@ export function evaluateRisk(
   settings: RiskSettings | null,
   riskState: RiskState | null
 ): RiskEvaluationResult {
-  if (!settings) settings = DEFAULT_RISK_SETTINGS;
+  // null settings = legacy / no-limits mode — pass unconditionally (no row in risk_settings yet)
+  if (!settings) return { passed: true };
 
   // 1. Position size
   if (amount > settings.max_position_size) {
