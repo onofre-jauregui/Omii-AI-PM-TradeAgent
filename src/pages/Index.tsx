@@ -14,6 +14,7 @@ import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
+import { StrategyStories } from "@/components/trading/StrategyStories";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot, Lock } from "lucide-react";
@@ -239,6 +240,9 @@ const Index = () => {
               state on every return because all useEffect data fetches re-fired from scratch. */}
           <div className={cn("space-y-6", activeTab !== "dashboard" && "hidden")}>
             <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
+            {isMobile && (
+              <StrategyStories mode={mode} onNavigate={handleNavigate} />
+            )}
             <StrategyPerformance mode={mode} />
             <PortfolioOverview mode={mode} />
             <TradeLog filterMode={mode} />
