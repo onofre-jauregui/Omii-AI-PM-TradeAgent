@@ -544,7 +544,7 @@ export default function LandingPage() {
   }, []);
 
   return (
-    <div className="min-h-screen" style={{ background: "#ffffff", color: "#1d1d1f" }}>
+    <main className="min-h-screen" style={{ background: "#ffffff", color: "#1d1d1f" }}>
 
       {/* ── Nav ── */}
       <nav
@@ -1243,6 +1243,6 @@ export default function LandingPage() {
           </div>
         </div>
       </footer>
-    </div>
+    </main>
   );
 }

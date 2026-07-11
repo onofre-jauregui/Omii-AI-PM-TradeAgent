@@ -80,8 +80,9 @@ test.describe("HITL live mode UI", () => {
 
   test("live mode banner component is in the JS bundle", async ({ page }) => {
     await page.goto("/");
-    // The bundle includes the LiveModeBanner source string
-    const response = await page.evaluate(async () => {
+    // Works in both Vite dev mode (source files served individually) and production (bundled)
+    const found = await page.evaluate(async () => {
+      // Production: scan bundled scripts
       const scripts = Array.from(document.querySelectorAll("script[src]"));
       for (const s of scripts) {
         try {
@@ -90,14 +91,20 @@ test.describe("HITL live mode UI", () => {
           if (t.includes("LIVE MODE") || t.includes("LiveModeBanner")) return true;
         } catch {}
       }
+      // Dev (Vite): check source file directly
+      try {
+        const r = await fetch("/src/components/trading/LiveModeBanner.tsx");
+        if (r.ok) return (await r.text()).includes("LiveModeBanner");
+      } catch {}
       return false;
     });
-    expect(response).toBe(true);
+    expect(found).toBe(true);
   });
 
   test("HITL approvals component is in the JS bundle", async ({ page }) => {
     await page.goto("/");
-    const response = await page.evaluate(async () => {
+    const found = await page.evaluate(async () => {
+      // Production: scan bundled scripts
       const scripts = Array.from(document.querySelectorAll("script[src]"));
       for (const s of scripts) {
         try {
@@ -106,9 +113,14 @@ test.describe("HITL live mode UI", () => {
           if (t.includes("hitl_approvals") || t.includes("HITLApprovalsCard")) return true;
         } catch {}
       }
+      // Dev (Vite): check source file directly
+      try {
+        const r = await fetch("/src/components/trading/HITLApprovalsCard.tsx");
+        if (r.ok) return (await r.text()).includes("HITLApprovalsCard");
+      } catch {}
       return false;
     });
-    expect(response).toBe(true);
+    expect(found).toBe(true);
   });
 });
 
