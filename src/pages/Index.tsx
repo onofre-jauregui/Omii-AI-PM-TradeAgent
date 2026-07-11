@@ -240,9 +240,7 @@ const Index = () => {
               state on every return because all useEffect data fetches re-fired from scratch. */}
           <div className={cn("space-y-6", activeTab !== "dashboard" && "hidden")}>
             <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
-            {isMobile && (
-              <StrategyStories mode={mode} onNavigate={handleNavigate} />
-            )}
+            <StrategyStories mode={mode} onNavigate={handleNavigate} />
             <StrategyPerformance mode={mode} />
             <PortfolioOverview mode={mode} />
             <TradeLog filterMode={mode} />

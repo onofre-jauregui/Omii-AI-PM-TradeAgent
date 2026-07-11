@@ -453,7 +453,9 @@ serve(async (req) => {
         : [];
       const alreadyLearned = new Set(existingLessons.map((r: any) => r.trade_id));
 
-      const validLessonTypes = ["forecast_bias", "market_timing", "signal_quality", "execution", "market_structure", "general"];
+      // Single source of truth — MUST MATCH the trade_lessons_lesson_type_check constraint in the DB.
+      // When adding a type here, also run a migration to extend that constraint.
+      const validLessonTypes = ["forecast_bias", "market_timing", "stale_signal", "kelly_mismatch", "signal_quality", "execution", "market_structure", "general"];
 
       for (const trade of allTradesToProcess) {
         if (alreadyLearned.has(trade.id)) continue;
@@ -497,14 +499,32 @@ Trade details:
 - Side bought: ${trade.side} at ${price}¢ (implied ${price}% probability)
 - Outcome: ${outcome.toUpperCase()} — P&L: $${pnl.toFixed(2)}
 - Market resolved: ${trade.resolution || "unknown"}
-- Signal notes: ${notes.slice(0, 300) || "none"}${trade.user_rating ? `\n- User rating: ${trade.user_rating === "good" ? "GOOD — user explicitly approved this trade decision" : "BAD — user explicitly flagged this as a poor decision"}` : ""}
+- Signal notes: ${notes.slice(0, 300) || "none"}${trade.user_rating ? `\n- User rating: ${trade.user_rating === "good" ? "GOOD — user explicitly approved this trade decision" : "BAD — user explicitly flagged this as a poor decision"}` : ""}${(() => {
+  const staleMatch = notes.match(/signal_age=(\d+)m.*live_edge=(-?[\d.]+)c/);
+  const sigEdgeMatch = notes.match(/edge=(\d+)c/);
+  if (!staleMatch) return "";
+  const ageMin = parseInt(staleMatch[1]);
+  const liveEdge = parseFloat(staleMatch[2]);
+  const sigEdge = sigEdgeMatch ? parseInt(sigEdgeMatch[1]) : null;
+  return `\n- Signal age at trade time: ${ageMin} min | Live edge at trade: ${liveEdge.toFixed(1)}¢${sigEdge !== null ? ` (signal had ${sigEdge}¢ when written)` : ""}\n- Staleness delta: ${sigEdge !== null ? (sigEdge - liveEdge).toFixed(0) : "?"}¢ of edge evaporated between signal write and trade execution`;
+})()}
 
 Recent lessons from same strategy (last 7 days):
 ${priorContext}
 
+Root cause taxonomy — pick the MOST SPECIFIC type that applies:
+- forecast_bias: GFS/NWS model was systematically wrong for this city/bucket/season
+- market_timing: market already repriced before trade (stale signal, new obs came in)
+- stale_signal: signal_age > 60 min AND live_edge was materially lower than signal edge (check "Staleness delta" above)
+- kelly_mismatch: position size was wrong for the payout geometry (e.g., $8 at risk to win $0.70 on a NO bet)
+- signal_quality: signal generation had a structural flaw (wrong edge formula, calibration error)
+- execution: order mechanics issue (fill price wrong, order rejected)
+- market_structure: general market behavior (liquidity, spread, closing time)
+- general: use only if none of the above fit
+
 Return ONLY valid JSON, no markdown, no extra text:
 {
-  "lesson_type": "forecast_bias" | "signal_quality" | "market_timing" | "market_structure" | "execution" | "general",
+  "lesson_type": "forecast_bias" | "market_timing" | "stale_signal" | "kelly_mismatch" | "signal_quality" | "execution" | "market_structure" | "general",
   "lesson": "<specific causal sentence — for losses include direction of error; for wins include what structural edge made this correct>",
   "do_differently": "<concrete IF/THEN rule, e.g. 'IF city=MIA AND month=May AND side=NO AND price>30¢ THEN REJECT' or 'IF bracket spread > 25¢ and volume > 500 THEN QUALIFY'>",
   "should_promote": true | false,
@@ -548,7 +568,7 @@ Return ONLY valid JSON, no markdown, no extra text:
               severity: "warning",
               message: `Lesson LLM failed for ${trade.ticker} — using template. Error: ${llmErr instanceof Error ? llmErr.message : String(llmErr)}`,
               metadata: { trade_id: trade.id, ticker: trade.ticker },
-            }).catch(() => {});
+            }).then(undefined, () => {});
           }
         }
 
@@ -581,23 +601,45 @@ Return ONLY valid JSON, no markdown, no extra text:
           ? [...new Set([trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase, ...llmMarketTags].filter(Boolean))]
           : [trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase].filter(Boolean);
 
-        const { data: insertedLesson, error: lessonInsertError } = await supabase
+        const lessonPayload = {
+          trade_id: trade.id,
+          user_id: trade.user_id ?? null,
+          ticker: trade.ticker,
+          strategy_id: trade.strategy_id,
+          outcome,
+          lesson_type,
+          lesson,
+          do_differently,
+          confidence: 0.8,
+          tags: lessonTags,
+          trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200), llm_generated: llmUsed, user_rating: trade.user_rating ?? null },
+        };
+
+        let { data: insertedLesson, error: lessonInsertError } = await supabase
           .from("trade_lessons")
-          .insert({
-            trade_id: trade.id,
-            user_id: trade.user_id ?? null,
-            ticker: trade.ticker,
-            strategy_id: trade.strategy_id,
-            outcome,
-            lesson_type,
-            lesson,
-            do_differently,
-            confidence: 0.8,
-            tags: lessonTags,
-            trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200), llm_generated: llmUsed, user_rating: trade.user_rating ?? null },
-          })
+          .insert(lessonPayload)
           .select("id")
           .single();
+
+        // Moat guard: if lesson_type drifts ahead of the DB check constraint (code adds a
+        // new type before the migration lands), Postgres rejects the row with 23514 and the
+        // lesson — the asset the whole learning loop exists to capture — would be dropped.
+        // Fall back to 'general' (always in the constraint) so the lesson content survives,
+        // and log the drift so the constraint gets updated. This exact drift on 'stale_signal'
+        // silently lost ~80 lessons over 3 days (2026-07-03→07-06) before it was caught.
+        if (lessonInsertError?.code === "23514" && /lesson_type/.test(lessonInsertError.message ?? "")) {
+          await supabase.from("compliance_log").insert({
+            event_type: "lesson_type_constraint_drift",
+            severity: "warning",
+            message: `lesson_type "${lesson_type}" rejected by DB constraint; retried as "general" for trade ${trade.id} (${trade.ticker}). Add "${lesson_type}" to trade_lessons_lesson_type_check.`,
+            metadata: { trade_id: trade.id, ticker: trade.ticker, rejected_lesson_type: lesson_type },
+          }).then(undefined, () => {});
+          ({ data: insertedLesson, error: lessonInsertError } = await supabase
+            .from("trade_lessons")
+            .insert({ ...lessonPayload, lesson_type: "general" })
+            .select("id")
+            .single());
+        }
 
         if (lessonInsertError) {
           await supabase.from("compliance_log").insert({
@@ -606,7 +648,17 @@ Return ONLY valid JSON, no markdown, no extra text:
             message: `Failed to write lesson for trade ${trade.id} (${trade.ticker}): ${lessonInsertError.message}`,
             metadata: { trade_id: trade.id, ticker: trade.ticker, error: lessonInsertError },
           });
-          await sendTelegramAlert(`⚠️ <b>[TradeAgent] Learning Loop Error</b>\ntrade_lessons INSERT failed for ${trade.ticker}: ${lessonInsertError.message}`);
+          // Dedupe on the error signature (not the trade) so a persistent write failure
+          // alerts once per 2h instead of once per failing trade per reflect cycle — this
+          // raw-send path is what turned the 2026-07-03→06 constraint drift into a Telegram
+          // storm. Mirrors the deduped alert on the outer catch below.
+          await alertOnce(
+            supabase,
+            "lesson_write_error",
+            (lessonInsertError.message ?? "").slice(0, 60),
+            2,
+            `⚠️ <b>[TradeAgent] Learning Loop Error</b>\ntrade_lessons INSERT failed for ${trade.ticker}: ${lessonInsertError.message}`,
+          ).catch(() => {});
           continue;
         }
 
@@ -687,7 +739,7 @@ Return ONLY valid JSON, no markdown, no extra text:
         severity: "error",
         message: `Lesson writing loop crashed: ${msg}`,
         metadata: { partial_results: results },
-      }).catch(() => {});
+      }).then(undefined, () => {});
       // Lesson loop failure means trades aren't being learned from — alert on first occurrence.
       await alertOnce(supabase, "lesson_write_error", msg.slice(0, 60), 2,
         `⚠️ <b>[TradeAgent] Lesson Write Error</b>\nThe learning loop failed — trades are not being reflected into agent memory.\nError: ${msg.slice(0, 300)}`
@@ -766,7 +818,7 @@ Return ONLY valid JSON, no markdown, no extra text:
         severity: "error",
         message: `memory_attribution backfill failed: ${msg}`,
         metadata: { partial_results: results },
-      }).catch(() => {});
+      }).then(undefined, () => {});
       await alertOnce(supabase, "memory_attribution_backfill_error", msg.slice(0, 60), 4,
         `⚠️ <b>[TradeAgent] Memory Attribution Backfill Failed</b>\nBayesian confidence scores will drift — settled PnL is not being linked to memory.\nError: ${msg.slice(0, 300)}`
       ).catch(() => {});
