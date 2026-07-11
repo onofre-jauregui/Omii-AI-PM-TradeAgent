@@ -66,6 +66,116 @@ serve(async (req) => {
     return new Response("Bad Request", { status: 400 });
   }
 
+  // Handle HITL approval callbacks (inline keyboard button presses)
+  const callbackQuery = body?.callback_query;
+  if (callbackQuery) {
+    const callbackData: string = callbackQuery.data || "";
+    const callbackChatId = String(callbackQuery.message?.chat?.id || callbackQuery.from?.id || "");
+
+    // Security: only process callbacks from our configured chat
+    if (callbackChatId !== CHAT_ID) {
+      return new Response("OK", { status: 200 });
+    }
+
+    const hitlApproveMatch = callbackData.match(/^hitl_(approve|reject)_([0-9a-f-]+)$/);
+    if (hitlApproveMatch) {
+      const decision = hitlApproveMatch[1]; // "approve" or "reject"
+      const approvalId = hitlApproveMatch[2];
+
+      const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+      // Fetch stored payload before updating status — needed for execution
+      const { data: approvalRecord } = await supabase.from("hitl_approvals")
+        .select("trade_payload, user_id, trace_id, status")
+        .eq("id", approvalId)
+        .single();
+
+      // Guard: only act if still pending (prevents double-tap and stale callbacks)
+      if (!approvalRecord || approvalRecord.status !== "pending") {
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            callback_query_id: callbackQuery.id,
+            text: `Already ${approvalRecord?.status ?? "processed"} — no action taken`,
+            show_alert: true,
+          }),
+        }).catch(() => {});
+        return new Response("OK", { status: 200 });
+      }
+
+      // Mark the decision
+      await supabase.from("hitl_approvals")
+        .update({
+          status: decision === "approve" ? "approved" : "rejected",
+          decided_at: new Date().toISOString(),
+          decision_note: `${decision}d via Telegram by operator`,
+        })
+        .eq("id", approvalId)
+        .eq("status", "pending");
+
+      // Answer callback immediately — dismiss Telegram's spinner
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callback_query_id: callbackQuery.id,
+          text: decision === "approve" ? "✅ Executing trade now…" : "❌ Trade rejected",
+          show_alert: false,
+        }),
+      }).catch(() => {});
+
+      let resultLine = decision === "approve" ? "✅ APPROVED — executing…" : "❌ REJECTED";
+
+      // On approval: call execute-trade with the stored payload + pre-auth ID
+      if (decision === "approve" && approvalRecord.trade_payload) {
+        const executePayload = {
+          ...approvalRecord.trade_payload,
+          hitlApprovalId: approvalId, // Phase 2 bypass token
+        };
+        try {
+          const execResp = await fetch(`${SUPABASE_URL}/functions/v1/execute-trade`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${SUPABASE_KEY}`,
+              apikey: SUPABASE_KEY,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(executePayload),
+          });
+          const execResult = await execResp.json().catch(() => ({})) as Record<string, unknown>;
+          if (execResult.success) {
+            const tradeId = (execResult.trade as Record<string, unknown>)?.id;
+            resultLine = `✅ APPROVED — trade executed${tradeId ? ` (${String(tradeId).slice(0, 8)})` : ""}`;
+          } else {
+            const errMsg = String(execResult.error || "unknown error").slice(0, 100);
+            resultLine = `✅ APPROVED but execution failed: ${errMsg}`;
+          }
+        } catch (execErr) {
+          const msg = execErr instanceof Error ? execErr.message : String(execErr);
+          resultLine = `✅ APPROVED but execution threw: ${msg.slice(0, 100)}`;
+        }
+      }
+
+      // Edit the original Telegram message to show the final outcome
+      if (callbackQuery.message?.message_id) {
+        const timestamp = new Date().toISOString().slice(11, 19);
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: CHAT_ID,
+            message_id: callbackQuery.message.message_id,
+            text: callbackQuery.message.text + `\n\n${resultLine} at ${timestamp} UTC`,
+            parse_mode: "HTML",
+          }),
+        }).catch(() => {});
+      }
+    }
+
+    return new Response("OK", { status: 200 });
+  }
+
   const message = body?.message;
   if (!message?.text) return new Response("OK", { status: 200 });
 

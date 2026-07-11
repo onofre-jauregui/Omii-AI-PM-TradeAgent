@@ -311,7 +311,7 @@ async function tripCircuitBreaker(supabase: any, runId: string): Promise<void> {
     event_type: "kalshi_circuit_open",
     severity: "critical",
     message: msg,
-    metadata: { run_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
+    metadata: { run_id: runId, trace_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
   }).then(() => {}).catch(() => {});
   const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
   const chatId = Deno.env.get("TELEGRAM_CHAT_ID");
@@ -605,7 +605,7 @@ serve(async (req) => {
           event_type: "auto_trade_strategy_halted",
           severity: "warning",
           message: `Strategy "${strategy.name}" (${strategy.id}) is halted: ${config.halt_reason || "unknown"}`,
-          metadata: { run_id: runId, strategy_id: strategy.id },
+          metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id },
         });
         continue;
       }
@@ -840,7 +840,7 @@ serve(async (req) => {
               event_type: "strategy_auto_halted",
               severity: "error",
               message: `Strategy "${strategy.name}" auto-halted after ${newFailures} consecutive failures`,
-              metadata: { run_id: runId, strategy_id: strategy.id, last_error: errMsg },
+              metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id, last_error: errMsg },
             });
             await sendTelegramAlert(`⏸️ <b>[TradeAgent] Strategy Halted</b>\n"${strategy.name}" auto-halted after ${newFailures} consecutive failures.\nLast error: ${errMsg.slice(0, 150)}`);
 
@@ -868,7 +868,7 @@ serve(async (req) => {
           event_type: "auto_trade_strategy_error",
           severity: "error",
           message: `Strategy "${strategy.name}" failed: ${errMsg}`,
-          metadata: { run_id: runId, strategy_id: strategy.id, stack: stratErr instanceof Error ? stratErr.stack : undefined },
+          metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id, stack: stratErr instanceof Error ? stratErr.stack : undefined },
         });
       }
 
@@ -888,6 +888,7 @@ serve(async (req) => {
       message: `Auto-trade complete: ${ranCount} ran, ${tradedCount} traded, ${errCount} errors, ${haltedCount} halted. Daily P&L: $${(riskState?.daily_pnl || 0).toFixed(2)}, trades: ${riskState?.daily_trades || 0}`,
       metadata: {
         run_id: runId,
+        trace_id: runId,
         started_at: runStartedAt,
         completed_at: new Date().toISOString(),
         strategies: strategyResults,
@@ -950,15 +951,17 @@ serve(async (req) => {
 
 const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
-// Wrapper around every execute-trade HTTP call. Detects 401 (service-role key
-// missing/rotated) and fires a Telegram alert + compliance_log entry so the
-// failure is visible instead of being silently swallowed as a failed trade.
+// Wrapper around every execute-trade HTTP call.
+//
+// Handles two special HTTP statuses:
+//   401 — service-role key missing/rotated; fires Telegram alert and halts
+//   202 — live trade deferred for HITL approval via Telegram; not a failure
 async function callExecuteTrade(
   executeUrl: string,
   supabaseKey: string,
   supabase: any,
   payload: Record<string, unknown>
-): Promise<{ success: boolean; error?: string; [key: string]: unknown }> {
+): Promise<{ success: boolean; hitl_pending?: boolean; error?: string; [key: string]: unknown }> {
   const resp = await fetch(executeUrl, {
     method: "POST",
     headers: {
@@ -984,6 +987,12 @@ async function callExecuteTrade(
     ).catch(() => {});
 
     return { success: false, error: "execute-trade 401 — service-role key misconfigured" };
+  }
+
+  // 202: live trade queued for HITL approval — not a failure, not a fill
+  if (resp.status === 202) {
+    const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
+    return { success: false, hitl_pending: true, approval_id: body.approval_id };
   }
 
   return resp.json().catch(() => ({ success: false, error: "response parse failed" }));
@@ -1593,7 +1602,7 @@ async function runS002LongshotBias(
       systemVersion: "v2",
       influencedByMemoryIds: s002MemoryIds,
     });
-    if (!result.success) {
+    if (!result.success && !result.hitl_pending) {
       const errDetail = result.error || result.message || "unknown error";
       captureMessage(`S-002 execute-trade failed: ${errDetail}`, "warning", {
         function: "auto-trade", strategyId: "S-002", runId, mode,
@@ -1601,7 +1610,17 @@ async function runS002LongshotBias(
       });
     }
     const aqTag = autoQualified ? " [AQ]" : "";
-    return { sig, success: result.success, detail: result.success ? `${sig.ticker} NO @ ${Math.round(price)}¢${aqTag}` : (result.error || result.message || "unknown error") };
+    const hitlTag = result.hitl_pending ? " [HITL-PENDING]" : "";
+    return {
+      sig,
+      success: result.success,
+      hitl_pending: result.hitl_pending ?? false,
+      detail: result.success
+        ? `${sig.ticker} NO @ ${Math.round(price)}¢${aqTag}`
+        : result.hitl_pending
+          ? `${sig.ticker} queued for HITL approval${aqTag}${hitlTag}`
+          : (result.error || result.message || "unknown error"),
+    };
   }));
 
   const filled = execResults.filter(r => r.success);
@@ -2231,7 +2250,8 @@ async function runS005WeatherEdge(
   );
 
   const filled = execResults.filter(r => r.result.success);
-  const failed = execResults.filter(r => !r.result.success);
+  const hitlPending = execResults.filter(r => r.result.hitl_pending);
+  const failed = execResults.filter(r => !r.result.success && !r.result.hitl_pending);
 
   // Mark consumed signals so the next cron run skips them — without this, the same
   // weather signal is re-qualified on every 30s run for its full 12h freshness window.
@@ -2248,6 +2268,9 @@ async function runS005WeatherEdge(
   const detailParts = [
     filled.length > 0
       ? `Executed ${filled.length} trade(s): ${filled.map(r => `${r.sig.ticker} ${r.sig.edge_cents}c edge`).join(", ")}`
+      : null,
+    hitlPending.length > 0
+      ? `${hitlPending.length} awaiting HITL approval`
       : null,
     failed.length > 0
       ? `${failed.length} failed: ${failed.map(r => r.result.error || r.result.message || "unknown").join(", ")}`
