@@ -359,54 +359,80 @@ export function DashboardHero({
   const { startingBalance, portfolioValue, kalshiBalance, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;
   const isTodayUp = todayPnl >= 0;
-  // In live mode, prefer real Kalshi wallet balance over synthetic portfolio value
   const displayValue = mode === "live" && kalshiBalance != null ? kalshiBalance : portfolioValue;
   const isLiveWallet = mode === "live" && kalshiBalance != null;
+
+  // CTA: one action that changes by state
+  const cta = (() => {
+    if (mode === "paper") return { label: "Go Live", tab: "settings", color: "primary" as const };
+    if (marketsClosingToday > 0) return { label: `${marketsClosingToday} position${marketsClosingToday === 1 ? "" : "s"} settling today`, tab: "markets", color: "warning" as const };
+    if (lastTradeAt) return { label: `View latest trade`, tab: "agent", color: "primary" as const };
+    return null;
+  })();
 
   return (
     <div className="space-y-3 apple-reveal">
       {/* Hero card */}
       <div className="rounded-2xl bg-gradient-to-br from-card to-card/80 p-5 apple-shadow">
 
-        {/* Top row: label + status */}
-        <div className="flex items-center justify-between mb-3">
+        {/* Top row: wallet label + live agent pulse */}
+        <div className="flex items-center justify-between mb-4">
           <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
-            {isLiveWallet ? "Kalshi Wallet" : mode === "paper" ? "Portfolio" : "Live Portfolio"}
+            {isLiveWallet ? "Kalshi Wallet" : mode === "paper" ? "Paper Portfolio" : "Live Portfolio"}
           </p>
-          <div className="flex flex-col items-end gap-1">
-            <AgentStatusBadge />
-            {winStreak >= 2 && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
-                🔥 {winStreak} day streak
-              </span>
-            )}
-          </div>
+          <AgentStatusBadge />
         </div>
 
-        {/* Portfolio value — the number */}
-        <h1
-          className="text-[44px] font-light leading-none text-foreground"
-          style={{ letterSpacing: "-0.04em" }}
-        >
-          {stats.loading
-            ? <span className="text-muted-foreground">--</span>
-            : `$${displayValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-          }
-        </h1>
-
-        {/* P&L delta row */}
-        <div className="flex items-center gap-2 flex-wrap mt-1.5 mb-4">
-          <span className={cn(
-            "inline-flex items-center gap-1 text-sm font-medium tabular-nums px-2 py-0.5 rounded-full",
-            isUp ? "text-profit bg-profit/10" : "text-loss bg-loss/10"
-          )}>
-            <ArrowUpRight className={cn("h-3.5 w-3.5", !isUp && "rotate-180")} />
-            {isUp ? "+" : ""}{totalReturnPct}%
-            <span className="text-[11px] opacity-70">({isUp ? "+" : ""}${Math.abs(totalReturn).toFixed(2)})</span>
+        {/* Dominant headline: return % — the biggest thing on screen */}
+        <div className="flex items-end gap-3 mb-1">
+          <span
+            className={cn(
+              "font-semibold leading-none tabular-nums",
+              stats.loading ? "text-muted-foreground" : (isUp ? "text-profit" : "text-loss"),
+            )}
+            style={{ fontSize: "clamp(3rem, 10vw, 4.5rem)", letterSpacing: "-0.04em" }}
+          >
+            {stats.loading
+              ? "--"
+              : `${isUp ? "+" : ""}${totalReturnPct}%`
+            }
           </span>
-          {todayPnl !== 0 && (
-            <span className={cn("text-xs tabular-nums", isTodayUp ? "text-profit" : "text-loss")}>
-              {isTodayUp ? "+" : ""}${Math.abs(todayPnl).toFixed(2)} today
+          {!stats.loading && (
+            <ArrowUpRight
+              className={cn(
+                "h-6 w-6 mb-2 shrink-0",
+                isUp ? "text-profit" : "text-loss rotate-180",
+              )}
+            />
+          )}
+        </div>
+
+        {/* Portfolio dollar value — secondary, below the % */}
+        <div className="flex items-center gap-2 flex-wrap mb-1">
+          <span className="text-2xl font-light text-foreground tabular-nums" style={{ letterSpacing: "-0.02em" }}>
+            {stats.loading
+              ? <span className="text-muted-foreground text-lg">loading…</span>
+              : `$${displayValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            }
+          </span>
+          <span className={cn("text-xs tabular-nums", isUp ? "text-profit" : "text-loss")}>
+            {!stats.loading && `(${isUp ? "+" : ""}$${Math.abs(totalReturn).toFixed(2)} all-time)`}
+          </span>
+        </div>
+
+        {/* Today velocity line */}
+        <div className="flex items-center gap-3 mb-4 min-h-[20px]">
+          {!stats.loading && todayPnl !== 0 && (
+            <span className={cn(
+              "inline-flex items-center gap-1 text-xs font-medium tabular-nums px-2 py-0.5 rounded-full",
+              isTodayUp ? "text-profit bg-profit/10" : "text-loss bg-loss/10",
+            )}>
+              {isTodayUp ? "▲" : "▼"} {isTodayUp ? "Up" : "Down"} ${Math.abs(todayPnl).toFixed(2)} today
+            </span>
+          )}
+          {winStreak >= 2 && (
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
+              🔥 {winStreak} day streak
             </span>
           )}
         </div>
@@ -414,12 +440,12 @@ export function DashboardHero({
         {/* Equity sparkline */}
         {stats.chartPoints.length > 2 && (
           <div className="my-3 -mx-1">
-            <ResponsiveContainer width="100%" height={120}>
+            <ResponsiveContainer width="100%" height={100}>
               <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
                 <defs>
                   <linearGradient id="heroGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.18} />
-                    <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                    <stop offset="0%" stopColor={isUp ? "hsl(var(--profit))" : "hsl(var(--loss))"} stopOpacity={0.2} />
+                    <stop offset="100%" stopColor={isUp ? "hsl(var(--profit))" : "hsl(var(--loss))"} stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <XAxis
@@ -433,7 +459,7 @@ export function DashboardHero({
                 <Area
                   type="monotone"
                   dataKey="value"
-                  stroke="hsl(var(--primary))"
+                  stroke={isUp ? "hsl(var(--profit))" : "hsl(var(--loss))"}
                   strokeWidth={1.5}
                   fill="url(#heroGradient)"
                   dot={false}
@@ -444,7 +470,7 @@ export function DashboardHero({
           </div>
         )}
 
-        {/* Stats grid */}
+        {/* Secondary stats — compact, not competing with the headline */}
         <div className="grid grid-cols-4 gap-2 mb-4">
           <QuickStat
             label="Win Rate"
@@ -468,6 +494,21 @@ export function DashboardHero({
           />
         </div>
 
+        {/* Single CTA — changes by state */}
+        {!stats.loading && cta && (
+          <button
+            onClick={() => onNavigate?.(cta.tab)}
+            className={cn(
+              "w-full flex items-center justify-between rounded-xl px-4 py-3 text-sm font-medium transition-all duration-150 active:scale-[0.98] border",
+              cta.color === "warning"
+                ? "bg-warning/10 text-warning border-warning/20 hover:bg-warning/15"
+                : "bg-primary/8 text-primary border-primary/20 hover:bg-primary/12",
+            )}
+          >
+            <span>{cta.label}</span>
+            <ArrowUpRight className="h-4 w-4 opacity-70 rotate-[0deg]" />
+          </button>
+        )}
       </div>
 
       {/* Status chips */}
@@ -475,14 +516,14 @@ export function DashboardHero({
         {lastTradeAt && (
           <AlertChip
             icon={<Bot className="h-3 w-3" />}
-            label={`Last settled: ${timeAgo(lastTradeAt)}`}
+            label={`Last settled ${timeAgo(lastTradeAt)}`}
             color="primary"
           />
         )}
         {marketsClosingToday > 0 && (
           <AlertChip
             icon={<Clock className="h-3 w-3" />}
-            label={`${marketsClosingToday} of your position${marketsClosingToday === 1 ? "" : "s"} settle today`}
+            label={`${marketsClosingToday} position${marketsClosingToday === 1 ? "" : "s"} settle today`}
             color="warning"
             onClick={() => onNavigate?.("markets")}
           />

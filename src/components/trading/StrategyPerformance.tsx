@@ -28,7 +28,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const [loading, setLoading] = useState(true);
 
   const activeStrategies = strategies.filter(s =>
-    (s.active || (strategyStats[s.id]?.totalTrades ?? 0) > 0) &&
+    s.active &&
     (!mode || s.mode === mode)
   );
 
