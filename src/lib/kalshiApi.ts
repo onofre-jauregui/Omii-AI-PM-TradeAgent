@@ -178,6 +178,27 @@ async function kalshiProxyDelete(endpoint: string): Promise<any> {
 
 // ─── Market Data ─────────────────────────────────────────────
 
+// Curated series for Trending — one representative per category.
+// Only 1–2 markets are taken from each series so the feed shows variety, not
+// 15 "Bitcoin at $X" price levels.
+const TRENDING_CURATED: Array<{ ticker: string; category: string }> = [
+  { ticker: "KXINX",       category: "Financials" },
+  { ticker: "KXBTC",       category: "Crypto"     },
+  { ticker: "KXFED",       category: "Economics"  },
+  { ticker: "KXCPI",       category: "Economics"  },
+  { ticker: "KXETH",       category: "Crypto"     },
+  { ticker: "KXNBA",       category: "Sports"     },
+  { ticker: "KXMLB",       category: "Sports"     },
+  { ticker: "KXNHL",       category: "Sports"     },
+  { ticker: "KXPAYROLLS",  category: "Economics"  },
+  { ticker: "KXGDP",       category: "Economics"  },
+];
+
+// Categories not covered by curated series — fetched dynamically to add variety
+const TRENDING_VARIETY_CATEGORIES = [
+  "Elections", "Politics", "Companies", "Culture", "Commodities", "Climate",
+];
+
 // Known active Kalshi series — these return real event-contract markets
 // (not MVE parlays). The default /markets endpoint is 100% MVE parlays.
 const KALSHI_ACTIVE_SERIES = [
@@ -293,6 +314,32 @@ export async function fetchKalshiMarkets(
   return allMarkets.sort((a, b) => b.volume - a.volume);
 }
 
+/**
+ * Fetch the single highest-volume active market from a given category.
+ * Used by buildTrendingFeed to sample variety categories not in TRENDING_CURATED.
+ * Two sequential requests: series discovery → top market.
+ */
+async function fetchTopFromCategory(category: string): Promise<ParsedMarket | null> {
+  const apiCategory = CATEGORY_API_NAME[category] ?? category;
+  try {
+    const seriesData = await kalshiProxyGet("series", {
+      status: "active", category: apiCategory, limit: "3",
+    });
+    const series: string[] = (seriesData.series ?? []).map((s: any) => s.ticker).filter(Boolean);
+    if (!series.length) return null;
+    const mkData = await kalshiProxyGet("markets", {
+      series_ticker: series[0], status: "open", limit: "5",
+    });
+    const parsed = (mkData.markets || [] as KalshiMarket[])
+      .map(parseKalshiMarket)
+      .filter((m): m is ParsedMarket => m !== null)
+      .sort((a, b) => b.volume - a.volume);
+    return parsed[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchKalshiMarket(ticker: string): Promise<ParsedMarket | null> {
   const data = await kalshiProxyGet(`markets/${ticker}`);
   const m = data.market;
@@ -339,9 +386,53 @@ export async function fetchKalshiMarketsByCategory(
   category: string,
   limitPerSeries = 10
 ): Promise<ParsedMarket[]> {
-  // "Trending" uses the curated high-volume series that already work
+  // Trending: one representative pick per series + one from each variety category.
+  // Runs in two parallel phases so the total wall-clock time is ~2 round trips,
+  // not 11+ sequential. Each series contributes at most 1 market to prevent
+  // "BTC at $80k / BTC at $82.5k / BTC at $85k" repetition.
   if (category === "Trending") {
-    return fetchKalshiMarkets(200);
+    const [curatedResults, varietyResults] = await Promise.all([
+      // Phase 1: known series (fast — no series-discovery step needed)
+      Promise.allSettled(
+        TRENDING_CURATED.map(({ ticker: s }) =>
+          kalshiProxyGet("markets", { limit: "3", status: "open", series_ticker: s })
+            .then(d => (d.markets || []) as KalshiMarket[])
+            .catch(() => [] as KalshiMarket[])
+        )
+      ),
+      // Phase 2: dynamic categories not in curated list (2-request chain per category)
+      Promise.allSettled(
+        TRENDING_VARIETY_CATEGORIES.map(cat => fetchTopFromCategory(cat))
+      ),
+    ]);
+
+    const seen = new Set<string>();
+    const trending: ParsedMarket[] = [];
+
+    // Top 1 market per curated series (preserves category diversity)
+    for (const result of curatedResults) {
+      if (result.status !== "fulfilled") continue;
+      const best = result.value
+        .map(parseKalshiMarket)
+        .filter((m): m is ParsedMarket => m !== null)
+        .sort((a, b) => b.volume - a.volume)[0];
+      if (best && !seen.has(best.ticker)) {
+        seen.add(best.ticker);
+        trending.push(best);
+      }
+    }
+
+    // Top 1 market per variety category
+    for (const result of varietyResults) {
+      if (result.status !== "fulfilled" || !result.value) continue;
+      const m = result.value;
+      if (!seen.has(m.ticker)) {
+        seen.add(m.ticker);
+        trending.push(m);
+      }
+    }
+
+    return trending.sort((a, b) => b.volume - a.volume);
   }
 
   // Resolve our display name to Kalshi's API category name
