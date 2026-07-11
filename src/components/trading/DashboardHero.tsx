@@ -199,7 +199,7 @@ export function DashboardHero({
         .eq("user_id", userId ?? "")
         .gte("settled_at", MAY_START)
         .order("settled_at", { ascending: false })
-        .limit(500),
+        .limit(2000),
       // Open positions: filled but not yet settled
       supabase
         .from("trades")

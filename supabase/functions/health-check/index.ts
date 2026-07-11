@@ -122,12 +122,7 @@ serve(async (req) => {
           type: "trading_silence",
           fingerprint,
           cooldownHours: SILENCE_HOURS,
-          message:
-            `⚠️ <b>[TradeAgent] Trading Silence</b>\n` +
-            `No trades placed in ${hoursSinceLastTrade.toFixed(1)}h.\n` +
-            `Last trade: ${sinceStr}\n` +
-            `Strategies active: ${[...new Set((activeStrategies || []).map((s: any) => s.name))].join(", ")}\n` +
-            `Signals present: yes — check compliance_log for errors.`,
+          message: `⚠️ [TradeAgent] Silence ${hoursSinceLastTrade.toFixed(0)}h — last: ${sinceStr} — signals present, check errors`,
         });
       }
     }
@@ -154,10 +149,7 @@ serve(async (req) => {
           type: "win_rate_collapse",
           fingerprint,
           cooldownHours: 24,
-          message:
-            `🔴 <b>[TradeAgent] Win Rate Collapse</b>\n` +
-            `Last ${recentSettled.length} settled trades: ${wins}W/${losses}L (${(winRate * 100).toFixed(1)}% — floor is ${(WIN_RATE_FLOOR * 100).toFixed(0)}%)\n` +
-            `Review recent signals and strategy filters.`,
+          message: `🔴 [TradeAgent] Win rate ${(winRate * 100).toFixed(0)}% (${wins}W/${losses}L of ${recentSettled.length}) — floor ${(WIN_RATE_FLOOR * 100).toFixed(0)}%`,
         });
       }
     }
@@ -185,11 +177,7 @@ serve(async (req) => {
         type: "volume_spike",
         fingerprint,
         cooldownHours: 1,
-        message:
-          `🚨 <b>[TradeAgent] Volume Spike</b>\n` +
-          `Last hour: ${lastHourCount} trades\n` +
-          `Prior 23h hourly avg: ${priorHourlyAvg.toFixed(1)}\n` +
-          `Ratio: ${((lastHourCount ?? 0) / priorHourlyAvg).toFixed(1)}x — check cron schedule and strategy loop.`,
+        message: `🚨 [TradeAgent] Volume spike: ${lastHourCount}/hr vs avg ${priorHourlyAvg.toFixed(1)} (${((lastHourCount ?? 0) / priorHourlyAvg).toFixed(1)}x) — check cron`,
       });
     }
 
@@ -217,11 +205,7 @@ serve(async (req) => {
         type: "duplicate_positions_detected",
         fingerprint,
         cooldownHours: 1,
-        message:
-          `🔄 <b>[TradeAgent] Duplicate Open Positions</b>\n` +
-          `${duplicateEntries.length} (user, ticker) pair(s) with >2 open filled rows.\n` +
-          `Tickers: ${tickerList.join(", ")}\n` +
-          `Exit loop may be running — check that tombstone UPDATE fires after each exit order in auto-trade.`,
+        message: `🔄 [TradeAgent] Duplicate positions: ${tickerList.join(", ")} (${duplicateEntries.length} pairs >2 open rows)`,
       });
     }
 
@@ -243,11 +227,7 @@ serve(async (req) => {
         type: "blocked_series",
         fingerprint,
         cooldownHours: 1,
-        message:
-          `🚫 <b>[TradeAgent] Blocked Series Trading</b>\n` +
-          `${violations.length} trade(s) on blocked series in last hour.\n` +
-          `Sample: ${sample}\n` +
-          `Blocked series: ${BLOCKED_SERIES.join(", ")} — fix ALLOWED_PREFIXES in auto-trade immediately.`,
+        message: `🚫 [TradeAgent] Blocked series traded: ${sample} (${violations.length}x) — fix ALLOWED_PREFIXES`,
       });
     }
 
@@ -262,11 +242,7 @@ serve(async (req) => {
         type: "strategy_suspended",
         fingerprint,
         cooldownHours: 6,
-        message:
-          `⏸️ <b>[TradeAgent] Strategy Suspended</b>\n` +
-          suspended.map((s: any) =>
-            `${s.name}: suspended until ${new Date(s.suspended_until).toISOString().slice(0, 16)} UTC`
-          ).join("\n"),
+        message: `⏸️ [TradeAgent] Suspended: ${suspended.map((s: any) => `${s.name} until ${new Date(s.suspended_until).toISOString().slice(11, 16)}Z`).join(", ")}`,
       });
     }
 
@@ -291,9 +267,7 @@ serve(async (req) => {
         type: "system_errors",
         fingerprint,
         cooldownHours: 2,
-        message:
-          `🔴 <b>[TradeAgent] System Errors (last 2h)</b>\n` +
-          `${recentErrors.length} error/critical event(s):\n${sample}`,
+        message: `🔴 [TradeAgent] ${recentErrors.length} error(s): ${recentErrors[0].event_type} — ${recentErrors[0].message.slice(0, 80)}`,
       });
     }
 
@@ -345,11 +319,46 @@ serve(async (req) => {
         type: `api_error_${provider}`,
         fingerprint: `api_error_${key}`,
         cooldownHours: 2,
-        message:
-          `🔴 <b>[TradeAgent] ${provider.toUpperCase()} ${isRateLimit ? "Rate Limited (429)" : `HTTP ${status}`}</b>\n` +
-          `${info.count} hit(s) in last 2h\n` +
-          `${info.message.slice(0, 120)}`,
+        message: `🔴 [TradeAgent] ${provider.toUpperCase()} ${isRateLimit ? "429" : status}: ${info.count}x in 2h — ${info.message.slice(0, 80)}`,
       });
+    }
+
+    // ── 9. Cron health — stale (parked/dead) or failing jobs ─────────
+    // Closes the silent-death blind spot: the other checks only see FAILED runs,
+    // so a job parked to a never-date schedule (or otherwise stalled) fired zero
+    // and read as healthy. cron_health() learns each job's real cadence from run
+    // history and flags any active job overdue by >3x, plus any whose last run failed.
+    const { data: cronRows, error: cronErr } = await supabase.rpc("cron_health");
+    if (cronErr) {
+      // Don't let a monitoring-surface failure pass silently — the watchdog itself must be loud.
+      pendingAlerts.push({
+        type: "cron_health_unavailable",
+        fingerprint: `cron_health_err_${cronErr.message?.slice(0, 40) ?? "unknown"}`,
+        cooldownHours: 6,
+        message: `🟠 [TradeAgent] Cron monitor blind — cron_health() failed: ${(cronErr.message ?? String(cronErr)).slice(0, 100)}`,
+      });
+    }
+    for (const c of cronRows ?? []) {
+      if (c.is_stale) {
+        const mins = Math.round((c.seconds_since_last_run ?? 0) / 60);
+        const expMin = Math.round((c.expected_interval_s ?? 0) / 60);
+        // Fingerprint on jobname → one alert per stalled job; re-alerts each 6h it stays stale.
+        pendingAlerts.push({
+          type: "cron_stale",
+          fingerprint: `cron_stale_${c.jobname}`,
+          cooldownHours: 6,
+          message: `⏱️ [TradeAgent] ${c.jobname} stalled ${mins}m (expected ~${expMin}m) — last: ${c.last_started_at ? String(c.last_started_at).slice(0, 16) + "Z" : "never"}`,
+        });
+      }
+      if (c.last_run_failed) {
+        // Include the failed run's date → a NEW failure re-alerts; the same stuck one doesn't spam.
+        pendingAlerts.push({
+          type: "cron_failed",
+          fingerprint: `cron_failed_${c.jobname}_${c.last_started_at ? String(c.last_started_at).slice(0, 10) : "na"}`,
+          cooldownHours: 12,
+          message: `❌ [TradeAgent] ${c.jobname} failed at ${c.last_started_at ? String(c.last_started_at).slice(0, 16) + "Z" : "?"} — check cron.job_run_details`,
+        });
+      }
     }
 
     // ── Deduplicate and send ──────────────────────────────────────────
@@ -404,7 +413,7 @@ serve(async (req) => {
       await sendTelegram(
         telegramToken!,
         telegramChatId!,
-        `🚨 <b>[TradeAgent] Health-Check CRASHED</b>\nThe monitoring watchdog threw an unhandled error — all alerts are paused until this is resolved.\nError: ${msg.slice(0, 200)}`
+        `🚨 [TradeAgent] Health-check crashed — all monitoring paused: ${msg.slice(0, 150)}`
       );
     } catch { /* if Telegram itself is down, at minimum the 500 response will surface in Supabase logs */ }
     return json({ error: msg }, 500);

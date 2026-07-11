@@ -977,7 +977,7 @@ async function callExecuteTrade(
       message: "auto-trade: execute-trade returned 401 — service-role key missing or rotated; trading halted",
       metadata: { execute_url: executeUrl, user_id: payload.user_id ?? null },
       user_id: payload.user_id ?? null,
-    }).catch(() => {});
+    }).then(null, () => {});
 
     await sendTelegramAlert(
       `🔴 <b>[TradeAgent] CRITICAL: Trading Halted</b>\nexecute-trade returned 401. Service-role key is missing or was rotated. No trades can be placed until the env var is restored.`
@@ -1101,7 +1101,7 @@ async function runS001SurfaceArb(
           severity: "warning",
           message: `S-001: Kalshi ${resp.status} fetching markets for ${eventTicker}`,
           metadata: { provider: "kalshi", status: resp.status, endpoint: `markets?event_ticker=${eventTicker}` },
-        }).catch(() => {});
+        }).then(null, () => {});
         if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
           kalshiCircuit.open = true;
           await tripCircuitBreaker(supabase, runId);
@@ -1123,9 +1123,13 @@ async function runS001SurfaceArb(
     }
 
     if (eventMarkets.length === 0) {
-      // Kalshi returned no open markets for this event — it's likely already settled.
-      // The cache entry is stale; market-data-fetcher will evict it on next cycle.
-      console.warn(`S-001: no open markets on Kalshi for event ${eventTicker} — skipping (market may be settled)`);
+      // Kalshi returned no open markets for this event — it's already settled.
+      // Mark the alert exploited so it stops being re-processed until the 2h purge clears it.
+      console.warn(`S-001: no open markets on Kalshi for event ${eventTicker} — marking exploited (settled)`);
+      await supabase.from("surface_alerts")
+        .update({ is_exploited: true })
+        .eq("id", alert.id)
+        .then(null, () => {});
       continue;
     }
 
@@ -1151,7 +1155,7 @@ async function runS001SurfaceArb(
         severity: "info",
         message: `S-001: ${eventTicker} ask-side sum ${askSideSumCents}c < required ${minAskSideSum}c after fee hurdle — skipping`,
         metadata: { event_ticker: eventTicker, ask_side_sum: askSideSumCents, required: minAskSideSum, run_id: runId },
-      }).catch(() => {});
+      }).then(null, () => {});
       continue;
     }
 
@@ -1233,7 +1237,7 @@ async function runS001SurfaceArb(
                 .from("trades")
                 .update({ exit_reason: "stop_loss_50pct" })
                 .eq("id", openPos.id)
-                .catch(() => {});
+                .then(null, () => {});
             }
             await supabase.from("compliance_log").insert({
               event_type: "s001_stop_loss_triggered",
@@ -1241,7 +1245,7 @@ async function runS001SurfaceArb(
               message: `S-001 stop-loss: ${openPos.ticker} sell @ ${closePrice}c (entry ${entryPriceCents}c, loss ${Math.round(lossPct * 100)}%, fill: ${closeResult.success})`,
               metadata: { ticker: openPos.ticker, entry_cents: entryPriceCents, bid_cents: currentNoBidCents, loss_pct: Math.round(lossPct * 100), run_id: runId },
               user_id: strategy.user_id || null,
-            }).catch(() => {});
+            }).then(null, () => {});
           }
         }
       }
@@ -1766,7 +1770,7 @@ async function runS005WeatherEdge(
         const outcome = closeResult.success ? `locked +${gainCents.toFixed(1)}¢` : "lock_failed";
         profitLockResults.push(`${pos.ticker}: ${outcome}`);
         if (closeResult.success) {
-          await supabase.from("trades").update({ exit_reason: "profit_lock_50pct" }).eq("id", pos.id).catch(() => {});
+          await supabase.from("trades").update({ exit_reason: "profit_lock_50pct" }).eq("id", pos.id).then(null, () => {});
         }
       }
     }
@@ -2177,7 +2181,7 @@ async function runS005WeatherEdge(
           severity: "info",
           message: `S-005 skipped ${sig.ticker}: live edge ${liveEdge.toFixed(1)}¢ < 10¢ (signal had ${sig.edge_cents}¢, age ${signalAgeMin}m)`,
           metadata: { ticker: sig.ticker, signal_edge: sig.edge_cents, live_edge: liveEdge, signal_age_min: signalAgeMin, runId },
-        }).catch(() => {});
+        }).then(null, () => {});
         return { sig, side, price: 0, amount: 0, result: { success: false, error: `stale_signal: live_edge=${liveEdge.toFixed(1)}¢` } };
       }
 

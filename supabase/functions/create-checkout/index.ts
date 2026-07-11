@@ -19,7 +19,7 @@ serve(async (req) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   const stripeKey = Deno.env.get("STRIPE_SECRET_KEY");
-  const frontendUrl = Deno.env.get("FRONTEND_URL") || "https://omii-ai-pm-trade-agent-acix7umyc-omiiaiagency.vercel.app";
+  const frontendUrl = Deno.env.get("FRONTEND_URL") || "https://kalshitradeagent.com";
 
   if (!supabaseUrl || !supabaseKey) return json({ error: "Missing server credentials" }, 500);
   if (!stripeKey) return json({ error: "Stripe not configured. Set STRIPE_SECRET_KEY in Supabase secrets." }, 500);
@@ -95,12 +95,13 @@ serve(async (req) => {
     },
     body: new URLSearchParams({
       customer: customerId,
+      client_reference_id: user.id,
       mode: "subscription",
       "line_items[0][price]": priceId,
       "line_items[0][quantity]": "1",
       success_url: `${frontendUrl}/billing?upgraded=1`,
       cancel_url: `${frontendUrl}/billing`,
-      "metadata[supabase_user_id]": user.id,
+      "metadata[user_id]": user.id,
       "metadata[tier]": tier,
     }).toString(),
   });

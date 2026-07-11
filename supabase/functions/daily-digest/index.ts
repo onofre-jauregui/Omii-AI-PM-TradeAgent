@@ -67,7 +67,7 @@ serve(async (_req) => {
         channel,
         payload: stats,
         created_at: new Date().toISOString(),
-      }).catch((e: unknown) => console.warn("compliance_log insert failed:", e));
+      }).then(undefined, (e: unknown) => console.warn("compliance_log insert failed:", e));
 
       sent++;
     } catch (err) {
