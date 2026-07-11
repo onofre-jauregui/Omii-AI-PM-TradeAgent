@@ -5,6 +5,8 @@ import {
   computeWinStreakFromTrades,
   s002VolumeCheck,
   s002EdgeCentsCheck,
+  s002SlotWeight,
+  s002IsAutoQualified,
   buildForceLlmCities,
   s005IsAutoQualified,
   buildQualifyEndpoint,
@@ -12,32 +14,78 @@ import {
 } from "../_shared/trading-logic";
 import { parseQualifyResponse } from "../_shared/prompt-safety";
 
-// ─── S-002 Longshot Bias — signal filters ──────────────────────────────────────
+// ─── S-002 Longshot Bias — signal filters ──────────────────────────────────
 
 describe("S-002 signal filters", () => {
-  it("signal with volume < 200 is filtered before LLM qualify call", () => {
-    expect(s002VolumeCheck(199)).toBe(false);
+  // Volume floor: 150 (down from 200 — equity-options threshold over-filtered Kalshi market)
+  it("signal with volume < 150 is filtered before LLM qualify call", () => {
+    expect(s002VolumeCheck(149)).toBe(false);
   });
 
-  it("signal with volume >= 200 passes volume check", () => {
-    expect(s002VolumeCheck(200)).toBe(true);
+  it("signal with volume >= 150 passes volume check", () => {
+    expect(s002VolumeCheck(150)).toBe(true);
     expect(s002VolumeCheck(500)).toBe(true);
   });
 
-  it("signal with edge_cents < 3 → skipped, detail contains edge floor message", () => {
-    const result = s002EdgeCentsCheck(2);
-    expect(result.passes).toBe(false);
-    expect(result.detail).toMatch(/skipped: edge_cents=2¢ below 3¢ floor/);
+  it("spread guard: volume >= 150 but spread > 3¢ → rejected", () => {
+    expect(s002VolumeCheck(200, 4)).toBe(false);
   });
 
-  it("signal with edge_cents >= 3 → proceeds to LLM qualify", () => {
-    expect(s002EdgeCentsCheck(3).passes).toBe(true);
+  it("spread guard: volume >= 150 and spread <= 3¢ → passes", () => {
+    expect(s002VolumeCheck(200, 3)).toBe(true);
+    expect(s002VolumeCheck(200, 0)).toBe(true);
+  });
+
+  // Edge floor: 4¢ (up from 3¢ — 3¢ allowed setups below what the academic premise supports)
+  it("signal with edge_cents < 4 → skipped, detail contains edge floor message", () => {
+    const result = s002EdgeCentsCheck(3);
+    expect(result.passes).toBe(false);
+    expect(result.detail).toMatch(/skipped: edge_cents=3¢ below 4¢ floor/);
+  });
+
+  it("signal with edge_cents >= 4 → proceeds to qualify gate", () => {
+    expect(s002EdgeCentsCheck(4).passes).toBe(true);
     expect(s002EdgeCentsCheck(10).passes).toBe(true);
   });
 
-  it("signal with volume >= 200 AND edge_cents >= 3 → passes both filters", () => {
-    expect(s002VolumeCheck(250)).toBe(true);
+  it("signal with volume >= 150 AND edge_cents >= 4 → passes both filters", () => {
+    expect(s002VolumeCheck(200)).toBe(true);
     expect(s002EdgeCentsCheck(5).passes).toBe(true);
+  });
+
+  // Slot weights: shorter duration = stronger bias signal = full slot weight
+  it("slot weight: <= 3d → 1.0 (strongest bias signal)", () => {
+    expect(s002SlotWeight(0.5)).toBe(1.0);
+    expect(s002SlotWeight(3)).toBe(1.0);
+  });
+
+  it("slot weight: 3-7d → 0.75", () => {
+    expect(s002SlotWeight(5)).toBe(0.75);
+    expect(s002SlotWeight(7)).toBe(0.75);
+  });
+
+  it("slot weight: > 7d → 0.5 (weakest; far-term bias less supported)", () => {
+    expect(s002SlotWeight(8)).toBe(0.5);
+    expect(s002SlotWeight(30)).toBe(0.5);
+  });
+
+  // Auto-qualify bypass: mirrors S-005's high-confidence bypass
+  it("auto-qualify: YES 8-10¢, vol >= 300, edge >= 6¢ → bypasses LLM", () => {
+    expect(s002IsAutoQualified(9, 300, 6)).toBe(true);
+    expect(s002IsAutoQualified(8, 400, 8)).toBe(true);
+    expect(s002IsAutoQualified(10, 300, 6)).toBe(true);
+  });
+
+  it("auto-qualify: YES 11¢ → does not bypass (top of range, lower quality)", () => {
+    expect(s002IsAutoQualified(11, 400, 8)).toBe(false);
+  });
+
+  it("auto-qualify: vol < 300 → does not bypass", () => {
+    expect(s002IsAutoQualified(9, 299, 6)).toBe(false);
+  });
+
+  it("auto-qualify: edge < 6¢ → does not bypass", () => {
+    expect(s002IsAutoQualified(9, 300, 5)).toBe(false);
   });
 });
 

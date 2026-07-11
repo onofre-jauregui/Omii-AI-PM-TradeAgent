@@ -253,6 +253,27 @@ serve(async (req) => {
           })
           .eq("trade_id", t.id);
 
+        // 5b. S-005 calibration feedback — write per-trade outcome to weather_bucket_calibration
+        //     so the weather model can detect systematic per-city/bucket bias over time.
+        if (outcome !== "void" && (ticker ?? "").startsWith("KXHIGH")) {
+          const cityMatch = ticker.match(/^KXHIGH([A-Z]+)-/);
+          const bucketMatch = ticker.match(/-B([\d.]+)$/);
+          const calCity = cityMatch?.[1] ?? null;
+          const calBucket = bucketMatch ? parseFloat(bucketMatch[1]) : null;
+          if (calCity && calBucket !== null) {
+            const yesSideWon = (t.side === "yes" && pnl > 0) || (t.side === "no" && pnl < 0);
+            await supabase.from("weather_bucket_calibration").upsert({
+              location_code: calCity,
+              bucket_threshold: calBucket,
+              trade_date: new Date().toISOString().slice(0, 10),
+              yes_resolved: yesSideWon,
+              pnl: Math.round(pnl * 100) / 100,
+              side: t.side,
+              ticker,
+            }, { onConflict: "location_code,trade_date,bucket_threshold,ticker" }).then(undefined, () => {});
+          }
+        }
+
         // 6. Compliance audit entry
         await supabase.from("compliance_log").insert({
           event_type: "trade_settled",
@@ -283,25 +304,35 @@ serve(async (req) => {
           }).catch(() => {});
         }
 
-        // 7. Auto stop-loss: if the trade settled at a loss ≥ stop_loss_pct% of amount,
-        //    halt trading for the rest of today for this user.
+        // 7. Daily drawdown circuit breaker: halt if cumulative daily loss exceeds max_daily_loss.
+        //    Binary prediction contracts always lose 100% of the bet on settlement — a per-trade
+        //    loss-percentage check would fire on every normal losing trade. Use daily PnL instead.
         if (pnl < 0 && t.user_id) {
+          const today = new Date().toISOString().split("T")[0];
           const { data: riskRow } = await supabase
             .from("risk_settings")
-            .select("auto_stop_loss, stop_loss_pct")
+            .select("auto_stop_loss, max_daily_loss")
             .eq("user_id", t.user_id)
             .maybeSingle();
 
-          if (riskRow?.auto_stop_loss && (riskRow.stop_loss_pct ?? 0) > 0) {
-            const lossPct = (Math.abs(pnl) / (Number(t.amount) || 1)) * 100;
-            if (lossPct >= riskRow.stop_loss_pct) {
-              const today = new Date().toISOString().split("T")[0];
+          if (riskRow?.auto_stop_loss && (riskRow.max_daily_loss ?? 0) > 0) {
+            const { data: stateRow } = await supabase
+              .from("risk_state")
+              .select("daily_pnl")
+              .eq("user_id", t.user_id)
+              .eq("date", today)
+              .maybeSingle();
+
+            const dailyPnl = Number(stateRow?.daily_pnl ?? 0) + pnl;
+            const limit = -Math.abs(Number(riskRow.max_daily_loss));
+
+            if (dailyPnl <= limit) {
               await supabase.from("risk_state").upsert(
                 {
                   user_id: t.user_id,
                   date: today,
                   is_trading_halted: true,
-                  halt_reason: `Auto stop-loss: ${ticker} lost ${lossPct.toFixed(1)}% (threshold: ${riskRow.stop_loss_pct}%)`,
+                  halt_reason: `Daily loss limit reached: $${Math.abs(dailyPnl).toFixed(2)} lost (limit: $${riskRow.max_daily_loss})`,
                   updated_at: new Date().toISOString(),
                 },
                 { onConflict: "user_id,date" }
@@ -311,27 +342,26 @@ serve(async (req) => {
                 severity: "warning",
                 trade_id: t.id,
                 user_id: t.user_id,
-                message: `Auto stop-loss halted trading: ${ticker} lost ${lossPct.toFixed(1)}% (threshold: ${riskRow.stop_loss_pct}%)`,
-                metadata: { pnl: Math.round(pnl * 100) / 100, amount: t.amount, lossPct, threshold: riskRow.stop_loss_pct, run_id: runId },
+                message: `Daily loss limit reached: $${Math.abs(dailyPnl).toFixed(2)} (limit $${riskRow.max_daily_loss}). Trading halted.`,
+                metadata: { daily_pnl: dailyPnl, limit, triggering_trade: ticker, run_id: runId },
               });
 
-              // Critical alert — force both email + SMS regardless of user channel preference
-              const lossAmt = Math.abs(Math.round(pnl * 100) / 100).toFixed(2);
+              const lossAmt = Math.abs(dailyPnl).toFixed(2);
               sendUserNotification(supabase, {
                 userId: t.user_id,
                 eventType: "stop_loss_hit",
                 forceChannel: "both",
-                subject: `STOP LOSS: ${ticker} — trading halted`,
+                subject: `Daily loss limit hit — trading halted`,
                 htmlBody: `
-                  <h2 style="color:#ef4444;font-size:22px;font-weight:700;margin:0 0 4px;">Stop Loss Triggered</h2>
-                  <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">${ticker} — trading halted for today</p>
+                  <h2 style="color:#ef4444;font-size:22px;font-weight:700;margin:0 0 4px;">Daily Loss Limit Reached</h2>
+                  <p style="color:rgba(255,255,255,0.5);font-size:14px;margin:0 0 24px;">Trading halted for the rest of today</p>
                   <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px;">
-                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Loss on position</td><td style="color:#ef4444;text-align:right;">${lossPct.toFixed(1)}% (-$${lossAmt})</td></tr>
-                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Threshold</td><td style="color:#fff;text-align:right;">${riskRow.stop_loss_pct}%</td></tr>
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Today's loss</td><td style="color:#ef4444;text-align:right;">-$${lossAmt}</td></tr>
+                    <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Daily limit</td><td style="color:#fff;text-align:right;">$${riskRow.max_daily_loss}</td></tr>
                     <tr><td style="color:rgba(255,255,255,0.5);padding:6px 0;">Status</td><td style="color:#ef4444;text-align:right;font-weight:600;">HALTED</td></tr>
                   </table>
                   <p style="color:rgba(255,255,255,0.6);font-size:13px;">All trading is paused for today. Resume from the dashboard when ready.</p>`,
-                smsBody: `TradeAgent ALERT: Stop-loss hit on ${ticker} (${lossPct.toFixed(1)}%, -$${lossAmt}). Trading HALTED today.`,
+                smsBody: `TradeAgent ALERT: Daily loss limit hit (-$${lossAmt} / limit $${riskRow.max_daily_loss}). Trading HALTED today.`,
               }).catch(() => {});
             }
           }

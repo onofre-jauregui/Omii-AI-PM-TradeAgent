@@ -22,8 +22,15 @@ function parseTempBucket(ticker: string, title: string): { low: number; high: nu
   const thresholdMatch = ticker.match(/-T(\d+)$/i);
   if (thresholdMatch) {
     const threshold = Number(thresholdMatch[1]);
-    // Open upper bound: "YES if high >= threshold°F". Use 9999 so bucketProbability
-    // computes P(X >= threshold) = 1 - normalCdf(threshold), not a 5°F slice.
+    const tl = title.toLowerCase();
+    // Detect "YES if high < threshold" markets from title language
+    const hasBelow = /<\s*\d|less than|below|under/.test(tl);
+    const hasAbove = />\s*\d|at least|over\s|\babove\b/.test(tl);
+    if (hasBelow && !hasAbove) {
+      // YES = high < threshold → P(high in (-inf, threshold))
+      return { low: -999, high: threshold };
+    }
+    // Default: YES = high >= threshold → P(high in [threshold, +inf))
     return { low: threshold, high: 9999 };
   }
 
@@ -37,11 +44,11 @@ function parseTempBucket(ticker: string, title: string): { low: number; high: nu
 
   // "above X" / "at least X" / "over X" (open-ended upper threshold)
   m = t.match(/(?:above|at least|over|>=)\s+(\d+)/i);
-  if (m) { const lo = Number(m[1]); return { low: lo, high: lo + 10 }; }
+  if (m) { const lo = Number(m[1]); return { low: lo, high: 9999 }; }
 
   // "below X" / "under X" / "less than X" (open-ended lower threshold)
   m = t.match(/(?:below|under|less than|<)\s+(\d+)/i);
-  if (m) { const hi = Number(m[1]); return { low: hi - 10, high: hi }; }
+  if (m) { const hi = Number(m[1]); return { low: -999, high: hi }; }
 
   return null;
 }
@@ -126,7 +133,7 @@ async function syncWeatherMarkets(
 // Backtest (weather_replay, ERA5 ground truth) showed 15¢ threshold hits 48.9%
 // win rate vs 38.1% at 5¢. Profitable at all thresholds due to asymmetric
 // payouts, but 15¢ maximizes risk-adjusted edge.
-const MIN_EDGE_TO_SIGNAL_CENTS = 3;
+const MIN_EDGE_TO_SIGNAL_CENTS = 25;
 
 // AUS and CHI show 22-23% win rates vs LAX 45%, NYC/MIA ~38%.
 // GFS underperforms on continental convective weather — exclude until
@@ -282,7 +289,7 @@ serve(async (req) => {
             severity: "warning",
             message: `weather-signal: open-meteo ECMWF fetch failed for ${loc.code}: ${ecmwfMsg.slice(0, 120)}`,
             metadata: { provider: "open-meteo", city: loc.code, error: ecmwfMsg },
-          }).catch(() => {});
+          }).then(undefined, () => {});
         }
 
         // Dual-model consensus: adjust effective edge based on model agreement
@@ -318,6 +325,15 @@ serve(async (req) => {
 
           const edge = computeEdge(m, trueProb);
           const rawEdgeCents = Math.abs(edge.edgeCents);
+          // Skip extreme model-vs-market disagreements where the market is likely right.
+          // A claimed 65¢+ edge against a market side priced above 50¢ indicates the GFS
+          // missed an event (e.g., heat wave). Trust the market in these cases.
+          if (rawEdgeCents > 65) {
+            const opposingMarketConfidence = edge.direction === 'buy_yes'
+              ? (m.yes_ask != null ? 100 - m.yes_ask : 0)   // NO side price
+              : (m.yes_bid ?? 0);                             // YES side price
+            if (opposingMarketConfidence > 50) continue; // market strongly disagrees — skip
+          }
           // Apply dual-model confidence multiplier: if models disagree, require larger edge
           const effectiveEdge = rawEdgeCents * confidenceMultiplier;
           if (effectiveEdge < MIN_EDGE_TO_SIGNAL_CENTS) continue;

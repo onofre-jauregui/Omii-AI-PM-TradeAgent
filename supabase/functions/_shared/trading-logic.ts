@@ -98,20 +98,60 @@ export function computeWinStreakFromTrades(
 
 // ─── S-002 Longshot Bias Filters ──────────────────────────────────────────────
 
-/** Volume gate: require >= 200 contracts for reliable price discovery. */
-export function s002VolumeCheck(volume: number): boolean {
-  return volume >= 200;
+/**
+ * Volume gate: require >= 150 contracts with a spread guard.
+ * 200 was borrowed from equity options and excluded too much of the Kalshi longshot
+ * universe. 150 is the lower bound; spread <= 3¢ compensates for lower volume by
+ * ensuring price discovery is still reliable.
+ */
+export function s002VolumeCheck(volume: number, spreadCents?: number): boolean {
+  if (volume >= 150) {
+    // Spread guard: if spread provided, reject wide markets regardless of volume.
+    if (spreadCents !== undefined && spreadCents > 3) return false;
+    return true;
+  }
+  return false;
 }
 
 /**
- * Edge floor: require >= 3¢ true-vs-implied divergence.
- * Returns {passes: true} or {passes: false, detail: "skipped: edge_cents=X¢ below 3¢ floor"}.
+ * Edge floor: require >= 4¢ true-vs-implied divergence.
+ * The academic edge at the 8-11¢ YES range is ~5pp (7% true vs 12% implied). At
+ * 10¢ YES this is ~0.5¢ raw probability edge per contract; the 4¢ floor on the
+ * aggregated signal-level edge_cents field keeps out stale/noisy signals that don't
+ * reflect the full structural premium.
  */
 export function s002EdgeCentsCheck(
   edgeCents: number
 ): { passes: boolean; detail?: string } {
-  if (edgeCents >= 3) return { passes: true };
-  return { passes: false, detail: `skipped: edge_cents=${edgeCents}¢ below 3¢ floor` };
+  if (edgeCents >= 4) return { passes: true };
+  return { passes: false, detail: `skipped: edge_cents=${edgeCents}¢ below 4¢ floor` };
+}
+
+/**
+ * Duration-based slot weight for S-002 positions.
+ * Literature supports stronger longshot bias in shorter-duration contracts — we
+ * prefer them and weight the cap accordingly.
+ *   ≤ 3d  → weight 1.0 (full slot; strongest bias signal)
+ *   3-7d  → weight 0.75
+ *   > 7d  → weight 0.5  (weakest; limit exposure in uncertain far-term)
+ */
+export function s002SlotWeight(daysToClose: number): number {
+  if (daysToClose <= 3) return 1.0;
+  if (daysToClose <= 7) return 0.75;
+  return 0.5;
+}
+
+/**
+ * Auto-qualify bypass: signals in the 8-10¢ YES band with volume >= 300 and
+ * edge_cents >= 6 have enough structural confirmation that per-trade LLM review
+ * adds noise rather than signal. Mirrors S-005's 30¢ auto-qualify bypass.
+ */
+export function s002IsAutoQualified(
+  yesAsk: number,
+  volume: number,
+  edgeCents: number
+): boolean {
+  return yesAsk >= 8 && yesAsk <= 10 && volume >= 300 && edgeCents >= 6;
 }
 
 // ─── S-005 Weather Edge City Gate ─────────────────────────────────────────────

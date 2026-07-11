@@ -14,6 +14,9 @@ import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
+import { StrategyStories } from "@/components/trading/StrategyStories";
+import { HITLApprovalsCard } from "@/components/trading/HITLApprovalsCard";
+import { LiveModeBanner } from "@/components/trading/LiveModeBanner";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot, Lock } from "lucide-react";
@@ -137,6 +140,9 @@ const Index = () => {
       )}
 
       <div className="flex-1 flex flex-col min-w-0">
+        {/* Live mode safety banner — must be unmissable */}
+        {mode === "live" && <LiveModeBanner />}
+
         {/* Top header */}
         <header
           className={cn(
@@ -239,6 +245,9 @@ const Index = () => {
               state on every return because all useEffect data fetches re-fired from scratch. */}
           <div className={cn("space-y-6", activeTab !== "dashboard" && "hidden")}>
             <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
+            {/* HITL approval queue — only rendered when there are pending/recent approvals */}
+            {mode === "live" && <HITLApprovalsCard userId={userId} />}
+            <StrategyStories mode={mode} onNavigate={handleNavigate} />
             <StrategyPerformance mode={mode} />
             <PortfolioOverview mode={mode} />
             <TradeLog filterMode={mode} />
