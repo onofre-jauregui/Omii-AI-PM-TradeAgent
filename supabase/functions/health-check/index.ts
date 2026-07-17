@@ -76,8 +76,8 @@ serve(async (req) => {
   if (!telegramToken || !telegramChatId) return json({ error: "Missing Telegram credentials" }, 500);
 
   const supabase = createClient(supabaseUrl, supabaseKey);
-  // Each entry: { type, fingerprint, cooldownHours, message }
-  const pendingAlerts: { type: string; fingerprint: string; cooldownHours: number; message: string }[] = [];
+  // Each entry: { type, fingerprint, cooldownHours, message, context? }
+  const pendingAlerts: { type: string; fingerprint: string; cooldownHours: number; message: string; context?: Record<string, unknown> }[] = [];
   const now = new Date();
 
   try {
@@ -123,6 +123,13 @@ serve(async (req) => {
           fingerprint,
           cooldownHours: SILENCE_HOURS,
           message: `⚠️ [TradeAgent] Silence ${hoursSinceLastTrade.toFixed(0)}h — last: ${sinceStr} — signals present, check errors`,
+          context: {
+            hours_silent: hoursSinceLastTrade,
+            last_trade_at: lastTrade?.created_at ?? null,
+            last_strategy_id: lastTrade?.strategy_id ?? null,
+            active_strategy_count: (activeStrategies ?? []).filter(s => !s.suspended_until || new Date(s.suspended_until) < now).length,
+            has_recent_signals: true,
+          },
         });
       }
     }
@@ -150,6 +157,21 @@ serve(async (req) => {
           fingerprint,
           cooldownHours: 24,
           message: `🔴 [TradeAgent] Win rate ${(winRate * 100).toFixed(0)}% (${wins}W/${losses}L of ${recentSettled.length}) — floor ${(WIN_RATE_FLOOR * 100).toFixed(0)}%`,
+          context: {
+            win_rate: winRate,
+            wins,
+            losses,
+            sample_size: recentSettled.length,
+            floor: WIN_RATE_FLOOR,
+            strategy_breakdown: Object.entries(
+              recentSettled.reduce((acc: Record<string, { w: number; l: number }>, t: any) => {
+                const k = t.strategy_id ?? "unknown";
+                if (!acc[k]) acc[k] = { w: 0, l: 0 };
+                Number(t.pnl) > 0 ? acc[k].w++ : acc[k].l++;
+                return acc;
+              }, {})
+            ),
+          },
         });
       }
     }
@@ -268,6 +290,14 @@ serve(async (req) => {
         fingerprint,
         cooldownHours: 2,
         message: `🔴 [TradeAgent] ${recentErrors.length} error(s): ${recentErrors[0].event_type} — ${recentErrors[0].message.slice(0, 80)}`,
+        context: {
+          error_count: recentErrors.length,
+          errors: recentErrors.slice(0, 5).map((e: any) => ({
+            event_type: e.event_type,
+            message: e.message,
+            created_at: e.created_at,
+          })),
+        },
       });
     }
 
@@ -383,6 +413,25 @@ serve(async (req) => {
         message: `Alert sent: ${alert.type}`,
         metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
       });
+
+      // Write a diagnostic trigger so the scheduled diagnostic agent can
+      // analyze the root cause and send a resolution recommendation to Telegram.
+      // The agent polls compliance_log for unresolved diagnostic_needed events
+      // and posts follow-up messages with specific fix steps.
+      if (alert.context) {
+        await supabase.from("compliance_log").insert({
+          event_type: "diagnostic_needed",
+          severity: "warning",
+          message: `Needs diagnosis: ${alert.type} — ${alert.message.slice(0, 120)}`,
+          metadata: {
+            alert_type: alert.type,
+            alert_message: alert.message,
+            diagnostic_context: alert.context,
+            triggered_at: now.toISOString(),
+            resolved: false,
+          },
+        });
+      }
 
       alertsSent.push(alert.type);
     }
