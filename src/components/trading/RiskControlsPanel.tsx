@@ -9,8 +9,9 @@ import { useState, useCallback, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useStrategies } from "@/lib/strategiesContext";
 
-export function RiskControlsPanel() {
-  const { strategies } = useStrategies();
+export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
+  const { strategies: allStrategies } = useStrategies();
+  const strategies = allStrategies.filter(s => s.mode === mode);
   const activeStrategies = strategies.filter(s => s.active);
 
   const [totalBudget, setTotalBudget] = useState<string>("3000");
@@ -246,12 +247,18 @@ export function RiskControlsPanel() {
         </div>
 
         {strategies.length === 0 ? (
-          <p className="text-sm text-muted-foreground border-t border-border pt-4">No strategies configured yet.</p>
+          <p className="text-sm text-muted-foreground border-t border-border pt-4">
+            {mode === "live"
+              ? "No live strategies yet — go to Strategies tab and click \"Run Live\" to create one."
+              : "No strategies configured yet."}
+          </p>
         ) : (
           <>
             {/* Total budget (reference only — for ROI tracking) */}
             <div className="space-y-1.5 border-t border-border pt-4">
-              <Label className="text-sm text-muted-foreground">Reference Budget (ROI tracking)</Label>
+              <Label className="text-sm text-muted-foreground">
+                {mode === "live" ? "Live Capital" : "Reference Budget (ROI tracking)"}
+              </Label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">$</span>
                 <Input

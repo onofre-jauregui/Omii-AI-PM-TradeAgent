@@ -278,7 +278,7 @@ const Index = () => {
             </div>
             {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
             {agentSubTab === "strategies" && <StrategiesPanel mode={mode} subscriptionTier={subscriptionTier} />}
-            {agentSubTab === "risk"       && <RiskControlsPanel />}
+            {agentSubTab === "risk"       && <RiskControlsPanel mode={mode} />}
             {agentSubTab === "memory"     && <AgentMemoryCard full />}
           </div>
 
