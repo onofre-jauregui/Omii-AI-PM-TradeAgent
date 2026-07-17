@@ -350,11 +350,15 @@ export function DashboardHero({
 
   // Lazy-load Kalshi markets after initial render — primes cache, then re-runs load()
   // so marketsClosingToday is computed without blocking the hero's first paint.
+  // load is in deps so the closure is always fresh — a stale closure here wins the
+  // loadIdRef race and discards valid live-mode results.
   useEffect(() => {
+    let cancelled = false;
     getCachedKalshiMarkets().then(markets => {
-      if (markets.length > 0) load();
+      if (!cancelled && markets.length > 0) load();
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
+  }, [load]);
 
   const { startingBalance, portfolioValue, kalshiBalance, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
   const isUp = totalReturn >= 0;

@@ -670,19 +670,29 @@ Return ONLY valid JSON, no markdown, no extra text:
         }
 
         // ── Pattern-aware promotion to agent_memory ──
-        // Promotes when: LLM flagged it, OR 2+ losses same ticker in 7 days, OR absP >= $25.
-        // Previously: threshold was $50 and required extreme prices — most losses never reached qualify gate.
+        // Promotes when: LLM flagged it, 2+ losses OR 3+ wins same ticker in 7 days,
+        // absP >= $10, or user explicitly rated the trade.
         const absP = Math.abs(pnl);
-        const { data: recentLossesSameTicker } = await supabase
-          .from("trade_lessons")
-          .select("id")
-          .eq("outcome", "loss")
-          .contains("tags", [tickerBase])
-          .gte("created_at", sevenDaysAgo);
-        const isPattern = (recentLossesSameTicker?.length ?? 0) >= 2;
-        // User explicitly flagged bad trades always promote — direct human signal
-        const userFlaggedBad = trade.user_rating === "bad";
-        const shouldPromote = llmShouldPromote || isPattern || absP >= 25 || userFlaggedBad;
+        const [lossPatternRes, winPatternRes] = await Promise.all([
+          supabase
+            .from("trade_lessons")
+            .select("id")
+            .eq("outcome", "loss")
+            .contains("tags", [tickerBase])
+            .gte("created_at", sevenDaysAgo),
+          supabase
+            .from("trade_lessons")
+            .select("id")
+            .eq("outcome", "win")
+            .contains("tags", [tickerBase])
+            .gte("created_at", sevenDaysAgo),
+        ]);
+        const isPattern    = (lossPatternRes.data?.length ?? 0) >= 2;
+        const isWinPattern = (winPatternRes.data?.length  ?? 0) >= 3;
+        const userFlaggedBad  = trade.user_rating === "bad";
+        const userFlaggedGood = trade.user_rating === "good";
+        const shouldPromote = llmShouldPromote || isPattern || isWinPattern
+                            || absP >= 10 || userFlaggedBad || userFlaggedGood;
 
         if (shouldPromote) {
           // Memory content = the IF/THEN rule the qualify prompt should act on
@@ -705,8 +715,8 @@ Return ONLY valid JSON, no markdown, no extra text:
           if (existingMem) {
             await supabase.from("agent_memory").update({
               confirmations: (existingMem.confirmations || 1) + 1,
-              // User-flagged bad trades get a stronger confidence bump
-              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + (userFlaggedBad ? 0.05 : 0.02)),
+              // User-flagged trades get a stronger bump; good slightly less than bad (bad = avoid hard)
+              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + (userFlaggedBad ? 0.05 : userFlaggedGood ? 0.04 : 0.02)),
               // Update content with latest rule — LLM may have refined it
               ...(llmUsed ? { content: memoryContent, summary: memoryContent.slice(0, 120) } : {}),
               updated_at: new Date().toISOString(),
@@ -721,7 +731,7 @@ Return ONLY valid JSON, no markdown, no extra text:
               user_id: trade.user_id ?? null,
               strategy_id: trade.strategy_id,
               tags: [...memoryTags, ...(trade.user_rating ? ["user_rated", `user_${trade.user_rating}`] : [])],
-              confidence: userFlaggedBad ? 0.90 : (outcome === "loss" ? 0.85 : 0.75),
+              confidence: userFlaggedBad ? 0.90 : userFlaggedGood ? 0.88 : (outcome === "loss" ? 0.85 : 0.75),
               confirmations: 1,
               is_active: true,
               summary: memoryContent.slice(0, 120),

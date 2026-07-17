@@ -1512,7 +1512,7 @@ async function runS002LongshotBias(
   // Fetch agent_memory and lessons once — shared across all candidates this cycle.
   const { data: s002Memories } = await supabase
     .from("agent_memory")
-    .select("id, title, content, confidence")
+    .select("id, title, content, confidence, exposed_confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
     .is("quarantined_at", null)
@@ -1520,7 +1520,10 @@ async function runS002LongshotBias(
     .order("confidence", { ascending: false })
     .limit(5);
   const s002MemBlock = (s002Memories ?? [])
-    .map((m: any) => `[conf ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
+    .map((m: any) => {
+      const bay = m.exposed_confidence != null ? ` / bayesian ${Number(m.exposed_confidence).toFixed(2)}` : "";
+      return `[conf ${Number(m.confidence).toFixed(2)}${bay}] ${m.title}: ${m.content}`;
+    })
     .join("\n");
   const s002MemoryIds = (s002Memories ?? []).map((m: any) => m.id);
   const s002Lessons = await fetchStrategyLessons(supabase, strategy.id);
@@ -1966,7 +1969,7 @@ async function runS005WeatherEdge(
 
   const memBaseQuery = supabase
     .from("agent_memory")
-    .select("id, title, content, confidence")
+    .select("id, title, content, confidence, exposed_confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
     .is("quarantined_at", null)
@@ -1982,7 +1985,7 @@ async function runS005WeatherEdge(
   if (!strategyMemories || strategyMemories.length === 0) {
     const fallback = await supabase
       .from("agent_memory")
-      .select("id, title, content, confidence")
+      .select("id, title, content, confidence, exposed_confidence")
       .eq("strategy_id", strategy.id)
       .eq("is_active", true)
       .is("merged_into", null)
@@ -1993,7 +1996,10 @@ async function runS005WeatherEdge(
 
   const activeMemoryIds = (strategyMemories ?? []).map((m: any) => m.id);
   const memoryBlock = (strategyMemories ?? [])
-    .map((m: any) => `[confidence ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
+    .map((m: any) => {
+      const bay = m.exposed_confidence != null ? ` / bayesian ${Number(m.exposed_confidence).toFixed(2)}` : "";
+      return `[confidence ${Number(m.confidence).toFixed(2)}${bay}] ${m.title}: ${m.content}`;
+    })
     .join("\n");
 
   if (cityTags.length > 0) {
@@ -2369,14 +2375,25 @@ Reason: [one sentence explaining why this is rejected]`;
 
 async function fetchStrategyLessons(supabase: any, strategyId: string): Promise<string[]> {
   try {
-    const { data } = await supabase
-      .from("trade_lessons")
-      .select("lesson, do_differently, outcome")
-      .eq("strategy_id", strategyId)
-      .eq("outcome", "loss")
-      .order("created_at", { ascending: false })
-      .limit(5);
-    return (data || []).map((r: any) => `${r.lesson} → ${r.do_differently}`);
+    const [lossRes, winRes] = await Promise.all([
+      supabase
+        .from("trade_lessons")
+        .select("lesson, do_differently")
+        .eq("strategy_id", strategyId)
+        .eq("outcome", "loss")
+        .order("created_at", { ascending: false })
+        .limit(3),
+      supabase
+        .from("trade_lessons")
+        .select("lesson")
+        .eq("strategy_id", strategyId)
+        .eq("outcome", "win")
+        .order("created_at", { ascending: false })
+        .limit(2),
+    ]);
+    const losses = (lossRes.data || []).map((r: any) => `[LOSS] ${r.lesson} → ${r.do_differently}`);
+    const wins   = (winRes.data  || []).map((r: any) => `[WIN] ${r.lesson}`);
+    return [...losses, ...wins];
   } catch {
     return [];
   }

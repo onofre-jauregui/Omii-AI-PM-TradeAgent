@@ -187,9 +187,10 @@ export default function OnboardingPage() {
   const [finishing, setFinishing] = useState(false);
 
   // ── finish ────────────────────────────────────────────────────────────
-  async function finishOnboarding(destination: string, mode?: "paper" | "live") {
+  // Returns true on success. destination=null seeds data without navigating.
+  async function finishOnboarding(destination: string | null, mode?: "paper" | "live"): Promise<boolean> {
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { toast.error("Session expired — please sign in again."); return; }
+    if (!user) { toast.error("Session expired — please sign in again."); return false; }
 
     setFinishing(true);
     try {
@@ -242,10 +243,12 @@ export default function OnboardingPage() {
       );
       if (riskErr) throw riskErr;
 
-      navigate(destination);
+      if (destination) navigate(destination);
+      return true;
     } catch (err) {
       console.error("Onboarding finalize failed:", err);
       toast.error("Setup failed — please try again or contact support.");
+      return false;
     } finally {
       setFinishing(false);
     }
@@ -253,8 +256,15 @@ export default function OnboardingPage() {
 
   async function chooseModeAndContinue(mode: "paper" | "live") {
     setChosenMode(mode);
-    if (mode === "live") await finishOnboarding("/billing", "live");
-    else setStep("live");
+    if (mode === "live") {
+      await finishOnboarding("/billing", "live");
+    } else {
+      // Seed strategies + mark onboarding complete before advancing to the
+      // confirmation step — so a browser close after this point doesn't force
+      // the user back through the whole flow on next login.
+      const ok = await finishOnboarding(null, "paper");
+      if (ok) setStep("live");
+    }
   }
 
   const currentProvider = AI_PROVIDERS.find(p => p.id === selectedProvider) ?? AI_PROVIDERS[0];
@@ -594,9 +604,8 @@ export default function OnboardingPage() {
             </p>
             <div className="space-y-2 text-left mb-8">
               {[
-                ["S-001", "Surface Arbitrage",  "Exploits bracket mispricing in S&P 500, BTC, and ETH markets — structural edge, direction-agnostic"],
-                ["S-002", "Resolution Fade",    "Buys NO on overpriced contracts near resolution, fading market overconfidence"],
-                ["S-005", "Weather Edge",        "Trades NWS forecast vs Kalshi implied temperature divergence"],
+                ["S-001", "Surface Arbitrage", "Exploits bracket mispricing in S&P 500, BTC, and ETH markets — structural edge, direction-agnostic"],
+                ["S-005", "Weather Edge",      "Trades NWS forecast vs Kalshi implied temperature divergence"],
               ].map(([id, name, desc]) => (
                 <div key={id} className="rounded-xl bg-secondary/50 px-4 py-3 flex items-start gap-3">
                   <span className="text-[10px] font-mono bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 shrink-0">{id}</span>
@@ -609,11 +618,10 @@ export default function OnboardingPage() {
             </div>
             <Button
               className="w-full rounded-full gap-2"
-              onClick={() => finishOnboarding("/", chosenMode)}
-              disabled={finishing}
+              onClick={() => navigate("/")}
             >
-              {finishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-              {finishing ? "Setting up…" : "Go to dashboard"}
+              <ArrowRight className="h-4 w-4" />
+              Go to dashboard
             </Button>
           </div>
         )}
