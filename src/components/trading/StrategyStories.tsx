@@ -9,11 +9,11 @@ interface StrategyStoriesProps {
   onNavigate: (tab: string) => void;
 }
 
-const STRATEGY_META: Record<string, { emoji: string; short: string; fallbackInsight: string }> = {
-  "S-001": { emoji: "⚡", short: "Arb",     fallbackInsight: "Scans for bracket-sum and spread anomalies across Kalshi markets" },
-  "S-002": { emoji: "📉", short: "Fade",    fallbackInsight: "Fades sentiment-driven overreactions near resolution" },
-  "S-003": { emoji: "📊", short: "Macro",   fallbackInsight: "Trades economic series when Kalshi diverges from analyst consensus" },
-  "S-005": { emoji: "🌤",  short: "Weather", fallbackInsight: "Exploits GFS forecast edges in weather prediction markets" },
+const STRATEGY_META: Record<string, { label: string; short: string; fallbackInsight: string }> = {
+  "S-001": { label: "01", short: "Arb",     fallbackInsight: "Scans for bracket-sum and spread anomalies across Kalshi markets" },
+  "S-002": { label: "02", short: "Fade",    fallbackInsight: "Fades sentiment-driven overreactions near resolution" },
+  "S-003": { label: "03", short: "Macro",   fallbackInsight: "Trades economic series when Kalshi diverges from analyst consensus" },
+  "S-005": { label: "05", short: "Weather", fallbackInsight: "Exploits GFS forecast edges in weather prediction markets" },
 };
 
 const ORDER = ["S-001", "S-002", "S-003", "S-005"];
@@ -77,7 +77,7 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
   if (cards.every(c => !c.strategy)) return null;
 
   const focusedCard = cards[focused];
-  const focusedMeta = STRATEGY_META[focusedCard?.tid ?? ""] ?? { emoji: "📈", short: "", fallbackInsight: "" };
+  const focusedMeta = STRATEGY_META[focusedCard?.tid ?? ""] ?? { label: "--", short: "", fallbackInsight: "" };
   const focusedStats = focusedCard?.strategy ? strategyStats[focusedCard.strategy.id] : null;
   const focusedInsight =
     insights[focusedCard?.tid ?? ""] ??
@@ -90,7 +90,7 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
       {/* Story circles */}
       <div className="flex justify-between px-2">
         {cards.map(({ strategy, ghost, tid }, i) => {
-          const meta = STRATEGY_META[tid] ?? { emoji: "📈", short: "Strat", fallbackInsight: "" };
+          const meta = STRATEGY_META[tid] ?? { label: "📈", short: "Strat", fallbackInsight: "" };
           const stats = strategy ? strategyStats[strategy.id] : null;
           const pnl = stats?.totalPnl ?? 0;
           const trades = stats?.totalTrades ?? 0;
@@ -115,14 +115,14 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
                 <div
                   className={cn(
                     "flex items-center justify-center rounded-full bg-background transition-all duration-300",
-                    isFocused ? "text-2xl" : "text-xl"
+                    isFocused ? "text-sm font-bold" : "text-xs font-semibold"
                   )}
                   style={{
                     width: isFocused ? 52 : 48,
                     height: isFocused ? 52 : 48,
                   }}
                 >
-                  {meta.emoji}
+                  {meta.label}
                 </div>
               </div>
 
@@ -156,7 +156,7 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
         className="w-full flex items-center gap-2 rounded-xl px-3 py-2.5 text-left transition-colors active:scale-[0.99]"
         style={{ background: "var(--secondary)" }}
       >
-        <span className="text-base shrink-0">{focusedMeta.emoji}</span>
+        <span className="text-base shrink-0">{focusedMeta.label}</span>
         <span className="flex-1 text-xs text-muted-foreground leading-snug line-clamp-2">
           {focusedInsight}
         </span>

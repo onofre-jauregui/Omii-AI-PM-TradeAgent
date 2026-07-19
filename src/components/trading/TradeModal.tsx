@@ -184,7 +184,7 @@ export function TradeModal({ market, open, onClose, mode, initialSide }: TradeMo
 
           {/* Mode badge */}
           <div className="flex items-center justify-between text-xs text-muted-foreground bg-secondary/50 rounded-xl px-3 py-2">
-            <span>{mode === "paper" ? "📄 Paper trade" : "⚡ Live trade on Kalshi"}</span>
+            <span>{mode === "paper" ? "Paper trade" : "Live trade on Kalshi"}</span>
             <span className="font-medium">${amount} at risk</span>
           </div>
 

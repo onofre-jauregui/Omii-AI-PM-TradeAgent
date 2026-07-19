@@ -72,7 +72,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
         if (t?.pnl != null && t.pnl > 0) {
           const q = t.market_question ?? "";
           toast.success(`+$${t.pnl.toFixed(2)} · ${q.substring(0, 40)}${q.length > 40 ? "…" : ""}`, {
-            duration: 4000, icon: "🎯",
+            duration: 4000,
           });
         }
         loadTrades();
