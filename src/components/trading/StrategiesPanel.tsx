@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
-  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, ArrowRight, Lock,
+  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, ArrowRight,
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useStrategies, type Strategy } from "@/lib/strategiesContext";
@@ -195,10 +195,8 @@ function StrategyDetailModal({
 // ─── Main panel ───────────────────────────────────────────────────────────────
 export function StrategiesPanel({
   mode,
-  subscriptionTier,
 }: {
   mode: "paper" | "live";
-  subscriptionTier: "free" | "starter" | "pro" | "prop";
 }) {
   const { strategies, strategyStats, instanceExists, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
   const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null);
@@ -208,11 +206,7 @@ export function StrategiesPanel({
     name: "", description: "", instructions: "", active: false, starting_balance: 1000,
   });
 
-  // "Run Live" flow state
-  const [runLiveTarget, setRunLiveTarget] = useState<Strategy | null>(null);
-  const [capitalAmount, setCapitalAmount] = useState("500");
   const [isCreatingInstance, setIsCreatingInstance] = useState(false);
-  const [showUpgradeForLive, setShowUpgradeForLive] = useState(false);
 
   const visibleStrategies = strategies.filter(s => s.mode === mode);
 
@@ -256,16 +250,6 @@ export function StrategiesPanel({
       // Context refreshes via realtime subscription
     } finally {
       setIsCreatingInstance(false);
-      setRunLiveTarget(null);
-    }
-  }
-
-  function handleRunLiveClick(strat: Strategy) {
-    if (subscriptionTier === "free") {
-      setShowUpgradeForLive(true);
-    } else {
-      setCapitalAmount("500");
-      setRunLiveTarget(strat);
     }
   }
 
@@ -298,7 +282,7 @@ export function StrategiesPanel({
         <div className="rounded-2xl bg-secondary/40 border border-dashed border-border p-10 text-center">
           <p className="text-sm text-muted-foreground">
             {mode === "live"
-              ? "No live strategies yet. Switch to Paper view and click “→ Run Live” on any strategy to create one."
+              ? "No live strategies yet. Click “New Strategy” above to create one — it starts inactive until you turn it on."
               : "No paper strategies yet. Create one to get started."}
           </p>
         </div>
@@ -407,17 +391,9 @@ export function StrategiesPanel({
                   <Trash2 className="h-3 w-3" /> Delete
                 </Button>
 
-                {/* Create-instance shortcuts — only shown when mirror doesn't exist yet */}
-                {mode === "paper" && tid && !hasLiveInstance && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    className="h-7 text-[11px] rounded-full px-3 gap-1 text-red-500 ml-auto"
-                    onClick={() => handleRunLiveClick(strat)}
-                  >
-                    <ArrowRight className="h-3 w-3" /> Run Live
-                  </Button>
-                )}
+                {/* Test-in-Paper shortcut — mirror a live strategy into paper for safe iteration.
+                    (Paper cards intentionally expose no real-money "Run Live" action; live
+                    strategies are created directly from the Live view's New Strategy button.) */}
                 {mode === "live" && tid && !hasPaperInstance && (
                   <Button
                     size="sm"
@@ -585,78 +561,6 @@ export function StrategiesPanel({
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* Run Live — capital dialog */}
-      <Dialog open={!!runLiveTarget} onOpenChange={(open) => !open && setRunLiveTarget(null)}>
-        <DialogContent className="rounded-2xl border-0 apple-shadow max-w-sm p-6">
-          <DialogHeader>
-            <DialogTitle className="text-base font-medium">Run "{runLiveTarget?.name}" Live</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground mt-1 mb-4 leading-relaxed">
-            This creates a live instance that trades real money on your Kalshi account. It starts inactive — you must turn it on from the Strategies panel.
-          </p>
-          <div className="space-y-1.5 mb-4">
-            <Label className="text-sm text-muted-foreground">Starting capital ($)</Label>
-            <Input
-              type="number"
-              value={capitalAmount}
-              onChange={(e) => setCapitalAmount(e.target.value)}
-              className="rounded-xl border-0 bg-secondary"
-              min={1}
-            />
-          </div>
-          <div className="flex gap-3">
-            <Button
-              className="flex-1 rounded-full gap-2 bg-red-500 hover:bg-red-600 text-white"
-              disabled={isCreatingInstance || !capitalAmount || Number(capitalAmount) <= 0}
-              onClick={() => runLiveTarget && createInstance(runLiveTarget, "live", Number(capitalAmount))}
-            >
-              {isCreatingInstance ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-              {isCreatingInstance ? "Creating…" : "Create Live Instance"}
-            </Button>
-            <Button variant="secondary" onClick={() => setRunLiveTarget(null)} className="rounded-full">Cancel</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Upgrade modal — shown when free-tier user clicks Run Live */}
-      {showUpgradeForLive && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}
-          onClick={() => setShowUpgradeForLive(false)}
-        >
-          <div
-            className="relative w-full max-w-sm rounded-2xl p-8 text-center"
-            style={{ background: "var(--background)", boxShadow: "0 24px 48px rgba(0,0,0,0.2)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mx-auto mb-4 flex items-center justify-center rounded-full" style={{ width: 48, height: 48, background: "var(--secondary)" }}>
-              <Lock className="h-5 w-5 text-muted-foreground" />
-            </div>
-            <h2 className="text-lg font-semibold text-foreground mb-2">Live trading is locked</h2>
-            <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
-              Your current plan only supports paper trading. Upgrade to Starter ($99/mo) to enable live trading on Kalshi.
-            </p>
-            <div className="flex flex-col gap-2">
-              <button
-                onClick={() => { setShowUpgradeForLive(false); window.location.href = "/billing"; }}
-                className="w-full rounded-full py-3 text-sm font-medium text-white"
-                style={{ background: "#0071e3" }}
-              >
-                View plans
-              </button>
-              <button
-                onClick={() => setShowUpgradeForLive(false)}
-                className="w-full rounded-full py-3 text-sm font-medium text-muted-foreground"
-                style={{ background: "var(--secondary)" }}
-              >
-                Stay on paper
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,28 +1,8 @@
-import { TrendingUp, TrendingDown, DollarSign, BarChart3, Target, Clock, Loader2, Wallet, ChevronDown, ChevronUp, X } from "lucide-react";
+import { Clock, Loader2, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
-
-const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL as string)?.trim();
-const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim();
-
-async function fetchKalshiBalance(): Promise<number | null> {
-  try {
-    const resp = await fetch(
-      `${SUPABASE_URL}/functions/v1/kalshi-proxy?endpoint=portfolio/balance`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    // Kalshi returns balance in cents
-    if (typeof data?.balance === "number") return data.balance / 100;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// Fallback if strategies table can't be reached — matches onboarding seed (S-001: $500, S-002: $1k, S-005: $1k)
-const PAPER_STARTING_BALANCE = 2_500;
+import { cancelKalshiOrder } from "@/lib/kalshiApi";
+import { toast } from "sonner";
 
 interface Position {
   market_id: string;
@@ -38,179 +18,13 @@ interface Position {
   created_at: string | null;
   filled_at: string | null;
   status: string;
+  order_id: string | null;
 }
 
-interface Stats {
-  portfolioValue: number;
-  cashAvailable: number;
-  totalPnl: number;
-  winRate: number;
-  openPositionCount: number;
-  totalTrades: number;
-}
-
-// ─── Stat cards ───────────────────────────────────────────────────────────────
-// mode: 'paper' | 'live' | undefined (all)
-export function PortfolioStats({
-  mode,
-  startingBalance: startingBalanceProp,
-}: {
-  mode?: "paper" | "live";
-  startingBalance?: number;
-}) {
-  const effectiveStartingBalance = startingBalanceProp ?? PAPER_STARTING_BALANCE;
-  const [stats, setStats] = useState<Stats>({
-    portfolioValue: 0, cashAvailable: 0, totalPnl: 0,
-    winRate: 0, openPositionCount: 0, totalTrades: 0,
-  });
-  const [loading, setLoading] = useState(true);
-  const initialized = useRef(false);
-
-  const load = useCallback(async () => {
-    if (!initialized.current) setLoading(true);
-
-    const MAY_START = "2026-04-22T00:00:00.000Z";
-
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id ?? "";
-
-    // PnL only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
-    let settledQuery = supabase
-      .from("trades").select("pnl, mode").eq("status", "settled").eq("user_id", userId).gte("settled_at", MAY_START);
-    // Open positions: placed but not yet resolved
-    let openQuery = supabase
-      .from("trades").select("amount, mode").eq("status", "filled").eq("user_id", userId).is("settled_at", null);
-    // Starting balance from strategies table
-    const strategiesQuery = supabase
-      .from("strategies").select("starting_balance").eq("user_id", userId);
-
-    if (mode) {
-      settledQuery = settledQuery.eq("mode", mode);
-      openQuery = openQuery.eq("mode", mode);
-    }
-
-    const [{ data: settledTrades }, { data: openPositions }, { data: strategyRows }] = await Promise.all([
-      settledQuery,
-      openQuery,
-      strategiesQuery,
-    ]);
-
-    const startingBalance = strategyRows
-      ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
-      : effectiveStartingBalance;
-
-    const totalPnl = (settledTrades ?? []).reduce((sum, t) => sum + (t.pnl || 0), 0);
-    const winners = (settledTrades ?? []).filter(t => (t.pnl || 0) > 0).length;
-    const losers = (settledTrades ?? []).filter(t => (t.pnl || 0) < 0).length;
-    const capitalInFlight = (openPositions ?? []).reduce((s, t) => s + (t.amount || 0), 0);
-
-    let portfolioValue: number;
-    let cashAvailable: number;
-
-    if (mode === "paper" || !mode) {
-      // Paper: starting capital + settled P&L. Cash available = that minus what's currently in flight.
-      portfolioValue = startingBalance + totalPnl;
-      cashAvailable = Math.max(0, portfolioValue - capitalInFlight);
-    } else {
-      // Live: fetch real balance from Kalshi; fall back to trade math if API unavailable
-      const kalshiBalance = await fetchKalshiBalance();
-      if (kalshiBalance !== null) {
-        cashAvailable = kalshiBalance;
-        portfolioValue = kalshiBalance + totalPnl;
-      } else {
-        portfolioValue = startingBalance + totalPnl;
-        cashAvailable = Math.max(0, portfolioValue - capitalInFlight);
-      }
-    }
-
-    setStats({
-      portfolioValue,
-      cashAvailable,
-      totalPnl,
-      winRate: winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0,
-      openPositionCount: (openPositions ?? []).length,
-      totalTrades: (settledTrades ?? []).length,
-    });
-    setLoading(false);
-    initialized.current = true;
-  }, [mode]);
-
-  useEffect(() => {
-    load();
-    const ch = supabase
-      .channel(`portfolio-stats-rt-${mode ?? "all"}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [load, mode]);
-
-  const pnlPercent = mode === "paper"
-    ? ((stats.totalPnl / effectiveStartingBalance) * 100).toFixed(1)
-    : stats.portfolioValue > 0
-      ? ((stats.totalPnl / stats.portfolioValue) * 100).toFixed(1)
-      : "0.0";
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-6">
-        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (mode === "paper") {
-    return (
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard
-          icon={Wallet}
-          label="Portfolio Balance"
-          value={`$${stats.portfolioValue.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-          sub={`Started at $${effectiveStartingBalance.toLocaleString()}`}
-        />
-        <StatCard
-          icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
-          label="Total P&L"
-          value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-          valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
-          sub={`${pnlPercent}%`}
-        />
-        <StatCard
-          icon={Target}
-          label="Win Rate"
-          value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
-          valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
-        />
-        <StatCard icon={BarChart3} label="Total Trades" value={`${stats.totalTrades}`} />
-      </div>
-    );
-  }
-
-  // Live / all-mode stat cards
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <StatCard
-        icon={Wallet}
-        label="Cash Balance"
-        value={`$${stats.cashAvailable.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-        sub="Kalshi account"
-      />
-      <StatCard
-        icon={stats.totalPnl >= 0 ? TrendingUp : TrendingDown}
-        label="Total P&L"
-        value={`${stats.totalPnl >= 0 ? "+" : ""}$${stats.totalPnl.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-        valueClass={stats.totalPnl >= 0 ? "text-profit" : "text-loss"}
-        sub={`${pnlPercent}%`}
-      />
-      <StatCard
-        icon={Target}
-        label="Win Rate"
-        value={stats.totalTrades > 0 ? `${stats.winRate}%` : "--"}
-        valueClass={stats.winRate >= 50 ? "text-profit" : "text-loss"}
-      />
-      <StatCard icon={BarChart3} label="Open Positions" value={`${stats.openPositionCount}`} />
-    </div>
-  );
-}
+const STATUS_LABEL: Record<string, string> = {
+  open: "Resting order",
+  partial: "Partially filled",
+};
 
 // ─── Active positions list ────────────────────────────────────────────────────
 function timeAgo(iso: string) {
@@ -221,11 +35,35 @@ function timeAgo(iso: string) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function PositionDetail({ pos, onClose }: { pos: Position; onClose: () => void }) {
+function PositionDetail({
+  pos, mode, onClose, onCancelled,
+}: {
+  pos: Position;
+  mode?: "paper" | "live";
+  onClose: () => void;
+  onCancelled: () => void;
+}) {
+  const [cancelling, setCancelling] = useState(false);
   const entryTime = pos.filled_at || pos.created_at;
   const daysHeld = entryTime
     ? Math.floor((Date.now() - new Date(entryTime).getTime()) / 86_400_000)
     : null;
+  const cancellable = mode === "live" && (pos.status === "open" || pos.status === "partial") && !!pos.order_id;
+
+  async function handleCancel() {
+    if (!pos.order_id) return;
+    setCancelling(true);
+    try {
+      await cancelKalshiOrder(pos.order_id);
+      toast.success("Cancellation sent to Kalshi. Status updates on the next reconcile.");
+      onCancelled();
+      onClose();
+    } catch (e: any) {
+      toast.error(`Couldn't cancel order: ${e?.message ?? "unknown error"}`);
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   return (
     <div className="mt-2 mb-1 rounded-xl bg-secondary/60 p-4 text-sm space-y-3">
@@ -237,6 +75,12 @@ function PositionDetail({ pos, onClose }: { pos: Position; onClose: () => void }
       </div>
 
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+        {pos.status !== "filled" && (
+          <div>
+            <p className="text-muted-foreground mb-0.5">Order status</p>
+            <p className="font-medium capitalize">{STATUS_LABEL[pos.status] ?? pos.status}</p>
+          </div>
+        )}
         <div>
           <p className="text-muted-foreground mb-0.5">Side</p>
           <p className={`font-medium ${pos.side?.toLowerCase() === "yes" ? "text-profit" : "text-loss"}`}>
@@ -282,6 +126,17 @@ function PositionDetail({ pos, onClose }: { pos: Position; onClose: () => void }
           </div>
         )}
       </div>
+
+      {cancellable && (
+        <button
+          onClick={handleCancel}
+          disabled={cancelling}
+          className="w-full flex items-center justify-center gap-1.5 rounded-full py-2 text-xs font-medium text-red-600 bg-red-500/10 hover:bg-red-500/20 disabled:opacity-50 transition-colors"
+        >
+          {cancelling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+          {cancelling ? "Cancelling…" : "Cancel resting order"}
+        </button>
+      )}
     </div>
   );
 }
@@ -302,11 +157,15 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
     let q = supabase
       .from("trades")
       .select("*")
-      .eq("status", "filled")
       .eq("action", "buy")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(100);
+    // Live mode also surfaces resting orders (open/partial) so they're visible and
+    // cancellable; paper trades are always immediately filled.
+    q = mode === "live"
+      ? q.in("status", ["filled", "open", "partial"])
+      : q.eq("status", "filled");
     if (mode) q = q.eq("mode", mode);
     const { data } = await q;
     setPositions((data ?? []) as Position[]);
@@ -372,6 +231,11 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
                         {pos.side?.toUpperCase()} @ {pos.filled_price || pos.price}¢ · ${pos.amount}
                         {pos.strategy && <span> · {pos.strategy}</span>}
                       </p>
+                      {pos.status !== "filled" && (
+                        <span className="inline-flex items-center mt-1 text-[10px] font-medium rounded-full px-1.5 py-0.5 bg-amber-500/10 text-amber-600">
+                          {STATUS_LABEL[pos.status] ?? pos.status}
+                        </span>
+                      )}
                     </div>
                     <div className="text-right shrink-0 flex flex-col items-end gap-1">
                       {pos.pnl !== null && pos.pnl !== 0 && (
@@ -383,7 +247,7 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
                     </div>
                   </button>
                   {isSelected && (
-                    <PositionDetail pos={pos} onClose={() => setSelectedId(null)} />
+                    <PositionDetail pos={pos} mode={mode} onClose={() => setSelectedId(null)} onCancelled={load} />
                   )}
                 </div>
               );
@@ -404,21 +268,6 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function StatCard({ icon: Icon, label, value, valueClass = "text-foreground", sub }: {
-  icon: React.ElementType; label: string; value: string; valueClass?: string; sub?: string;
-}) {
-  return (
-    <div className="rounded-2xl bg-card p-4 sm:p-5 apple-shadow transition-shadow duration-300 hover:apple-shadow-hover">
-      <div className="flex items-center gap-2 mb-2">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-        <span className="text-xs text-muted-foreground">{label}</span>
-      </div>
-      <p className={`text-xl font-medium tabular-nums ${valueClass}`}>{value}</p>
-      {sub && <p className={`text-sm text-muted-foreground mt-0.5`}>{sub}</p>}
     </div>
   );
 }
