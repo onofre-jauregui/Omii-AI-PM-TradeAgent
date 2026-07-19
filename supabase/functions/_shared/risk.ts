@@ -36,7 +36,8 @@ export type RiskRejectionCode =
   | "daily_loss_limit"
   | "open_positions_limit"
   | "drawdown_limit"
-  | "concentration_limit";
+  | "concentration_limit"
+  | "capital_cap";
 
 export interface RiskEvaluationResult {
   passed: boolean;
@@ -154,5 +155,41 @@ export function evaluateRisk(
     }
   }
 
+  return { passed: true };
+}
+
+export interface CapitalCapResult {
+  passed: boolean;
+  reason?: string;
+  code?: Extract<RiskRejectionCode, "capital_cap">;
+}
+
+/**
+ * Aggregate live-exposure cap (the "Agent Capital Limit" / allocated_capital).
+ *
+ * Pure: the caller supplies the already-summed open live exposure (sum of the
+ * user's live trades that still hold risk — status filled/open/partial, not yet
+ * settled) and the incoming order amount. Rejects when the new order would push
+ * total open live exposure over allocated_capital.
+ *
+ * This is what makes allocated_capital a real cap on EVERY live path
+ * (single order, auto-trade leg, chat) — previously it was enforced only for
+ * multi-leg baskets in execute-basket.
+ *
+ * Live only. Paper is unbounded here by design (see evaluateRisk).
+ */
+export function evaluateCapitalCap(
+  openExposure: number,
+  amount: number,
+  allocatedCapital: number
+): CapitalCapResult {
+  const projected = openExposure + amount;
+  if (projected > allocatedCapital) {
+    return {
+      passed: false,
+      code: "capital_cap",
+      reason: `Order $${amount} would raise open live exposure to $${projected.toFixed(2)}, over the Agent Capital Limit of $${allocatedCapital}. Close positions or raise the limit.`,
+    };
+  }
   return { passed: true };
 }
