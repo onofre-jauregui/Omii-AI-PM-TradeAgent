@@ -302,6 +302,21 @@ serve(async (req) => {
     // ── Risk Management (tenant-scoped) ──
     const settings = await getRiskSettings(supabase, userId);
     const riskState = await getRiskStateToday(supabase, userId);
+
+    // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
+    // which would let a real-money order through unbounded. Require configured limits before
+    // any live trade rather than defaulting to permissive.
+    if (tradeMode === "live" && !settings) {
+      await logCompliance(supabase, userId, null, "risk_check_failed", "warning",
+        "Live trading requires configured risk limits",
+        { amount, price, side, action, ticker: resolvedTicker, code: "no_risk_settings", trace_id: traceId });
+      return new Response(JSON.stringify({
+        success: false,
+        code: "no_risk_settings",
+        error: "Live trading requires configured risk limits. Open Risk Controls and set your limits before trading live.",
+      }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const riskCheck = evaluateRisk(
       amount,
       tradeMode as "paper" | "live",

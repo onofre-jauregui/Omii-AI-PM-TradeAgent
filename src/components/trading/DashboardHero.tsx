@@ -23,6 +23,11 @@ async function getCachedKalshiMarkets(): Promise<any[]> {
   return kalshiMarketsFetch;
 }
 
+// How long a successful Kalshi wallet ping stays fresh. Within this window we reuse
+// the cached balance instead of re-hitting kalshi-ping, so the balance doesn't re-fetch
+// on every unrelated `trades` realtime event.
+const KALSHI_PING_TTL_MS = 15_000;
+
 interface ChartPoint { date: string; value: number; }
 
 interface HeroStats {
@@ -150,6 +155,8 @@ export function DashboardHero({
   userId?: string;
 }) {
   const loadIdRef = useRef(0); // cancels stale concurrent loads
+  const lastKalshiBalanceRef = useRef<number | null>(null); // last known-good wallet balance
+  const lastKalshiPingRef = useRef(0); // ts of last successful Kalshi ping (throttle window)
   const [stats, setStats] = useState<HeroStats>({
     startingBalance: 0,
     portfolioValue: 0,
@@ -178,16 +185,29 @@ export function DashboardHero({
     // Use prop if available — avoids a network round-trip on every load
     const userId = userIdProp ?? (await supabase.auth.getUser()).data.user?.id;
 
-    // Fetch Kalshi wallet balance when in live mode (non-blocking — may fail if no key set)
+    // Fetch Kalshi wallet balance when in live mode (non-blocking — may fail if no key set).
+    // Two guards prevent a 2600 → 0 → 2600 flicker: (1) within KALSHI_PING_TTL_MS we reuse the
+    // cached balance instead of re-pinging on every unrelated trades realtime event; (2) a transient
+    // failure (non-ok, missing balance, or throw) returns the last known-good value rather than null,
+    // so displayValue never falls back to the empty-live portfolioValue (0) after a good read.
     const kalshiBalanceFetch: Promise<number | null> = mode === "live"
-      ? supabase.auth.getSession().then(({ data: { session } }) => {
-          if (!session) return null;
-          const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
-          return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` } })
-            .then(r => r.ok ? r.json() : null)
-            .then(j => (j?.balance_usd != null ? Number(j.balance_usd) : null))
-            .catch(() => null);
-        })
+      ? (Date.now() - lastKalshiPingRef.current < KALSHI_PING_TTL_MS
+          ? Promise.resolve(lastKalshiBalanceRef.current)
+          : supabase.auth.getSession().then(({ data: { session } }) => {
+              if (!session) return lastKalshiBalanceRef.current;
+              const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
+              return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` } })
+                .then(r => (r.ok ? r.json() : null))
+                .then(j => {
+                  const bal = j?.balance_usd != null ? Number(j.balance_usd) : null;
+                  if (bal != null) {
+                    lastKalshiBalanceRef.current = bal;
+                    lastKalshiPingRef.current = Date.now();
+                  }
+                  return bal ?? lastKalshiBalanceRef.current; // keep last-good on transient failure
+                })
+                .catch(() => lastKalshiBalanceRef.current);
+            }))
       : Promise.resolve(null);
 
     const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
@@ -200,33 +220,47 @@ export function DashboardHero({
         .gte("settled_at", MAY_START)
         .order("settled_at", { ascending: false })
         .limit(2000),
-      // Open positions: filled but not yet settled
-      supabase
-        .from("trades")
-        .select("id, ticker")
-        .eq("status", "filled")
-        .eq("user_id", userId ?? "")
-        .is("settled_at", null),
-      // Trades placed today (for activity count)
-      supabase
-        .from("trades")
-        .select("id")
-        .eq("user_id", userId ?? "")
-        .gte("created_at", todayISO),
+      // Open positions: filled but not yet settled (mode-scoped so the live tab
+      // doesn't count paper positions)
+      (() => {
+        let q = supabase
+          .from("trades")
+          .select("id, ticker")
+          .eq("status", "filled")
+          .eq("user_id", userId ?? "")
+          .is("settled_at", null);
+        if (mode) q = q.eq("mode", mode);
+        return q;
+      })(),
+      // Trades placed today (for activity count) — mode-scoped
+      (() => {
+        let q = supabase
+          .from("trades")
+          .select("id")
+          .eq("user_id", userId ?? "")
+          .gte("created_at", todayISO);
+        if (mode) q = q.eq("mode", mode);
+        return q;
+      })(),
       // Starting balance — sum of strategies matching the current mode
       (() => {
         let q = supabase.from("strategies").select("starting_balance, mode").eq("user_id", userId ?? "");
         if (mode) q = q.eq("mode", mode);
         return q;
       })(),
-      // Most recently SETTLED trade — "Last settled" chip aligns with streak metric
-      supabase
-        .from("trades")
-        .select("settled_at")
-        .eq("user_id", userId ?? "")
-        .eq("status", "settled")
-        .order("settled_at", { ascending: false })
-        .limit(1),
+      // Most recently SETTLED trade — "Last settled" chip. Mode-scoped so the live tab
+      // doesn't surface a paper settlement while live P&L reads empty.
+      (() => {
+        let q = supabase
+          .from("trades")
+          .select("settled_at")
+          .eq("user_id", userId ?? "")
+          .eq("status", "settled")
+          .order("settled_at", { ascending: false })
+          .limit(1);
+        if (mode) q = q.eq("mode", mode);
+        return q;
+      })(),
     ]);
 
     const kalshiBalance = await kalshiBalanceFetch;
