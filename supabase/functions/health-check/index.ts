@@ -167,7 +167,7 @@ serve(async (req) => {
               recentSettled.reduce((acc: Record<string, { w: number; l: number }>, t: any) => {
                 const k = t.strategy_id ?? "unknown";
                 if (!acc[k]) acc[k] = { w: 0, l: 0 };
-                Number(t.pnl) > 0 ? acc[k].w++ : acc[k].l++;
+                if (Number(t.pnl) > 0) acc[k].w++; else acc[k].l++;
                 return acc;
               }, {})
             ),
