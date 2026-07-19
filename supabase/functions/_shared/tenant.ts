@@ -113,6 +113,46 @@ export async function getRiskStateToday(
 }
 
 /**
+ * Set (or clear) today's trading halt for a tenant. Writes risk_state scoped to
+ * (user_id, date) — the trading path reads halt state per-user, so a row without
+ * user_id is invisible to it (and rejected by RLS).
+ *
+ * Robust to migration apply-order: uses select-then-update/insert rather than an
+ * onConflict upsert, so it works whether or not the UNIQUE(user_id, date)
+ * constraint has been applied yet, and never depends on the old functional index.
+ */
+export async function setRiskHalt(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  halted: boolean,
+  reason: string | null
+): Promise<{ error: any }> {
+  const today = new Date().toISOString().split("T")[0];
+  const payload = {
+    is_trading_halted: halted,
+    halt_reason: halted ? reason : null,
+    updated_at: new Date().toISOString(),
+  };
+  const { data: existing } = await supabase
+    .from("risk_state")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("date", today)
+    .maybeSingle();
+  if (existing) {
+    const { error } = await supabase
+      .from("risk_state")
+      .update(payload)
+      .eq("id", (existing as any).id);
+    return { error };
+  }
+  const { error } = await supabase
+    .from("risk_state")
+    .insert({ ...payload, user_id: userId, date: today });
+  return { error };
+}
+
+/**
  * Apply the user_id filter to a Supabase query builder. Use this in edge
  * functions to ensure every query is tenant-scoped.
  *

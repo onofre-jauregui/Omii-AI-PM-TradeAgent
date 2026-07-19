@@ -19,8 +19,15 @@ import { HITLApprovalsCard } from "@/components/trading/HITLApprovalsCard";
 import { LiveModeBanner } from "@/components/trading/LiveModeBanner";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
-import { Bot, Lock } from "lucide-react";
+import { Bot, Lock, LayoutDashboard, Settings, LogOut } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 type Tab = "dashboard" | "agent" | "markets" | "settings";
 type Mode = "paper" | "live";
@@ -184,18 +191,41 @@ const Index = () => {
                 )}
               </div>
 
-              {/* Right: profile avatar — toggles settings/dashboard */}
-              <button
-                onClick={() => handleNavigate(activeTab === "settings" ? "dashboard" : "settings")}
-                className="shrink-0 active:scale-95 transition-transform"
-                title={activeTab === "settings" ? "Back to dashboard" : "Profile & settings"}
-              >
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
-                    {userEmail ? userEmail[0].toUpperCase() : "T"}
-                  </AvatarFallback>
-                </Avatar>
-              </button>
+              {/* Right: profile avatar — dropdown menu; the same tap opens and closes it */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="shrink-0 rounded-full active:scale-95 transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    title="Account menu"
+                  >
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
+                        {userEmail ? userEmail[0].toUpperCase() : "T"}
+                      </AvatarFallback>
+                    </Avatar>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56 rounded-xl apple-shadow">
+                  {userEmail && (
+                    <>
+                      <div className="px-3 py-2.5">
+                        <p className="text-xs text-muted-foreground truncate">{userEmail}</p>
+                      </div>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => handleNavigate("dashboard")}>
+                    <LayoutDashboard className="h-4 w-4" /> Dashboard
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => handleNavigate("settings")}>
+                    <Settings className="h-4 w-4" /> Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive" onClick={() => supabase.auth.signOut()}>
+                    <LogOut className="h-4 w-4" /> Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           ) : (
             /* Desktop: tab label left + toggle right */
@@ -277,8 +307,8 @@ const Index = () => {
               ))}
             </div>
             {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
-            {agentSubTab === "strategies" && <StrategiesPanel mode={mode} subscriptionTier={subscriptionTier} />}
-            {agentSubTab === "risk"       && <RiskControlsPanel />}
+            {agentSubTab === "strategies" && <StrategiesPanel mode={mode} />}
+            {agentSubTab === "risk"       && <RiskControlsPanel mode={mode} />}
             {agentSubTab === "memory"     && <AgentMemoryCard full />}
           </div>
 

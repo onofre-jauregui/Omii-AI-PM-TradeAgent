@@ -8,9 +8,11 @@ import { Shield, Save, Loader2, CheckCircle, AlertCircle, Wallet, OctagonX, Play
 import { useState, useCallback, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useStrategies } from "@/lib/strategiesContext";
+import { toast } from "sonner";
 
-export function RiskControlsPanel() {
-  const { strategies } = useStrategies();
+export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
+  const { strategies: allStrategies } = useStrategies();
+  const strategies = allStrategies.filter(s => s.mode === mode);
   const activeStrategies = strategies.filter(s => s.active);
 
   const [totalBudget, setTotalBudget] = useState<string>("3000");
@@ -33,42 +35,68 @@ export function RiskControlsPanel() {
   // Global kill switch state
   const [isHalted, setIsHalted] = useState(false);
   const [haltReason, setHaltReason] = useState<string | null>(null);
-  const [riskStateId, setRiskStateId] = useState<string | null>(null);
   const [haltToggling, setHaltToggling] = useState(false);
 
   const loadRiskState = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
     const today = new Date().toISOString().slice(0, 10);
+    // Scope by user_id: the trading path reads halt state per-user, and RLS isolates rows
+    // per user, so a date-only read can return the wrong (or no) row.
     const { data } = await supabase
       .from("risk_state")
       .select("id, is_trading_halted, halt_reason")
+      .eq("user_id", user.id)
       .eq("date", today)
       .maybeSingle();
     if (data) {
       setIsHalted(data.is_trading_halted ?? false);
       setHaltReason(data.halt_reason ?? null);
-      setRiskStateId(data.id);
     }
   }, []);
 
   const handleToggleHalt = async () => {
     setHaltToggling(true);
-    const today = new Date().toISOString().slice(0, 10);
-    const next = !isHalted;
-    const payload = {
-      is_trading_halted: next,
-      halt_reason: next ? "Manually paused by user" : null,
-      updated_at: new Date().toISOString(),
-    };
-    if (riskStateId) {
-      await supabase.from("risk_state").update(payload).eq("id", riskStateId);
-    } else {
-      // No row for today yet — insert one
-      const { data } = await supabase.from("risk_state").insert({ ...payload, date: today }).select("id").single();
-      if (data) setRiskStateId(data.id);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        toast.error("Not signed in — can't update the kill switch.");
+        return;
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      const next = !isHalted;
+      const payload = {
+        is_trading_halted: next,
+        halt_reason: next ? "Manually paused by user" : null,
+        updated_at: new Date().toISOString(),
+      };
+      // The row MUST carry user_id or the per-user RLS WITH CHECK rejects the write and the
+      // kill switch silently no-ops. We can't rely on onConflict upsert — the unique index is
+      // functional (COALESCE(user_id,''), date), which PostgREST's column-based onConflict
+      // can't target — so re-fetch this user's row for today (the server may have already
+      // created it) and update-by-id, else insert with user_id.
+      const { data: existing } = await supabase
+        .from("risk_state")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("date", today)
+        .maybeSingle();
+      let error;
+      if (existing) {
+        ({ error } = await supabase.from("risk_state").update(payload).eq("id", existing.id));
+      } else {
+        ({ error } = await supabase.from("risk_state").insert({ ...payload, user_id: user.id, date: today }));
+      }
+      if (error) {
+        toast.error(`Couldn't update kill switch: ${error.message}`);
+        return;
+      }
+      setIsHalted(next);
+      setHaltReason(next ? "Manually paused by user" : null);
+      toast.success(next ? "Trading paused — no new live orders will be placed." : "Trading resumed.");
+    } finally {
+      setHaltToggling(false);
     }
-    setIsHalted(next);
-    setHaltReason(next ? "Manually paused by user" : null);
-    setHaltToggling(false);
   };
 
   const loadAll = useCallback(async () => {
@@ -230,7 +258,7 @@ export function RiskControlsPanel() {
             <div>
               <Label className="text-sm">Agent Capital Limit</Label>
               <p className="text-[11px] text-muted-foreground mt-0.5">
-                Max live exposure the agent can hold at once — enforced server-side before every order.
+                Max total live exposure across open positions — enforced server-side on every live order (single, agent, or basket). Each order is also size-capped by Max Position Size below.
               </p>
             </div>
             <span className="text-sm font-medium tabular-nums shrink-0 ml-4">${riskSettings.allocatedCapital[0].toLocaleString()}</span>
@@ -241,17 +269,23 @@ export function RiskControlsPanel() {
             min={50} max={10000} step={50}
           />
           <p className="text-[10px] text-warning">
-            If open positions already equal this amount, no new live orders will be placed until positions close.
+            Once open live exposure would exceed this limit, new live orders are rejected before they reach Kalshi.
           </p>
         </div>
 
         {strategies.length === 0 ? (
-          <p className="text-sm text-muted-foreground border-t border-border pt-4">No strategies configured yet.</p>
+          <p className="text-sm text-muted-foreground border-t border-border pt-4">
+            {mode === "live"
+              ? "No live strategies yet — go to the Strategies tab (Live view) and click \"New Strategy\" to create one."
+              : "No strategies configured yet."}
+          </p>
         ) : (
           <>
             {/* Total budget (reference only — for ROI tracking) */}
             <div className="space-y-1.5 border-t border-border pt-4">
-              <Label className="text-sm text-muted-foreground">Reference Budget (ROI tracking)</Label>
+              <Label className="text-sm text-muted-foreground">
+                {mode === "live" ? "Live Capital" : "Reference Budget (ROI tracking)"}
+              </Label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">$</span>
                 <Input
@@ -264,7 +298,7 @@ export function RiskControlsPanel() {
                 />
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Used for P&L % calculations only — not a trading limit. Revoke API access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
+                Baseline for ROI / P&L % math — not a trading cap. Your real limits are Max Position Size (per order) and Agent Capital Limit (total exposure) above. Revoke API access anytime from <span className="font-medium">Kalshi → Account → API Keys</span>.
               </p>
             </div>
 

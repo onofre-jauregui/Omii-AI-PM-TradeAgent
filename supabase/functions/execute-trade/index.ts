@@ -2,8 +2,8 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
-import { evaluateRisk, type RiskSettings, type RiskState } from "../_shared/risk.ts";
-import { resolveTenant, getRiskSettings, getRiskStateToday } from "../_shared/tenant.ts";
+import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "../_shared/risk.ts";
+import { resolveTenant, getRiskSettings, getRiskStateToday, setRiskHalt } from "../_shared/tenant.ts";
 import { isServiceRoleBearer } from "../_shared/auth-helpers.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
@@ -302,26 +302,56 @@ serve(async (req) => {
     // ── Risk Management (tenant-scoped) ──
     const settings = await getRiskSettings(supabase, userId);
     const riskState = await getRiskStateToday(supabase, userId);
-    const riskCheck = evaluateRisk(
+
+    // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
+    // which would let a real-money order through unbounded. Require configured limits before
+    // any live trade rather than defaulting to permissive.
+    if (tradeMode === "live" && !settings) {
+      await logCompliance(supabase, userId, null, "risk_check_failed", "warning",
+        "Live trading requires configured risk limits",
+        { amount, price, side, action, ticker: resolvedTicker, code: "no_risk_settings", trace_id: traceId });
+      return new Response(JSON.stringify({
+        success: false,
+        code: "no_risk_settings",
+        error: "Live trading requires configured risk limits. Open Risk Controls and set your limits before trading live.",
+      }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    let riskCheck = evaluateRisk(
       amount,
       tradeMode as "paper" | "live",
       settings as RiskSettings | null,
       riskState as RiskState | null
     );
 
-    // If the evaluator says we should set a new halt reason, persist it.
-    if (riskCheck.newHaltReason) {
-      const today = new Date().toISOString().split("T")[0];
-      await supabase.from("risk_state").upsert(
-        {
-          user_id: userId,
-          date: today,
-          is_trading_halted: true,
-          halt_reason: riskCheck.newHaltReason,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: userId ? "user_id,date" : "date" }
-      );
+    // Aggregate live-exposure cap (allocated_capital). Needs a DB sum, so it runs
+    // here and folds into riskCheck so the existing failure path handles logging +
+    // the failed-trade row. This makes allocated_capital a real cap on EVERY live
+    // path (single order, auto-trade leg, chat) — not just multi-leg baskets.
+    if (riskCheck.passed && tradeMode === "live" && userId && settings) {
+      const cap = (settings as any).allocated_capital ?? 500;
+      const { data: openLive } = await supabase
+        .from("trades")
+        .select("amount")
+        .eq("user_id", userId)
+        .eq("mode", "live")
+        .in("status", ["filled", "open", "partial"])
+        .is("settled_at", null);
+      const openExposure = (openLive ?? []).reduce((s: number, t: any) => s + (t.amount ?? 0), 0);
+      const capCheck = evaluateCapitalCap(openExposure, amount, cap);
+      if (!capCheck.passed) {
+        riskCheck = { passed: false, code: capCheck.code, reason: capCheck.reason };
+      }
+    }
+
+    // If the evaluator says we should set a new halt reason, persist it (per-user).
+    if (riskCheck.newHaltReason && userId) {
+      const { error: haltErr } = await setRiskHalt(supabase, userId, true, riskCheck.newHaltReason);
+      if (haltErr) {
+        captureMessage(`execute-trade failed to persist auto-halt: ${haltErr.message ?? haltErr}`, "error", {
+          function: "execute-trade", extra: { userId, reason: riskCheck.newHaltReason },
+        });
+      }
     }
 
     if (!riskCheck.passed) {

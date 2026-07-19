@@ -161,7 +161,7 @@ serve(async (req) => {
       //    Langfuse scoring if auto-settle fires twice before the first run commits.
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
-        .select("id, user_id, side, action, price, amount, created_at, trace_id")
+        .select("id, user_id, side, action, price, amount, created_at, trace_id, mode")
         .in("id", tradeIds)
         .eq("status", "filled")
         .is("settled_at", null);
@@ -385,11 +385,17 @@ serve(async (req) => {
     //    left the Kalshi API — fetchKalshiMarket() returns null for them, leaving them
     //    stuck open forever unless this sweep runs. 4h grace period prevents premature
     //    closure of markets in final settlement processing.
+    //
+    //    PAPER ONLY. A live order represents real money — force-expiring it to pnl=0
+    //    would destroy a real outcome. Live orders settle via market resolution (the
+    //    pending-resolution view now includes live) or are handled by reconcile-orders;
+    //    anything that genuinely can't resolve stays 'filled' for manual review.
     const expiryCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const { data: expiredByTime } = await supabase
       .from("trades")
       .select("id, ticker")
       .eq("status", "filled")
+      .eq("mode", "paper")
       .is("settled_at", null)
       .not("expiration_time", "is", null)
       .lt("expiration_time", expiryCutoff);

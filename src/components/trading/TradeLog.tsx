@@ -84,11 +84,17 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
 
   async function rateTrade(trade: Trade, rating: "good" | "bad") {
     if (ratingId) return;
+    const newRating = trade.user_rating === rating ? null : rating;
     setRatingId(trade.id);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      await supabase.from("trades").update({ user_rating: rating }).eq("id", trade.id);
-      const isGood = rating === "good";
+      await supabase.from("trades").update({ user_rating: newRating }).eq("id", trade.id);
+      if (newRating === null) {
+        setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, user_rating: null } : t));
+        toast("Rating cleared");
+        return;
+      }
+      const isGood = newRating === "good";
       const pnlStr = trade.pnl != null ? `P&L: ${trade.pnl >= 0 ? "+" : ""}$${trade.pnl.toFixed(2)}` : "P&L: pending";
       await supabase.from("agent_memory").insert({
         memory_type: isGood ? "success" : "mistake",
@@ -101,7 +107,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
         tags: ["user_feedback", trade.strategy ?? "manual", trade.side, isGood ? "good_trade" : "bad_trade"],
         user_id: user?.id ?? null,
       });
-      setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, user_rating: rating } : t));
+      setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, user_rating: newRating } : t));
       toast.success(`Feedback saved — agent will ${isGood ? "look for more setups like this" : "be more selective here"}`);
     } catch {
       toast.error("Failed to save feedback");
