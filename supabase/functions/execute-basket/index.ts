@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant, tenantInsertFields } from "../_shared/tenant.ts";
+import { evaluateCapitalCap } from "../_shared/risk.ts";
 
 /**
  * execute-basket: Multi-leg ordered trade execution with stateful lifecycle.
@@ -67,13 +68,16 @@ serve(async (req) => {
 
       const cap: number = riskRow?.allocated_capital ?? 500;
 
-      // Sum cost of all currently open live positions for this user
+      // Open live exposure = live trades still holding risk (not yet settled).
+      // Broadened from status='open' only to filled/open/partial to match the
+      // per-leg cap in execute-trade — otherwise filled legs wouldn't count.
       const { data: openTrades } = await supabase
         .from("trades")
         .select("amount")
         .eq("user_id", tenant.userId)
         .eq("mode", "live")
-        .eq("status", "open");
+        .in("status", ["filled", "open", "partial"])
+        .is("settled_at", null);
 
       const openExposure: number = (openTrades ?? []).reduce(
         (sum: number, t: { amount: number }) => sum + (t.amount ?? 0),
@@ -86,12 +90,10 @@ serve(async (req) => {
         0
       );
 
-      if (openExposure + basketCost > cap) {
+      const capCheck = evaluateCapitalCap(openExposure, basketCost, cap);
+      if (!capCheck.passed) {
         return new Response(
-          JSON.stringify({
-            error: `Capital cap exceeded. Allocated: $${cap}, current open exposure: $${openExposure.toFixed(2)}, basket cost: $${basketCost.toFixed(2)}. Adjust your allocated capital in Risk Controls or close open positions.`,
-            code: "CAPITAL_CAP_EXCEEDED",
-          }),
+          JSON.stringify({ error: capCheck.reason, code: "CAPITAL_CAP_EXCEEDED" }),
           { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }

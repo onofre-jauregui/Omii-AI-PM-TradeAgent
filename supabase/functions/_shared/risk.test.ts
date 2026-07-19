@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { evaluateRisk, type RiskSettings, type RiskState } from "./risk";
+import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "./risk";
 
 const baseSettings: RiskSettings = {
   max_position_size: 500,
   max_daily_loss: 500,
   max_open_positions: 10,
   max_drawdown_pct: 20,
+  auto_stop_loss: false,
+  stop_loss_pct: 0,
+  allocated_capital: 1000,
 };
 
 const baseState: RiskState = {
@@ -209,5 +212,30 @@ describe("evaluateRisk", () => {
       });
       expect(result.code).toBe("daily_loss_limit");
     });
+  });
+});
+
+describe("evaluateCapitalCap", () => {
+  it("allows an order when open exposure + amount is under the cap", () => {
+    const r = evaluateCapitalCap(300, 100, 500);
+    expect(r.passed).toBe(true);
+  });
+
+  it("allows an order that lands exactly on the cap", () => {
+    const r = evaluateCapitalCap(400, 100, 500);
+    expect(r.passed).toBe(true);
+  });
+
+  it("rejects an order that would exceed the cap", () => {
+    const r = evaluateCapitalCap(400, 101, 500);
+    expect(r.passed).toBe(false);
+    expect(r.code).toBe("capital_cap");
+    expect(r.reason).toContain("Agent Capital Limit");
+  });
+
+  it("rejects the very first order when it alone exceeds the cap", () => {
+    const r = evaluateCapitalCap(0, 600, 500);
+    expect(r.passed).toBe(false);
+    expect(r.code).toBe("capital_cap");
   });
 });

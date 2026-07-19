@@ -14,7 +14,7 @@ export function LiveModeBanner() {
       aria-label="Live trading mode active"
     >
       <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span>LIVE MODE — Real money is active. Trades require Telegram approval before executing.</span>
+      <span>LIVE MODE — Real money is active. Every trade needs your approval (in-app or Telegram) before it executes.</span>
     </div>
   );
 }
