@@ -258,7 +258,7 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
             <div>
               <Label className="text-sm">Agent Capital Limit</Label>
               <p className="text-[11px] text-muted-foreground mt-0.5">
-                Total live exposure the agent targets across open positions. The hard cap enforced on every individual order is Max Position Size (below).
+                Max total live exposure across open positions — enforced server-side on every live order (single, agent, or basket). Each order is also size-capped by Max Position Size below.
               </p>
             </div>
             <span className="text-sm font-medium tabular-nums shrink-0 ml-4">${riskSettings.allocatedCapital[0].toLocaleString()}</span>
@@ -269,7 +269,7 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
             min={50} max={10000} step={50}
           />
           <p className="text-[10px] text-warning">
-            Every live order is hard-capped by Max Position Size (below) before it reaches Kalshi.
+            Once open live exposure would exceed this limit, new live orders are rejected before they reach Kalshi.
           </p>
         </div>
 
