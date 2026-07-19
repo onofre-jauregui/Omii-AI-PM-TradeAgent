@@ -84,7 +84,7 @@ serve(async (req) => {
             severity: "warning",
             message: `settle-signals: Kalshi ${marketResp.status} fetching ${ticker}`,
             metadata: { provider: "kalshi", status: marketResp.status, endpoint: ticker },
-          }).catch(() => {});
+          }).then(undefined, () => {});
           results.push({ ticker, status: "api_error" });
           continue;
         }

@@ -64,7 +64,7 @@ export async function alertOnce(
       severity: "warning",
       message: `Alert sent: ${alertType}`,
       metadata: { alert_type: alertType, fingerprint },
-    }).catch(() => {}); // don't let the record insert block the alert path
+    }).then(undefined, () => {}); // don't let the record insert block the alert path
 
     return true;
   } catch {

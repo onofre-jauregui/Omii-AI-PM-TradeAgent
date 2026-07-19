@@ -1,16 +1,14 @@
 import { useState } from "react";
 import {
   LayoutDashboard, BarChart2, Settings, ChevronLeft, ChevronRight,
-  Activity, Bot, LogOut,
+  Bot,
 } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/integrations/supabase/client";
 
 interface SidebarProps {
   activeTab: string;
   onNavigate: (tab: string) => void;
-  userEmail?: string;
+  userEmail?: string; // retained for API compatibility — no longer displayed in sidebar
 }
 
 const NAV_ITEMS = [
@@ -23,7 +21,7 @@ const BOTTOM_ITEMS = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
+export function Sidebar({ activeTab, onNavigate }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -80,19 +78,19 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
             </button>
           );
         })}
-      </nav>
 
-      {/* Bottom: live status + profile/settings */}
-      <div className="shrink-0 border-t border-border py-3 px-2 space-y-0.5">
-        {/* Agent active indicator */}
+        {/* Agent active status — non-interactive, bottom of nav list */}
         <div className={cn(
-          "flex items-center gap-2 px-2.5 py-1.5 text-xs text-profit",
+          "flex items-center gap-2 px-2.5 py-1.5 text-xs text-profit mt-1",
           collapsed && "justify-center"
         )}>
           <span className="h-1.5 w-1.5 rounded-full bg-profit animate-pulse-gentle shrink-0" />
           {!collapsed && <span>Agent Active</span>}
         </div>
+      </nav>
 
+      {/* Bottom: settings */}
+      <div className="shrink-0 border-t border-border py-3 px-2 space-y-0.5">
         {BOTTOM_ITEMS.map(({ id, label, icon: Icon }) => {
           const active = activeTab === id;
           return (
@@ -113,27 +111,6 @@ export function Sidebar({ activeTab, onNavigate, userEmail }: SidebarProps) {
             </button>
           );
         })}
-
-        {/* Avatar + sign out */}
-        <div className={cn(
-          "flex items-center gap-2 rounded-lg px-2.5 py-2 mt-1",
-          collapsed ? "justify-center px-0" : "justify-between"
-        )}>
-          <Avatar className="h-6 w-6 shrink-0">
-            <AvatarFallback className="bg-secondary text-foreground text-[9px] font-medium">
-              {userEmail ? userEmail[0].toUpperCase() : "T"}
-            </AvatarFallback>
-          </Avatar>
-          {!collapsed && (
-            <button
-              onClick={() => supabase.auth.signOut()}
-              className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
-              title="Sign out"
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
       </div>
     </aside>
   );

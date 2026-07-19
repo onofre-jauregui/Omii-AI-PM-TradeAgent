@@ -151,15 +151,20 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
   // allSeries is no longer needed — fetchKalshiMarketsByCategory is self-contained
   // Kept in state to avoid breaking the KalshiSeries type import
   const fetchCategory = useCallback(async (category: string, force = false) => {
-    const TTL = 30_000;
+    const TTL = category === "Trending" ? 120_000 : 60_000;
     const cached = cache.current.get(category);
-    if (!force && cached && Date.now() - cached.fetchedAt < TTL) {
+
+    // Stale-while-revalidate: show cached data immediately even if stale.
+    // Only show the full-page spinner on a cold first load (nothing cached yet).
+    if (cached) {
       setMarkets(cached.markets);
       setLastUpdated(new Date(cached.fetchedAt));
-      return;
+      if (!force && Date.now() - cached.fetchedAt < TTL) return;
+      // Stale but has data — don't spin, just silently refresh in background
+    } else {
+      setLoading(true);
     }
 
-    setLoading(true);
     setError(null);
     try {
       const result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
@@ -167,8 +172,10 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
       setMarkets(result);
       setLastUpdated(new Date());
     } catch {
-      setError("Live feed unavailable");
-      setMarkets([]);
+      if (!cached) {
+        setError("Live feed unavailable");
+        setMarkets([]);
+      }
     } finally {
       setLoading(false);
     }

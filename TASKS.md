@@ -4,12 +4,11 @@
 ## In Progress
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
-| Finalize onboarding flow | HIGH | M | In Progress |
+| Billing UI + subscription enforcement | HIGH | M | Queued |
 
 ## Queued
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
-| Implement user feedback mechanism | HIGH | M | Queued |
 | Develop comprehensive marketing strategy | HIGH | L | Queued |
 | Integrate additional trading strategies | MED | M | Queued |
 | Optimize performance of trading algorithms | MED | L | Queued |
@@ -18,4 +17,5 @@
 ## Completed This Week
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
+| Finalize onboarding flow | HIGH | M | Completed |
 | Add waitlist admin view and onboarding flow | HIGH | M | Completed |

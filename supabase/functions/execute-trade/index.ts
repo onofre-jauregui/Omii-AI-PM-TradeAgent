@@ -144,6 +144,7 @@ serve(async (req) => {
       strategy, strategyId, mode, notes, orderType, timeInForce,
       expectedOutcome, confidenceLevel, traceId, expirationTime,
       sourceSignalId, influencedByMemoryIds, systemVersion, exitReason,
+      hitlApprovalId, // set by telegram-webhook when operator approves a deferred live trade
     } = parsedBody;
 
     const resolvedTicker = ticker || marketId;
@@ -301,6 +302,21 @@ serve(async (req) => {
     // ── Risk Management (tenant-scoped) ──
     const settings = await getRiskSettings(supabase, userId);
     const riskState = await getRiskStateToday(supabase, userId);
+
+    // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
+    // which would let a real-money order through unbounded. Require configured limits before
+    // any live trade rather than defaulting to permissive.
+    if (tradeMode === "live" && !settings) {
+      await logCompliance(supabase, userId, null, "risk_check_failed", "warning",
+        "Live trading requires configured risk limits",
+        { amount, price, side, action, ticker: resolvedTicker, code: "no_risk_settings", trace_id: traceId });
+      return new Response(JSON.stringify({
+        success: false,
+        code: "no_risk_settings",
+        error: "Live trading requires configured risk limits. Open Risk Controls and set your limits before trading live.",
+      }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const riskCheck = evaluateRisk(
       amount,
       tradeMode as "paper" | "live",
@@ -346,7 +362,7 @@ serve(async (req) => {
       }).select().single();
 
       await logCompliance(supabase, userId, failedTrade?.id, "risk_check_failed", "warning",
-        riskCheck.reason!, { amount, price, side, action, code: riskCheck.code });
+        riskCheck.reason!, { amount, price, side, action, code: riskCheck.code, trace_id: traceId });
 
       return new Response(JSON.stringify({
         success: false,
@@ -354,6 +370,146 @@ serve(async (req) => {
         trade: failedTrade,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
+
+    // ── HITL Gate (live trades only) ──────────────────────────────────────
+    // Two-phase deferred approval to avoid edge-function timeout:
+    //
+    // Phase 1 (first call, no hitlApprovalId):
+    //   Create approval record → send Telegram with inline keyboard → return 202.
+    //   The trade is NOT executed. auto-trade records hitl_pending and returns.
+    //
+    // Phase 2 (callback from telegram-webhook, hitlApprovalId present):
+    //   Verify the approval is in "approved" state → proceed to Kalshi execution.
+    //
+    // Paper trades skip this gate entirely.
+    if (tradeMode === "live") {
+      if (hitlApprovalId) {
+        // Phase 2: telegram-webhook already recorded the operator's decision —
+        // verify it before allowing through.
+        const { data: preAuth } = await supabase
+          .from("hitl_approvals")
+          .select("status, trace_id")
+          .eq("id", hitlApprovalId)
+          .single();
+
+        if (!preAuth || preAuth.status !== "approved") {
+          await logCompliance(supabase, userId, null, "hitl_gate_rejected", "warning",
+            `Live trade blocked — approval ${hitlApprovalId} is ${preAuth?.status ?? "not found"}`,
+            { hitl_approval_id: hitlApprovalId, ticker: resolvedTicker, trace_id: traceId }
+          );
+          return new Response(JSON.stringify({
+            success: false,
+            error: `Live trade blocked — HITL approval is ${preAuth?.status ?? "not found"}`,
+          }), { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+
+        await logCompliance(supabase, userId, null, "hitl_trade_approved", "info",
+          `Live trade executing — operator approved via Telegram`,
+          { hitl_approval_id: hitlApprovalId, ticker: resolvedTicker, trace_id: traceId }
+        );
+        // Fall through to execution below.
+
+      } else {
+        // Phase 1: no pre-authorization — create approval record and send Telegram.
+        const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
+        const chatId = Deno.env.get("TELEGRAM_CHAT_ID");
+
+        if (!botToken || !chatId) {
+          // Telegram not configured — block live trades entirely (fail safe).
+          await logCompliance(supabase, userId, null, "hitl_gate_error", "critical",
+            "HITL gate requires Telegram but TELEGRAM_BOT_TOKEN/CHAT_ID are not set — live trade blocked",
+            { ticker: resolvedTicker, trace_id: traceId }
+          );
+          return new Response(JSON.stringify({
+            success: false,
+            error: "Live trading requires HITL approval via Telegram. Configure TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.",
+          }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+
+        const { data: approvalRow, error: approvalInsertError } = await supabase
+          .from("hitl_approvals")
+          .insert({
+            user_id: userId,
+            trace_id: traceId || null,
+            trade_payload: {
+              ticker: resolvedTicker,
+              marketId: resolvedTicker,
+              marketQuestion: marketQuestion || resolvedTicker,
+              side,
+              action,
+              price,
+              amount,
+              strategy: strategy || null,
+              strategyId: strategyId || null,
+              mode: "live",
+              notes: notes || null,
+              orderType: orderType || null,
+              timeInForce: timeInForce || null,
+              expirationTime: expirationTime || null,
+              expectedOutcome: expectedOutcome || null,
+              confidenceLevel: confidenceLevel || null,
+              sourceSignalId: sourceSignalId || null,
+              traceId: traceId || null,
+            },
+            status: "pending",
+          })
+          .select("id")
+          .single();
+
+        if (approvalInsertError || !approvalRow) {
+          await logCompliance(supabase, userId, null, "hitl_gate_error", "critical",
+            "HITL gate failed to create approval record — live trade blocked",
+            { error: approvalInsertError?.message, ticker: resolvedTicker, trace_id: traceId }
+          );
+          return new Response(JSON.stringify({
+            success: false,
+            error: "HITL gate unavailable — live trade blocked for safety",
+          }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+
+        const approvalId = approvalRow.id;
+        const tradeValue = Math.round((amount * price) / 100);
+        const tradeMessage =
+          `🔔 <b>LIVE TRADE PENDING APPROVAL</b>\n\n` +
+          `📊 <b>${resolvedTicker}</b>\n` +
+          `💰 $${tradeValue} | ${side.toUpperCase()} ${action.toUpperCase()} @ ${price}¢\n` +
+          `📋 Strategy: ${strategy || "manual"}\n` +
+          (notes ? `📝 ${notes.slice(0, 150)}\n` : "") +
+          `\nTap below to approve or reject.\n` +
+          `⚠️ Rejecting (or ignoring) blocks the trade permanently.`;
+
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: tradeMessage,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[
+                { text: "✅ Approve", callback_data: `hitl_approve_${approvalId}` },
+                { text: "❌ Reject", callback_data: `hitl_reject_${approvalId}` },
+              ]],
+            },
+          }),
+        }).catch(() => {});
+
+        await logCompliance(supabase, userId, null, "hitl_approval_requested", "info",
+          `Live trade queued for HITL approval: ${resolvedTicker} ${side} ${action} @ ${price}¢`,
+          { approval_id: approvalId, ticker: resolvedTicker, price, amount, trace_id: traceId }
+        );
+
+        // Return 202 — trade is deferred, not executed.
+        // telegram-webhook will call execute-trade again with hitlApprovalId once approved.
+        return new Response(JSON.stringify({
+          success: false,
+          hitl_pending: true,
+          approval_id: approvalId,
+          message: "Live trade queued — awaiting operator approval via Telegram",
+        }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+    // ── End HITL Gate ─────────────────────────────────────────────────────
 
     // ── Paper Trading ──
     if (tradeMode === "paper") {
@@ -491,7 +647,7 @@ serve(async (req) => {
     // Log order submission
     await logCompliance(supabase, userId, null, "order_submitted", "info",
       `Submitting ${resolvedOrderType} order: ${action} ${contractCount}x ${side} ${resolvedTicker} @ ${price}c`,
-      { payload: kalshiOrderPayload, liquidity_check: liquidityCheck }
+      { payload: kalshiOrderPayload, liquidity_check: liquidityCheck, trace_id: traceId }
     );
 
     // Place order on Kalshi
@@ -533,8 +689,30 @@ serve(async (req) => {
 
       await logCompliance(supabase, userId, failedTrade?.id, "order_failed", "error",
         `Kalshi order rejected (status ${kalshiResponse.status}): ${kalshiErrorDetail}`,
-        { kalshi_status: kalshiResponse.status, kalshi_response: kalshiResult, payload: kalshiOrderPayload }
+        { kalshi_status: kalshiResponse.status, kalshi_response: kalshiResult, payload: kalshiOrderPayload, trace_id: traceId }
       );
+
+      // Dead-letter queue — failed live trades are preserved for human inspection and replay
+      if (tradeMode === "live") {
+        await supabase.from("failed_trade_queue").insert({
+          user_id: userId,
+          trace_id: traceId || null,
+          trade_payload: {
+            ticker: resolvedTicker,
+            side,
+            action,
+            price,
+            amount,
+            strategy: strategy || null,
+            strategy_id: strategyId || null,
+            mode: "live",
+            order_type: resolvedOrderType,
+            notes: notes || null,
+          },
+          failure_reason: kalshiErrorDetail.slice(0, 500),
+          kalshi_status: kalshiResponse.status,
+        }).then(null, () => {});
+      }
 
       // Alert on first rejection per ticker — persistent rejections on the same market warrant investigation.
       await alertOnce(supabase, "kalshi_order_rejected", `${resolvedTicker}_${kalshiResponse.status}`, 1,

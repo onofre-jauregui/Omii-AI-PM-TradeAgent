@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Key, Bell, Save, Loader2, CheckCircle, AlertCircle, Circle, Cpu,
-  Zap, Check,
+  Zap, Check, LogOut, CreditCard, ArrowUpRight,
 } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
@@ -131,11 +131,13 @@ export function SettingsPanel({ userId }: { userId?: string }) {
   };
 
   const loadAll = useCallback(async (uid: string) => {
-    const [{ data: keyRows }, { data: prof }, { data: sub }] = await Promise.all([
+    const [{ data: keyRows }, { data: prof }, { data: sub }, { data: { user } }] = await Promise.all([
       supabase.from("api_keys").select("provider, key_id").eq("user_id", uid),
       supabase.from("profiles").select("display_name, avatar_url, phone, notification_prefs").eq("id", uid).maybeSingle(),
       supabase.from("subscriptions").select("tier, status").eq("user_id", uid).maybeSingle(),
+      supabase.auth.getUser(),
     ]);
+    if (user?.email) setProfileEmail(user.email);
 
     if (keyRows) {
       setSavedProviders(new Set(keyRows.map(r => r.provider)));
@@ -454,6 +456,41 @@ export function SettingsPanel({ userId }: { userId?: string }) {
               {kalshiSaveError}
             </p>
           )}
+        </div>
+      </div>
+
+      {/* ── Account ──────────────────────────────────────────────── */}
+      <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
+        <div className="px-6 py-4 border-b border-border">
+          <h3 className="text-sm font-medium">Account</h3>
+          {profileEmail && (
+            <p className="text-xs text-muted-foreground mt-0.5">{profileEmail}</p>
+          )}
+        </div>
+        <div className="px-6 py-5 space-y-3">
+          <div className="flex items-center justify-between py-3 border border-border rounded-xl px-4">
+            <div>
+              <p className="text-sm font-medium capitalize">{tierLabel(subscriptionTier)} plan</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {subscriptionTier === "free" ? "Paper trading only · upgrade to go live" : "Live trading enabled"}
+              </p>
+            </div>
+            <button
+              onClick={() => navigate("/billing")}
+              className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline shrink-0"
+            >
+              {subscriptionTier === "free" ? "Upgrade" : "Manage"}
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <Button
+            variant="outline"
+            className="w-full rounded-full gap-2 text-sm border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive hover:border-destructive"
+            onClick={() => supabase.auth.signOut()}
+          >
+            <LogOut className="h-4 w-4" />
+            Sign out
+          </Button>
         </div>
       </div>
 

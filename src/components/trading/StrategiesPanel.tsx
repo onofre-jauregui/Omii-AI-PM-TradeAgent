@@ -7,12 +7,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
-  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, AlertTriangle,
+  TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, ArrowRight,
 } from "lucide-react";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useStrategies, type Strategy } from "@/lib/strategiesContext";
 import { supabase } from "@/integrations/supabase/client";
-
 
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -43,7 +42,6 @@ function StrategyDetailModal({
   const buildChart = useCallback(async () => {
     setLoadingChart(true);
     const { data: { user } } = await supabase.auth.getUser();
-    // P&L only comes from settled trades — filled trades have pnl=0 until Kalshi resolves
     const { data: trades } = await supabase
       .from("trades")
       .select("strategy, strategy_id, pnl, settled_at")
@@ -97,6 +95,9 @@ function StrategyDetailModal({
               {strategy.active && (
                 <Badge variant="secondary" className="text-[10px] rounded-full bg-profit/10 text-profit">Active</Badge>
               )}
+              <Badge variant="secondary" className={`text-[10px] rounded-full px-2 ${strategy.mode === "live" ? "bg-red-500/10 text-red-500" : "bg-secondary text-muted-foreground"}`}>
+                {strategy.mode}
+              </Badge>
             </div>
             <DialogTitle className="text-lg font-medium">{strategy.name}</DialogTitle>
             {strategy.description && (
@@ -192,98 +193,22 @@ function StrategyDetailModal({
 }
 
 // ─── Main panel ───────────────────────────────────────────────────────────────
-// ─── Trading Mode Panel ───────────────────────────────────────────────────────
-function TradingModePanel() {
-  const { strategies, updateStrategy } = useStrategies();
-  // pendingLive: strategy id waiting for confirmation tap; cleared after 5s
-  const [pendingLive, setPendingLive] = useState<string | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearPending = () => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    setPendingLive(null);
-  };
-
-  const handleToggle = (id: string, currentMode: "paper" | "live") => {
-    if (currentMode === "live") {
-      // Safe direction: live → paper, no confirmation needed
-      clearPending();
-      updateStrategy(id, { mode: "paper" });
-    } else if (pendingLive === id) {
-      // Second tap: commit paper → live
-      clearPending();
-      updateStrategy(id, { mode: "live" });
-    } else {
-      // First tap: set pending, start 5s timeout
-      clearPending();
-      setPendingLive(id);
-      timerRef.current = setTimeout(() => setPendingLive(null), 5000);
-    }
-  };
-
-  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
-
-  const liveCount = strategies.filter(s => s.mode === "live").length;
-  const paperCount = strategies.filter(s => s.mode === "paper").length;
-
-  return (
-    <div className="rounded-2xl bg-card apple-shadow overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-        <p className="text-xs font-medium text-foreground">Trading Mode</p>
-        <p className="text-[11px] text-muted-foreground tabular-nums">
-          {liveCount > 0 && <span className="text-loss font-medium">{liveCount} live</span>}
-          {liveCount > 0 && paperCount > 0 && <span className="text-muted-foreground"> · </span>}
-          {paperCount > 0 && <span>{paperCount} paper</span>}
-        </p>
-      </div>
-      <div className="divide-y divide-border">
-        {strategies.map(strat => {
-          const isLive = strat.mode === "live";
-          const isPending = pendingLive === strat.id;
-          return (
-            <div key={strat.id} className="px-5 py-3">
-              <div className="flex items-center gap-3">
-                <Badge variant="secondary" className="text-[10px] rounded-full font-mono px-1.5 shrink-0">
-                  {displayId(strat.id)}
-                </Badge>
-                <p className="text-sm text-foreground flex-1 min-w-0 truncate">{strat.name}</p>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className={`text-xs ${!isLive ? "text-primary font-medium" : "text-muted-foreground"}`}>
-                    Paper
-                  </span>
-                  <Switch
-                    checked={isLive}
-                    onCheckedChange={() => handleToggle(strat.id, strat.mode)}
-                    className={isLive ? "data-[state=checked]:bg-loss" : ""}
-                  />
-                  <span className={`text-xs ${isLive ? "text-loss font-medium" : "text-muted-foreground"}`}>
-                    Live
-                  </span>
-                </div>
-              </div>
-              {isPending && (
-                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-warning bg-warning/10 rounded-lg px-3 py-1.5">
-                  <AlertTriangle className="h-3 w-3 shrink-0" />
-                  Real money — tap Live again to confirm
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-export function StrategiesPanel() {
-  const { strategies, strategyStats, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
+export function StrategiesPanel({
+  mode,
+}: {
+  mode: "paper" | "live";
+}) {
+  const { strategies, strategyStats, instanceExists, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
   const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null);
   const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [newStrategy, setNewStrategy] = useState({
-    name: "", description: "", instructions: "", active: false,
-    mode: "paper" as "paper" | "live", starting_balance: 1000,
+    name: "", description: "", instructions: "", active: false, starting_balance: 1000,
   });
+
+  const [isCreatingInstance, setIsCreatingInstance] = useState(false);
+
+  const visibleStrategies = strategies.filter(s => s.mode === mode);
 
   const handleSaveEdit = () => {
     if (!editingStrategy) return;
@@ -291,7 +216,6 @@ export function StrategiesPanel() {
       name: editingStrategy.name,
       description: editingStrategy.description,
       instructions: editingStrategy.instructions,
-      mode: editingStrategy.mode,
       starting_balance: editingStrategy.starting_balance,
     });
     setEditingStrategy(null);
@@ -299,10 +223,35 @@ export function StrategiesPanel() {
 
   const handleCreate = () => {
     if (!newStrategy.name.trim()) return;
-    addStrategy(newStrategy);
-    setNewStrategy({ name: "", description: "", instructions: "", active: false, mode: "paper", starting_balance: 1000 });
+    addStrategy({ ...newStrategy, mode });
+    setNewStrategy({ name: "", description: "", instructions: "", active: false, starting_balance: 1000 });
     setIsCreating(false);
   };
+
+  async function createInstance(source: Strategy, targetMode: "paper" | "live", startingBalance: number) {
+    setIsCreatingInstance(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const uid8 = user.id.replace(/-/g, "").slice(0, 8);
+      const baseId = source.template_id ?? source.id.replace(/-[a-f0-9]{6,}$/i, "");
+      const suffix = targetMode === "live" ? "l" : "p";
+      await supabase.from("strategies").insert({
+        id: `${baseId}-${suffix}-${uid8}`,
+        template_id: source.template_id,
+        name: source.name,
+        description: source.description,
+        instructions: source.instructions,
+        active: false,
+        mode: targetMode,
+        starting_balance: startingBalance,
+        user_id: user.id,
+      });
+      // Context refreshes via realtime subscription
+    } finally {
+      setIsCreatingInstance(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -317,9 +266,11 @@ export function StrategiesPanel() {
     <div className="space-y-8 apple-reveal">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>Strategies</h2>
+          <h2 className="text-2xl font-light tracking-tight text-foreground" style={{ letterSpacing: "-0.02em" }}>
+            {mode === "paper" ? "Paper" : "Live"} Strategies
+          </h2>
           <p className="text-sm text-muted-foreground mt-1">
-            {strategies.length} strategies · {strategies.filter(s => s.active).length} active
+            {visibleStrategies.length} strategies · {visibleStrategies.filter(s => s.active).length} active
           </p>
         </div>
         <Button onClick={() => setIsCreating(true)} className="rounded-full gap-2 text-sm px-5">
@@ -327,14 +278,25 @@ export function StrategiesPanel() {
         </Button>
       </div>
 
-      <TradingModePanel />
+      {visibleStrategies.length === 0 && (
+        <div className="rounded-2xl bg-secondary/40 border border-dashed border-border p-10 text-center">
+          <p className="text-sm text-muted-foreground">
+            {mode === "live"
+              ? "No live strategies yet. Click “New Strategy” above to create one — it starts inactive until you turn it on."
+              : "No paper strategies yet. Create one to get started."}
+          </p>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-2 gap-4">
-        {strategies.map((strat) => {
+        {visibleStrategies.map((strat) => {
           const stats = strategyStats[strat.id];
           const pnl = stats?.totalPnl ?? 0;
           const roi = stats?.roi ?? 0;
           const balance = stats?.balance ?? strat.starting_balance;
+          const tid = strat.template_id;
+          const hasLiveInstance = tid ? (instanceExists[tid]?.live ?? false) : true;
+          const hasPaperInstance = tid ? (instanceExists[tid]?.paper ?? false) : true;
 
           return (
             <div
@@ -428,6 +390,23 @@ export function StrategiesPanel() {
                 >
                   <Trash2 className="h-3 w-3" /> Delete
                 </Button>
+
+                {/* Test-in-Paper shortcut — mirror a live strategy into paper for safe iteration.
+                    (Paper cards intentionally expose no real-money "Run Live" action; live
+                    strategies are created directly from the Live view's New Strategy button.) */}
+                {mode === "live" && tid && !hasPaperInstance && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="h-7 text-[11px] rounded-full px-3 gap-1 ml-auto"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      await createInstance(strat, "paper", 1000);
+                    }}
+                  >
+                    <ArrowRight className="h-3 w-3" /> Test in Paper
+                  </Button>
+                )}
               </div>
             </div>
           );
@@ -511,27 +490,14 @@ export function StrategiesPanel() {
                     style={{ resize: "vertical" }}
                   />
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label className="text-sm text-muted-foreground">Starting Balance ($)</Label>
-                    <Input
-                      type="number"
-                      value={editingStrategy.starting_balance}
-                      onChange={(e) => setEditingStrategy({ ...editingStrategy, starting_balance: Number(e.target.value) || 0 })}
-                      className="rounded-xl border-0 bg-secondary"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-sm text-muted-foreground">Trading Mode</Label>
-                    <div className="flex items-center gap-3 h-10">
-                      <span className={`text-sm ${editingStrategy.mode === "paper" ? "text-primary" : "text-muted-foreground"}`}>Paper</span>
-                      <Switch
-                        checked={editingStrategy.mode === "live"}
-                        onCheckedChange={(checked) => setEditingStrategy({ ...editingStrategy, mode: checked ? "live" : "paper" })}
-                      />
-                      <span className={`text-sm ${editingStrategy.mode === "live" ? "text-loss" : "text-muted-foreground"}`}>Live</span>
-                    </div>
-                  </div>
+                <div className="space-y-1.5">
+                  <Label className="text-sm text-muted-foreground">Starting Balance ($)</Label>
+                  <Input
+                    type="number"
+                    value={editingStrategy.starting_balance}
+                    onChange={(e) => setEditingStrategy({ ...editingStrategy, starting_balance: Number(e.target.value) || 0 })}
+                    className="rounded-xl border-0 bg-secondary"
+                  />
                 </div>
                 <div className="flex items-center justify-between">
                   <Label className="text-sm">Active</Label>
@@ -555,7 +521,7 @@ export function StrategiesPanel() {
       <Dialog open={isCreating} onOpenChange={setIsCreating}>
         <DialogContent className="rounded-2xl border-0 apple-shadow max-w-lg p-6">
           <DialogHeader>
-            <DialogTitle className="text-lg font-medium">New Strategy</DialogTitle>
+            <DialogTitle className="text-lg font-medium">New {mode === "live" ? "Live" : "Paper"} Strategy</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-2">
             <div className="space-y-1.5">
@@ -577,27 +543,14 @@ export function StrategiesPanel() {
                 style={{ resize: "vertical" }}
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label className="text-sm text-muted-foreground">Starting Balance ($)</Label>
-                <Input
-                  type="number"
-                  value={newStrategy.starting_balance}
-                  onChange={(e) => setNewStrategy({ ...newStrategy, starting_balance: Number(e.target.value) || 0 })}
-                  className="rounded-xl border-0 bg-secondary"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-sm text-muted-foreground">Mode</Label>
-                <div className="flex items-center gap-3 h-10">
-                  <span className={`text-sm ${newStrategy.mode === "paper" ? "text-primary" : "text-muted-foreground"}`}>Paper</span>
-                  <Switch
-                    checked={newStrategy.mode === "live"}
-                    onCheckedChange={(checked) => setNewStrategy({ ...newStrategy, mode: checked ? "live" : "paper" })}
-                  />
-                  <span className={`text-sm ${newStrategy.mode === "live" ? "text-loss" : "text-muted-foreground"}`}>Live</span>
-                </div>
-              </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Starting Balance ($)</Label>
+              <Input
+                type="number"
+                value={newStrategy.starting_balance}
+                onChange={(e) => setNewStrategy({ ...newStrategy, starting_balance: Number(e.target.value) || 0 })}
+                className="rounded-xl border-0 bg-secondary"
+              />
             </div>
             <div className="flex gap-3 pt-2">
               <Button onClick={handleCreate} disabled={!newStrategy.name.trim()} className="flex-1 rounded-full gap-2">

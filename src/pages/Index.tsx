@@ -14,10 +14,20 @@ import { RiskControlsPanel } from "@/components/trading/RiskControlsPanel";
 import { SettingsPanel } from "@/components/trading/SettingsPanel";
 import { ProfilePanel } from "@/components/trading/ProfilePanel";
 import { AgentMemoryCard } from "@/components/trading/AgentMemoryCard";
+import { StrategyStories } from "@/components/trading/StrategyStories";
+import { HITLApprovalsCard } from "@/components/trading/HITLApprovalsCard";
+import { LiveModeBanner } from "@/components/trading/LiveModeBanner";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
-import { Bot, Lock } from "lucide-react";
+import { Bot, Lock, LayoutDashboard, Settings, LogOut } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 type Tab = "dashboard" | "agent" | "markets" | "settings";
 type Mode = "paper" | "live";
@@ -137,6 +147,9 @@ const Index = () => {
       )}
 
       <div className="flex-1 flex flex-col min-w-0">
+        {/* Live mode safety banner — must be unmissable */}
+        {mode === "live" && <LiveModeBanner />}
+
         {/* Top header */}
         <header
           className={cn(
@@ -178,18 +191,41 @@ const Index = () => {
                 )}
               </div>
 
-              {/* Right: profile avatar → taps to settings */}
-              <button
-                onClick={() => handleNavigate("settings")}
-                className="shrink-0 active:scale-95 transition-transform"
-                title="Settings"
-              >
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
-                    {userEmail ? userEmail[0].toUpperCase() : "T"}
-                  </AvatarFallback>
-                </Avatar>
-              </button>
+              {/* Right: profile avatar — dropdown menu; the same tap opens and closes it */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="shrink-0 rounded-full active:scale-95 transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    title="Account menu"
+                  >
+                    <Avatar className="h-8 w-8">
+                      <AvatarFallback className="bg-secondary text-foreground text-[11px] font-medium">
+                        {userEmail ? userEmail[0].toUpperCase() : "T"}
+                      </AvatarFallback>
+                    </Avatar>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56 rounded-xl apple-shadow">
+                  {userEmail && (
+                    <>
+                      <div className="px-3 py-2.5">
+                        <p className="text-xs text-muted-foreground truncate">{userEmail}</p>
+                      </div>
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => handleNavigate("dashboard")}>
+                    <LayoutDashboard className="h-4 w-4" /> Dashboard
+                  </DropdownMenuItem>
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2" onClick={() => handleNavigate("settings")}>
+                    <Settings className="h-4 w-4" /> Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive" onClick={() => supabase.auth.signOut()}>
+                    <LogOut className="h-4 w-4" /> Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           ) : (
             /* Desktop: tab label left + toggle right */
@@ -198,23 +234,28 @@ const Index = () => {
                 {TAB_LABELS[activeTab]}
               </h1>
               {(activeTab === "dashboard" || activeTab === "agent") && (
-                <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
-                  <button
-                    onClick={() => handleModeChange("paper")}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                      mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    Paper
-                  </button>
-                  <button
-                    onClick={() => handleModeChange("live")}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
-                      mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    Live
-                  </button>
+                <div className="flex flex-col items-end gap-0.5">
+                  <div className="flex items-center gap-1 rounded-full bg-secondary p-1">
+                    <button
+                      onClick={() => handleModeChange("paper")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "paper" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Paper
+                    </button>
+                    <button
+                      onClick={() => handleModeChange("live")}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${
+                        mode === "live" ? "bg-red-500 text-white shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Live
+                    </button>
+                  </div>
+                  {mode === "paper" && (
+                    <span className="text-[10px] text-muted-foreground/60 pr-1">Live strategies still running</span>
+                  )}
                 </div>
               )}
             </div>
@@ -234,6 +275,9 @@ const Index = () => {
               state on every return because all useEffect data fetches re-fired from scratch. */}
           <div className={cn("space-y-6", activeTab !== "dashboard" && "hidden")}>
             <DashboardHero mode={mode} onNavigate={handleNavigate} userId={userId} />
+            {/* HITL approval queue — only rendered when there are pending/recent approvals */}
+            {mode === "live" && <HITLApprovalsCard userId={userId} />}
+            <StrategyStories mode={mode} onNavigate={handleNavigate} />
             <StrategyPerformance mode={mode} />
             <PortfolioOverview mode={mode} />
             <TradeLog filterMode={mode} />
@@ -263,8 +307,8 @@ const Index = () => {
               ))}
             </div>
             {agentSubTab === "chat"       && <AgentPanel mode={mode} onOpenMarket={handleOpenMarket} />}
-            {agentSubTab === "strategies" && <StrategiesPanel />}
-            {agentSubTab === "risk"       && <RiskControlsPanel />}
+            {agentSubTab === "strategies" && <StrategiesPanel mode={mode} />}
+            {agentSubTab === "risk"       && <RiskControlsPanel mode={mode} />}
             {agentSubTab === "memory"     && <AgentMemoryCard full />}
           </div>
 

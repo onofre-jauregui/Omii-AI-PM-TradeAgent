@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { User, Settings, LogOut } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
 interface AppHeaderProps {
   onNavigate?: (tab: string) => void;
@@ -82,7 +83,7 @@ export function AppHeader({ onNavigate }: AppHeaderProps) {
                 <Settings className="h-4 w-4" /> Settings
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive">
+              <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive" onClick={() => supabase.auth.signOut()}>
                 <LogOut className="h-4 w-4" /> Sign out
               </DropdownMenuItem>
             </DropdownMenuContent>

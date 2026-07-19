@@ -42,6 +42,7 @@ interface RawMarket {
   ticker: string;
   title?: string;
   subtitle?: string;
+  status?: string;
   yes_bid?: number;
   yes_ask?: number;
   yes_bid_dollars?: number;
@@ -372,7 +373,13 @@ serve(async (req) => {
 
     // ── Parse and deduplicate ─────────────────────────────────────────────────
     const nowMs = Date.now();
-    const parsedRaw = rawMarkets.map(parseMarket).filter((m): m is ParsedMarket => m !== null);
+    // Exclude markets the exchange has already closed/settled — they have stale prices and
+    // produce violations that S-001 will never be able to act on.
+    const openRawMarkets = rawMarkets.filter((m) => {
+      const s = m.status;
+      return !s || s === "open" || s === "active";
+    });
+    const parsedRaw = openRawMarkets.map(parseMarket).filter((m): m is ParsedMarket => m !== null);
     const seen = new Set<string>();
     const markets = parsedRaw.filter((m) => {
       if (seen.has(m.ticker)) return false;

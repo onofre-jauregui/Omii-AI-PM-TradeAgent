@@ -13,6 +13,8 @@ import {
   computeWinStreakFromTrades,
   s002VolumeCheck,
   s002EdgeCentsCheck,
+  s002SlotWeight,
+  s002IsAutoQualified,
   buildForceLlmCities,
   s005IsAutoQualified,
   buildQualifyEndpoint,
@@ -309,7 +311,7 @@ async function tripCircuitBreaker(supabase: any, runId: string): Promise<void> {
     event_type: "kalshi_circuit_open",
     severity: "critical",
     message: msg,
-    metadata: { run_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
+    metadata: { run_id: runId, trace_id: runId, tripped_at: new Date().toISOString(), auto_reset_after: "10m" },
   }).then(() => {}).catch(() => {});
   const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
   const chatId = Deno.env.get("TELEGRAM_CHAT_ID");
@@ -571,6 +573,21 @@ serve(async (req) => {
     // ── Run each active strategy deterministically ───────────────────────────
     const strategyResults: StrategyResult[] = [];
 
+    // Pre-flight: cache which user_ids have a Kalshi key configured.
+    // Checked once per user per run (not per strategy) to avoid redundant DB queries.
+    const kalshiKeyExistsCache = new Map<string, boolean>();
+    async function hasKalshiKey(userId: string): Promise<boolean> {
+      if (kalshiKeyExistsCache.has(userId)) return kalshiKeyExistsCache.get(userId)!;
+      const { count } = await supabase
+        .from("api_keys")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("provider", "kalshi_live");
+      const exists = (count ?? 0) > 0;
+      kalshiKeyExistsCache.set(userId, exists);
+      return exists;
+    }
+
     for (const strategy of strategies) {
       const config = configMap.get(strategy.id);
       const stratStart = Date.now();
@@ -588,7 +605,7 @@ serve(async (req) => {
           event_type: "auto_trade_strategy_halted",
           severity: "warning",
           message: `Strategy "${strategy.name}" (${strategy.id}) is halted: ${config.halt_reason || "unknown"}`,
-          metadata: { run_id: runId, strategy_id: strategy.id },
+          metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id },
         });
         continue;
       }
@@ -611,6 +628,33 @@ serve(async (req) => {
               mode: strategy.mode,
               status: "skipped",
               details: `entitlement blocked: ${entitlement.reason}`,
+            });
+            continue;
+          }
+
+          // ── Kalshi key pre-flight (live strategies only) ──────────────────────
+          // If a user enabled a live strategy but hasn't configured their Kalshi API
+          // key, block here rather than letting execute-trade create a failed trade record.
+          if (strategy.mode === "live" && !(await hasKalshiKey(strategy.user_id))) {
+            await supabase.from("compliance_log").insert({
+              event_type: "live_trade_blocked_no_key",
+              severity: "warning",
+              message: `Strategy "${strategy.name}" (${strategy.id}) skipped: no Kalshi API key configured for user`,
+              metadata: { run_id: runId, strategy_id: strategy.id },
+              user_id: strategy.user_id,
+            });
+            await sendTelegramAlert(
+              `⚠️ <b>[TradeAgent] Live Strategy Blocked — No Kalshi Key</b>\n` +
+              `Strategy: ${strategy.name} (${strategy.id})\n` +
+              `User ${strategy.user_id.slice(0, 8)}... has no Kalshi API key. ` +
+              `Add one in Settings → Kalshi Connection.`
+            );
+            strategyResults.push({
+              strategy_id: strategy.id,
+              strategy_name: strategy.name,
+              mode: strategy.mode,
+              status: "skipped",
+              details: "live_trade_blocked_no_key",
             });
             continue;
           }
@@ -796,7 +840,7 @@ serve(async (req) => {
               event_type: "strategy_auto_halted",
               severity: "error",
               message: `Strategy "${strategy.name}" auto-halted after ${newFailures} consecutive failures`,
-              metadata: { run_id: runId, strategy_id: strategy.id, last_error: errMsg },
+              metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id, last_error: errMsg },
             });
             await sendTelegramAlert(`⏸️ <b>[TradeAgent] Strategy Halted</b>\n"${strategy.name}" auto-halted after ${newFailures} consecutive failures.\nLast error: ${errMsg.slice(0, 150)}`);
 
@@ -824,7 +868,7 @@ serve(async (req) => {
           event_type: "auto_trade_strategy_error",
           severity: "error",
           message: `Strategy "${strategy.name}" failed: ${errMsg}`,
-          metadata: { run_id: runId, strategy_id: strategy.id, stack: stratErr instanceof Error ? stratErr.stack : undefined },
+          metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id, stack: stratErr instanceof Error ? stratErr.stack : undefined },
         });
       }
 
@@ -844,6 +888,7 @@ serve(async (req) => {
       message: `Auto-trade complete: ${ranCount} ran, ${tradedCount} traded, ${errCount} errors, ${haltedCount} halted. Daily P&L: $${(riskState?.daily_pnl || 0).toFixed(2)}, trades: ${riskState?.daily_trades || 0}`,
       metadata: {
         run_id: runId,
+        trace_id: runId,
         started_at: runStartedAt,
         completed_at: new Date().toISOString(),
         strategies: strategyResults,
@@ -906,15 +951,17 @@ serve(async (req) => {
 
 const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
-// Wrapper around every execute-trade HTTP call. Detects 401 (service-role key
-// missing/rotated) and fires a Telegram alert + compliance_log entry so the
-// failure is visible instead of being silently swallowed as a failed trade.
+// Wrapper around every execute-trade HTTP call.
+//
+// Handles two special HTTP statuses:
+//   401 — service-role key missing/rotated; fires Telegram alert and halts
+//   202 — live trade deferred for HITL approval via Telegram; not a failure
 async function callExecuteTrade(
   executeUrl: string,
   supabaseKey: string,
   supabase: any,
   payload: Record<string, unknown>
-): Promise<{ success: boolean; error?: string; [key: string]: unknown }> {
+): Promise<{ success: boolean; hitl_pending?: boolean; error?: string; [key: string]: unknown }> {
   const resp = await fetch(executeUrl, {
     method: "POST",
     headers: {
@@ -933,13 +980,19 @@ async function callExecuteTrade(
       message: "auto-trade: execute-trade returned 401 — service-role key missing or rotated; trading halted",
       metadata: { execute_url: executeUrl, user_id: payload.user_id ?? null },
       user_id: payload.user_id ?? null,
-    }).catch(() => {});
+    }).then(null, () => {});
 
     await sendTelegramAlert(
       `🔴 <b>[TradeAgent] CRITICAL: Trading Halted</b>\nexecute-trade returned 401. Service-role key is missing or was rotated. No trades can be placed until the env var is restored.`
     ).catch(() => {});
 
     return { success: false, error: "execute-trade 401 — service-role key misconfigured" };
+  }
+
+  // 202: live trade queued for HITL approval — not a failure, not a fill
+  if (resp.status === 202) {
+    const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
+    return { success: false, hitl_pending: true, approval_id: body.approval_id };
   }
 
   return resp.json().catch(() => ({ success: false, error: "response parse failed" }));
@@ -958,7 +1011,29 @@ async function runS001SurfaceArb(
   const mode = strategy.mode || "paper";
   const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
   const MAX_LEGS_PER_EVENT = 3;
-  const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+
+  // Staleness guard: 10 min instead of 30 min.
+  // Real bracket-sum violations on KXINX are visible to all bots watching the same feed.
+  // By 30 min the arb has almost certainly been closed by faster participants; we become
+  // a price-taker on already-corrected spreads. 10 min is the outer boundary at which
+  // any execution latency (scanner write → cron lag → this function) still leaves genuine edge.
+  const TEN_MIN_AGO = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+  // Fee-adjusted minimum edge per leg.
+  // Kalshi charges 7% of winnings on NO contracts.
+  // On a $15 leg: fee = $15 * 0.07 = $1.05 regardless of NO price.
+  // The fee hurdle in cents = (fee / gross_win_per_dollar) * 100.
+  // For a NO at price P cents: gross win per $1 staked = (100 - P) / P dollars.
+  // To cover $1.05 fee on $15 stake: need (100-P)/P > 1.05/15 = 0.07.
+  // This simplifies to: edge > 7¢ when P ≈ 50¢ (worst case for arb legs).
+  // We set the guard at the leg level: noPrice must be > 15¢ (yesAsk < 85¢) to ensure
+  // the fee (7% of net win) is comfortably covered by the structural edge in the violation.
+  // Additionally, we require per-leg ask-side excess to be ≥ 8¢ (raised from implicit 0)
+  // so a 3-leg bracket at 103¢ total is rejected — only 1¢/leg excess, eaten by fees.
+  // Min excess at ask needed across the basket to trade: 8¢/leg * legs in trade ≥ 24¢ total.
+  // This is evaluated per-event using the live ask prices fetched from Kalshi.
+  const KALSHI_FEE_RATE = 0.07;        // 7% of winnings
+  const MIN_NET_EDGE_PER_LEG_CENTS = 8; // minimum per-leg edge after 7% fee; 8¢ ≈ break-even at mid-to-ask slippage
 
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
   // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
@@ -970,7 +1045,7 @@ async function runS001SurfaceArb(
     .select("*")
     .eq("alert_type", "bracket_sum_violation")
     .eq("is_exploited", false)
-    .gte("detected_at", thirtyMinAgo)
+    .gte("detected_at", TEN_MIN_AGO)
     .gte("confidence", 0.9)
     .order("expected_edge_cents", { ascending: false })
     .limit(20);
@@ -1035,7 +1110,7 @@ async function runS001SurfaceArb(
           severity: "warning",
           message: `S-001: Kalshi ${resp.status} fetching markets for ${eventTicker}`,
           metadata: { provider: "kalshi", status: resp.status, endpoint: `markets?event_ticker=${eventTicker}` },
-        }).catch(() => {});
+        }).then(null, () => {});
         if (kalshiCircuit.failures >= CIRCUIT_TRIP_THRESHOLD && !kalshiCircuit.open) {
           kalshiCircuit.open = true;
           await tripCircuitBreaker(supabase, runId);
@@ -1057,25 +1132,64 @@ async function runS001SurfaceArb(
     }
 
     if (eventMarkets.length === 0) {
-      // Kalshi returned no open markets for this event — it's likely already settled.
-      // The cache entry is stale; market-data-fetcher will evict it on next cycle.
-      console.warn(`S-001: no open markets on Kalshi for event ${eventTicker} — skipping (market may be settled)`);
+      // Kalshi returned no open markets for this event — it's already settled.
+      // Mark the alert exploited so it stops being re-processed until the 2h purge clears it.
+      console.warn(`S-001: no open markets on Kalshi for event ${eventTicker} — marking exploited (settled)`);
+      await supabase.from("surface_alerts")
+        .update({ is_exploited: true })
+        .eq("id", alert.id)
+        .then(null, () => {});
       continue;
     }
 
     // 4. Find the most overpriced markets: highest YES ask = most overpriced relative to fair value
     // In a fair bracket, each market's YES price should reflect its true probability.
-    // When bracket sums > 100¢, all are overpriced — focus on the highest-priced ones.
-    // Kalshi API returns prices as *_dollars (e.g. yes_ask_dollars: 0.45 = 45¢)
+    // When bracket sums > 100c, all are overpriced — focus on the highest-priced ones.
+    // Kalshi API returns prices as *_dollars (e.g. yes_ask_dollars: 0.45 = 45c)
     const yesAskCents = (m: any) => Math.round(parseFloat(m.yes_ask_dollars ?? m.yes_ask ?? "0") * 100);
+
+    // Ask-side bracket sum guard.
+    // The scanner detects violations using mid prices; execution happens at the ask (always >= mid).
+    // Compute the live ask-side bracket sum to verify that edge persists at real fill prices.
+    // Required minimum: 100 + (MIN_NET_EDGE_PER_LEG_CENTS * MAX_LEGS_PER_EVENT) = 124c by default.
+    // A bracket summing to only 103c at ask delivers ~1c/leg edge — negative after the 7% fee.
+    const askSideSumCents = eventMarkets.reduce((sum: number, m: any) => {
+      const ask = yesAskCents(m);
+      return ask > 0 ? sum + ask : sum;
+    }, 0);
+    const minAskSideSum = 100 + MIN_NET_EDGE_PER_LEG_CENTS * MAX_LEGS_PER_EVENT;
+    if (askSideSumCents < minAskSideSum) {
+      await supabase.from("compliance_log").insert({
+        event_type: "s001_edge_below_fee_hurdle",
+        severity: "info",
+        message: `S-001: ${eventTicker} ask-side sum ${askSideSumCents}c < required ${minAskSideSum}c after fee hurdle — skipping`,
+        metadata: { event_ticker: eventTicker, ask_side_sum: askSideSumCents, required: minAskSideSum, run_id: runId },
+      }).then(null, () => {});
+      continue;
+    }
+
+    // Per-leg fee-adjusted edge filter.
+    // Kalshi charges 7% of gross winnings on a winning NO contract.
+    // On a $15 leg buying NO at P cents: gross_win = $15 * (100 - P) / P; fee = gross_win * 0.07.
+    // Fee expressed in edge-cent equivalent: feeHurdle = ((100 - P) / P) * 7.
+    //   P=50c: feeHurdle=7c  (need >7c per-leg edge to break even)
+    //   P=20c: feeHurdle=28c (need >28c per-leg edge)
+    // We require per-leg edge to exceed BOTH the price-adjusted hurdle AND the 8c absolute floor.
+    const feeHurdleCentsAt = (noPrice: number): number =>
+      ((100 - noPrice) / noPrice) * KALSHI_FEE_RATE * 100;
+
     const tradeable = eventMarkets
       .filter((m: any) => {
         const ask = yesAskCents(m);
-        return (
-          ask >= 5 &&       // enough payout if NO wins
-          ask <= 92 &&      // NO side at least 8¢ to pay for commission
-          !openTickers.has(m.ticker)
-        );
+        const noPrice = 100 - ask;
+        if (ask < 5 || ask > 92) return false;    // original price band: floor ensures payout; ceiling ensures commission coverage
+        if (openTickers.has(m.ticker)) return false;
+        // Per-leg fee check: distribute the alert's total expected edge evenly across legs.
+        // Rejects arbs where total excess (e.g. 3c across a 3-leg basket) is eaten by fees.
+        const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
+        const feeHurdle = feeHurdleCentsAt(noPrice);
+        if (perLegEdge < feeHurdle || perLegEdge < MIN_NET_EDGE_PER_LEG_CENTS) return false;
+        return true;
       })
       .map((m: any) => ({
         ticker: m.ticker,
@@ -1084,14 +1198,75 @@ async function runS001SurfaceArb(
         title: m.title || m.ticker,
         closeTime: m.close_time,
       }))
-      .sort((a: any, b: any) => b.yesAsk - a.yesAsk) // highest YES = most overpriced
+      .sort((a: any, b: any) => b.yesAsk - a.yesAsk) // highest YES ask = most overpriced relative to fair value
       .slice(0, MAX_LEGS_PER_EVENT);
 
     if (tradeable.length === 0) continue;
 
+    // 4b. Stop-loss check: scan open S-001 positions in this event and close any down >=50%.
+    // A NO position falling 50% from entry (e.g. bought at 40c, now bid 20c) signals the
+    // violation was a data artifact — exit before full-settlement loss locks in.
+    // Reuses the eventMarkets payload already fetched; no extra Kalshi API call needed.
+    {
+      const openS001InEvent = (openTrades || []).filter(
+        (t: any) => (t.ticker as string).startsWith(eventTicker)
+      );
+      for (const openPos of openS001InEvent) {
+        const liveMarket = eventMarkets.find((m: any) => m.ticker === openPos.ticker);
+        if (!liveMarket) continue;
+        const currentNoBidCents = Math.round(
+          parseFloat(liveMarket.no_bid_dollars ?? liveMarket.no_bid ?? "0") * 100
+        );
+        const entryPriceCents: number = openPos.price ?? 0;
+        if (entryPriceCents > 0 && currentNoBidCents > 0) {
+          const lossPct = (entryPriceCents - currentNoBidCents) / entryPriceCents;
+          if (lossPct >= 0.5) {
+            const closePrice = Math.max(1, currentNoBidCents + 1); // 1c above bid, floor at 1c
+            const closeResult = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
+              ticker: openPos.ticker,
+              marketId: openPos.ticker,
+              marketQuestion: openPos.market_question || openPos.ticker,
+              side: "no",
+              action: "sell",
+              price: closePrice,
+              amount: openPos.amount || AMOUNT_PER_LEG,
+              strategy: strategy.name,
+              strategyId: strategy.id,
+              orderType: "limit",
+              time_in_force: "day",
+              mode,
+              exit_reason: "stop_loss_50pct",
+              notes: `S-001 stop-loss: NO position down ${Math.round(lossPct * 100)}% (entry ${entryPriceCents}c, bid now ${currentNoBidCents}c) — closing to prevent full-settlement loss`,
+              user_id: strategy.user_id || null,
+              traceId: runId,
+              systemVersion: "v2",
+            });
+            if (closeResult.success || mode === "paper") {
+              await supabase
+                .from("trades")
+                .update({ exit_reason: "stop_loss_50pct" })
+                .eq("id", openPos.id)
+                .then(null, () => {});
+            }
+            await supabase.from("compliance_log").insert({
+              event_type: "s001_stop_loss_triggered",
+              severity: "warning",
+              message: `S-001 stop-loss: ${openPos.ticker} sell @ ${closePrice}c (entry ${entryPriceCents}c, loss ${Math.round(lossPct * 100)}%, fill: ${closeResult.success})`,
+              metadata: { ticker: openPos.ticker, entry_cents: entryPriceCents, bid_cents: currentNoBidCents, loss_pct: Math.round(lossPct * 100), run_id: runId },
+              user_id: strategy.user_id || null,
+            }).then(null, () => {});
+          }
+        }
+      }
+    }
+
     // 5. Execute NO buys on the top overpriced markets — no LLM gate needed.
-    //    The arb is structural: bracket must sum to 100¢, market says it sums to >100¢.
+    //    The arb is structural: bracket must sum to 100c, market says it sums to >100c.
+    //    time_in_force="day" ensures unfilled live limit orders auto-cancel at market close
+    //    instead of sitting open indefinitely. Paper mode fills immediately.
     const legResults = await Promise.all(tradeable.map(async (leg: any) => {
+      const feeHurdle = feeHurdleCentsAt(leg.noPrice);
+      const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
           ticker: leg.ticker,
           marketId: leg.ticker,
@@ -1103,8 +1278,9 @@ async function runS001SurfaceArb(
           strategy: strategy.name,
           strategyId: strategy.id,
           orderType: "limit",
+          time_in_force: "day",
           mode,
-          notes: `S-001 Surface Arb: bracket sum violation on ${eventTicker}. YES overpriced at ${leg.yesAsk}¢ (bracket sums >100¢). Buying NO @ ${leg.noPrice}¢.`,
+          notes: `S-001 Surface Arb: ${eventTicker} ask-side sum ${askSideSumCents}c. YES overpriced at ${leg.yesAsk}c, buying NO @ ${leg.noPrice}c. Per-leg edge ${perLegEdge.toFixed(1)}c vs fee hurdle ${feeHurdle.toFixed(1)}c.`,
           expectedOutcome: `NO wins if S&P does NOT land in this bracket. Structural arb, not directional.`,
           confidenceLevel: alert.confidence,
           user_id: strategy.user_id || null,
@@ -1116,7 +1292,7 @@ async function runS001SurfaceArb(
 
     const legsFilled = legResults.filter(r => r.success);
     if (legsFilled.length > 0) {
-      allFilled.push(...legsFilled.map(r => `${r.ticker}@${r.price}¢`));
+      allFilled.push(...legsFilled.map(r => `${r.ticker}@${r.price}c`));
       // Mark alert as exploited so we don't re-trade same event this run
       await supabase
         .from("surface_alerts")
@@ -1134,8 +1310,8 @@ async function runS001SurfaceArb(
     details: allFilled.length > 0
       ? `S-001 Surface Arb: ${allFilled.length} legs filled — ${allFilled.join(", ")}`
       : alerts.length === 0
-        ? "No fresh KXINX/KXBTC bracket-sum violations in window"
-        : "Alerts found but all events settled on Kalshi or tickers already held — cache will self-correct next cycle",
+        ? "No fresh KXINX/KXBTC bracket-sum violations in last 10 min (surface-scanner must run first)"
+        : "Alerts found but all events failed fee hurdle, settled on Kalshi, or tickers already held",
   };
 }
 
@@ -1168,19 +1344,20 @@ async function runS002LongshotBias(
   // Near-cert side (>88¢) removed: buying YES at 90¢ needs >90% win rate, we can't reliably hit that.
   const AMOUNT_PER_TRADE = 20;
 
-  // Time-based auto-exit: close NO positions expiring within 12h to stop
-  // holding losers to full resolution (-91¢ each). Strategy instructions say
-  // "exit if < 12h remaining" but were never enforced in code.
-  const twelveHourCutoff = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+  // Exit: close NO positions within 2h of expiry (reduced from 12h).
+  // The 12h window was destroying EV by exiting before settlement on long-dated positions.
+  // At 2h the market is near-final; sell at 5¢ floor (up from 2¢) to recover more premium.
+  const twoHourExitCutoff = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
   const { data: expiringPositions } = await supabase
     .from("trades")
-    .select("id, ticker, side, price, amount, market_question")
+    .select("id, ticker, side, price, amount, market_question, expiration_time")
     .eq("status", "filled")
     .eq("strategy_id", strategy.id)
+    .eq("side", "no")
     .is("exit_reason", null)
     .is("settled_at", null)
     .not("expiration_time", "is", null)
-    .lt("expiration_time", twelveHourCutoff);
+    .lt("expiration_time", twoHourExitCutoff);
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const timeExitResults: string[] = [];
@@ -1193,15 +1370,15 @@ async function runS002LongshotBias(
       marketQuestion: pos.market_question || pos.ticker,
       side: pos.side || "no",
       action: "sell",
-      price: 2, // aggressive: accept near-zero to guarantee fill before expiry
+      price: 5, // 5¢ floor — aggressive enough to fill <2h out, recovers 3¢ vs old 2¢ exit
       amount: pos.amount || AMOUNT_PER_TRADE,
       strategy: strategy.name,
       strategyId: strategy.id,
       orderType: "limit",
       time_in_force: "day",
       mode,
-      exit_reason: "time_exit_12h",
-      notes: `S-002 time-based exit: position within 12h of expiry — closing to prevent full-resolution loss`,
+      exit_reason: "time_exit_2h",
+      notes: `S-002 time-based exit: position within 2h of expiry — closing at 5¢ floor`,
       user_id: strategy.user_id || null,
       traceId: runId,
       systemVersion: "v2",
@@ -1214,7 +1391,7 @@ async function runS002LongshotBias(
     try {
       await supabase
         .from("trades")
-        .update({ exit_reason: "time_exit_12h" })
+        .update({ exit_reason: "time_exit_2h" })
         .eq("id", pos.id);
     } catch { /* non-critical — worst case is one duplicate next cycle */ }
   }
@@ -1222,29 +1399,28 @@ async function runS002LongshotBias(
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 
   // Longshots only: YES ask 8-11¢. We buy NO on these markets.
-  // Volume floor lowered to 100 — longshot bias is structural (behavioral overpricing of
-  // low-probability YES), not volume-dependent. 200 was borrowed from equity options and
-  // excluded too much of the Kalshi market. 100 ensures spread is tight enough for clean fills.
+  // Volume floor 150 (down from 200 which over-filtered Kalshi longshot universe).
+  // Spread guard applied in post-filter: reject bid-ask spread > 3¢.
   const { data: rawSignals } = await applySignalTenantFilter(
     supabase
       .from("signals")
       .select("*")
       .lt("yes_ask", 12)
       .gte("yes_ask", 8)
-      .gte("volume", 200)
+      .gte("volume", 150)
       .gte("days_to_close", 0.08)
       .lte("days_to_close", 30)
       .gte("created_at", twoHoursAgo)
       .not("direction", "is", null)
       .eq("was_acted_on", false)
-      .order("created_at", { ascending: false })
+      .order("days_to_close", { ascending: true }) // prefer shorter-duration: stronger bias signal
       .limit(20),
     strategy.user_id
   );
 
   // Hard block: no ETH, no sports, no weather (S-005 owns weather with a real GFS model;
   // S-002 has no weather-specific edge and will trade against S-005's positions)
-  const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL", "KXHIGH"];
+  const blockedPrefixes = ["KXETH", "KXNHL", "KXNBA", "KXMLB", "KXNFL", "KXHIGH", "KXBTC", "KXCRYPTO"];
   // Live close-time guard: even if days_to_close in the signal looks positive (stale),
   // reject any market whose close_time is already in the past or within 2 hours.
   // This was the root cause of the 48-position runaway on KXINX-26MAY15 — the signal
@@ -1259,6 +1435,8 @@ async function runS002LongshotBias(
       const closeMs = new Date(s.close_time).getTime();
       if (closeMs <= fifteenMinFromNow) return false;
     }
+    // Spread guard: wide markets suggest poor price discovery — skip
+    if (s.yes_bid != null && ((s.yes_ask ?? 0) - (s.yes_bid ?? 0)) > 3) return false;
     return true;
   });
 
@@ -1269,7 +1447,7 @@ async function runS002LongshotBias(
       mode,
       status: "completed",
       action: "no_setup",
-      details: "No longshot signals (yes_ask 8-11¢, vol≥200, 2h-30d, non-sports/ETH)",
+      details: "No longshot signals (yes_ask 8-11¢, vol≥150, spread≤3¢, 2h-30d, non-sports/ETH/crypto)",
     };
   }
 
@@ -1331,6 +1509,25 @@ async function runS002LongshotBias(
     };
   }
 
+  // Fetch agent_memory and lessons once — shared across all candidates this cycle.
+  const { data: s002Memories } = await supabase
+    .from("agent_memory")
+    .select("id, title, content, confidence, exposed_confidence")
+    .eq("strategy_id", strategy.id)
+    .eq("is_active", true)
+    .is("quarantined_at", null)
+    .is("merged_into", null)
+    .order("confidence", { ascending: false })
+    .limit(5);
+  const s002MemBlock = (s002Memories ?? [])
+    .map((m: any) => {
+      const bay = m.exposed_confidence != null ? ` / bayesian ${Number(m.exposed_confidence).toFixed(2)}` : "";
+      return `[conf ${Number(m.confidence).toFixed(2)}${bay}] ${m.title}: ${m.content}`;
+    })
+    .join("\n");
+  const s002MemoryIds = (s002Memories ?? []).map((m: any) => m.id);
+  const s002Lessons = await fetchStrategyLessons(supabase, strategy.id);
+
   const execResults = await Promise.all(candidates.map(async (sig: any) => {
     const yesAsk = sig.yes_ask || 10;
 
@@ -1340,7 +1537,7 @@ async function runS002LongshotBias(
       return { sig, success: false, detail: `skipped: yes_ask=${yesAsk}¢ out of 8-11¢ range at execution time` };
     }
 
-    // Edge floor: require at least 3¢ of true-vs-implied divergence.
+    // Edge floor: require at least 4¢ of true-vs-implied divergence (tightened from 3¢).
     const edgeCheck = s002EdgeCentsCheck(sig.edge_cents ?? 0);
     if (!edgeCheck.passes) {
       return { sig, success: false, detail: edgeCheck.detail };
@@ -1354,39 +1551,36 @@ async function runS002LongshotBias(
     // YES ask 8¢ → NO price 93¢; YES ask 11¢ → NO price 90¢
     const price = Math.min(99, (100 - yesAsk) + 1);
 
-    // Pull agent_memory and recent lessons for S-002 (were previously missing)
-    const { data: s002Memories } = await supabase
-      .from("agent_memory")
-      .select("id, title, content, confidence")
-      .eq("strategy_id", strategy.id)
-      .eq("is_active", true)
-      .is("quarantined_at", null)
-      .is("merged_into", null)
-      .order("confidence", { ascending: false })
-      .limit(5);
-    const s002MemBlock = (s002Memories ?? [])
-      .map((m: any) => `[conf ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
-      .join("\n");
-    const s002MemoryIds = (s002Memories ?? []).map((m: any) => m.id);
-    const s002Lessons = await fetchStrategyLessons(supabase, strategy.id);
+    // Auto-qualify bypass: high-confidence structural setups skip the LLM gate entirely.
+    // Conditions: YES 8-10¢, vol>=300, edge>=6¢. Mirrors S-005's 30¢ auto-qualify bypass.
+    // Prevents the LLM's generic reject heuristics from introducing noise into a
+    // statistical-bias strategy where the edge is per-population, not per-trade.
+    const autoQualified = s002IsAutoQualified(yesAsk, sig.volume ?? 0, sig.edge_cents ?? 0);
+    let qualifyReason = "auto-qualified: structural edge confirmed (vol>=300, edge>=6¢, YES 8-10¢)";
 
-    const qualifyPrompt = buildQualifyPrompt("S-002 Longshot Bias", {
-      ticker: sig.ticker,
-      market_question: sig.market_question,
-      direction,
-      yes_bid: sig.yes_bid,
-      yes_ask: sig.yes_ask,
-      volume: sig.volume,
-      days_to_close: sig.days_to_close,
-      win_streak: winStreak,
-      performance_context: `Current win streak: ${winStreak} day(s). Tracked for instrumentation only — base your QUALIFY/REJECT decision purely on structural edge criteria below.`,
-      ...(s002Lessons.length > 0 ? { past_lessons: s002Lessons.join("\n") } : {}),
-      ...(s002MemBlock ? { strategy_memory: s002MemBlock } : {}),
-      note: `Longshot Bias (longshot-only mode): YES ask is ${yesAsk}¢, we buy NO at ~${price}¢. Academic research shows Kalshi markets in the 8-11¢ range resolve YES ~7% vs. 12% implied — we have a structural edge buying NO here. REJECT only if: market has an obvious volume pump (>10x normal), expiry in <6h, or the market question makes this specific event genuinely likely (e.g. breaking news). Do NOT reject just because the NO price is high — that is expected and correct for a longshot.`,
-    });
+    if (!autoQualified) {
+      // S-002-specific qualify prompt. Reject criteria are narrowed to genuine structural
+      // exceptions — generic LLM heuristics ("low activity", "edge looks like noise",
+      // "correlated risk") are explicitly suppressed because they misfire on a bias strategy.
+      const qualifyPrompt = buildQualifyPrompt("S-002 Longshot Bias", {
+        ticker: sig.ticker,
+        market_question: sig.market_question,
+        direction,
+        yes_bid: sig.yes_bid,
+        yes_ask: sig.yes_ask,
+        volume: sig.volume,
+        days_to_close: sig.days_to_close,
+        win_streak: winStreak,
+        performance_context: `Win streak: ${winStreak} day(s). Instrumentation only — ignore for this decision.`,
+        ...(s002Lessons.length > 0 ? { past_lessons: s002Lessons.join("\n") } : {}),
+        ...(s002MemBlock ? { strategy_memory: s002MemBlock } : {}),
+        note: `S-002 Longshot Bias: YES ask ${yesAsk}¢, buying NO at ~${price}¢. The edge is STRUCTURAL — YES contracts 8-11¢ on Kalshi resolve YES ~7% vs 12% implied, yielding ~5pp edge per trade. QUALIFY unless one of these specific exceptions applies: (1) the market question describes a near-certain outcome given current breaking news; (2) volume is spiking abnormally suggesting informed flow; (3) this event-root already has an open S-002 position. Do NOT reject for generic reasons (high NO price, market efficiency, low volume vs equity norms) — REJECT is reserved for genuine structural exceptions only.`,
+      });
 
-    const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id, supabase);
-    if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
+      const { qualified, reason } = await qualifySetup(aiConfig, qualifyPrompt, mode, runId, strategy.id, supabase);
+      if (!qualified) return { sig, success: false, detail: `rejected: ${reason}` };
+      qualifyReason = reason;
+    }
 
     const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
       ticker: sig.ticker,
@@ -1402,23 +1596,34 @@ async function runS002LongshotBias(
       time_in_force: "day",
       mode,
       expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
-      notes: `S-002 Longshot Bias: longshot NO, ${direction} @ ${Math.round(price)}¢ (maker day order). ${reason}`,
-      expectedOutcome: `${direction} on ${sig.ticker} — bias edge ~5pp`,
-      confidenceLevel: 0.55,
+      notes: `S-002 Longshot Bias: NO @ ${Math.round(price)}¢ (${direction}, maker limit). ${qualifyReason}`,
+      expectedOutcome: `${direction} on ${sig.ticker} — structural bias edge ~5pp, slot weight ${s002SlotWeight(sig.days_to_close ?? 30).toFixed(2)}`,
+      confidenceLevel: autoQualified ? 0.65 : 0.55,
       user_id: strategy.user_id || null,
       traceId: runId,
       sourceSignalId: sig.id || null,
-      systemVersion: 'v2',
+      systemVersion: "v2",
       influencedByMemoryIds: s002MemoryIds,
     });
-    if (!result.success) {
+    if (!result.success && !result.hitl_pending) {
       const errDetail = result.error || result.message || "unknown error";
       captureMessage(`S-002 execute-trade failed: ${errDetail}`, "warning", {
         function: "auto-trade", strategyId: "S-002", runId, mode,
         extra: { ticker: sig.ticker, price, direction: "buy_no", response: result },
       });
     }
-    return { sig, success: result.success, detail: result.success ? `${sig.ticker} NO @ ${Math.round(price)}¢` : (result.error || result.message || "unknown error") };
+    const aqTag = autoQualified ? " [AQ]" : "";
+    const hitlTag = result.hitl_pending ? " [HITL-PENDING]" : "";
+    return {
+      sig,
+      success: result.success,
+      hitl_pending: result.hitl_pending ?? false,
+      detail: result.success
+        ? `${sig.ticker} NO @ ${Math.round(price)}¢${aqTag}`
+        : result.hitl_pending
+          ? `${sig.ticker} queued for HITL approval${aqTag}${hitlTag}`
+          : (result.error || result.message || "unknown error"),
+    };
   }));
 
   const filled = execResults.filter(r => r.success);
@@ -1445,7 +1650,7 @@ async function runS002LongshotBias(
       filled.length > 0
         ? `Longshot Bias executed ${filled.length}/${candidates.length}: ${filled.map(r => r.detail).join(", ")}`
         : `No fills: ${execResults.map(r => r.detail).join("; ")}`,
-      timeExitResults.length > 0 ? `Time exits (12h): ${timeExitResults.join(", ")}` : "",
+      timeExitResults.length > 0 ? `Time exits (2h): ${timeExitResults.join(", ")}` : "",
     ].filter(Boolean).join(" | "),
   };
 }
@@ -1478,16 +1683,26 @@ async function runS005WeatherEdge(
   const MAX_PARALLEL_SIGNALS = 5;
   const excludedCities: string[] = (config as any)?.excluded_cities ?? [];
 
-  // GFS accuracy time gate — Sunday GFS runs have ~15% higher RMSE (fewer radiosonde launches).
-  // Pre-14:00 UTC gate removed: weather-signal upserts overwrite edge_cents every 10 min, so
-  // by 14:00 UTC same-day Kalshi markets have priced in the forecast and edge has eroded below
-  // threshold. The original pre-14:00 losses were caused by poisoned memories + bad sizing
-  // (both fixed), not by GFS model quality. Keep only the Sunday structural RMSE block.
+  // Dynamic edge floor by forecast horizon. GFS RMSE roughly doubles from day-1 (~3.5°F) to
+  // day-3 (~6-7°F), collapsing real edge by 40-50%. Scale the floor so risk-adjusted EV stays
+  // constant. Signals beyond 3 days are rejected — GFS skill degrades too much past day-3.
+  // day-1: base floor; day-2: base+5¢; day-3: base+10¢
+  const MAX_FORECAST_HORIZON_DAYS = 3;
+  function horizonEdgeFloor(daysToClose: number): number {
+    if (daysToClose <= 1) return minEdge;
+    if (daysToClose <= 2) return minEdge + 5;
+    return minEdge + 10; // day-3
+  }
+
+  // GFS accuracy time gate. Saturday (6) and Sunday (0) GFS runs have elevated RMSE:
+  // fewer radiosonde launches on weekends degrade ensemble accuracy by ~15%.
+  // Block both weekend days to avoid trading on degraded model runs.
   const utcNow = new Date();
   const utcHour = utcNow.getUTCHours();
-  const utcDay = utcNow.getUTCDay(); // 0 = Sunday
-  if (utcDay === 0) {
-    const reason = "Sunday GFS accuracy window (elevated RMSE)";
+  const utcDay = utcNow.getUTCDay(); // 0 = Sunday, 6 = Saturday
+  if (utcDay === 0 || utcDay === 6) {
+    const dayName = utcDay === 0 ? "Sunday" : "Saturday";
+    const reason = `${dayName} GFS accuracy window (elevated RMSE — fewer weekend radiosonde launches)`;
     await supabase.from("compliance_log").insert({
       user_id: strategy.user_id,
       event_type: "s005_time_gate",
@@ -1504,6 +1719,84 @@ async function runS005WeatherEdge(
       details: `time_gate: ${reason}`,
     };
   }
+
+  // Early profit lock: if a position has moved 50%+ of edge in our favor since entry,
+  // close it now rather than holding to settlement. Weather markets can reverse sharply
+  // on a new GFS run (updates every ~6h), so locking realized gains beats holding for
+  // the final few cents. We fetch open S-005 positions, check current mid-price vs entry,
+  // and sell any that have appreciated by >= 50% of the entry edge.
+  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
+  const profitLockResults: string[] = [];
+  try {
+    const { data: openS005Trades } = await supabase
+      .from("trades")
+      .select("id, ticker, side, price, amount, market_question, metadata")
+      .eq("status", "filled")
+      .eq("strategy_id", strategy.id)
+      .is("exit_reason", null)
+      .is("settled_at", null)
+      .eq(strategy.user_id ? "user_id" : "user_id", strategy.user_id || null);
+
+    for (const pos of openS005Trades ?? []) {
+      // Retrieve signal edge at entry from metadata if stored, else skip
+      const entryEdgeCents: number = Number(pos.metadata?.entry_edge_cents ?? 0);
+      const entryPrice: number = Number(pos.price ?? 0);
+      if (entryEdgeCents <= 0 || entryPrice <= 0) continue;
+
+      // Fetch current market price from Kalshi
+      let currentMid: number | null = null;
+      try {
+        const mktResp = await fetch(
+          `${KALSHI_API_BASE}/markets/${encodeURIComponent(pos.ticker)}`,
+          { headers: { "Content-Type": "application/json" } }
+        );
+        if (mktResp.ok) {
+          const mktData = await mktResp.json();
+          const mkt = mktData?.market ?? mktData;
+          const yesBid = Number(mkt?.yes_bid_dollars ?? mkt?.yes_bid ?? 0) * (mkt?.yes_bid_dollars !== undefined ? 100 : 1);
+          const yesAsk = Number(mkt?.yes_ask_dollars ?? mkt?.yes_ask ?? 0) * (mkt?.yes_ask_dollars !== undefined ? 100 : 1);
+          if (yesBid > 0 && yesAsk > 0) currentMid = (yesBid + yesAsk) / 2;
+        }
+      } catch { /* non-critical — skip this position */ }
+
+      if (currentMid === null) continue;
+
+      // For a YES buy: entry cost = entryPrice. Current value = currentMid.
+      // For a NO buy: entry cost = entryPrice. Current value = 100 - currentMid.
+      const currentValue = pos.side === "yes" ? currentMid : (100 - currentMid);
+      const gainCents = currentValue - entryPrice;
+      const profitLockThreshold = entryEdgeCents * 0.5;
+
+      if (gainCents >= profitLockThreshold) {
+        // Close at aggressive limit: accept 1¢ below current bid to guarantee fill
+        const closePrice = Math.max(1, Math.round(currentValue) - 1);
+        const closeResult = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
+          ticker: pos.ticker,
+          marketId: pos.ticker,
+          marketQuestion: pos.market_question || pos.ticker,
+          side: pos.side,
+          action: "sell",
+          price: closePrice,
+          amount: pos.amount,
+          strategy: strategy.name,
+          strategyId: strategy.id,
+          orderType: "limit",
+          time_in_force: "day",
+          mode,
+          exit_reason: "profit_lock_50pct",
+          notes: `S-005 profit lock: position gained ${gainCents.toFixed(1)}¢ >= 50% of ${entryEdgeCents}¢ entry edge. Closing to capture gains before next GFS update.`,
+          user_id: strategy.user_id || null,
+          traceId: runId,
+          systemVersion: "v2",
+        });
+        const outcome = closeResult.success ? `locked +${gainCents.toFixed(1)}¢` : "lock_failed";
+        profitLockResults.push(`${pos.ticker}: ${outcome}`);
+        if (closeResult.success) {
+          await supabase.from("trades").update({ exit_reason: "profit_lock_50pct" }).eq("id", pos.id).then(null, () => {});
+        }
+      }
+    }
+  } catch { /* profit lock is enhancement — never block entry logic */ }
 
   // 24h window: GFS model updates at ~04:00 and ~07:00 UTC. KXHIGH markets trade until
   // ~05:00 UTC the following day (midnight ET), so signals created at 04:00 UTC must remain
@@ -1524,9 +1817,10 @@ async function runS005WeatherEdge(
     null // signals are system-generated — no user_id column on signals table
   );
 
-  // Filter out cities where S-005 has persistent forecast_bias losses, and drop any
-  // signals whose settlement date has already passed — prevents Kalshi API calls for
-  // expired markets (which drives rate-limit hits before the execute-trade guard fires).
+  // Filter out cities where S-005 has persistent forecast_bias losses, drop signals
+  // whose settlement date has already passed, enforce forecast horizon cap, apply
+  // dynamic edge floor by horizon, and reject extreme-probability signals where GFS
+  // may be outside its calibrated regime.
   const nowMs = Date.now();
   const signals = (rawSignals || [])
     .filter((s: any) => {
@@ -1536,6 +1830,19 @@ async function runS005WeatherEdge(
         const cityMatch = (s.ticker || "").match(/^KXHIGH([A-Z]{2,4})-/);
         if (cityMatch && excludedCities.includes(cityMatch[1])) return false;
       }
+      // Forecast horizon cap: GFS skill degrades sharply beyond 3 days.
+      // days_to_close=1 placeholder means horizon unknown — treat as day-1 (allow).
+      const horizon = Math.round(s.days_to_close ?? 1);
+      if (horizon > MAX_FORECAST_HORIZON_DAYS) return false;
+      // Dynamic edge floor by horizon — a 15¢ edge on a day-3 forecast is not
+      // equivalent to 15¢ on day-1 when RMSE is 6-7°F vs 3.5°F.
+      const edgeFloor = horizonEdgeFloor(horizon);
+      if ((s.edge_cents ?? 0) < edgeFloor) return false;
+      // Calibration bounds: GFS probability below 5% or above 95% means the model
+      // is in an extreme regime it wasn't calibrated for (extreme heat events, fronts).
+      // These signals appear to have large edge but the Gaussian assumption breaks down.
+      const trueP = s.true_probability ?? 0.5;
+      if (trueP < 0.05 || trueP > 0.95) return false;
       return true;
     })
     .slice(0, MAX_PARALLEL_SIGNALS);
@@ -1547,7 +1854,7 @@ async function runS005WeatherEdge(
       mode,
       status: "completed",
       action: "no_setup",
-      details: `No weather signals with edge >= ${minEdge}c in last 12h (GFS model updates ~04:00 and ~07:00 UTC)`,
+      details: `No weather signals passed filters (edge floor ${minEdge}c day-1/${minEdge+5}c day-2/${minEdge+10}c day-3, max horizon ${MAX_FORECAST_HORIZON_DAYS}d, prob 5-95%). GFS updates ~04:00 and ~07:00 UTC.`,
     };
   }
 
@@ -1662,7 +1969,7 @@ async function runS005WeatherEdge(
 
   const memBaseQuery = supabase
     .from("agent_memory")
-    .select("id, title, content, confidence")
+    .select("id, title, content, confidence, exposed_confidence")
     .eq("strategy_id", strategy.id)
     .eq("is_active", true)
     .is("quarantined_at", null)
@@ -1678,7 +1985,7 @@ async function runS005WeatherEdge(
   if (!strategyMemories || strategyMemories.length === 0) {
     const fallback = await supabase
       .from("agent_memory")
-      .select("id, title, content, confidence")
+      .select("id, title, content, confidence, exposed_confidence")
       .eq("strategy_id", strategy.id)
       .eq("is_active", true)
       .is("merged_into", null)
@@ -1689,7 +1996,10 @@ async function runS005WeatherEdge(
 
   const activeMemoryIds = (strategyMemories ?? []).map((m: any) => m.id);
   const memoryBlock = (strategyMemories ?? [])
-    .map((m: any) => `[confidence ${Number(m.confidence).toFixed(2)}] ${m.title}: ${m.content}`)
+    .map((m: any) => {
+      const bay = m.exposed_confidence != null ? ` / bayesian ${Number(m.exposed_confidence).toFixed(2)}` : "";
+      return `[confidence ${Number(m.confidence).toFixed(2)}${bay}] ${m.title}: ${m.content}`;
+    })
     .join("\n");
 
   if (cityTags.length > 0) {
@@ -1791,11 +2101,15 @@ async function runS005WeatherEdge(
           ).join("\n")
         : "";
 
+      const sigHorizon = Math.round(sig.days_to_close ?? 1);
+      const sigEdgeFloor = horizonEdgeFloor(sigHorizon);
       const prompt = buildQualifyPrompt("S-005 Weather Edge", {
         ticker: sig.ticker,
         market_question: sig.market_question,
         direction: sig.direction,
         edge_cents: sig.edge_cents,
+        forecast_horizon_days: sigHorizon,
+        edge_floor_for_horizon: sigEdgeFloor,
         true_probability: sig.true_probability,
         implied_probability: sig.implied_probability,
         yes_bid: sig.yes_bid,
@@ -1808,7 +2122,7 @@ async function runS005WeatherEdge(
         performance_context: `Current win streak: ${winStreak} day(s). Tracked for instrumentation only — base your QUALIFY/REJECT decision purely on structural edge criteria below.`,
         ...(lessonBlock ? { past_lessons: lessonBlock } : {}),
         ...(memoryBlock ? { strategy_memory: memoryBlock } : {}),
-        note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : "require edge >= 15¢."}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
+        note: `Weather Edge: GFS ensemble forecast vs Kalshi price. Mode: ${mode.toUpperCase()} — ${mode === "paper" ? "LEAN QUALIFY to collect data. QUALIFY whenever edge_cents >= 5 and data is fresh. Large divergences (e.g., true_prob=2% vs implied=60%) are EXPECTED and correct — that IS the edge." : `require edge >= ${sigEdgeFloor}¢ (horizon-adjusted: day-${sigHorizon} needs ${sigEdgeFloor}¢ vs base ${minEdge}¢ due to GFS RMSE scaling).`}. REJECT ONLY if: market expires in < 2h, city in ticker does not match location, or data is clearly corrupt (null prices). Do NOT reject based on the size of the divergence — large divergence is the signal.`,
       });
       const { qualified, reason } = await qualifySetup(aiConfig, prompt, mode, runId, strategy.id, supabase);
       // Log every qualify/reject decision for 24h monitoring
@@ -1849,21 +2163,61 @@ async function runS005WeatherEdge(
   }
 
   // 3. Execute all qualified trades in parallel
-  const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const execResults = await Promise.all(
     qualifiedList.map(async ({ sig, reason }) => {
       const side = sig.direction === "buy_yes" ? "yes" : "no";
-      // MAKER orders: rest inside the spread at bid+1¢ (was taker at ask)
+
+      // Re-validate signal against live market price before trading.
+      // Signals are written every 30 min; the market can reprice significantly
+      // between signal-write time and now. Use live prices from kalshi_markets_cache
+      // for both the edge check and Kelly sizing — fall back to signal values if cache miss.
+      const seriesTicker = (sig.ticker as string).match(/^(KXHIGH[A-Z]+)-/)?.[1] ?? "";
+      const signalAgeMs = Date.now() - new Date(sig.created_at).getTime();
+      const signalAgeMin = Math.round(signalAgeMs / 60000);
+      let effectiveYesBid: number = sig.yes_bid ?? 50;
+      let effectiveYesAsk: number = sig.yes_ask ?? 50;
+      let liveEdge: number = sig.edge_cents ?? 0;
+
+      if (seriesTicker) {
+        const { data: liveMarketRows } = await supabase
+          .from("kalshi_markets_cache")
+          .select("market_data")
+          .eq("series_ticker", seriesTicker)
+          .limit(60);
+        const liveRow = (liveMarketRows ?? [])
+          .map((r: any) => r.market_data)
+          .find((m: any) => m.ticker === sig.ticker);
+        if (liveRow) {
+          const toCents = (v: any) => v == null ? null : (Number(v) > 1 ? Math.round(Number(v)) : Math.round(Number(v) * 100));
+          effectiveYesBid = toCents(liveRow.yes_bid_dollars ?? liveRow.yes_bid) ?? sig.yes_bid ?? 50;
+          effectiveYesAsk = toCents(liveRow.yes_ask_dollars ?? liveRow.yes_ask) ?? sig.yes_ask ?? 50;
+          const trueP = sig.true_probability ?? 0.5;
+          liveEdge = sig.direction === "buy_yes"
+            ? trueP * 100 - effectiveYesAsk
+            : effectiveYesBid - trueP * 100;
+        }
+      }
+
+      // Skip if live edge has evaporated — signal is stale
+      if (liveEdge < 10) {
+        await supabase.from("compliance_log").insert({
+          user_id: strategy.user_id,
+          event_type: "s005_stale_signal_skip",
+          severity: "info",
+          message: `S-005 skipped ${sig.ticker}: live edge ${liveEdge.toFixed(1)}¢ < 10¢ (signal had ${sig.edge_cents}¢, age ${signalAgeMin}m)`,
+          metadata: { ticker: sig.ticker, signal_edge: sig.edge_cents, live_edge: liveEdge, signal_age_min: signalAgeMin, runId },
+        }).then(null, () => {});
+        return { sig, side, price: 0, amount: 0, result: { success: false, error: `stale_signal: live_edge=${liveEdge.toFixed(1)}¢` } };
+      }
+
+      // MAKER orders: rest inside the spread at bid+1¢ using live prices
       const price = sig.direction === "buy_yes"
-        ? Math.max(1, (sig.yes_bid || 50) + 1)
-        : Math.max(1, (100 - (sig.yes_ask || 50)) + 1);
-      // Kelly-based sizing: accounts for binary contract payout geometry.
-      // A NO bet at 65¢ (paying 35¢, winning 65¢) has different Kelly fraction than
-      // a YES bet at the same edge — raw edge-only sizing ignores this asymmetry.
-      // Half-Kelly cap (0.25) prevents over-sizing on high-edge but narrow-spread signals.
+        ? Math.max(1, effectiveYesBid + 1)
+        : Math.max(1, (100 - effectiveYesAsk) + 1);
+      // Kelly-based sizing using live contract price — accounts for binary contract payout geometry.
       const contractPrice = sig.direction === "buy_yes"
-        ? (sig.yes_ask ?? 50)
-        : (100 - (sig.yes_bid ?? 50));
+        ? effectiveYesAsk
+        : (100 - effectiveYesBid);
       const priceFrac = Math.max(1, Math.min(99, contractPrice)) / 100;
       const payoutOdds = (1 - priceFrac) / priceFrac;
       const trueProb = sig.true_probability ?? 0.5;
@@ -1885,7 +2239,7 @@ async function runS005WeatherEdge(
           orderType: "limit",
           mode,
           expirationTime: parseSettlementDate(sig.ticker)?.toISOString() || null,
-          notes: `S-005 auto-trade: edge=${sig.edge_cents}c, true_p=${sig.true_probability}, maker order at bid+1¢. ${reason}`,
+          notes: `S-005 auto-trade: edge=${sig.edge_cents}c, true_p=${sig.true_probability}, maker order at bid+1¢. signal_age=${signalAgeMin}m, live_edge=${liveEdge.toFixed(0)}c. ${reason}`,
           expectedOutcome: `NWS model: ${sig.direction} (true_p=${sig.true_probability}, implied_p=${sig.implied_probability})`,
           confidenceLevel: sig.true_probability,
           user_id: strategy.user_id || null,
@@ -1893,13 +2247,17 @@ async function runS005WeatherEdge(
           sourceSignalId: sig.id || null,
           systemVersion: 'v2',
           influencedByMemoryIds: activeMemoryIds,
+          // Store entry edge for profit-lock logic: used by the next run to determine
+          // whether the position has appreciated 50%+ of entry edge.
+          metadata: { entry_edge_cents: sig.edge_cents ?? 0, forecast_horizon_days: Math.round(sig.days_to_close ?? 1) },
       });
       return { sig, side, price, amount, result };
     })
   );
 
   const filled = execResults.filter(r => r.result.success);
-  const failed = execResults.filter(r => !r.result.success);
+  const hitlPending = execResults.filter(r => r.result.hitl_pending);
+  const failed = execResults.filter(r => !r.result.success && !r.result.hitl_pending);
 
   // Mark consumed signals so the next cron run skips them — without this, the same
   // weather signal is re-qualified on every 30s run for its full 12h freshness window.
@@ -1917,8 +2275,14 @@ async function runS005WeatherEdge(
     filled.length > 0
       ? `Executed ${filled.length} trade(s): ${filled.map(r => `${r.sig.ticker} ${r.sig.edge_cents}c edge`).join(", ")}`
       : null,
+    hitlPending.length > 0
+      ? `${hitlPending.length} awaiting HITL approval`
+      : null,
     failed.length > 0
       ? `${failed.length} failed: ${failed.map(r => r.result.error || r.result.message || "unknown").join(", ")}`
+      : null,
+    profitLockResults.length > 0
+      ? `Profit locks: ${profitLockResults.join(", ")}`
       : null,
   ].filter(Boolean).join(". ");
 
@@ -2011,14 +2375,25 @@ Reason: [one sentence explaining why this is rejected]`;
 
 async function fetchStrategyLessons(supabase: any, strategyId: string): Promise<string[]> {
   try {
-    const { data } = await supabase
-      .from("trade_lessons")
-      .select("lesson, do_differently, outcome")
-      .eq("strategy_id", strategyId)
-      .eq("outcome", "loss")
-      .order("created_at", { ascending: false })
-      .limit(5);
-    return (data || []).map((r: any) => `${r.lesson} → ${r.do_differently}`);
+    const [lossRes, winRes] = await Promise.all([
+      supabase
+        .from("trade_lessons")
+        .select("lesson, do_differently")
+        .eq("strategy_id", strategyId)
+        .eq("outcome", "loss")
+        .order("created_at", { ascending: false })
+        .limit(3),
+      supabase
+        .from("trade_lessons")
+        .select("lesson")
+        .eq("strategy_id", strategyId)
+        .eq("outcome", "win")
+        .order("created_at", { ascending: false })
+        .limit(2),
+    ]);
+    const losses = (lossRes.data || []).map((r: any) => `[LOSS] ${r.lesson} → ${r.do_differently}`);
+    const wins   = (winRes.data  || []).map((r: any) => `[WIN] ${r.lesson}`);
+    return [...losses, ...wins];
   } catch {
     return [];
   }
