@@ -77,7 +77,7 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
   if (cards.every(c => !c.strategy)) return null;
 
   const focusedCard = cards[focused];
-  const focusedMeta = STRATEGY_META[focusedCard?.tid ?? ""] ?? { label: "📈", short: "", fallbackInsight: "" };
+  const focusedMeta = STRATEGY_META[focusedCard?.tid ?? ""] ?? { label: "--", short: "", fallbackInsight: "" };
   const focusedStats = focusedCard?.strategy ? strategyStats[focusedCard.strategy.id] : null;
   const focusedInsight =
     insights[focusedCard?.tid ?? ""] ??
