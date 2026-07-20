@@ -87,69 +87,6 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
 
   return (
     <div className="space-y-3">
-      {/* Story circles */}
-      <div className="flex justify-between px-2">
-        {cards.map(({ strategy, ghost, tid }, i) => {
-          const meta = STRATEGY_META[tid] ?? { label: "--", short: "Strat", fallbackInsight: "" };
-          const stats = strategy ? strategyStats[strategy.id] : null;
-          const pnl = stats?.totalPnl ?? 0;
-          const trades = stats?.totalTrades ?? 0;
-          const isFocused = i === focused;
-
-          return (
-            <button
-              key={tid}
-              onClick={() => {
-                setFocused(i);
-                onNavigate("markets");
-              }}
-              onMouseEnter={() => setFocused(i)}
-              className={cn(
-                "flex flex-col items-center gap-1.5 active:scale-95 transition-transform",
-                ghost && "opacity-40"
-              )}
-              style={{ width: 64 }}
-            >
-              {/* Ring */}
-              <div className={cn("rounded-full transition-all duration-300", getRingClass(pnl, strategy?.active ?? false, isFocused))}>
-                <div
-                  className={cn(
-                    "flex items-center justify-center rounded-full bg-background transition-all duration-300",
-                    isFocused ? "text-sm font-bold" : "text-xs font-semibold"
-                  )}
-                  style={{
-                    width: isFocused ? 52 : 48,
-                    height: isFocused ? 52 : 48,
-                  }}
-                >
-                  {meta.label}
-                </div>
-              </div>
-
-              {/* Name */}
-              <span className={cn(
-                "text-[10px] font-medium leading-none transition-colors",
-                isFocused ? "text-foreground" : "text-muted-foreground"
-              )}>
-                {meta.short}
-              </span>
-
-              {/* P&L pill */}
-              <span className={cn(
-                "text-[9px] font-semibold px-1.5 py-0.5 rounded-full leading-none",
-                trades === 0
-                  ? "bg-secondary text-muted-foreground"
-                  : pnl >= 0
-                    ? "bg-emerald-500/15 text-emerald-500"
-                    : "bg-red-500/15 text-red-400"
-              )}>
-                {trades === 0 ? "—" : fmtPnl(pnl)}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
       {/* Rotating insight strip */}
       <button
         onClick={() => onNavigate("markets")}
@@ -163,21 +100,6 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
         <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
       </button>
 
-      {/* Progress dots */}
-      <div className="flex justify-center gap-1">
-        {cards.map((_, i) => (
-          <button
-            key={i}
-            onClick={() => setFocused(i)}
-            className={cn(
-              "rounded-full transition-all duration-300",
-              i === focused
-                ? "w-4 h-1.5 bg-foreground"
-                : "w-1.5 h-1.5 bg-muted-foreground/30"
-            )}
-          />
-        ))}
-      </div>
     </div>
   );
 }

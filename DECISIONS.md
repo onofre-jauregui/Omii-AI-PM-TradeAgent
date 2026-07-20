@@ -4,6 +4,16 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-20 — Flagged market-data-fetcher credential-fetch timeout gap (not auto-fixed)
+
+**Decision:** Logged as a finding for review rather than deploying a fix during an unattended scheduled health-check run.
+**Finding:** `market-data-fetcher/index.ts` calls `getKalshiCredentials()` (a Supabase query + decrypt) *before* the per-series loop where `RUN_BUDGET_MS` (50s) is enforced. That call has no timeout. On 2026-07-13 the run aborted after 130.6s with 0 series failed / all 18 skipped — consistent with the credential fetch itself stalling, not Kalshi API latency. This fired a critical Telegram alert ("Surface scanner and signal generation may be running on stale data") and happened again 2026-07-16 (61.4s, 3 skipped). No recurrence in the last 24h (checked via `compliance_log`, 0 error/critical rows since 2026-07-16).
+**Proposed fix:** wrap `getKalshiCredentials(...)` in `market-data-fetcher/index.ts:63` with the same `AbortController` + timeout pattern already used per-series (~5–8s), so a stalled credential fetch fails fast and alerts with an accurate cause instead of silently consuming the whole run budget.
+**Options:** A) Auto-deploy the timeout wrapper now — rejected: this edge function is live-trading-adjacent (market data feeds S-001/S-002/S-005 execution) and production deploys are a Hard Stop requiring in-session approval, which isn't available on an unattended scheduled run. B) Log the finding + fix for Onofre to review and deploy — chosen.
+**Why:** Matches session protocol for scheduled/unattended runs — report, don't ship, when the change touches a live production trading path.
+**Reversibility:** N/A — no code changed yet.
+**Trace:** `compliance_log` event_type=`market_data_fetcher_aborted`, 2026-07-13T12:43:11Z and 2026-07-16T22:47:02Z.
+
 ## 2026-07-10 — Deferred HITL gate (two-phase) for live trades
 
 **Decision:** HITL gate lives in execute-trade, uses a deferred 202 pattern instead of inline polling.
