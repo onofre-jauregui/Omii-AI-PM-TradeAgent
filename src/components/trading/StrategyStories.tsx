@@ -90,7 +90,7 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
       {/* Story circles */}
       <div className="flex justify-between px-2">
         {cards.map(({ strategy, ghost, tid }, i) => {
-          const meta = STRATEGY_META[tid] ?? { label: "📈", short: "Strat", fallbackInsight: "" };
+          const meta = STRATEGY_META[tid] ?? { label: "--", short: "Strat", fallbackInsight: "" };
           const stats = strategy ? strategyStats[strategy.id] : null;
           const pnl = stats?.totalPnl ?? 0;
           const trades = stats?.totalTrades ?? 0;

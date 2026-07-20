@@ -12,7 +12,8 @@ if (
   host !== `www.${CANONICAL}` &&
   host !== STAGING &&
   host !== "localhost" &&
-  host !== "127.0.0.1"
+  host !== "127.0.0.1" &&
+  !host.endsWith(".vercel.app")
 ) {
   window.location.replace(`https://${CANONICAL}${window.location.pathname}${window.location.search}${window.location.hash}`);
 }
