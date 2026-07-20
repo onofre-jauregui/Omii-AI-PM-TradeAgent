@@ -3,25 +3,26 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Bot, Brain, Globe, Lock } from "lucide-react";
 
 const FEATURES = [
   {
-    icon: "🤖",
+    Icon: Bot,
     title: "AI Agent, Always On",
     desc: "Scans Kalshi markets 24/7, qualifies setups, and executes trades while you sleep.",
   },
   {
-    icon: "🧠",
+    Icon: Brain,
     title: "Gets Smarter With Every Trade",
     desc: "Wins and losses feed back into shared memory. The model improves for every contributor.",
   },
   {
-    icon: "🌐",
+    Icon: Globe,
     title: "Community Edge",
     desc: "Opt in to the shared signal pool. More users → more trades → better returns for everyone.",
   },
   {
-    icon: "🔒",
+    Icon: Lock,
     title: "Your Keys, Your Capital",
     desc: "Connect your Kalshi API key. We never touch your funds — the agent trades on your behalf via Kalshi's own API.",
   },
@@ -144,7 +145,7 @@ export default function SignupPage() {
         <div className="max-w-4xl mx-auto grid grid-cols-1 sm:grid-cols-2 gap-8">
           {FEATURES.map((f) => (
             <div key={f.title} className="flex gap-4">
-              <span className="text-2xl mt-0.5">{f.icon}</span>
+              <f.Icon className="h-5 w-5 mt-0.5 text-white/60 shrink-0" />
               <div>
                 <h3 className="font-semibold text-white">{f.title}</h3>
                 <p className="text-white/40 text-sm mt-1 leading-relaxed">{f.desc}</p>

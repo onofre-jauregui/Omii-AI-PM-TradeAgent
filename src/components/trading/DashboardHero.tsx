@@ -470,7 +470,7 @@ export function DashboardHero({
           )}
           {winStreak >= 2 && (
             <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-warning/15 text-warning px-2 py-0.5 rounded-full">
-              🔥 {winStreak} day streak
+              {winStreak} day streak
             </span>
           )}
         </div>

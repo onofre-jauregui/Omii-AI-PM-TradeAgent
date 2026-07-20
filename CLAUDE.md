@@ -68,6 +68,18 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - **Apply migrations:** `source ~/.omii_env && curl -s -X POST "https://api.supabase.com/v1/projects/uyfnezxmgwitpzsrnkst/database/query" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN_KTA" -H "Content-Type: application/json" -d '{"query": "..."}'`
 - **Never use** `npx supabase db push` — migration history is out of sync with remote.
 
+## Branch strategy — hard rule
+
+**feature → dev → main. No exceptions.**
+
+- All feature/fix PRs use `--base dev`
+- Only the `dev → main` promotion PR uses `--base main`
+- Before creating any PR, state the base branch and confirm it's correct
+- Before merging any PR, verify it's not bypassing dev
+- Onofre must explicitly say "ship to production" / "promote dev to main" to trigger a dev→main PR
+
+---
+
 ## Rules specific to this project
 
 ### On trading performance claims

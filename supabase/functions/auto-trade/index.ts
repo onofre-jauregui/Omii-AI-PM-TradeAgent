@@ -953,15 +953,14 @@ const KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
 // Wrapper around every execute-trade HTTP call.
 //
-// Handles two special HTTP statuses:
-//   401 — service-role key missing/rotated; fires Telegram alert and halts
-//   202 — live trade deferred for HITL approval via Telegram; not a failure
+// Handles the 401 case specially: service-role key missing/rotated fires a
+// Telegram alert and halts trading. All other responses pass through.
 async function callExecuteTrade(
   executeUrl: string,
   supabaseKey: string,
   supabase: any,
   payload: Record<string, unknown>
-): Promise<{ success: boolean; hitl_pending?: boolean; error?: string; [key: string]: unknown }> {
+): Promise<{ success: boolean; error?: string; [key: string]: unknown }> {
   const resp = await fetch(executeUrl, {
     method: "POST",
     headers: {
@@ -987,12 +986,6 @@ async function callExecuteTrade(
     ).catch(() => {});
 
     return { success: false, error: "execute-trade 401 — service-role key misconfigured" };
-  }
-
-  // 202: live trade queued for HITL approval — not a failure, not a fill
-  if (resp.status === 202) {
-    const body = await resp.json().catch(() => ({})) as Record<string, unknown>;
-    return { success: false, hitl_pending: true, approval_id: body.approval_id };
   }
 
   return resp.json().catch(() => ({ success: false, error: "response parse failed" }));
@@ -1605,7 +1598,7 @@ async function runS002LongshotBias(
       systemVersion: "v2",
       influencedByMemoryIds: s002MemoryIds,
     });
-    if (!result.success && !result.hitl_pending) {
+    if (!result.success) {
       const errDetail = result.error || result.message || "unknown error";
       captureMessage(`S-002 execute-trade failed: ${errDetail}`, "warning", {
         function: "auto-trade", strategyId: "S-002", runId, mode,
@@ -1613,16 +1606,12 @@ async function runS002LongshotBias(
       });
     }
     const aqTag = autoQualified ? " [AQ]" : "";
-    const hitlTag = result.hitl_pending ? " [HITL-PENDING]" : "";
     return {
       sig,
       success: result.success,
-      hitl_pending: result.hitl_pending ?? false,
       detail: result.success
         ? `${sig.ticker} NO @ ${Math.round(price)}¢${aqTag}`
-        : result.hitl_pending
-          ? `${sig.ticker} queued for HITL approval${aqTag}${hitlTag}`
-          : (result.error || result.message || "unknown error"),
+        : (result.error || result.message || "unknown error"),
     };
   }));
 
@@ -2256,8 +2245,7 @@ async function runS005WeatherEdge(
   );
 
   const filled = execResults.filter(r => r.result.success);
-  const hitlPending = execResults.filter(r => r.result.hitl_pending);
-  const failed = execResults.filter(r => !r.result.success && !r.result.hitl_pending);
+  const failed = execResults.filter(r => !r.result.success);
 
   // Mark consumed signals so the next cron run skips them — without this, the same
   // weather signal is re-qualified on every 30s run for its full 12h freshness window.
@@ -2274,9 +2262,6 @@ async function runS005WeatherEdge(
   const detailParts = [
     filled.length > 0
       ? `Executed ${filled.length} trade(s): ${filled.map(r => `${r.sig.ticker} ${r.sig.edge_cents}c edge`).join(", ")}`
-      : null,
-    hitlPending.length > 0
-      ? `${hitlPending.length} awaiting HITL approval`
       : null,
     failed.length > 0
       ? `${failed.length} failed: ${failed.map(r => r.result.error || r.result.message || "unknown").join(", ")}`
