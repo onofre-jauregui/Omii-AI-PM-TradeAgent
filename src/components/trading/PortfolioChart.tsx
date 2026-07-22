@@ -37,10 +37,12 @@ export function PortfolioChart({
   const loadChartData = useCallback(async () => {
     setLoading(true);
 
-    // Get starting balance from strategies table (same source as DashboardHero)
-    const { data: strategyRows } = await supabase
-      .from("strategies")
-      .select("starting_balance");
+    // Get starting balance from strategies table (same source as DashboardHero).
+    // Must be mode-scoped: otherwise the live chart baselines at paper+live
+    // combined (~$2,600) while its trades are live-only, so the value is wrong.
+    let sbQuery = supabase.from("strategies").select("starting_balance, mode");
+    if (mode) sbQuery = sbQuery.eq("mode", mode);
+    const { data: strategyRows } = await sbQuery;
 
     const balance = strategyRows && strategyRows.length > 0
       ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
