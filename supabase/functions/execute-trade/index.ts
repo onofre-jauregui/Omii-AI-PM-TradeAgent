@@ -6,7 +6,7 @@ import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } f
 import { resolveTenant, getRiskSettings, getRiskStateToday, setRiskHalt } from "../_shared/tenant.ts";
 import { isServiceRoleBearer } from "../_shared/auth-helpers.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
-import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { checkEntitlement, TIER_DEFINITIONS, type SubscriptionRow } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 
@@ -233,8 +233,11 @@ serve(async (req) => {
     }
 
     // ── Subscription Entitlement Check ──
-    // Paper trades are always allowed. Live trades require an active paid subscription.
-    if (tradeMode === "live") {
+    // Tier limits are resolved for every mode (the free trial's own caps apply to
+    // paper trades) but the allowed/blocked gate below — subscription status, live
+    // access, strategy access, position size — only applies to live money.
+    let tierLimits = TIER_DEFINITIONS.free.limits;
+    if (userId) {
       const { data: sub } = await supabase
         .from("subscriptions")
         .select("*")
@@ -244,17 +247,43 @@ serve(async (req) => {
       const entitlement = checkEntitlement({
         subscription: sub as SubscriptionRow | null,
         strategy: strategyId,
-        mode: "live",
+        mode: tradeMode,
         positionUsd: amount,
       });
+      tierLimits = entitlement.limits;
 
-      if (!entitlement.allowed) {
+      if (tradeMode === "live" && !entitlement.allowed) {
         await logCompliance(supabase, userId, null, "entitlement_blocked", "warning",
           entitlement.reason!, { strategyId, mode: "live", amount });
         return new Response(
           JSON.stringify({ error: entitlement.reason }),
           { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
+      }
+    }
+
+    // ── Daily Trade Count Cap (per tier, scoped to this mode) ──
+    // The billing page advertises a trades/day figure per tier (including the free
+    // trial's paper-only cap) — this is the enforcement for it. Scoped to the
+    // requested mode so a user's paper activity doesn't eat into their live quota.
+    if (userId) {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { count: tradesToday } = await supabase
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("mode", tradeMode)
+        .gte("created_at", twentyFourHoursAgo);
+
+      if ((tradesToday ?? 0) >= tierLimits.maxTradesPerDay) {
+        await logCompliance(supabase, userId, null, "daily_trade_cap_enforced", "warning",
+          `Trade rejected: daily trade cap (${tierLimits.maxTradesPerDay}) reached for user ${userId} in ${tradeMode} mode`,
+          { mode: tradeMode, count: tradesToday, limit: tierLimits.maxTradesPerDay }
+        );
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Daily trade limit (${tierLimits.maxTradesPerDay} for ${tradeMode} mode) reached. Upgrade for a higher limit or try again tomorrow.`,
+        }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
 
@@ -277,7 +306,10 @@ serve(async (req) => {
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
     if (userId) {
       const capSettings = await getRiskSettings(supabase, userId);
-      const maxPos = (capSettings as any)?.max_open_positions ?? 10;
+      const userMaxPos = (capSettings as any)?.max_open_positions ?? 10;
+      // Live mode can never exceed what the subscription tier pays for, regardless
+      // of a looser self-configured risk_settings value.
+      const maxPos = tradeMode === "live" ? Math.min(userMaxPos, tierLimits.maxOpenPositions) : userMaxPos;
       const { count: openCount } = await supabase
         .from("trades")
         .select("id", { count: "exact", head: true })

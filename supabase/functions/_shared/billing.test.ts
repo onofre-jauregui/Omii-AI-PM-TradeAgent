@@ -32,11 +32,11 @@ describe("TIER_DEFINITIONS", () => {
     );
   });
 
-  it("position limits are enforced via in-app risk controls per tier", () => {
-    // All tiers currently delegate position sizing to in-app risk controls (maxPositionUsd = 999999).
-    // The actual enforcement is done by the user's risk_settings row, not the tier cap.
-    expect(TIER_DEFINITIONS.free.limits.maxPositionUsd).toBeGreaterThan(0);
-    expect(TIER_DEFINITIONS.prop.limits.maxPositionUsd).toBeGreaterThan(0);
+  it("position limits increase monotonically with tier and match what's advertised", () => {
+    expect(TIER_DEFINITIONS.free.limits.maxPositionUsd).toBe(25);
+    expect(TIER_DEFINITIONS.starter.limits.maxPositionUsd).toBe(100);
+    expect(TIER_DEFINITIONS.pro.limits.maxPositionUsd).toBe(500);
+    expect(TIER_DEFINITIONS.prop.limits.maxPositionUsd).toBe(5000);
   });
 
   it("S-003 (Economic Consensus) is not in any tier per Fed paper evidence", () => {
@@ -158,16 +158,25 @@ describe("checkEntitlement", () => {
     expect(r.allowed).toBe(true);
   });
 
-  it("allows positions when live trading is enabled — size limits enforced by risk_settings", () => {
-    // Position size enforcement moved to risk_settings (user-configurable).
-    // checkEntitlement only gates tier/strategy/subscription status.
+  it("allows a position within the tier's max size", () => {
     const r = checkEntitlement({
       subscription: activeStarter,
       strategy: "S-004",
       mode: "live",
-      positionUsd: 10_000,
+      positionUsd: 100, // starter cap is exactly $100
     });
     expect(r.allowed).toBe(true);
+  });
+
+  it("blocks a position over the tier's max size", () => {
+    const r = checkEntitlement({
+      subscription: activeStarter,
+      strategy: "S-004",
+      mode: "live",
+      positionUsd: 10_000, // starter cap is $100
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/max position size/);
   });
 
   it("blocks S-003 on every tier in live mode (it's disabled per Fed paper)", () => {
