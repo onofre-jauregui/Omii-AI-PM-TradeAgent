@@ -67,9 +67,9 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Free Trial",
     monthlyPriceUsd: 0,
     limits: {
-      maxTradesPerDay: 999999,
-      maxOpenPositions: 999999,
-      maxPositionUsd: 999999,
+      maxTradesPerDay: 5,
+      maxOpenPositions: 3,
+      maxPositionUsd: 25,
       maxMarketsWatched: 999999,
       liveTradingEnabled: false,
       allowedStrategies: ALL_STRATEGIES, // paper trades always allowed regardless of strategy
@@ -80,9 +80,9 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Starter",
     monthlyPriceUsd: 99,
     limits: {
-      maxTradesPerDay: 999999,
-      maxOpenPositions: 999999,
-      maxPositionUsd: 999999, // user enforces via in-app risk controls
+      maxTradesPerDay: 25,
+      maxOpenPositions: 8,
+      maxPositionUsd: 100,
       maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ["S-001", "S-002", "S-004"],
@@ -93,9 +93,9 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Pro",
     monthlyPriceUsd: 199,
     limits: {
-      maxTradesPerDay: 999999,
-      maxOpenPositions: 999999,
-      maxPositionUsd: 999999, // user enforces via in-app risk controls
+      maxTradesPerDay: 100,
+      maxOpenPositions: 25,
+      maxPositionUsd: 500,
       maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
@@ -106,9 +106,9 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
     displayName: "Prop",
     monthlyPriceUsd: 999,
     limits: {
-      maxTradesPerDay: 999999,
-      maxOpenPositions: 999999,
-      maxPositionUsd: 999999,
+      maxTradesPerDay: 1000,
+      maxOpenPositions: 100,
+      maxPositionUsd: 5000,
       maxMarketsWatched: 999999,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
@@ -206,6 +206,15 @@ export function checkEntitlement(
     return {
       allowed: false,
       reason: `Strategy ${input.strategy} is not available on your current tier. Upgrade for access.`,
+      limits,
+    };
+  }
+
+  // Position size must be within the tier's max (or per-customer override)
+  if (input.positionUsd !== undefined && input.positionUsd > limits.maxPositionUsd) {
+    return {
+      allowed: false,
+      reason: `Order amount $${input.positionUsd} exceeds your tier's max position size of $${limits.maxPositionUsd}. Upgrade for larger positions.`,
       limits,
     };
   }

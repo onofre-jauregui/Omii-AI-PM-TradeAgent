@@ -2,9 +2,11 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowUpRight, ArrowDownRight, Clock, Loader2, RefreshCw, ThumbsUp, ThumbsDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { useRecentTrades, tradesKeys } from "@/lib/queries/trades";
 
 interface Trade {
   id: string;
@@ -46,41 +48,17 @@ function fmt(date: string) {
 }
 
 export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
-  const [trades, setTrades] = useState<Trade[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  // Shared cache: newest 50 trades, stale-while-revalidate. Refreshes via the
+  // single realtime channel in strategiesContext (no per-component channel here).
+  const { data, isLoading, isFetching, refetch } = useRecentTrades(filterMode);
+  const trades = (data ?? []) as Trade[];
   const [ratingId, setRatingId] = useState<string | null>(null);
 
-  const loadTrades = useCallback(async () => {
-    setLoading(true);
-    let q = supabase
-      .from("trades")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(50);
-    if (filterMode) q = q.eq("mode", filterMode);
-    const { data, error } = await q;
-    if (!error && data) setTrades(data as Trade[]);
-    setLoading(false);
-  }, [filterMode]);
-
-  useEffect(() => {
-    loadTrades();
-    const channel = supabase
-      .channel(`trades-realtime-${filterMode ?? "all"}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "trades" }, (payload) => {
-        const t = payload.new as Trade;
-        if (t?.pnl != null && t.pnl > 0) {
-          const q = t.market_question ?? "";
-          toast.success(`+$${t.pnl.toFixed(2)} · ${q.substring(0, 40)}${q.length > 40 ? "…" : ""}`, {
-            duration: 4000,
-          });
-        }
-        loadTrades();
-      })
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "trades" }, () => loadTrades())
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [loadTrades, filterMode]);
+  // Optimistically patch the cached row so the thumbs toggle feels instant.
+  const patchTrade = (id: string, updates: Partial<Trade>) =>
+    queryClient.setQueryData(tradesKeys.recent(filterMode), (old: unknown) =>
+      ((old ?? []) as Trade[]).map(t => (t.id === id ? { ...t, ...updates } : t)));
 
   async function rateTrade(trade: Trade, rating: "good" | "bad") {
     if (ratingId) return;
@@ -90,7 +68,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
       const { data: { user } } = await supabase.auth.getUser();
       await supabase.from("trades").update({ user_rating: newRating }).eq("id", trade.id);
       if (newRating === null) {
-        setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, user_rating: null } : t));
+        patchTrade(trade.id, { user_rating: null });
         toast("Rating cleared");
         return;
       }
@@ -107,7 +85,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
         tags: ["user_feedback", trade.strategy ?? "manual", trade.side, isGood ? "good_trade" : "bad_trade"],
         user_id: user?.id ?? null,
       });
-      setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, user_rating: newRating } : t));
+      patchTrade(trade.id, { user_rating: newRating });
       toast.success(`Feedback saved — agent will ${isGood ? "look for more setups like this" : "be more selective here"}`);
     } catch {
       toast.error("Failed to save feedback");
@@ -127,19 +105,19 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
             <h3 className="text-sm font-medium">
               {filterMode === "live" ? "Live " : ""}Trade History
             </h3>
-            {!loading && (
+            {!isLoading && (
               <span className="text-[10px] text-muted-foreground bg-secondary px-2 py-0.5 rounded-full">
                 {trades.length} trades
               </span>
             )}
           </div>
-          <Button variant="ghost" size="sm" onClick={loadTrades} disabled={loading} className="h-7 w-7 p-0 rounded-full">
-            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          <Button variant="ghost" size="sm" onClick={() => refetch()} disabled={isFetching} className="h-7 w-7 p-0 rounded-full">
+            {isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
 
         <ScrollArea className="h-[480px]">
-          {loading && trades.length === 0 ? (
+          {isLoading && trades.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               <span className="text-sm text-muted-foreground">Loading trades…</span>

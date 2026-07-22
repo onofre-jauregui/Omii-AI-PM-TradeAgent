@@ -1,5 +1,8 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { tradesKeys, fetchSettledTrades } from "@/lib/queries/trades";
 
 export interface Strategy {
   id: string;
@@ -50,6 +53,7 @@ function generateStrategyId(existing: Strategy[]): string {
 }
 
 export function StrategiesProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [strategyStats, setStrategyStats] = useState<Record<string, StrategyStats>>({});
   const [loading, setLoading] = useState(true);
@@ -103,17 +107,15 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }, []);
 
-  // Load per-strategy performance stats from trades
+  // Load per-strategy performance stats from trades. Reads through the shared
+  // React Query cache (same key as useSettledTrades) so this and every settled-
+  // trades consumer share ONE network fetch instead of each scanning the table.
   const refreshStats = useCallback(async () => {
-    const MAY_START = "2026-04-22T00:00:00.000Z";
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id ?? "";
-    const { data: trades } = await supabase
-      .from("trades")
-      .select("strategy, strategy_id, pnl, status, amount")
-      .eq("status", "settled")
-      .eq("user_id", userId)
-      .gte("settled_at", MAY_START);
+    const trades = await queryClient.fetchQuery({
+      queryKey: tradesKeys.settled(),
+      queryFn: fetchSettledTrades,
+      staleTime: 30_000,
+    });
 
     if (!trades) return;
 
@@ -171,7 +173,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     }
 
     setStrategyStats(statsMap);
-  }, [strategies]);
+  }, [strategies, queryClient]);
 
   useEffect(() => {
     loadStrategies();
@@ -187,6 +189,12 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
   const strategiesDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tradesDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Single realtime channel for the whole dashboard. On a trades change it
+  // debounces (500ms) then invalidates every ["trades", ...] query so all
+  // consumers (positions, log, settled scan, stats) refresh from one place —
+  // replacing the four separate per-component channels that used to each
+  // re-fetch on every event. The winning-trade toast (moved here from TradeLog)
+  // fires immediately on INSERT so it isn't delayed by the debounce.
   useEffect(() => {
     const channel = supabase
       .channel("strategies-realtime")
@@ -194,9 +202,19 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
         if (strategiesDebounce.current) clearTimeout(strategiesDebounce.current);
         strategiesDebounce.current = setTimeout(loadStrategies, 500);
       })
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, (payload) => {
+        if (payload.eventType === "INSERT") {
+          const t = payload.new as { pnl?: number | null; market_question?: string | null };
+          if (t?.pnl != null && t.pnl > 0) {
+            const q = t.market_question ?? "";
+            toast.success(`+$${t.pnl.toFixed(2)} · ${q.substring(0, 40)}${q.length > 40 ? "…" : ""}`, { duration: 4000 });
+          }
+        }
         if (tradesDebounce.current) clearTimeout(tradesDebounce.current);
-        tradesDebounce.current = setTimeout(refreshStats, 500);
+        tradesDebounce.current = setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: tradesKeys.all });
+          refreshStats();
+        }, 500);
       })
       .subscribe();
 
@@ -205,7 +223,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
       if (strategiesDebounce.current) clearTimeout(strategiesDebounce.current);
       if (tradesDebounce.current) clearTimeout(tradesDebounce.current);
     };
-  }, [loadStrategies, refreshStats]);
+  }, [loadStrategies, refreshStats, queryClient]);
 
   const updateStrategy = useCallback(async (id: string, updates: Partial<Strategy>) => {
     setStrategies(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
