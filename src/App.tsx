@@ -22,7 +22,19 @@ import TermsPage from "./pages/TermsPage.tsx";
 import PrivacyPage from "./pages/PrivacyPage.tsx";
 import ObservabilityPage from "./pages/ObservabilityPage.tsx";
 
-const queryClient = new QueryClient();
+// Stale-while-revalidate defaults for the whole app: components render cached
+// data instantly and refetch in the background, so tab switches and remounts
+// within staleTime fire zero network requests and never flash a spinner.
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,        // 30s — data considered fresh; no refetch on remount within window
+      gcTime: 5 * 60_000,       // keep unused cache 5 min before garbage-collecting
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+});
 
 /** Gate that checks profiles.is_admin — DB is the source of truth, works for any admin. */
 function AdminRoute({ element }: { element: React.ReactElement }) {
