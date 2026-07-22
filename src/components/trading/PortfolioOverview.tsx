@@ -1,8 +1,8 @@
 import { Clock, Loader2, ChevronDown, ChevronUp, X } from "lucide-react";
-import { useEffect, useState, useCallback, useRef } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { useState } from "react";
 import { cancelKalshiOrder } from "@/lib/kalshiApi";
 import { toast } from "sonner";
+import { useOpenPositions } from "@/lib/queries/trades";
 
 interface Position {
   market_id: string;
@@ -144,45 +144,14 @@ function PositionDetail({
 const PAGE_SIZE = 5;
 
 export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Shared cache (mode-scoped positions); refreshes via the single realtime
+  // channel in strategiesContext. No per-component channel, no spinner-on-refetch.
+  const { data, isLoading, refetch } = useOpenPositions(mode);
+  const positions = (data ?? []) as Position[];
   const [expanded, setExpanded] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const initialized = useRef(false);
 
-  const load = useCallback(async () => {
-    if (!initialized.current) setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id ?? "";
-    let q = supabase
-      .from("trades")
-      .select("*")
-      .eq("action", "buy")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(100);
-    // Live mode also surfaces resting orders (open/partial) so they're visible and
-    // cancellable; paper trades are always immediately filled.
-    q = mode === "live"
-      ? q.in("status", ["filled", "open", "partial"])
-      : q.eq("status", "filled");
-    if (mode) q = q.eq("mode", mode);
-    const { data } = await q;
-    setPositions((data ?? []) as Position[]);
-    setLoading(false);
-    initialized.current = true;
-  }, [mode]);
-
-  useEffect(() => {
-    load();
-    const ch = supabase
-      .channel(`portfolio-positions-rt-${mode ?? "all"}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [load, mode]);
-
-  if (loading) {
+  if (isLoading && positions.length === 0) {
     return (
       <div className="flex items-center justify-center py-10">
         <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
@@ -247,7 +216,7 @@ export function PortfolioOverview({ mode }: { mode?: "paper" | "live" }) {
                     </div>
                   </button>
                   {isSelected && (
-                    <PositionDetail pos={pos} mode={mode} onClose={() => setSelectedId(null)} onCancelled={load} />
+                    <PositionDetail pos={pos} mode={mode} onClose={() => setSelectedId(null)} onCancelled={() => refetch()} />
                   )}
                 </div>
               );

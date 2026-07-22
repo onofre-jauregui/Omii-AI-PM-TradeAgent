@@ -2,9 +2,9 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/
 import { Line, LineChart, XAxis, YAxis, Legend } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, TrendingDown, Target, BarChart3, DollarSign, Activity, Loader2 } from "lucide-react";
-import { useEffect, useState, useCallback } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { useMemo } from "react";
 import { useStrategies } from "@/lib/strategiesContext";
+import { useSettledTrades } from "@/lib/queries/trades";
 
 // Distinct colors for up to 34 strategies
 const STRATEGY_COLORS = [
@@ -24,45 +24,28 @@ interface PerStrategyPoint {
 
 export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
   const { strategies, strategyStats } = useStrategies();
-  const [chartData, setChartData] = useState<PerStrategyPoint[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: settled, isLoading } = useSettledTrades();
 
   const activeStrategies = strategies.filter(s =>
     s.active &&
     (!mode || s.mode === mode)
   );
 
-  const buildChartData = useCallback(async () => {
-    setLoading(true);
+  // Per-strategy cumulative equity, derived from the shared settled-trades cache
+  // (no own fetch, no spinner-on-refetch). The shared query returns all modes
+  // newest-first, so filter by mode and sort ascending to preserve cumulative order.
+  const chartData = useMemo<PerStrategyPoint[]>(() => {
+    const rows = (settled ?? [])
+      .filter(t => (!mode || t.mode === mode) && t.settled_at)
+      .sort((a, b) => (a.settled_at! < b.settled_at! ? -1 : 1));
+    if (rows.length === 0) return [];
 
-    const MAY_START = "2026-04-22T00:00:00.000Z";
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id ?? "";
-    let q = supabase
-      .from("trades")
-      .select("strategy, strategy_id, pnl, settled_at, mode")
-      .eq("status", "settled")
-      .eq("user_id", userId)
-      .gte("settled_at", MAY_START)
-      .order("settled_at", { ascending: true });
-    if (mode) q = q.eq("mode", mode);
-    const { data: trades } = await q;
-
-    if (!trades || trades.length === 0) {
-      setChartData([]);
-      setLoading(false);
-      return;
-    }
-
-    // Cumulative P&L per strategy, starting from each strategy's starting_balance
     const stratBalances: Record<string, number> = {};
-    for (const s of strategies) {
-      stratBalances[s.id] = s.starting_balance;
-    }
+    for (const s of strategies) stratBalances[s.id] = s.starting_balance;
 
     // Group settled trades by day (settled_at date)
-    const dayMap = new Map<string, typeof trades>();
-    for (const t of trades) {
+    const dayMap = new Map<string, typeof rows>();
+    for (const t of rows) {
       const rawDate = (t.settled_at ?? "").slice(0, 10); // "2026-05-21" — strip time before appending
       const day = new Date(rawDate + "T12:00:00Z").toLocaleDateString("en-US", {
         month: "short", day: "numeric",
@@ -84,25 +67,15 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
           t.strategy_id === s.id ||
           (!t.strategy_id && (t.strategy === s.name || t.strategy === s.id))
         );
-        if (matchedStrat) {
-          stratBalances[matchedStrat.id] += t.pnl || 0;
-        }
+        if (matchedStrat) stratBalances[matchedStrat.id] += t.pnl || 0;
       }
 
       const point: PerStrategyPoint = { date: day };
       for (const s of strategies) point[s.id] = Math.round(stratBalances[s.id] * 100) / 100;
       points.push(point);
     }
-
-    setChartData(points);
-    setLoading(false);
-  }, [strategies, mode]);
-
-  useEffect(() => {
-    if (strategies.length > 0) {
-      buildChartData();
-    }
-  }, [strategies, buildChartData]);
+    return points;
+  }, [settled, strategies, mode]);
 
   // Build chart config dynamically
   const chartConfig: Record<string, { label: string; color: string }> = {};
@@ -113,7 +86,7 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
     };
   });
 
-  if (loading) {
+  if (isLoading && chartData.length === 0) {
     return (
       <div className="flex items-center justify-center py-16">
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
