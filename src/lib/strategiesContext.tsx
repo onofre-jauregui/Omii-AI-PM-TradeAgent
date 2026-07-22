@@ -122,11 +122,12 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     const knownStrategyNames = new Set(strategies.map(s => s.name));
 
     for (const strat of strategies) {
-      // Primary: match by strategy_id. Fallback: match by strategy name/id only for
-      // old trades that were recorded before strategy_id was a required field.
+      // Primary: match by strategy_id. Fallback for paper strategies only: match by
+      // name for old trades recorded before strategy_id was required. Live strategies
+      // only count exact strategy_id matches to prevent paper trades leaking in.
       const stratTrades = trades.filter(t =>
         t.strategy_id === strat.id ||
-        (!t.strategy_id && (t.strategy === strat.name || t.strategy === strat.id))
+        (strat.mode !== "live" && !t.strategy_id && (t.strategy === strat.name || t.strategy === strat.id))
       );
 
       const totalPnl = stratTrades.reduce((s, t) => s + (t.pnl || 0), 0);
