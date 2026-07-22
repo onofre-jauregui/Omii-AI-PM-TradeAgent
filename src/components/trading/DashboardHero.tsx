@@ -46,6 +46,9 @@ interface HeroStats {
   settledCount: number;
   chartPoints: ChartPoint[];
   loading: boolean;
+  /** The mode these stats were computed for. Used to reject cross-mode renders
+   *  so the live tab never briefly shows paper numbers (or vice versa). */
+  statsMode?: "paper" | "live";
 }
 
 function timeAgo(iso: string) {
@@ -155,6 +158,8 @@ export function DashboardHero({
   userId?: string;
 }) {
   const loadIdRef = useRef(0); // cancels stale concurrent loads
+  const modeRef = useRef(mode); // latest mode — used to discard cross-mode stale loads
+  modeRef.current = mode;
   const lastKalshiBalanceRef = useRef<number | null>(null); // last known-good wallet balance
   const lastKalshiPingRef = useRef(0); // ts of last successful Kalshi ping (throttle window)
   const [stats, setStats] = useState<HeroStats>({
@@ -353,7 +358,11 @@ export function DashboardHero({
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
 
-    if (myId !== loadIdRef.current) return; // a newer load fired — discard this result
+    // Discard if a newer load fired OR the mode changed while this load was in
+    // flight. The second check kills the flicker: a paper-scoped load triggered
+    // by a realtime `trades` event can otherwise resolve after the user is on the
+    // live tab and overwrite the live numbers with the paper portfolio.
+    if (myId !== loadIdRef.current || mode !== modeRef.current) return;
     setStats({
       startingBalance,
       portfolioValue,
@@ -370,6 +379,7 @@ export function DashboardHero({
       settledCount: modeTrades.length,
       chartPoints,
       loading: false,
+      statsMode: mode,
     });
   }, [mode, userIdProp]);
 
@@ -399,6 +409,10 @@ export function DashboardHero({
   const isTodayUp = todayPnl >= 0;
   const displayValue = mode === "live" && kalshiBalance != null ? kalshiBalance : portfolioValue;
   const isLiveWallet = mode === "live" && kalshiBalance != null;
+  // While a mode switch is settling, `stats` may still describe the other mode.
+  // Treat that as loading so no cross-mode number (e.g. the paper portfolio on
+  // the live tab) is ever rendered.
+  const loading = stats.loading || stats.statsMode !== mode;
 
   // CTA: one action that changes by state
   const cta = (() => {
@@ -426,16 +440,16 @@ export function DashboardHero({
           <span
             className={cn(
               "font-semibold leading-none tabular-nums",
-              stats.loading ? "text-muted-foreground" : (isUp ? "text-profit" : "text-loss"),
+              loading ? "text-muted-foreground" : (isUp ? "text-profit" : "text-loss"),
             )}
             style={{ fontSize: "clamp(3rem, 10vw, 4.5rem)", letterSpacing: "-0.04em" }}
           >
-            {stats.loading
+            {loading
               ? "--"
               : `${isUp ? "+" : ""}${totalReturnPct}%`
             }
           </span>
-          {!stats.loading && (
+          {!loading && (
             <ArrowUpRight
               className={cn(
                 "h-6 w-6 mb-2 shrink-0",
@@ -448,19 +462,19 @@ export function DashboardHero({
         {/* Portfolio dollar value — secondary, below the % */}
         <div className="flex items-center gap-2 flex-wrap mb-1">
           <span className="text-2xl font-light text-foreground tabular-nums" style={{ letterSpacing: "-0.02em" }}>
-            {stats.loading
+            {loading
               ? <span className="text-muted-foreground text-lg">loading…</span>
               : `$${displayValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
             }
           </span>
           <span className={cn("text-xs tabular-nums", isUp ? "text-profit" : "text-loss")}>
-            {!stats.loading && `(${isUp ? "+" : ""}$${Math.abs(totalReturn).toFixed(2)} all-time)`}
+            {!loading && `(${isUp ? "+" : ""}$${Math.abs(totalReturn).toFixed(2)} all-time)`}
           </span>
         </div>
 
         {/* Today velocity line */}
         <div className="flex items-center gap-3 mb-4 min-h-[20px]">
-          {!stats.loading && todayPnl !== 0 && (
+          {!loading && todayPnl !== 0 && (
             <span className={cn(
               "inline-flex items-center gap-1 text-xs font-medium tabular-nums px-2 py-0.5 rounded-full",
               isTodayUp ? "text-profit bg-profit/10" : "text-loss bg-loss/10",
@@ -533,7 +547,7 @@ export function DashboardHero({
         </div>
 
         {/* Single CTA — changes by state */}
-        {!stats.loading && cta && (
+        {!loading && cta && (
           <button
             onClick={() => onNavigate?.(cta.tab)}
             className={cn(
@@ -566,7 +580,7 @@ export function DashboardHero({
             onClick={() => onNavigate?.("markets")}
           />
         )}
-        {!lastTradeAt && !stats.loading && (
+        {!lastTradeAt && !loading && (
           <AlertChip
             icon={<Bot className="h-3 w-3 animate-pulse" />}
             label="Agent scanning — first trades appear within 30 min"
