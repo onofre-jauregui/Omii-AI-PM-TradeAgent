@@ -99,11 +99,23 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
     }
   };
 
+  const liveDefaults = {
+    maxDailyLoss:     [50],
+    maxDrawdown:      [10],
+    maxPositionSize:  [25],
+    maxOpenPositions: [3],
+    maxDailyTrades:   [10],
+    autoStopLoss:     true,
+    stopLossPct:      [10],
+    defaultOrderType: "limit",
+    allocatedCapital: [100],
+  };
+
   const loadAll = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
     const userId = user?.id ?? "";
     const { data } = await supabase.from("risk_settings").select("*")
-      .eq("user_id", userId).maybeSingle();
+      .eq("user_id", userId).eq("mode", mode).maybeSingle();
     if (data) {
       setRiskSettings({
         maxDailyLoss:     [data.max_daily_loss],
@@ -116,9 +128,11 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
         defaultOrderType: data.default_order_type,
         allocatedCapital: [data.allocated_capital ?? 500],
       });
+    } else if (mode === "live") {
+      setRiskSettings(liveDefaults);
     }
     setLoaded(true);
-  }, []);
+  }, [mode]);
 
   useEffect(() => { loadAll(); loadRiskState(); }, [loadAll, loadRiskState]);
 
@@ -144,6 +158,7 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
 
       const riskPayload = {
         user_id:             userId,
+        mode,
         max_daily_loss:      riskSettings.maxDailyLoss[0],
         max_drawdown_pct:    riskSettings.maxDrawdown[0],
         max_position_size:   riskSettings.maxPositionSize[0],
@@ -157,7 +172,7 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
       };
 
       const { data: existing, error: selectErr } = await supabase
-        .from("risk_settings").select("id").eq("user_id", userId).maybeSingle();
+        .from("risk_settings").select("id").eq("user_id", userId).eq("mode", mode).maybeSingle();
       if (selectErr) throw new Error(`Failed to check existing settings: ${selectErr.message}`);
 
       if (existing) {
