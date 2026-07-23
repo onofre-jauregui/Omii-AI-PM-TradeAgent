@@ -109,7 +109,8 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
   const [searchOpen, setSearchOpen] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("volume");
   const [horizon, setHorizon] = useState<Horizon>("any");
-  const [visibleCount, setVisibleCount] = useState(50);
+  const MARKETS_PAGE = 12; // show a light first page; "Show more" reveals the rest
+  const [visibleCount, setVisibleCount] = useState(MARKETS_PAGE);
 
   const [selectedMarket, setSelectedMarket] = useState<ParsedMarket | null>(null);
   const [tradeMarket, setTradeMarket] = useState<ParsedMarket | null>(null);
@@ -167,7 +168,7 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
 
     setError(null);
     try {
-      const result = await fetchKalshiMarketsByCategory(allSeries, category, 10);
+      const result = await fetchKalshiMarketsByCategory(allSeries, category, 3);
       cache.current.set(category, { markets: result, fetchedAt: Date.now() });
       setMarkets(result);
       setLastUpdated(new Date());
@@ -195,7 +196,9 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
   // Background pre-warm: after active tab loads, silently fetch the next 3 tabs
   useEffect(() => {
     const idx = FIXED_CATEGORIES.indexOf(activeCategory);
-    const toWarm = FIXED_CATEGORIES.slice(idx + 1, idx + 4);
+    // Pre-warm only the next tab. Warming 3 ahead fired ~3× the category fan-out
+    // in the background on every switch — a big part of the "choke".
+    const toWarm = FIXED_CATEGORIES.slice(idx + 1, idx + 2);
     let cancelled = false;
     const warmNext = async () => {
       for (const cat of toWarm) {
@@ -216,7 +219,7 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
   }, [activeCategory]);
 
   // Reset visible count when search or horizon changes
-  useEffect(() => { setVisibleCount(50); }, [search, horizon, sortBy]);
+  useEffect(() => { setVisibleCount(MARKETS_PAGE); }, [search, horizon, sortBy]);
 
   // Open a market by ticker when navigated from agent chat
   useEffect(() => {
@@ -276,7 +279,7 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
             onClick={() => {
               setActiveCategory(cat);
               setSearch("");
-              setVisibleCount(50);
+              setVisibleCount(MARKETS_PAGE);
             }}
             className={cn(
               "shrink-0 px-4 py-3 text-sm font-medium transition-all duration-150 border-b-2 -mb-px whitespace-nowrap",
@@ -404,10 +407,10 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
           </div>
           {filtered.length > visibleCount && (
             <button
-              onClick={() => setVisibleCount(c => c + 50)}
+              onClick={() => setVisibleCount(c => c + MARKETS_PAGE)}
               className="mt-5 w-full py-3 rounded-2xl border border-border bg-card text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
             >
-              Show {Math.min(50, filtered.length - visibleCount)} more
+              Show {Math.min(MARKETS_PAGE, filtered.length - visibleCount)} more
               <span className="ml-1.5 text-xs opacity-60">({filtered.length - visibleCount} remaining)</span>
             </button>
           )}
