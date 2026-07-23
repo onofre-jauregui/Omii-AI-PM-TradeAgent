@@ -213,6 +213,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
         if (tradesDebounce.current) clearTimeout(tradesDebounce.current);
         tradesDebounce.current = setTimeout(() => {
           queryClient.invalidateQueries({ queryKey: tradesKeys.all });
+          queryClient.invalidateQueries({ queryKey: ["portfolio"] });
           refreshStats();
         }, 500);
       })

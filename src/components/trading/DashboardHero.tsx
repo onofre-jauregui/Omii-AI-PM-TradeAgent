@@ -1,9 +1,11 @@
 import { Bot, Clock, ArrowUpRight } from "lucide-react";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Area, AreaChart, ResponsiveContainer, XAxis, YAxis } from "recharts";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { fetchKalshiMarkets } from "@/lib/kalshiApi";
+import { usePortfolioSummary, useEquityCurve, useKalshiWallet, type EquityDay } from "@/lib/queries/portfolio";
+import { useOpenPositions } from "@/lib/queries/trades";
 
 // Kalshi markets cache — shared across renders, refreshed every 15 min
 let kalshiMarketsCache: { data: any[]; ts: number } | null = null;
@@ -23,32 +25,53 @@ async function getCachedKalshiMarkets(): Promise<any[]> {
   return kalshiMarketsFetch;
 }
 
-// How long a successful Kalshi wallet ping stays fresh. Within this window we reuse
-// the cached balance instead of re-hitting kalshi-ping, so the balance doesn't re-fetch
-// on every unrelated `trades` realtime event.
-const KALSHI_PING_TTL_MS = 15_000;
-
 interface ChartPoint { date: string; value: number; }
 
-interface HeroStats {
-  startingBalance: number;
-  portfolioValue: number;
-  kalshiBalance: number | null;
-  totalReturn: number;
-  totalReturnPct: number;
-  todayPnl: number;
-  winRate: number;
-  openPositions: number;
-  tradesToday: number;
-  winStreak: number;
-  marketsClosingToday: number;
-  lastTradeAt: string | null;
-  settledCount: number;
-  chartPoints: ChartPoint[];
-  loading: boolean;
-  /** The mode these stats were computed for. Used to reject cross-mode renders
-   *  so the live tab never briefly shows paper numbers (or vice versa). */
-  statsMode?: "paper" | "live";
+// Build the cumulative equity curve (Apr 22 → today) and the win streak from
+// the daily settled-P&L buckets returned by get_equity_curve. Mirrors the old
+// client logic exactly, but over ~60 daily rows instead of thousands of trades.
+function buildEquity(equity: EquityDay[], startingBalance: number): { chartPoints: ChartPoint[]; winStreak: number } {
+  const byDay: Record<string, number> = {};
+  for (const e of equity) byDay[e.day] = (byDay[e.day] ?? 0) + e.dayPnl;
+
+  // Win streak: consecutive calendar days with positive net P&L, working back
+  // from the most recent day that had settled trades — only if that was today or
+  // yesterday, else there's no live traction.
+  let winStreak = 0;
+  const sortedTradeDays = Object.keys(byDay).sort().reverse();
+  if (sortedTradeDays.length > 0) {
+    const lastDay = new Date(sortedTradeDays[0] + "T12:00:00Z");
+    const todayNoon = new Date();
+    todayNoon.setUTCHours(12, 0, 0, 0);
+    const daysSinceLast = Math.floor((todayNoon.getTime() - lastDay.getTime()) / 86_400_000);
+    if (daysSinceLast <= 1) {
+      const cursor = new Date(sortedTradeDays[0] + "T12:00:00Z");
+      while (true) {
+        const key = cursor.toISOString().slice(0, 10);
+        if (!byDay[key]) break;          // gap day — no trades
+        if (byDay[key] <= 0) break;      // losing day
+        winStreak++;
+        cursor.setUTCDate(cursor.getUTCDate() - 1);
+      }
+    }
+  }
+
+  // Continuous daily cumulative equity from the starting balance.
+  let cum = startingBalance;
+  const chartPoints: ChartPoint[] = [];
+  const cursor = new Date("2026-04-22T12:00:00Z");
+  const today = new Date();
+  today.setUTCHours(12, 0, 0, 0);
+  while (cursor <= today) {
+    const key = cursor.toISOString().slice(0, 10);
+    cum += byDay[key] ?? 0;
+    chartPoints.push({
+      date: cursor.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
+      value: Math.round(cum * 100) / 100,
+    });
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return { chartPoints, winStreak };
 }
 
 function timeAgo(iso: string) {
@@ -151,268 +174,68 @@ function AlertChip({
 export function DashboardHero({
   mode,
   onNavigate,
-  userId: userIdProp,
 }: {
   mode?: "paper" | "live";
   onNavigate?: (tab: string) => void;
   userId?: string;
 }) {
-  const loadIdRef = useRef(0); // cancels stale concurrent loads
-  const modeRef = useRef(mode); // latest mode — used to discard cross-mode stale loads
-  modeRef.current = mode;
-  const lastKalshiBalanceRef = useRef<number | null>(null); // last known-good wallet balance
-  const lastKalshiPingRef = useRef(0); // ts of last successful Kalshi ping (throttle window)
-  const [stats, setStats] = useState<HeroStats>({
-    startingBalance: 0,
-    portfolioValue: 0,
-    kalshiBalance: null,
-    totalReturn: 0,
-    totalReturnPct: 0,
-    todayPnl: 0,
-    winRate: 0,
-    openPositions: 0,
-    tradesToday: 0,
-    winStreak: 0,
-    marketsClosingToday: 0,
-    lastTradeAt: null,
-    settledCount: 0,
-    chartPoints: [],
-    loading: true,
-  });
+  // Server-aggregated portfolio metrics (one summary row + ~60 daily buckets),
+  // cached per mode. Switching paper<->live shows the target mode's cached data
+  // instantly after the first visit — no full client-side re-aggregation, and no
+  // cross-mode flicker (each mode is its own cache key, no keepPreviousData).
+  const { data: summary, isLoading: loading } = usePortfolioSummary(mode);
+  const { data: equity } = useEquityCurve(mode);
+  const { data: openPos } = useOpenPositions(mode);
+  const { data: walletBalance } = useKalshiWallet(mode);
 
-  const load = useCallback(async () => {
-    const myId = ++loadIdRef.current; // increment; stale loads will see myId !== loadIdRef.current
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayISO = todayStart.toISOString();
-    const MAY_START = "2026-04-22T00:00:00.000Z";
-
-    // Use prop if available — avoids a network round-trip on every load
-    const userId = userIdProp ?? (await supabase.auth.getUser()).data.user?.id;
-
-    // Fetch Kalshi wallet balance when in live mode (non-blocking — may fail if no key set).
-    // Two guards prevent a 2600 → 0 → 2600 flicker: (1) within KALSHI_PING_TTL_MS we reuse the
-    // cached balance instead of re-pinging on every unrelated trades realtime event; (2) a transient
-    // failure (non-ok, missing balance, or throw) returns the last known-good value rather than null,
-    // so displayValue never falls back to the empty-live portfolioValue (0) after a good read.
-    const kalshiBalanceFetch: Promise<number | null> = mode === "live"
-      ? (Date.now() - lastKalshiPingRef.current < KALSHI_PING_TTL_MS
-          ? Promise.resolve(lastKalshiBalanceRef.current)
-          : supabase.auth.getSession().then(({ data: { session } }) => {
-              if (!session) return lastKalshiBalanceRef.current;
-              const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
-              return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` } })
-                .then(r => (r.ok ? r.json() : null))
-                .then(j => {
-                  const bal = j?.balance_usd != null ? Number(j.balance_usd) : null;
-                  if (bal != null) {
-                    lastKalshiBalanceRef.current = bal;
-                    lastKalshiPingRef.current = Date.now();
-                  }
-                  return bal ?? lastKalshiBalanceRef.current; // keep last-good on transient failure
-                })
-                .catch(() => lastKalshiBalanceRef.current);
-            }))
-      : Promise.resolve(null);
-
-    const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
-      // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
-      supabase
-        .from("trades")
-        .select("pnl, settled_at, mode")
-        .eq("status", "settled")
-        .eq("user_id", userId ?? "")
-        .gte("settled_at", MAY_START)
-        .order("settled_at", { ascending: false })
-        .limit(2000),
-      // Open positions: filled but not yet settled (mode-scoped so the live tab
-      // doesn't count paper positions)
-      (() => {
-        let q = supabase
-          .from("trades")
-          .select("id, ticker")
-          .eq("status", "filled")
-          .eq("user_id", userId ?? "")
-          .is("settled_at", null);
-        if (mode) q = q.eq("mode", mode);
-        return q;
-      })(),
-      // Trades placed today (for activity count) — mode-scoped
-      (() => {
-        let q = supabase
-          .from("trades")
-          .select("id")
-          .eq("user_id", userId ?? "")
-          .gte("created_at", todayISO);
-        if (mode) q = q.eq("mode", mode);
-        return q;
-      })(),
-      // Starting balance — sum of strategies matching the current mode
-      (() => {
-        let q = supabase.from("strategies").select("starting_balance, mode").eq("user_id", userId ?? "");
-        if (mode) q = q.eq("mode", mode);
-        return q;
-      })(),
-      // Most recently SETTLED trade — "Last settled" chip. Mode-scoped so the live tab
-      // doesn't surface a paper settlement while live P&L reads empty.
-      (() => {
-        let q = supabase
-          .from("trades")
-          .select("settled_at")
-          .eq("user_id", userId ?? "")
-          .eq("status", "settled")
-          .order("settled_at", { ascending: false })
-          .limit(1);
-        if (mode) q = q.eq("mode", mode);
-        return q;
-      })(),
-    ]);
-
-    const kalshiBalance = await kalshiBalanceFetch;
-
-    const settledTrades = settledRes.status === "fulfilled" ? (settledRes.value.data ?? []) : [];
-    const openTrades = openRes.status === "fulfilled" ? (openRes.value.data ?? []) : [];
-    const tradesToday = placedTodayRes.status === "fulfilled" ? (placedTodayRes.value.data?.length ?? 0) : 0;
-    const strategies = strategiesRes.status === "fulfilled" ? (strategiesRes.value.data ?? []) : [];
-    const lastPlaced = lastPlacedRes.status === "fulfilled" ? (lastPlacedRes.value.data?.[0]?.settled_at ?? null) : null;
-
-    // Kalshi markets loaded from cache (non-blocking — won't delay hero render)
-    const markets = kalshiMarketsCache?.data ?? [];
-
-    // Starting balance from mode-filtered strategies
-    const startingBalance = strategies.reduce((s: number, st: any) => s + (st.starting_balance ?? 0), 0);
-
-    // Filter by mode if specified
-    const modeTrades = mode ? settledTrades.filter(t => t.mode === mode) : settledTrades;
-
-    // Total P&L from all settled trades
-    const totalPnl = modeTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const portfolioValue = startingBalance + totalPnl;
-    const totalReturnPct = startingBalance > 0
-      ? parseFloat(((totalPnl / startingBalance) * 100).toFixed(1))
-      : 0;
-
-    // Today's P&L — trades that settled today
-    const settledToday = modeTrades.filter(t => t.settled_at && t.settled_at >= todayISO);
-    const todayPnl = settledToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
-
-    // Win rate across all settled trades
-    const winners = modeTrades.filter(t => (t.pnl ?? 0) > 0).length;
-    const losers = modeTrades.filter(t => (t.pnl ?? 0) < 0).length;
-    const winRate = winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0;
-
-    // Markets closing within 24h that the user has an open position in
-    const openTickers = new Set((openTrades as any[]).map(t => t.ticker).filter(Boolean));
-    const cutoff = Date.now() + 24 * 60 * 60 * 1000;
-    const marketsClosingToday = markets.filter(m => {
-      if (!m.closeTime || !m.ticker) return false;
-      if (!openTickers.has(m.ticker)) return false;
-      const t = new Date(m.closeTime).getTime();
-      return t > Date.now() && t < cutoff;
-    }).length;
-
-    // Build daily P&L map — shared by streak calc and chart
-    const byDay: Record<string, number> = {};
-    for (const t of modeTrades) {
-      const day = (t.settled_at ?? "").slice(0, 10);
-      if (!day) continue;
-      byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
-    }
-
-    // Win streak = consecutive calendar days with positive net P&L, working
-    // backwards from the most recent day that had any settled trades.
-    // Starting from today would always break on days with no settlements yet.
-    let winStreak = 0;
-    const sortedTradeDays = Object.keys(byDay).sort().reverse();
-    if (sortedTradeDays.length > 0) {
-      const lastDay = new Date(sortedTradeDays[0] + "T12:00:00Z");
-      const todayNoon = new Date();
-      todayNoon.setUTCHours(12, 0, 0, 0);
-      const daysSinceLast = Math.floor((todayNoon.getTime() - lastDay.getTime()) / 86_400_000);
-      if (daysSinceLast <= 1) {
-        // Last settlement was today or yesterday — streak is live
-        const streakCursor = new Date(sortedTradeDays[0] + "T12:00:00Z");
-        while (true) {
-          const key = streakCursor.toISOString().slice(0, 10);
-          if (!byDay[key]) break;          // gap day — no trades at all
-          if (byDay[key] <= 0) break;      // losing day
-          winStreak++;
-          streakCursor.setUTCDate(streakCursor.getUTCDate() - 1);
-        }
-      }
-      // daysSinceLast > 1: no positive traction in last 24h — streak stays 0
-    }
-    // Fill every calendar date Apr 22 → today so the chart is continuous
-    let cum = startingBalance;
-    const chartPoints: ChartPoint[] = [];
-    const cursor = new Date("2026-04-22T12:00:00Z");
-    const today = new Date();
-    today.setUTCHours(12, 0, 0, 0);
-    while (cursor <= today) {
-      const key = cursor.toISOString().slice(0, 10);
-      cum += byDay[key] ?? 0;
-      chartPoints.push({
-        date: cursor.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
-        value: Math.round(cum * 100) / 100,
-      });
-      cursor.setUTCDate(cursor.getUTCDate() + 1);
-    }
-
-    // Discard if a newer load fired OR the mode changed while this load was in
-    // flight. The second check kills the flicker: a paper-scoped load triggered
-    // by a realtime `trades` event can otherwise resolve after the user is on the
-    // live tab and overwrite the live numbers with the paper portfolio.
-    if (myId !== loadIdRef.current || mode !== modeRef.current) return;
-    setStats({
-      startingBalance,
-      portfolioValue,
-      kalshiBalance,
-      totalReturn: totalPnl,
-      totalReturnPct,
-      todayPnl,
-      winRate,
-      openPositions: openTrades.length,
-      tradesToday,
-      winStreak,
-      marketsClosingToday,
-      lastTradeAt: lastPlaced,
-      settledCount: modeTrades.length,
-      chartPoints,
-      loading: false,
-      statsMode: mode,
-    });
-  }, [mode, userIdProp]);
-
-  useEffect(() => {
-    load();
-    const ch = supabase
-      .channel("dashboard-hero-rt")
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
-      .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [load]);
-
-  // Lazy-load Kalshi markets after initial render — primes cache, then re-runs load()
-  // so marketsClosingToday is computed without blocking the hero's first paint.
-  // load is in deps so the closure is always fresh — a stale closure here wins the
-  // loadIdRef race and discards valid live-mode results.
+  // Kalshi markets for the "settling today" chip (module-cached, 15-min TTL).
+  const [markets, setMarkets] = useState<any[]>(() => kalshiMarketsCache?.data ?? []);
   useEffect(() => {
     let cancelled = false;
-    getCachedKalshiMarkets().then(markets => {
-      if (!cancelled && markets.length > 0) load();
-    });
+    getCachedKalshiMarkets().then(m => { if (!cancelled) setMarkets(m); });
     return () => { cancelled = true; };
-  }, [load]);
+  }, []);
 
-  const { startingBalance, portfolioValue, kalshiBalance, totalReturn, totalReturnPct, todayPnl, winRate, openPositions, tradesToday, winStreak, marketsClosingToday, lastTradeAt, settledCount } = stats;
+  const startingBalance = summary?.startingBalance ?? 0;
+  const totalReturn = summary?.totalPnl ?? 0;
+  const portfolioValue = startingBalance + totalReturn;
+  const totalReturnPct = startingBalance > 0
+    ? parseFloat(((totalReturn / startingBalance) * 100).toFixed(1))
+    : 0;
+  const todayPnl = summary?.todayPnl ?? 0;
+  const winRate = summary && (summary.winners + summary.losers) > 0
+    ? Math.round((summary.winners / (summary.winners + summary.losers)) * 100)
+    : 0;
+  const openPositions = summary?.openPositions ?? 0;
+  const tradesToday = summary?.tradesToday ?? 0;
+  const settledCount = summary?.settledCount ?? 0;
+  const lastTradeAt = summary?.lastSettledAt ?? null;
+  const kalshiBalance = mode === "live" ? (walletBalance ?? null) : null;
+
+  // Equity curve + win streak from the daily buckets.
+  const { chartPoints, winStreak } = useMemo(
+    () => buildEquity(equity ?? [], startingBalance),
+    [equity, startingBalance],
+  );
+
+  // Markets closing within 24h that the user holds an open position in.
+  const marketsClosingToday = useMemo(() => {
+    const openTickers = new Set(
+      ((openPos ?? []) as Array<{ ticker?: string | null }>).map(t => t.ticker).filter(Boolean),
+    );
+    const now = Date.now();
+    const cutoff = now + 24 * 60 * 60 * 1000;
+    return (markets ?? []).filter((m: any) => {
+      if (!m.closeTime || !m.ticker || !openTickers.has(m.ticker)) return false;
+      const t = new Date(m.closeTime).getTime();
+      return t > now && t < cutoff;
+    }).length;
+  }, [openPos, markets]);
+
   const isUp = totalReturn >= 0;
   const isTodayUp = todayPnl >= 0;
   const displayValue = mode === "live" && kalshiBalance != null ? kalshiBalance : portfolioValue;
   const isLiveWallet = mode === "live" && kalshiBalance != null;
-  // While a mode switch is settling, `stats` may still describe the other mode.
-  // Treat that as loading so no cross-mode number (e.g. the paper portfolio on
-  // the live tab) is ever rendered.
-  const loading = stats.loading || stats.statsMode !== mode;
 
   // CTA: one action that changes by state
   const cta = (() => {
@@ -490,10 +313,10 @@ export function DashboardHero({
         </div>
 
         {/* Equity sparkline */}
-        {stats.chartPoints.length > 2 && (
+        {chartPoints.length > 2 && (
           <div className="my-3 -mx-1">
             <ResponsiveContainer width="100%" height={100}>
-              <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
+              <AreaChart data={chartPoints} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
                 <defs>
                   <linearGradient id="heroGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor={isUp ? "hsl(var(--profit))" : "hsl(var(--loss))"} stopOpacity={0.2} />

@@ -68,8 +68,9 @@ export function useSettledTrades() {
 /** Open/active positions for the positions panel (mode-scoped). */
 export function useOpenPositions(mode?: "paper" | "live") {
   return useQuery({
+    // Mode-scoped key, no keepPreviousData: a mode switch shows the target
+    // mode's cached rows (or a brief skeleton), never the other mode's.
     queryKey: tradesKeys.open(mode),
-    placeholderData: keepPreviousData,
     queryFn: async () => {
       const userId = await currentUserId();
       let q = supabase
@@ -93,8 +94,8 @@ export function useOpenPositions(mode?: "paper" | "live") {
 /** Recent trade history for the log (mode-scoped, newest 50). */
 export function useRecentTrades(mode?: "paper" | "live") {
   return useQuery({
+    // Mode-scoped key, no keepPreviousData (see useOpenPositions).
     queryKey: tradesKeys.recent(mode),
-    placeholderData: keepPreviousData,
     queryFn: async () => {
       const userId = await currentUserId();
       let q = supabase
