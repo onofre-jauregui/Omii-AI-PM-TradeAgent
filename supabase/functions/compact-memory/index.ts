@@ -103,6 +103,25 @@ serve(async (req) => {
         const data = await summaryResp.json();
         const summaryText = data.choices?.[0]?.message?.content || "";
 
+        // Same event_type/shape as auto-trade's qualify-call logging so the
+        // Observability cost dashboard (ObservabilityPage.tsx) picks this up for
+        // free — compact-memory's summarize/merge calls were previously invisible.
+        if (data.usage?.prompt_tokens != null || data.usage?.completion_tokens != null) {
+          await supabase.from("compliance_log").insert({
+            event_type: "llm_usage",
+            severity: "info",
+            message: `compact-memory summarize: ${data.usage?.prompt_tokens ?? "?"} in / ${data.usage?.completion_tokens ?? "?"} out`,
+            metadata: {
+              model: aiModel,
+              provider: keys["openrouter"] ? "openrouter" : "openai",
+              prompt_tokens: data.usage?.prompt_tokens ?? null,
+              completion_tokens: data.usage?.completion_tokens ?? null,
+              total_tokens: data.usage?.total_tokens ?? null,
+              source: "compact-memory-summarize",
+            },
+          }).then(undefined, () => {});
+        }
+
         // Parse numbered summaries
         const lines = summaryText.split("\n").filter((l: string) => l.trim());
         for (const line of lines) {
@@ -231,6 +250,22 @@ serve(async (req) => {
 
           const mergeData = await mergeResp.json();
           const mergeText = mergeData.choices?.[0]?.message?.content || "";
+
+          if (mergeData.usage?.prompt_tokens != null || mergeData.usage?.completion_tokens != null) {
+            await supabase.from("compliance_log").insert({
+              event_type: "llm_usage",
+              severity: "info",
+              message: `compact-memory merge: ${mergeData.usage?.prompt_tokens ?? "?"} in / ${mergeData.usage?.completion_tokens ?? "?"} out`,
+              metadata: {
+                model: aiModel,
+                provider: keys["openrouter"] ? "openrouter" : "openai",
+                prompt_tokens: mergeData.usage?.prompt_tokens ?? null,
+                completion_tokens: mergeData.usage?.completion_tokens ?? null,
+                total_tokens: mergeData.usage?.total_tokens ?? null,
+                source: "compact-memory-merge",
+              },
+            }).then(undefined, () => {});
+          }
           const mergeLines = mergeText.split("\n").filter((l: string) => l.trim());
           if (mergeLines.length < 2) continue;
 

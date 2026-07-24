@@ -199,12 +199,13 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
   winStreakCache.set(userId, streak);
   return streak;
 }
-async function fetchUserRiskSettings(supabase: any, userId: string): Promise<any> {
-  if (riskSettingsCache.has(userId)) return riskSettingsCache.get(userId);
+async function fetchUserRiskSettings(supabase: any, userId: string, mode: "paper" | "live" = "paper"): Promise<any> {
+  const cacheKey = `${userId}:${mode}`;
+  if (riskSettingsCache.has(cacheKey)) return riskSettingsCache.get(cacheKey);
   const { data } = await supabase.from("risk_settings").select("*")
-    .eq("user_id", userId).maybeSingle();
+    .eq("user_id", userId).eq("mode", mode).maybeSingle();
   const settings = data ?? DEFAULT_RISK_SETTINGS;
-  riskSettingsCache.set(userId, settings);
+  riskSettingsCache.set(cacheKey, settings);
   return settings;
 }
 
@@ -667,7 +668,7 @@ serve(async (req) => {
         let userRisk: any = null;
         let winStreak = 0;
         if (strategy.user_id) {
-          userRisk = await fetchUserRiskSettings(supabase, strategy.user_id);
+          userRisk = await fetchUserRiskSettings(supabase, strategy.user_id, strategy.mode as "paper" | "live");
           winStreak = await computeWinStreak(supabase, strategy.user_id);
 
           // Open position cap
