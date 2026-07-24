@@ -45,6 +45,7 @@ const Index = () => {
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const [userId, setUserId] = useState<string | undefined>();
   const [subscriptionTier, setSubscriptionTier] = useState<"free" | "starter" | "pro" | "prop">("free");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [marketToOpen, setMarketToOpen] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -58,12 +59,13 @@ const Index = () => {
       setUserId(session?.user?.id ?? undefined);
       if (session?.user?.id) {
         const [profileRes, subRes] = await Promise.all([
-          supabase.from("profiles").select("trading_mode").eq("id", session.user.id).single(),
+          supabase.from("profiles").select("trading_mode, is_admin").eq("id", session.user.id).single(),
           supabase.from("subscriptions").select("tier, status").eq("user_id", session.user.id).maybeSingle(),
         ]);
         if (profileRes.data?.trading_mode === "live" || profileRes.data?.trading_mode === "paper") {
           setMode(profileRes.data.trading_mode);
         }
+        setIsAdmin(profileRes.data?.is_admin ?? false);
         if (subRes.data?.tier && (subRes.data.status === "active" || subRes.data.status === "trialing")) {
           setSubscriptionTier(subRes.data.tier as typeof subscriptionTier);
         }
@@ -73,7 +75,7 @@ const Index = () => {
   }, []);
 
   async function handleModeChange(next: Mode) {
-    if (next === "live" && subscriptionTier === "free") {
+    if (next === "live" && subscriptionTier === "free" && !isAdmin) {
       setShowUpgradeModal(true);
       return;
     }

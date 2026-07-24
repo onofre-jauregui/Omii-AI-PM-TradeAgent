@@ -228,10 +228,11 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
   const updateStrategy = useCallback(async (id: string, updates: Partial<Strategy>) => {
     setStrategies(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
 
-    await supabase.from("strategies").update({
+    const { error } = await supabase.from("strategies").update({
       ...updates,
       updated_at: new Date().toISOString(),
     }).eq("id", id);
+    if (error) toast.error("Failed to save strategy change");
   }, []);
 
   const addStrategy = useCallback(async (strategy: Omit<Strategy, "id">) => {
