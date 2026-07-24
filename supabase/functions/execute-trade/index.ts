@@ -643,6 +643,15 @@ serve(async (req) => {
     const orderStatus = kalshiOrder.remaining_count === 0 ? "filled" :
                         kalshiOrder.remaining_count < contractCount ? "partial" : "open";
 
+    // Instrumentation for the live pilot: capture the REAL fill price and slippage
+    // on ANY fill (full OR partial), not just full fills. This is how we learn
+    // whether the favorable-priced limit orders actually get filled at our price —
+    // the one unknown paper cannot answer. Positive slippage = filled worse than intended.
+    const hasFill = orderStatus === "filled" || orderStatus === "partial";
+    const realFillPrice = hasFill && kalshiOrder.avg_price != null ? kalshiOrder.avg_price : null;
+    const slippageCents = realFillPrice != null ? Math.round(realFillPrice - price) : null;
+    const filledContracts = contractCount - (kalshiOrder.remaining_count ?? 0);
+
     const { data: trade, error: insertError } = await supabase.from("trades").insert({
         user_id: userId,
         ticker: resolvedTicker,
@@ -658,10 +667,11 @@ serve(async (req) => {
         order_type: resolvedOrderType,
         time_in_force: kalshiOrderPayload.time_in_force,
         expiration_time: expirationTime || null,
-        filled_price: orderStatus === "filled" ? kalshiOrder.avg_price : null,
-        filled_at: orderStatus === "filled" ? new Date().toISOString() : null,
+        filled_price: realFillPrice,
+        filled_at: hasFill ? new Date().toISOString() : null,
+        slippage_cents: slippageCents,
         pnl: 0,
-        notes: notes || `Live order on Kalshi: ${kalshiOrder.order_id}`,
+        notes: (notes ? `${notes} ` : "") + `Live Kalshi order ${kalshiOrder.order_id}: ${orderStatus}, ${filledContracts}/${contractCount} filled` + (realFillPrice != null ? ` @ ${realFillPrice}c (intended ${price}c, slippage ${slippageCents}c)` : ""),
         trace_id: traceId || null,
         source_signal_id: sourceSignalId || null,
         influenced_by_memory_ids: influencedByMemoryIds || [],
