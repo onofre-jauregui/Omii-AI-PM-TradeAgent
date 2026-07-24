@@ -112,26 +112,29 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
   };
 
   const loadAll = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id ?? "";
-    const { data } = await supabase.from("risk_settings").select("*")
-      .eq("user_id", userId).eq("mode", mode).maybeSingle();
-    if (data) {
-      setRiskSettings({
-        maxDailyLoss:     [data.max_daily_loss],
-        maxDrawdown:      [data.max_drawdown_pct],
-        maxPositionSize:  [data.max_position_size],
-        maxOpenPositions: [data.max_open_positions],
-        maxDailyTrades:   [data.max_daily_trades ?? 30],
-        autoStopLoss:     data.auto_stop_loss,
-        stopLossPct:      [data.stop_loss_pct],
-        defaultOrderType: data.default_order_type,
-        allocatedCapital: [data.allocated_capital ?? 500],
-      });
-    } else if (mode === "live") {
-      setRiskSettings(liveDefaults);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id ?? "";
+      const { data } = await supabase.from("risk_settings").select("*")
+        .eq("user_id", userId).eq("mode", mode).maybeSingle();
+      if (data) {
+        setRiskSettings({
+          maxDailyLoss:     [data.max_daily_loss],
+          maxDrawdown:      [data.max_drawdown_pct],
+          maxPositionSize:  [data.max_position_size],
+          maxOpenPositions: [data.max_open_positions],
+          maxDailyTrades:   [data.max_daily_trades ?? 30],
+          autoStopLoss:     data.auto_stop_loss,
+          stopLossPct:      [data.stop_loss_pct],
+          defaultOrderType: data.default_order_type,
+          allocatedCapital: [data.allocated_capital ?? 500],
+        });
+      } else if (mode === "live") {
+        setRiskSettings(liveDefaults);
+      }
+    } finally {
+      setLoaded(true);
     }
-    setLoaded(true);
   }, [mode]);
 
   useEffect(() => { loadAll(); loadRiskState(); }, [loadAll, loadRiskState]);

@@ -201,8 +201,10 @@ export function DashboardHero({
           : supabase.auth.getSession().then(({ data: { session } }) => {
               if (!session) return lastKalshiBalanceRef.current;
               const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
-              return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` } })
-                .then(r => (r.ok ? r.json() : null))
+              const ctrl = new AbortController();
+              const pingTimeout = setTimeout(() => ctrl.abort(), 8000);
+              return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` }, signal: ctrl.signal })
+                .then(r => { clearTimeout(pingTimeout); return r.ok ? r.json() : null; })
                 .then(j => {
                   const bal = j?.balance_usd != null ? Number(j.balance_usd) : null;
                   if (bal != null) {
@@ -211,7 +213,7 @@ export function DashboardHero({
                   }
                   return bal ?? lastKalshiBalanceRef.current; // keep last-good on transient failure
                 })
-                .catch(() => lastKalshiBalanceRef.current);
+                .catch(() => { clearTimeout(pingTimeout); return lastKalshiBalanceRef.current; });
             }))
       : Promise.resolve(null);
 
