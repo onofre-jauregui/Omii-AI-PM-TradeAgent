@@ -19,6 +19,7 @@ import {
   s005IsAutoQualified,
   buildQualifyEndpoint,
   buildQualifyHeaders,
+  shouldRunByCadence,
 } from "../_shared/trading-logic.ts";
 
 /**
@@ -475,9 +476,9 @@ serve(async (req) => {
     // Guard: only run strategies whose owner has completed onboarding — prevents seeded/fake
     // accounts from consuming compute and generating trades under a foreign user_id.
     const [{ data: systemStrategies }, { data: userStrategies }, { data: onboardedProfiles }] = await Promise.all([
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
         .eq("active", true).is("user_id", null).order("id"),
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
         .eq("active", true).not("user_id", "is", null).order("id"),
       supabase.from("profiles").select("id").eq("onboarding_completed", true),
     ]);
@@ -616,6 +617,26 @@ serve(async (req) => {
           metadata: { run_id: runId, trace_id: runId, strategy_id: strategy.id },
         });
         continue;
+      }
+
+      // ── Per-strategy run cadence ──────────────────────────────────────────
+      // A user can set run_interval_minutes to throttle a strategy below the
+      // hourly cron. NULL = run every cycle (default). We stamp last_run_at only
+      // for throttled strategies, so default strategies generate no realtime churn.
+      if (!shouldRunByCadence(strategy.run_interval_minutes, strategy.last_run_at, Date.now())) {
+        strategyResults.push({
+          strategy_id: strategy.id,
+          strategy_name: strategy.name,
+          mode: strategy.mode,
+          status: "skipped",
+          details: `cadence: next run in ${Math.max(0, Math.ceil(strategy.run_interval_minutes - (Date.now() - new Date(strategy.last_run_at).getTime()) / 60000))}m`,
+        });
+        continue;
+      }
+      if (strategy.run_interval_minutes) {
+        await supabase.from("strategies")
+          .update({ last_run_at: new Date().toISOString() })
+          .eq("id", strategy.id);
       }
 
       try {

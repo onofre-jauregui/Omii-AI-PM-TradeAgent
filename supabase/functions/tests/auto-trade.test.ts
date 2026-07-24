@@ -11,6 +11,8 @@ import {
   s005IsAutoQualified,
   buildQualifyEndpoint,
   buildQualifyHeaders,
+  shouldRunByCadence,
+  CADENCE_GRACE_MIN,
 } from "../_shared/trading-logic";
 import { parseQualifyResponse } from "../_shared/prompt-safety";
 
@@ -259,5 +261,45 @@ describe("LLM gate routing", () => {
 
   it("malformed response → null (treated as REJECT by caller)", () => {
     expect(parseQualifyResponse("maybe qualify this")).toBeNull();
+  });
+});
+
+// ─── Per-strategy run cadence ───────────────────────────────────────────────
+
+describe("shouldRunByCadence", () => {
+  const NOW = Date.parse("2026-07-24T12:00:00Z");
+  const minsAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+
+  it("null interval → always runs (default hourly behavior unchanged)", () => {
+    expect(shouldRunByCadence(null, minsAgo(1), NOW)).toBe(true);
+    expect(shouldRunByCadence(undefined, minsAgo(1), NOW)).toBe(true);
+    expect(shouldRunByCadence(0, minsAgo(1), NOW)).toBe(true);
+  });
+
+  it("never run before (last_run_at null) → runs regardless of interval", () => {
+    expect(shouldRunByCadence(240, null, NOW)).toBe(true);
+    expect(shouldRunByCadence(240, undefined, NOW)).toBe(true);
+  });
+
+  it("unparseable last_run_at → runs (fail open, never wedge a strategy)", () => {
+    expect(shouldRunByCadence(240, "not-a-date", NOW)).toBe(true);
+  });
+
+  it("hourly (60m) strategy fires on the hourly cron despite jitter", () => {
+    // Cron stamped 59.5 min ago; grace lets it run instead of skipping this cycle.
+    expect(shouldRunByCadence(60, minsAgo(59.5), NOW)).toBe(true);
+    expect(shouldRunByCadence(60, minsAgo(60), NOW)).toBe(true);
+  });
+
+  it("4h (240m) strategy skips intermediate hourly cycles", () => {
+    expect(shouldRunByCadence(240, minsAgo(60), NOW)).toBe(false);   // 1h in → skip
+    expect(shouldRunByCadence(240, minsAgo(180), NOW)).toBe(false);  // 3h in → skip
+    expect(shouldRunByCadence(240, minsAgo(235), NOW)).toBe(true);   // ~4h (grace) → run
+    expect(shouldRunByCadence(240, minsAgo(240), NOW)).toBe(true);
+  });
+
+  it("boundary: elapsed exactly interval - grace → runs", () => {
+    expect(shouldRunByCadence(120, minsAgo(120 - CADENCE_GRACE_MIN), NOW)).toBe(true);
+    expect(shouldRunByCadence(120, minsAgo(120 - CADENCE_GRACE_MIN - 0.1), NOW)).toBe(false);
   });
 });

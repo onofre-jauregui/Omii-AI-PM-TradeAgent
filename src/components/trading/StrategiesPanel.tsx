@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
   TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, ArrowRight,
@@ -19,6 +20,21 @@ import {
 
 // Strip the user-scoped suffix added for multi-tenancy (e.g. "S-002-ab12cd34" → "S-002")
 const displayId = (id: string) => id.replace(/-[a-f0-9]{6,}$/i, "");
+
+// Run cadence presets. The auto-trade cron runs hourly, so hourly is the floor;
+// null (stored as NULL) means "every cycle". Value is minutes between evaluations.
+const CADENCE_OPTIONS: { value: string; label: string }[] = [
+  { value: "0",    label: "Every hour (default)" },
+  { value: "120",  label: "Every 2 hours" },
+  { value: "240",  label: "Every 4 hours" },
+  { value: "360",  label: "Every 6 hours" },
+  { value: "720",  label: "Every 12 hours" },
+  { value: "1440", label: "Once a day" },
+];
+
+// UI stores cadence as a string ("0" = default/null). Convert for the DB column.
+const cadenceToDb = (v: string): number | null => (v === "0" ? null : Number(v));
+const cadenceToUi = (v: number | null | undefined): string => (v && v > 0 ? String(v) : "0");
 
 // ─── Strategy detail chart ────────────────────────────────────────────────────
 function StrategyDetailModal({
@@ -204,6 +220,7 @@ export function StrategiesPanel({
   const [isCreating, setIsCreating] = useState(false);
   const [newStrategy, setNewStrategy] = useState({
     name: "", description: "", instructions: "", active: false, starting_balance: 1000,
+    run_interval_minutes: null as number | null,
   });
 
   const [isCreatingInstance, setIsCreatingInstance] = useState(false);
@@ -217,6 +234,7 @@ export function StrategiesPanel({
       description: editingStrategy.description,
       instructions: editingStrategy.instructions,
       starting_balance: editingStrategy.starting_balance,
+      run_interval_minutes: editingStrategy.run_interval_minutes,
     });
     setEditingStrategy(null);
   };
@@ -224,7 +242,7 @@ export function StrategiesPanel({
   const handleCreate = () => {
     if (!newStrategy.name.trim()) return;
     addStrategy({ ...newStrategy, mode });
-    setNewStrategy({ name: "", description: "", instructions: "", active: false, starting_balance: 1000 });
+    setNewStrategy({ name: "", description: "", instructions: "", active: false, starting_balance: 1000, run_interval_minutes: null });
     setIsCreating(false);
   };
 
@@ -245,6 +263,7 @@ export function StrategiesPanel({
         active: false,
         mode: targetMode,
         starting_balance: startingBalance,
+        run_interval_minutes: source.run_interval_minutes ?? null,
         user_id: user.id,
       });
       // Context refreshes via realtime subscription
@@ -499,6 +518,23 @@ export function StrategiesPanel({
                     className="rounded-xl border-0 bg-secondary"
                   />
                 </div>
+                <div className="space-y-1.5">
+                  <Label className="text-sm text-muted-foreground">Run Frequency</Label>
+                  <p className="text-xs text-muted-foreground">How often the agent evaluates this strategy for new trades.</p>
+                  <Select
+                    value={cadenceToUi(editingStrategy.run_interval_minutes)}
+                    onValueChange={(v) => setEditingStrategy({ ...editingStrategy, run_interval_minutes: cadenceToDb(v) })}
+                  >
+                    <SelectTrigger className="rounded-xl border-0 bg-secondary">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CADENCE_OPTIONS.map((o) => (
+                        <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="flex items-center justify-between">
                   <Label className="text-sm">Active</Label>
                   <Switch checked={editingStrategy.active} onCheckedChange={(checked) => setEditingStrategy({ ...editingStrategy, active: checked })} />
@@ -551,6 +587,23 @@ export function StrategiesPanel({
                 onChange={(e) => setNewStrategy({ ...newStrategy, starting_balance: Number(e.target.value) || 0 })}
                 className="rounded-xl border-0 bg-secondary"
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-muted-foreground">Run Frequency</Label>
+              <p className="text-xs text-muted-foreground">How often the agent evaluates this strategy for new trades.</p>
+              <Select
+                value={cadenceToUi(newStrategy.run_interval_minutes)}
+                onValueChange={(v) => setNewStrategy({ ...newStrategy, run_interval_minutes: cadenceToDb(v) })}
+              >
+                <SelectTrigger className="rounded-xl border-0 bg-secondary">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {CADENCE_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex gap-3 pt-2">
               <Button onClick={handleCreate} disabled={!newStrategy.name.trim()} className="flex-1 rounded-full gap-2">

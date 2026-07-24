@@ -96,6 +96,32 @@ export function computeWinStreakFromTrades(
   return streak;
 }
 
+// ─── Per-strategy run cadence ─────────────────────────────────────────────────
+
+/** Grace subtracted from the interval so an N-minute cadence still fires on an
+ *  N-minute cron cycle instead of skipping every other one due to timing jitter. */
+export const CADENCE_GRACE_MIN = 5;
+
+/**
+ * Decide whether a strategy is due to run this cycle.
+ * - intervalMin null/0/negative → no throttle: run every cron cycle (default behavior).
+ * - lastRunAt null/unparseable → never recorded a gated run: run now.
+ * - otherwise run once the elapsed time reaches (intervalMin - grace).
+ * nowMs is injectable for deterministic testing.
+ */
+export function shouldRunByCadence(
+  intervalMin: number | null | undefined,
+  lastRunAt: string | null | undefined,
+  nowMs: number
+): boolean {
+  if (!intervalMin || intervalMin <= 0) return true;
+  if (!lastRunAt) return true;
+  const lastMs = new Date(lastRunAt).getTime();
+  if (Number.isNaN(lastMs)) return true;
+  const elapsedMin = (nowMs - lastMs) / 60_000;
+  return elapsedMin >= intervalMin - CADENCE_GRACE_MIN;
+}
+
 // ─── S-002 Longshot Bias Filters ──────────────────────────────────────────────
 
 /**

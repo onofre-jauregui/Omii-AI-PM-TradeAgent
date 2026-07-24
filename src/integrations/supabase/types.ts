@@ -923,9 +923,11 @@ export type Database = {
           expected_hit_rate: number | null
           id: string
           instructions: string
+          last_run_at: string | null
           max_acceptable_drawdown: number | null
           mode: string
           name: string
+          run_interval_minutes: number | null
           starting_balance: number
           suspended_until: string | null
           suspension_reason: string | null
@@ -940,9 +942,11 @@ export type Database = {
           expected_hit_rate?: number | null
           id: string
           instructions?: string
+          last_run_at?: string | null
           max_acceptable_drawdown?: number | null
           mode?: string
           name: string
+          run_interval_minutes?: number | null
           starting_balance?: number
           suspended_until?: string | null
           suspension_reason?: string | null
@@ -957,9 +961,11 @@ export type Database = {
           expected_hit_rate?: number | null
           id?: string
           instructions?: string
+          last_run_at?: string | null
           max_acceptable_drawdown?: number | null
           mode?: string
           name?: string
+          run_interval_minutes?: number | null
           starting_balance?: number
           suspended_until?: string | null
           suspension_reason?: string | null
