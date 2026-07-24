@@ -248,15 +248,20 @@ Applied via the Supabase Management API (`POST /v1/projects/{ref}/database/query
 
 | Job | Schedule | Function |
 |---|---|---|
-| `surface-scanner-cron` | Every 30 seconds | Scan Kalshi bracket markets for structural mispricings |
-| `auto-trade-cron` | Every 2 minutes | Execute strategies for all active users |
-| `signal-generator-cron` | Every minute | Score and store fresh market signals |
-| `auto-settle-cron` | Every 10 minutes | Settle resolved markets, write P&L |
-| `weather-signal-cron` | Every 10 minutes | Compare NWS forecasts to Kalshi weather markets |
-| `futures-signal-cron` | Every 10 minutes | Score futures-based signals |
-| `auto-reflect-hourly` | Every hour | Consolidate trade outcomes into agent memory lessons |
-| `health-check-hourly` | Every hour | Validate system health, alert on anomalies |
+| `market-data-fetcher-cron` | Every 5 min (`:01,:06,:11...`) | Sole Kalshi market-data poller; writes `kalshi_markets_cache` |
+| `surface-scanner-cron` | Every 5 min (`:03,:08,:13...`) | Scan Kalshi bracket markets for structural mispricings |
+| `signal-generator-cron` | Every 15 min (`:08,:23,:38,:53`) | Score and store fresh market signals |
+| `futures-signal-cron` | Every 10 min (`:06,:16,:26...`) | Score futures-based signals |
+| `auto-trade-cron` | **Every hour** (`:05`) | Execute strategies for all active users |
+| `auto-settle-cron` | Every 10 min (`:02,:12,:22...`) | Settle resolved markets, write P&L |
+| `auto-reflect-hourly` | Every hour (`:07`) | Consolidate trade outcomes into agent memory lessons |
+| `health-check-hourly` | Every hour (`:10`) | Validate system health, alert on anomalies |
 | `backtest-weather-daily` | Daily at 6 AM | Rolling 30-day weather model calibration |
+| `daily-digest-cron` | Daily at 10 PM | Email/SMS P&L digest |
+
+Verified against live `cron.job` 2026-07-23 — this table previously understated every interval by 10-30x (claimed `auto-trade` ran every 2 min; it has run hourly since ~2026-05-23) and omitted `market-data-fetcher-cron`/`daily-digest-cron` entirely. Minute offsets are staggered across jobs (`20260525_stagger_cron_schedules.sql`) to avoid simultaneous connection-pool exhaustion — don't round them all to `:00`.
+
+Note: the `weather-signal` edge function exists in `supabase/functions/` but has **no active cron job** — nothing schedules it. S-005 (Weather Edge) sources its NWS comparison from within `auto-trade`'s own `runS005WeatherEdge`, not this function. Whether `weather-signal` is dead code or missing a cron registration is unconfirmed — flagged, not fixed, here.
 
 ### Runbook — Strategy Auto-Halt
 
