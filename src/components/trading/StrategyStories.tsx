@@ -44,17 +44,17 @@ export function StrategyStories({ mode, onNavigate }: StrategyStoriesProps) {
       if (!user) return;
       const { data } = await supabase
         .from("agent_memory")
-        .select("strategy, lesson")
+        .select("strategy_id, content")
         .eq("user_id", user.id)
-        .eq("active", true)
-        .order("last_confirmed_at", { ascending: false })
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
         .limit(30);
       if (!data) return;
       const map: Record<string, string> = {};
       for (const row of data) {
         // Normalise "S-001-abc123" → "S-001"
-        const tid = (row.strategy ?? "").replace(/[-_][a-f0-9]{6,}$/i, "").toUpperCase();
-        if (!map[tid] && row.lesson) map[tid] = row.lesson;
+        const tid = (row.strategy_id ?? "").replace(/[-_][a-f0-9]{6,}$/i, "").toUpperCase();
+        if (!map[tid] && row.content) map[tid] = row.content;
       }
       setInsights(map);
     }
