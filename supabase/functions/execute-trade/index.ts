@@ -3,10 +3,11 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "../_shared/risk.ts";
-import { resolveTenant, getRiskSettings, getRiskStateToday, setRiskHalt } from "../_shared/tenant.ts";
+import { resolveTenant, getRiskStateToday, setRiskHalt } from "../_shared/tenant.ts";
+import { resolveEffectiveLimits, countTradesInWindow } from "../_shared/limits.ts";
 import { isServiceRoleBearer } from "../_shared/auth-helpers.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
-import { checkEntitlement, TIER_DEFINITIONS, type SubscriptionRow } from "../_shared/billing.ts";
+import { checkEntitlement } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 
@@ -232,25 +233,22 @@ serve(async (req) => {
       }
     }
 
-    // ── Subscription Entitlement Check ──
-    // Tier limits are resolved for every mode (the free trial's own caps apply to
-    // paper trades) but the allowed/blocked gate below — subscription status, live
-    // access, strategy access, position size — only applies to live money.
-    let tierLimits = TIER_DEFINITIONS.free.limits;
-    if (userId) {
-      const { data: sub } = await supabase
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", userId)
-        .maybeSingle();
+    // ── Effective limits — single source of truth ──
+    // One resolve of the user's mode-scoped risk_settings + subscription tier.
+    // Every numeric cap below reads from this instead of re-fetching or
+    // re-deriving. Null only for the legacy no-user path (no caps, as before).
+    const effective = userId ? await resolveEffectiveLimits(supabase, userId, tradeMode) : null;
 
+    // ── Subscription Entitlement Check ──
+    // The allowed/blocked policy gate — subscription status, live access, strategy
+    // access, position size — applies to live money only.
+    if (userId && effective) {
       const entitlement = checkEntitlement({
-        subscription: sub as SubscriptionRow | null,
+        subscription: effective.subscription,
         strategy: strategyId,
         mode: tradeMode,
         positionUsd: amount,
       });
-      tierLimits = entitlement.limits;
 
       if (tradeMode === "live" && !entitlement.allowed) {
         await logCompliance(supabase, userId, null, "entitlement_blocked", "warning",
@@ -263,26 +261,19 @@ serve(async (req) => {
     }
 
     // ── Daily Trade Count Cap (per tier, scoped to this mode) ──
-    // The billing page advertises a trades/day figure per tier (including the free
-    // trial's paper-only cap) — this is the enforcement for it. Scoped to the
-    // requested mode so a user's paper activity doesn't eat into their live quota.
-    if (userId) {
-      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const { count: tradesToday } = await supabase
-        .from("trades")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userId)
-        .eq("mode", tradeMode)
-        .gte("created_at", twentyFourHoursAgo);
-
-      if ((tradesToday ?? 0) >= tierLimits.maxTradesPerDay) {
+    // Enforces the trades/day figure the billing page advertises. Behavior
+    // unchanged: the tier ceiling (with per-customer overrides), mode-scoped count.
+    if (userId && effective) {
+      const tradesToday = await countTradesInWindow(supabase, userId, tradeMode, 24);
+      const dailyCap = effective.tier.maxTradesPerDay;
+      if (tradesToday >= dailyCap) {
         await logCompliance(supabase, userId, null, "daily_trade_cap_enforced", "warning",
-          `Trade rejected: daily trade cap (${tierLimits.maxTradesPerDay}) reached for user ${userId} in ${tradeMode} mode`,
-          { mode: tradeMode, count: tradesToday, limit: tierLimits.maxTradesPerDay }
+          `Trade rejected: daily trade cap (${dailyCap}) reached for user ${userId} in ${tradeMode} mode`,
+          { mode: tradeMode, count: tradesToday, limit: dailyCap }
         );
         return new Response(JSON.stringify({
           success: false,
-          error: `Daily trade limit (${tierLimits.maxTradesPerDay} for ${tradeMode} mode) reached. Upgrade for a higher limit or try again tomorrow.`,
+          error: `Daily trade limit (${dailyCap} for ${tradeMode} mode) reached. Upgrade for a higher limit or try again tomorrow.`,
         }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
     }
@@ -304,12 +295,11 @@ serve(async (req) => {
     // ── Atomic position cap — race-condition-proof enforcement ──
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
-    if (userId) {
-      const capSettings = await getRiskSettings(supabase, userId, tradeMode);
-      const userMaxPos = (capSettings as any)?.max_open_positions ?? 10;
-      // Live mode can never exceed what the subscription tier pays for, regardless
-      // of a looser self-configured risk_settings value.
-      const maxPos = tradeMode === "live" ? Math.min(userMaxPos, tierLimits.maxOpenPositions) : userMaxPos;
+    if (userId && effective) {
+      // effective.maxOpenPositions already applies the tier ceiling for live
+      // (min(user, tier)) and the user's own cap for paper — the single source
+      // of truth, replacing the prior inline min() computation.
+      const maxPos = effective.maxOpenPositions;
       // Count open positions in THIS mode only — paper positions must not consume
       // the live cap (and vice-versa).
       const { count: openCount } = await supabase
@@ -334,7 +324,12 @@ serve(async (req) => {
     }
 
     // ── Risk Management (tenant-scoped) ──
-    const settings = await getRiskSettings(supabase, userId, tradeMode);
+    // Preserve the prior null-vs-configured semantics exactly: evaluateRisk and
+    // the capital cap must see `null` when the user has no risk_settings row (so
+    // an unconfigured legacy tenant passes unconditionally), NOT the normalized
+    // defaults. effective.configured is true iff a real row exists for this mode.
+    const settings: RiskSettings | null =
+      effective && effective.configured ? effective.riskSettings : null;
     const riskState = await getRiskStateToday(supabase, userId);
 
     // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",

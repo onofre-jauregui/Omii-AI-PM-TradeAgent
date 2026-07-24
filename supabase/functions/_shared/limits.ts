@@ -36,7 +36,7 @@ export async function resolveEffectiveLimits(
   supabase: any,
   userId: string | null,
   mode: "paper" | "live",
-): Promise<EffectiveLimits> {
+): Promise<EffectiveLimits & { subscription: SubscriptionRow | null }> {
   const [riskRow, sub] = await Promise.all([
     getRiskSettings(supabase, userId, mode),
     userId
@@ -44,8 +44,9 @@ export async function resolveEffectiveLimits(
           .then((r: { data: unknown }) => (r?.data ?? null))
       : Promise.resolve(null),
   ]);
-  const tier = resolveLimits(sub as SubscriptionRow | null);
-  return { mode, tier, ...computeEffectiveLimits(riskRow, tier, mode) };
+  const subscription = sub as SubscriptionRow | null;
+  const tier = resolveLimits(subscription);
+  return { mode, tier, subscription, ...computeEffectiveLimits(riskRow, tier, mode) };
 }
 
 /**
