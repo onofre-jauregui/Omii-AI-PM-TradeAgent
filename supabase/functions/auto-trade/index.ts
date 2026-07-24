@@ -214,6 +214,7 @@ async function countOpenPositions(
   strategyId?: string,
   thresholdDays: number = 7,
   userId?: string | null,
+  mode?: "paper" | "live",
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
@@ -227,6 +228,12 @@ async function countOpenPositions(
 
   if (strategyId) {
     query = query.eq("strategy_id", strategyId);
+  }
+
+  // Count positions in THIS mode only — paper positions must not consume the
+  // live open-position cap (and vice-versa), since the cap is per (user, mode).
+  if (mode) {
+    query = query.eq("mode", mode);
   }
 
   // Scope to the correct tenant — null user_id means legacy/system strategies
@@ -672,7 +679,7 @@ serve(async (req) => {
           winStreak = await computeWinStreak(supabase, strategy.user_id);
 
           // Open position cap
-          const openPositions = await countOpenPositions(supabase, undefined, 7, strategy.user_id);
+          const openPositions = await countOpenPositions(supabase, undefined, 7, strategy.user_id, strategy.mode as "paper" | "live");
           if (openPositions.totalCount >= userRisk.max_open_positions) {
             await supabase.from("compliance_log").insert({
               event_type: "risk_check_failed",
@@ -699,6 +706,7 @@ serve(async (req) => {
             .from("trades")
             .select("id", { count: "exact", head: true })
             .eq("user_id", strategy.user_id)
+            .eq("mode", strategy.mode)
             .gte("created_at", dayAgo);
 
           if ((dailyTradeCount ?? 0) >= maxDailyTrades) {
@@ -1446,7 +1454,7 @@ async function runS002LongshotBias(
   }
 
   // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot
-  const positions = await countOpenPositions(supabase, "S-002", 7, strategy.user_id ?? null);
+  const positions = await countOpenPositions(supabase, "S-002", 7, strategy.user_id ?? null, mode as "paper" | "live");
   const openS002Count = positions.weightedCost;
   const nearTermOnly = positions.nearTermCount;
   const farTermOnly = positions.farTermCount;
@@ -1848,7 +1856,7 @@ async function runS005WeatherEdge(
     };
   }
 
-  const positions = await countOpenPositions(supabase, undefined, 7, strategy.user_id ?? null);
+  const positions = await countOpenPositions(supabase, undefined, 7, strategy.user_id ?? null, mode as "paper" | "live");
   const maxPositions = userRisk?.max_open_positions ?? 10;
   const slotsAvailable = Math.max(0, maxPositions - positions.totalCount);
   if (slotsAvailable === 0) {
