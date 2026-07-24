@@ -28,6 +28,24 @@ async function getCachedKalshiMarkets(): Promise<any[]> {
 // on every unrelated `trades` realtime event.
 const KALSHI_PING_TTL_MS = 15_000;
 
+// Supabase-js sets no client-side timeout on its own — a hung request (e.g. the
+// browser's connection pool exhausted by other dashboard widgets) would otherwise
+// leave `Promise.allSettled` below waiting forever, so the hero never leaves
+// "Loading." This bounds every query in the batch so it always settles.
+const HERO_QUERY_TIMEOUT_MS = 10_000;
+function withTimeout<T>(promise: PromiseLike<T>, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${HERO_QUERY_TIMEOUT_MS}ms`)),
+      HERO_QUERY_TIMEOUT_MS,
+    );
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 interface ChartPoint { date: string; value: number; }
 
 interface HeroStats {
@@ -46,6 +64,7 @@ interface HeroStats {
   settledCount: number;
   chartPoints: ChartPoint[];
   loading: boolean;
+  error: string | null;
   /** The mode these stats were computed for. Used to reject cross-mode renders
    *  so the live tab never briefly shows paper numbers (or vice versa). */
   statsMode?: "paper" | "live";
@@ -178,6 +197,7 @@ export function DashboardHero({
     settledCount: 0,
     chartPoints: [],
     loading: true,
+    error: null,
   });
 
   const load = useCallback(async () => {
@@ -219,17 +239,20 @@ export function DashboardHero({
 
     const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
-      supabase
-        .from("trades")
-        .select("pnl, settled_at, mode")
-        .eq("status", "settled")
-        .eq("user_id", userId ?? "")
-        .gte("settled_at", MAY_START)
-        .order("settled_at", { ascending: false })
-        .limit(2000),
+      withTimeout(
+        supabase
+          .from("trades")
+          .select("pnl, settled_at, mode")
+          .eq("status", "settled")
+          .eq("user_id", userId ?? "")
+          .gte("settled_at", MAY_START)
+          .order("settled_at", { ascending: false })
+          .limit(2000),
+        "settled trades",
+      ),
       // Open positions: filled but not yet settled (mode-scoped so the live tab
       // doesn't count paper positions)
-      (() => {
+      withTimeout((() => {
         let q = supabase
           .from("trades")
           .select("id, ticker")
@@ -238,9 +261,9 @@ export function DashboardHero({
           .is("settled_at", null);
         if (mode) q = q.eq("mode", mode);
         return q;
-      })(),
+      })(), "open positions"),
       // Trades placed today (for activity count) — mode-scoped
-      (() => {
+      withTimeout((() => {
         let q = supabase
           .from("trades")
           .select("id")
@@ -248,16 +271,16 @@ export function DashboardHero({
           .gte("created_at", todayISO);
         if (mode) q = q.eq("mode", mode);
         return q;
-      })(),
+      })(), "trades today"),
       // Starting balance — sum of strategies matching the current mode
-      (() => {
+      withTimeout((() => {
         let q = supabase.from("strategies").select("starting_balance, mode").eq("user_id", userId ?? "");
         if (mode) q = q.eq("mode", mode);
         return q;
-      })(),
+      })(), "strategies"),
       // Most recently SETTLED trade — "Last settled" chip. Mode-scoped so the live tab
       // doesn't surface a paper settlement while live P&L reads empty.
-      (() => {
+      withTimeout((() => {
         let q = supabase
           .from("trades")
           .select("settled_at")
@@ -267,10 +290,24 @@ export function DashboardHero({
           .limit(1);
         if (mode) q = q.eq("mode", mode);
         return q;
-      })(),
+      })(), "last settled trade"),
     ]);
 
     const kalshiBalance = await kalshiBalanceFetch;
+
+    // Surface the first failure/timeout so the UI can show a real error instead of
+    // silently rendering zeros — either a rejected promise (timeout) or a fulfilled
+    // one carrying a Postgrest `error` (bad query/RLS) counts as a failure.
+    const results = [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes];
+    const firstFailure = results.find(r =>
+      r.status === "rejected" || (r.status === "fulfilled" && (r.value as { error?: unknown }).error),
+    );
+    const loadError = firstFailure
+      ? firstFailure.status === "rejected"
+        ? (firstFailure.reason instanceof Error ? firstFailure.reason.message : String(firstFailure.reason))
+        : (firstFailure.value as { error: { message: string } }).error.message
+      : null;
+    if (loadError) console.error("DashboardHero load failed:", loadError);
 
     const settledTrades = settledRes.status === "fulfilled" ? (settledRes.value.data ?? []) : [];
     const openTrades = openRes.status === "fulfilled" ? (openRes.value.data ?? []) : [];
@@ -381,6 +418,7 @@ export function DashboardHero({
       settledCount: modeTrades.length,
       chartPoints,
       loading: false,
+      error: loadError,
       statsMode: mode,
     });
   }, [mode, userIdProp]);
@@ -436,6 +474,16 @@ export function DashboardHero({
           </p>
           <AgentStatusBadge />
         </div>
+
+        {stats.error && (
+          <button
+            onClick={() => load()}
+            className="mb-3 flex w-full items-center justify-between rounded-xl bg-loss/10 px-3 py-2 text-left text-xs text-loss"
+          >
+            <span>Couldn't load your portfolio — {stats.error}</span>
+            <span className="shrink-0 font-medium underline">Retry</span>
+          </button>
+        )}
 
         {/* Dominant headline: return % — the biggest thing on screen */}
         <div className="flex items-end gap-3 mb-1">
