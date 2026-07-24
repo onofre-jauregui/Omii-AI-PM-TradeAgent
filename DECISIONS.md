@@ -4,6 +4,14 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-24 — Sub-hourly per-strategy cadence: 5-min cron + NULL→hourly gate
+
+**Decision:** Support per-strategy cadences down to 5 min by bumping the single `auto-trade-cron` from hourly (`5 * * * *`) to every 5 min (`*/5 * * * *`), and making `shouldRunByCadence` treat a NULL `run_interval_minutes` as the hourly `DEFAULT_CADENCE_MIN` (60) instead of "run every cron tick". Grace dropped 5→2.5 min (half the new cron cycle). last_run_at is now stamped on every run (incl. defaults). UI floor is 5 min.
+**Options:** A) **Single 5-min cron + NULL→hourly gate (chosen)** — one cron, gate is the single source of truth for frequency; B) Two-cron partition (hourly for NULL, 5-min for throttled) — rejected: the global `auto_trade_locks` mutex would let overlapping ticks lock each other out, so defaults could miss their only hourly run; C) 1-min floor + speed up the whole data pipeline — rejected: signals only refresh every 5 min, so <5-min cadence re-reads identical data and multiplies Kalshi API load 5-15x on the live account (Onofre chose the 5-min floor).
+**Why:** 5 min matches the signal-pipeline refresh; the lock makes a single cron cleaner than a partition; NULL→hourly preserves exact pre-cadence behavior for the live strategy (S-001-l) — verified in prod that back-to-back invocations skip NULL strategies with "next run in 60m", so no 12x-trading regression.
+**Reversibility:** easy — revert the cron to `5 * * * *` and the gate constant; no schema change (columns already existed).
+**Trace:** PR #33 (feat/per-strategy-run-cadence); migrations `20260724_strategy_run_cadence.sql` + `20260724b_auto_trade_cron_5min.sql`; verified live 2026-07-24 (5-min paper strategy ran-then-re-throttled while NULL strategies held at hourly).
+
 ## 2026-07-20 — Flagged market-data-fetcher credential-fetch timeout gap (not auto-fixed)
 
 **Decision:** Logged as a finding for review rather than deploying a fix during an unattended scheduled health-check run.

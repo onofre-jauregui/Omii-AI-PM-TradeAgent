@@ -23,7 +23,12 @@ const displayId = (id: string) => id.replace(/-[a-f0-9]{6,}$/i, "");
 
 // Run cadence presets. The auto-trade cron runs hourly, so hourly is the floor;
 // null (stored as NULL) means "every cycle". Value is minutes between evaluations.
+// 5 min is the floor — it matches how often the signal pipeline (surface-scanner,
+// market-data-fetcher) regenerates prices. Anything faster just re-reads identical data.
 const CADENCE_OPTIONS: { value: string; label: string }[] = [
+  { value: "5",    label: "Every 5 minutes" },
+  { value: "15",   label: "Every 15 minutes" },
+  { value: "30",   label: "Every 30 minutes" },
   { value: "0",    label: "Every hour (default)" },
   { value: "120",  label: "Every 2 hours" },
   { value: "240",  label: "Every 4 hours" },

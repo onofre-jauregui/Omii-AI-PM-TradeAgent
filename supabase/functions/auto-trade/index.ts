@@ -20,6 +20,7 @@ import {
   buildQualifyEndpoint,
   buildQualifyHeaders,
   shouldRunByCadence,
+  DEFAULT_CADENCE_MIN,
 } from "../_shared/trading-logic.ts";
 
 /**
@@ -620,24 +621,26 @@ serve(async (req) => {
       }
 
       // ── Per-strategy run cadence ──────────────────────────────────────────
-      // A user can set run_interval_minutes to throttle a strategy below the
-      // hourly cron. NULL = run every cycle (default). We stamp last_run_at only
-      // for throttled strategies, so default strategies generate no realtime churn.
+      // The cron ticks every 5 min. A user can set run_interval_minutes to throttle
+      // a strategy anywhere from every 5 min up to daily; NULL falls back to the
+      // hourly DEFAULT_CADENCE_MIN so un-throttled strategies keep pre-cadence
+      // behavior. last_run_at is stamped on every actual run (including defaults)
+      // so the gate has a reference point — the realtime channel debounces the
+      // resulting UPDATEs, so hourly default stamps cause no meaningful churn.
       if (!shouldRunByCadence(strategy.run_interval_minutes, strategy.last_run_at, Date.now())) {
+        const effIntervalMin = strategy.run_interval_minutes || DEFAULT_CADENCE_MIN;
         strategyResults.push({
           strategy_id: strategy.id,
           strategy_name: strategy.name,
           mode: strategy.mode,
           status: "skipped",
-          details: `cadence: next run in ${Math.max(0, Math.ceil(strategy.run_interval_minutes - (Date.now() - new Date(strategy.last_run_at).getTime()) / 60000))}m`,
+          details: `cadence: next run in ${Math.max(0, Math.ceil(effIntervalMin - (Date.now() - new Date(strategy.last_run_at).getTime()) / 60000))}m`,
         });
         continue;
       }
-      if (strategy.run_interval_minutes) {
-        await supabase.from("strategies")
-          .update({ last_run_at: new Date().toISOString() })
-          .eq("id", strategy.id);
-      }
+      await supabase.from("strategies")
+        .update({ last_run_at: new Date().toISOString() })
+        .eq("id", strategy.id);
 
       try {
         // ── Per-strategy entitlement check ────────────────────────────────────
