@@ -228,18 +228,35 @@ export default function OnboardingPage() {
       );
       if (stratErr) throw stratErr;
 
-      // Seed risk_settings so auto-trade doesn't fall back to the system default (10 positions)
+      // Seed risk_settings so auto-trade doesn't fall back to the system default (10 positions).
+      // risk_settings has one row per (user_id, mode); seed BOTH and conflict on
+      // (user_id, mode) — the signup trigger may have already created these rows.
+      // Paper (where the user starts) gets the roomier onboarding defaults; live
+      // stays conservative (the tier ceiling clamps it at trade time regardless).
       const { error: riskErr } = await supabase.from("risk_settings").upsert(
-        {
-          user_id: user.id,
-          max_position_size: 20,
-          max_open_positions: 25,
-          max_daily_trades: 50,
-          allocated_capital: 500,
-          max_daily_loss: 100,
-          max_drawdown_pct: 20,
-        },
-        { onConflict: "user_id" }
+        [
+          {
+            user_id: user.id,
+            mode: "paper",
+            max_position_size: 20,
+            max_open_positions: 25,
+            max_daily_trades: 50,
+            allocated_capital: 500,
+            max_daily_loss: 100,
+            max_drawdown_pct: 20,
+          },
+          {
+            user_id: user.id,
+            mode: "live",
+            max_position_size: 20,
+            max_open_positions: 3,
+            max_daily_trades: 30,
+            allocated_capital: 500,
+            max_daily_loss: 100,
+            max_drawdown_pct: 10,
+          },
+        ],
+        { onConflict: "user_id,mode" }
       );
       if (riskErr) throw riskErr;
 

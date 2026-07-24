@@ -626,7 +626,6 @@ serve(async (req) => {
       authSettled,
       keyRowsSettled,
       savedModelSettled,
-      riskSettled,
       memorySettled,
       tradesSettled,
       unreflectedSettled,
@@ -634,7 +633,9 @@ serve(async (req) => {
       authPromise,
       supabase.from("api_keys").select("provider, secret_ciphertext, secret_iv, encrypted_secret").in("provider", ["openrouter", "openai", "anthropic", "google"]),
       supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
-      supabase.from("risk_settings").select("*").maybeSingle(),
+      // NOTE: risk_settings is fetched in the SECOND batch below, after userId
+      // resolves — it is per (user_id, mode) and an unscoped query here matches
+      // multiple rows and errors.
       supabase.from("agent_memory")
         .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
         .eq("is_active", true)
@@ -660,8 +661,10 @@ serve(async (req) => {
       userId = authSettled.value.data.user.id;
     }
 
-    // Load profile + user_preference memories in parallel (userId now known)
-    const [profileSettled, prefMemoriesSettled] = await Promise.allSettled([
+    // Load profile + user_preference memories + risk_settings in parallel (userId now known).
+    // risk_settings is per (user_id, mode); scope by both so we don't match multiple rows.
+    const riskMode: "paper" | "live" = tradingMode === "live" ? "live" : "paper";
+    const [profileSettled, prefMemoriesSettled, riskSettled] = await Promise.allSettled([
       userId
         ? supabase.from("profiles").select("display_name").eq("id", userId).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
@@ -673,6 +676,9 @@ serve(async (req) => {
             .or(`user_id.is.null,user_id.eq.${userId}`)
             .order("confidence", { ascending: false })
             .limit(20)
+        : Promise.resolve({ data: null, error: null }),
+      userId
+        ? supabase.from("risk_settings").select("*").eq("user_id", userId).eq("mode", riskMode).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
     ]);
 

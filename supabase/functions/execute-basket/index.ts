@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { resolveTenant, tenantInsertFields } from "../_shared/tenant.ts";
+import { resolveTenant, tenantInsertFields, getRiskSettings } from "../_shared/tenant.ts";
 import { evaluateCapitalCap } from "../_shared/risk.ts";
 
 /**
@@ -60,11 +60,9 @@ serve(async (req) => {
     // Prevent the agent from deploying more than the user's configured cap.
     // Paper trades bypass this check — no real money at risk.
     if (mode === "live" && tenant.userId) {
-      const { data: riskRow } = await supabase
-        .from("risk_settings")
-        .select("allocated_capital")
-        .eq("user_id", tenant.userId)
-        .maybeSingle();
+      // Use the shared, mode-scoped reader — a user_id-only query matches both
+      // the paper and live rows and silently falls back to the $500 default.
+      const riskRow = await getRiskSettings(supabase, tenant.userId, "live");
 
       const cap: number = riskRow?.allocated_capital ?? 500;
 

@@ -305,15 +305,18 @@ serve(async (req) => {
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
     if (userId) {
-      const capSettings = await getRiskSettings(supabase, userId);
+      const capSettings = await getRiskSettings(supabase, userId, tradeMode);
       const userMaxPos = (capSettings as any)?.max_open_positions ?? 10;
       // Live mode can never exceed what the subscription tier pays for, regardless
       // of a looser self-configured risk_settings value.
       const maxPos = tradeMode === "live" ? Math.min(userMaxPos, tierLimits.maxOpenPositions) : userMaxPos;
+      // Count open positions in THIS mode only — paper positions must not consume
+      // the live cap (and vice-versa).
       const { count: openCount } = await supabase
         .from("trades")
         .select("id", { count: "exact", head: true })
         .eq("user_id", userId)
+        .eq("mode", tradeMode)
         .eq("status", "filled")
         .is("settled_at", null)
         .is("exit_reason", null);
@@ -331,7 +334,7 @@ serve(async (req) => {
     }
 
     // ── Risk Management (tenant-scoped) ──
-    const settings = await getRiskSettings(supabase, userId);
+    const settings = await getRiskSettings(supabase, userId, tradeMode);
     const riskState = await getRiskStateToday(supabase, userId);
 
     // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
