@@ -546,6 +546,29 @@ Return ONLY valid JSON, no markdown, no extra text:
             if (llmResp.ok) {
               const llmData = await llmResp.json();
               const rawText = llmData.choices?.[0]?.message?.content || "";
+
+              // Same event_type/shape as auto-trade's qualify-call logging so the
+              // Observability cost dashboard (ObservabilityPage.tsx) picks this up
+              // for free — reflection LLM calls were previously invisible to cost tracking.
+              const lessonPromptTokens = llmData.usage?.prompt_tokens ?? null;
+              const lessonCompletionTokens = llmData.usage?.completion_tokens ?? null;
+              if (lessonPromptTokens != null || lessonCompletionTokens != null) {
+                await supabase.from("compliance_log").insert({
+                  event_type: "llm_usage",
+                  severity: "info",
+                  message: `auto-reflect lesson: ${lessonPromptTokens ?? "?"} in / ${lessonCompletionTokens ?? "?"} out`,
+                  metadata: {
+                    model: lessonAiModel,
+                    provider: lessonKeys["openrouter"] ? "openrouter" : "openai",
+                    prompt_tokens: lessonPromptTokens,
+                    completion_tokens: lessonCompletionTokens,
+                    total_tokens: llmData.usage?.total_tokens ?? null,
+                    source: "auto-reflect-lesson",
+                    trade_id: trade.id,
+                  },
+                }).then(undefined, () => {});
+              }
+
               // Strip markdown code fences if present
               const jsonText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
               const parsed = JSON.parse(jsonText);
