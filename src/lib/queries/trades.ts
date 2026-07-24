@@ -46,7 +46,7 @@ export interface SettledTradeRow {
  */
 export async function fetchSettledTrades(): Promise<SettledTradeRow[]> {
   const userId = await currentUserId();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("trades")
     .select("strategy, strategy_id, pnl, status, amount, settled_at, mode, ticker")
     .eq("status", "settled")
@@ -54,6 +54,7 @@ export async function fetchSettledTrades(): Promise<SettledTradeRow[]> {
     .gte("settled_at", MAY_START)
     .order("settled_at", { ascending: false })
     .limit(5000);
+  if (error) throw error;
   return (data as SettledTradeRow[]) ?? [];
 }
 
@@ -84,7 +85,8 @@ export function useOpenPositions(mode?: "paper" | "live") {
         ? q.in("status", ["filled", "open", "partial"])
         : q.eq("status", "filled");
       if (mode) q = q.eq("mode", mode);
-      const { data } = await q;
+      const { data, error } = await q;
+      if (error) throw error;
       return (data ?? []) as unknown[];
     },
   });
@@ -104,7 +106,8 @@ export function useRecentTrades(mode?: "paper" | "live") {
         .order("created_at", { ascending: false })
         .limit(50);
       if (mode) q = q.eq("mode", mode);
-      const { data } = await q;
+      const { data, error } = await q;
+      if (error) throw error;
       return (data ?? []) as unknown[];
     },
   });
