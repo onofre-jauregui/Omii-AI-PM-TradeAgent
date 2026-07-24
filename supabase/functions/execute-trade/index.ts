@@ -295,6 +295,10 @@ serve(async (req) => {
     // ── Atomic position cap — race-condition-proof enforcement ──
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
+    // Captured for the risk check below: risk_state.open_position_count is mode-blind
+    // (no mode column yet — PR6), so paper positions would otherwise block live trades.
+    // We override it with this mode-scoped count so the per-mode cap is honored.
+    let modeScopedOpenCount: number | null = null;
     if (userId && effective) {
       // effective.maxOpenPositions already applies the tier ceiling for live
       // (min(user, tier)) and the user's own cap for paper — the single source
@@ -310,6 +314,7 @@ serve(async (req) => {
         .eq("status", "filled")
         .is("settled_at", null)
         .is("exit_reason", null);
+      modeScopedOpenCount = openCount ?? 0;
 
       if ((openCount ?? 0) >= maxPos) {
         await logCompliance(supabase, userId, null, "position_cap_enforced", "warning",
@@ -331,6 +336,12 @@ serve(async (req) => {
     const settings: RiskSettings | null =
       effective && effective.configured ? effective.riskSettings : null;
     const riskState = await getRiskStateToday(supabase, userId);
+    // risk_state is mode-blind (shared paper+live) until PR6. Override its open-position
+    // count with the mode-scoped count computed above so a user's paper positions can't
+    // block a live trade (and vice-versa) via evaluateRisk's open-positions check.
+    if (riskState && modeScopedOpenCount !== null) {
+      (riskState as any).open_position_count = modeScopedOpenCount;
+    }
 
     // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
     // which would let a real-money order through unbounded. Require configured limits before
