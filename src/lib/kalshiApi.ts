@@ -139,15 +139,48 @@ const authHeader = () => ({
   "Content-Type": "application/json",
 });
 
+// Caps concurrent kalshi-proxy GET requests. Category tabs, background pre-warm,
+// and per-series trending fan-out can each fire a dozen+ requests independently —
+// with no cap they stack up over a session and exhaust the browser's connection
+// pool (net::ERR_INSUFFICIENT_RESOURCES), starving unrelated fetches on the page.
+const MAX_CONCURRENT_PROXY_REQUESTS = 6;
+let activeProxyRequests = 0;
+const proxyRequestQueue: Array<() => void> = [];
+
+function acquireProxySlot(): Promise<void> {
+  return new Promise(resolve => {
+    const tryGrant = () => {
+      if (activeProxyRequests < MAX_CONCURRENT_PROXY_REQUESTS) {
+        activeProxyRequests++;
+        resolve();
+      } else {
+        proxyRequestQueue.push(tryGrant);
+      }
+    };
+    tryGrant();
+  });
+}
+
+function releaseProxySlot(): void {
+  activeProxyRequests--;
+  const next = proxyRequestQueue.shift();
+  if (next) next();
+}
+
 async function kalshiProxyGet(endpoint: string, params: Record<string, string> = {}): Promise<any> {
   const url = new URL(proxyUrl());
   url.searchParams.set("endpoint", endpoint);
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, v);
   }
-  const response = await fetch(url.toString(), { headers: authHeader() });
-  if (!response.ok) throw new Error(`Kalshi API error: ${response.status}`);
-  return response.json();
+  await acquireProxySlot();
+  try {
+    const response = await fetch(url.toString(), { headers: authHeader() });
+    if (!response.ok) throw new Error(`Kalshi API error: ${response.status}`);
+    return response.json();
+  } finally {
+    releaseProxySlot();
+  }
 }
 
 async function kalshiProxyPost(endpoint: string, body: any): Promise<any> {
