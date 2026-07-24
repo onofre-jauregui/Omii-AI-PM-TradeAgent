@@ -20,6 +20,11 @@ export default defineConfig(({ mode }) => ({
       workbox: {
         clientsClaim: true,
         skipWaiting: true,
+        // vite-plugin-pwa defaults navigateFallback to "index.html", which binds a
+        // precache handler to that URL — but globPatterns below excludes html from
+        // precache, so the SW throws "non-precached-url" on activation. Navigation
+        // is already handled by the explicit NetworkFirst runtimeCaching rule below.
+        navigateFallback: undefined,
         // Only precache hashed JS/CSS/icon assets — NOT index.html.
         // index.html references hashed filenames that change on every deploy;
         // if the SW serves a stale index.html the browser requests old JS bundles
