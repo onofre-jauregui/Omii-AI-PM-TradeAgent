@@ -30,9 +30,14 @@ DROP INDEX IF EXISTS public.risk_settings_user_id_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS risk_settings_user_mode_idx
   ON public.risk_settings (user_id, mode);
 
--- 4. Backfill: every user must have BOTH a paper and a live row. Idempotent via
---    the unique index above. Copies existing per-user values into the missing
+-- 4. Backfill: every real user must have BOTH a paper and a live row. Idempotent
+--    via the unique index above. Copies existing per-user values into the missing
 --    mode so a user who already tuned their paper limits doesn't get defaults.
+--
+--    user_id IS NOT NULL is required: the unique index treats NULLs as distinct
+--    (default NULLS DISTINCT), so ON CONFLICT does NOT match the legacy/system
+--    null-user rows — including them here would insert duplicate null rows on
+--    every apply. Legacy null-user defaults are managed manually, not backfilled.
 INSERT INTO public.risk_settings (
   user_id, mode, max_position_size, max_open_positions, max_daily_loss,
   max_drawdown_pct, allocated_capital, max_daily_trades, auto_stop_loss,
@@ -45,6 +50,7 @@ SELECT
 FROM (
   SELECT DISTINCT ON (user_id) *
   FROM public.risk_settings
+  WHERE user_id IS NOT NULL
   ORDER BY user_id, updated_at DESC
 ) src
 CROSS JOIN (VALUES ('paper'), ('live')) AS want(mode)
