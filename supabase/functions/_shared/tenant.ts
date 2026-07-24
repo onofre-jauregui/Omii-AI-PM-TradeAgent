@@ -82,17 +82,35 @@ export async function resolveTenant(
 }
 
 /**
- * Load the risk_settings row for a tenant. Returns null if no row exists,
- * which the caller should interpret as "no limits configured".
+ * Load the risk_settings row for a tenant, scoped to a trading mode.
+ *
+ * `risk_settings` holds one row per (user_id, mode) — enforced by the unique
+ * index risk_settings_user_mode_idx. A query that filters by user_id alone
+ * matches BOTH the paper and live rows, and `.maybeSingle()` then errors on
+ * the multi-row result. That error must NOT be swallowed: doing so returns
+ * null, which the live-trading gate reads as "no limits configured" and
+ * rejects every live trade. So `mode` is required and the error is logged.
+ *
+ * Returns null only when no row genuinely exists for (user_id, mode), which
+ * the caller should interpret as "no limits configured" (fail-closed for live).
  */
 export async function getRiskSettings(
   supabase: ReturnType<typeof createClient>,
-  userId: string | null
+  userId: string | null,
+  mode: "paper" | "live"
 ): Promise<any | null> {
-  const query = supabase.from("risk_settings").select("*");
-  const { data } = userId
+  const query = supabase.from("risk_settings").select("*").eq("mode", mode);
+  const { data, error } = userId
     ? await query.eq("user_id", userId).maybeSingle()
     : await query.is("user_id", null).maybeSingle();
+  if (error) {
+    // Loud, not silent: a swallowed error here is exactly what let the
+    // live-trade-rejection bug hide. Log and fail closed (null).
+    console.error(
+      `getRiskSettings query failed (user_id=${userId ?? "null"}, mode=${mode}): ${error.message}`
+    );
+    return null;
+  }
   return data || null;
 }
 

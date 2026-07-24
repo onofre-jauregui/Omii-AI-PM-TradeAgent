@@ -309,10 +309,14 @@ serve(async (req) => {
         //    loss-percentage check would fire on every normal losing trade. Use daily PnL instead.
         if (pnl < 0 && t.user_id) {
           const today = new Date().toISOString().split("T")[0];
+          // Scope by (user_id, mode): risk_settings has one row per mode, so a
+          // user_id-only query matches both rows and .maybeSingle() errors →
+          // riskRow becomes null and this daily-loss breaker silently never fires.
           const { data: riskRow } = await supabase
             .from("risk_settings")
             .select("auto_stop_loss, max_daily_loss")
             .eq("user_id", t.user_id)
+            .eq("mode", t.mode)
             .maybeSingle();
 
           if (riskRow?.auto_stop_loss && (riskRow.max_daily_loss ?? 0) > 0) {
