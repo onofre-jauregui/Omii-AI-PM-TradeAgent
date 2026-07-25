@@ -2,6 +2,42 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-25 (later run, 2nd) — Consolidate `auto-trade`'s daily-cap counter onto `_shared/limits.ts`'s `countTradesInWindow`, once `tenant.ts`'s two latent type errors are cleaned up
+
+**Status:** Recommended, not applied. Full root-cause writeup in `docs/health-log.md`'s matching
+entry — the fix (excluding `status='failed'` from both of today's two independent daily-cap
+counters) is deployed; this is the follow-on structural improvement, deliberately not shipped
+this pass.
+
+**The finding:** `_shared/limits.ts` already carries a header comment stating its
+`countTradesInWindow()` was written to be the *single* source of truth for "how many trades has
+this user placed today," replacing duplicated inline counters in `execute-trade`, `execute-basket`,
+`auto-trade`, and `trading-agent`. In practice `auto-trade` was never migrated onto it — it kept
+its own inline count query. That duplication is exactly why today's failed-order-counting bug had
+to be found and fixed twice, in two files, instead of once.
+
+**Why not applied this pass:** importing `countTradesInWindow` into `auto-trade` pulls in
+`_shared/tenant.ts` transitively (via `limits.ts` → `getRiskSettings`), which carries two
+pre-existing type errors — `supabase.from("risk_state").update(payload)` and
+`.insert({...payload, user_id})` both resolve to a `never`-typed table because of how this
+codebase's Supabase client generic is instantiated. Those errors already exist in the codebase
+(same 2 errors execute-trade's `deno check` already carries) but are not currently reachable from
+`auto-trade`'s type-check graph — importing `limits.ts` would make them newly visible there,
+which fails this repo's own "zero new `deno check` errors vs. baseline" verification bar.
+
+**Recommended fix, in order:** (1) fix `tenant.ts`'s two `never`-type errors — almost certainly a
+missing or wrong type parameter on the `createClient<Database>()` call, or a stale/missing
+generated `Database` type for the `risk_state` table; (2) once clean, migrate `auto-trade`'s
+inline daily-cap query onto `countTradesInWindow`, deleting the duplicate; (3) confirm `deno
+check` on both files stays at their (lower, post-tenant-fix) baseline afterward.
+
+**Why it matters ($ / revenue):** every duplicate implementation of "what counts as a trade for
+risk purposes" is a second place the same bug can hide, and today is the second time this
+specific project has paid for that (see the auth/time_in_force dual-bug entry earlier today, and
+the 07-23 max_open_positions per-strategy-scoping finding — same root pattern: shared risk logic
+re-implemented per call site instead of centralized). Centralizing removes an entire class of
+future recurrence, not just today's instance.
+
 ## 2026-07-25 (scheduled health check) — proactive low-balance alert in `health-check`, prompted by fixing the `insufficient_balance` order-rejection bug
 
 **Status:** Deployed. Full root-cause writeup in `docs/health-log.md`'s matching 07-25 entry —

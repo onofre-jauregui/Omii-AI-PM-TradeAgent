@@ -2,6 +2,58 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (later run, 2nd) — daily-trade-cap counted failed orders in *two* independent places, actively rejecting live trades right now
+
+**Telegram error state:** All errors in the last 6h trace back to the three clusters already
+resolved earlier today (auth 401 → fixed ~15:25 UTC; `time_in_force` constraint → fixed same
+commit; `insufficient_balance` → pre-flight check deployed ~17:14 UTC). Zero new error classes.
+But `daily_trade_cap_enforced` fired 63x in the trailing 6h (vs. single digits on a normal day)
+and the most recent hit, live at time of this check: `"Trade rejected: daily trade cap (100)
+reached for user ea207ba1... in live mode"`, `count: 102, limit: 100` — a live 429 actively
+blocking every order.
+
+**Root cause:** today's earlier auth/balance bugs generated 70 failed live orders in 24h
+(`select mode, status, count(*) from trades ... group by mode, status` confirmed 70 `failed` vs.
+14 `open` + 18 `cancelled` = 32 real). Two independent daily-trade-cap checks both counted every
+`trades` row regardless of `status`:
+1. `auto-trade/index.ts`'s own inline pre-check (Risk-tab `max_daily_trades`) — already caught and
+   fixed in this run's first pass (see below), before the second gate was found.
+2. `_shared/limits.ts`'s `countTradesInWindow()` — the actual enforcement gate inside
+   `execute-trade` that returns the 429 — has an explicit comment stating it was written to
+   *replace* both counters, but `auto-trade` was never migrated onto it, so the same
+   failed-order-counting bug had to be (and was) fixed independently in both places.
+70 failed + 32 real = 102, which alone exceeded the account's 100/day tier cap — meaning **live
+trading was blocking itself with a false daily-limit page even after the underlying auth/balance
+bugs were fixed**, because the failures those bugs caused were still being held against the cap.
+
+**Fix (deployed):** added `.neq("status", "failed")` to both counters —
+`auto-trade/index.ts:713` and `_shared/limits.ts`'s `countTradesInWindow` (used by
+`execute-trade`'s 429 gate). Both bound real trading activity/exposure now, not attempts rejected
+before ever reaching the exchange. `deno check` on each file shows the same error count as
+baseline (`auto-trade`: 17/17, `limits.ts`: 2/2, `execute-trade`: 22/22) — zero new errors.
+Deployed via `supabase functions deploy auto-trade` and `execute-trade`. **Verified live:** polled
+`compliance_log` through the next real cron cycle post-deploy — the same underfunded S-001 basket
+retried (2 legs got real Kalshi order IDs and rested, 1 leg correctly rejected on genuine
+insufficient balance for that specific leg) with **zero `daily_trade_cap_enforced` rejections** —
+confirms the cap no longer trips on its own failure history. Real trade count post-fix: 32/100,
+comfortable headroom.
+
+**Improvement (recommended, not applied):** `_shared/limits.ts` was written specifically to be
+the single source of truth replacing duplicate cap-counting logic (its own header comment says
+so), but `auto-trade` was never migrated onto it — which is *why* this exact bug needed fixing
+twice today. Attempted the consolidation (import `countTradesInWindow` into `auto-trade`, drop
+its inline query) in this pass; reverted because it transitively pulls in `_shared/tenant.ts`
+(via `limits.ts` → `getRiskSettings`), which surfaces 2 pre-existing type errors in `tenant.ts`
+that `auto-trade`'s type-check graph doesn't currently reach — a real (if pre-existing elsewhere)
+regression against this repo's own "zero new `deno check` errors" bar. Worth doing once
+`tenant.ts`'s two `never`-type errors (`update(payload)` and `.insert({...,user_id})`, both typed
+`never` from an under-specified Supabase client generic) are cleaned up separately — at that
+point `auto-trade` can safely import `countTradesInWindow` and this class of bug becomes
+impossible to reintroduce by construction.
+
+**Reversibility:** both `.neq("status", "failed")` additions are single-line, independently
+revertible. No schema or migration involved.
+
 ## 2026-07-25 (scheduled health check) — live basket rejected 7x on `insufficient_balance`; no pre-flight balance check existed
 
 **Telegram error state:** 7 `order_failed` / `error` rows, all `insufficient_balance` (Kalshi
