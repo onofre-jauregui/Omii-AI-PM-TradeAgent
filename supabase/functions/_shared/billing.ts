@@ -201,8 +201,14 @@ export function checkEntitlement(
     };
   }
 
-  // Strategy must be allowed
-  if (input.strategy && !limits.allowedStrategies.includes(input.strategy)) {
+  // Strategy must be allowed. Normalize to the base template id first — live
+  // strategies carry a suffixed, per-user id ("S-001-l-ea207ba1") and paper
+  // ones too ("S-001-ea207ba1"), while the tier's allow-list holds canonical
+  // ids ("S-001"). Without this, a legitimately-allowed strategy is rejected
+  // as "not available on your tier" — and because paper mode skips this whole
+  // check, the bug only ever bit LIVE trading (0 live trades, so never seen).
+  const baseStrategy = input.strategy?.match(/^S-\d+/)?.[0] ?? input.strategy;
+  if (baseStrategy && !limits.allowedStrategies.includes(baseStrategy)) {
     return {
       allowed: false,
       reason: `Strategy ${input.strategy} is not available on your current tier. Upgrade for access.`,

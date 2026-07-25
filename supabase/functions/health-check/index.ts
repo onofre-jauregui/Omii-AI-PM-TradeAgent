@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
 /**
  * health-check: Monitors the trading agent and alerts via Telegram.
@@ -25,6 +26,7 @@ const WIN_RATE_FLOOR = 0.60;
 const WIN_RATE_SAMPLE = 20;
 const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not manual burst sessions
 const BLOCKED_SERIES = ["KXETH"];
+const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -369,7 +371,16 @@ serve(async (req) => {
       });
     }
     for (const c of cronRows ?? []) {
-      if (c.is_stale) {
+      if (c.last_status === "missing") {
+        // In the manifest (expected_cron_jobs) but absent from cron.job entirely —
+        // never scheduled, not just stalled. Re-alerts every 6h until registered.
+        pendingAlerts.push({
+          type: "cron_missing",
+          fingerprint: `cron_missing_${c.jobname}`,
+          cooldownHours: 6,
+          message: `🚨 [TradeAgent] ${c.jobname} is not registered in cron.job — expected but never scheduled`,
+        });
+      } else if (c.is_stale) {
         const mins = Math.round((c.seconds_since_last_run ?? 0) / 60);
         const expMin = Math.round((c.expected_interval_s ?? 0) / 60);
         // Fingerprint on jobname → one alert per stalled job; re-alerts each 6h it stays stale.
@@ -388,6 +399,41 @@ serve(async (req) => {
           cooldownHours: 12,
           message: `❌ [TradeAgent] ${c.jobname} failed at ${c.last_started_at ? String(c.last_started_at).slice(0, 16) + "Z" : "?"} — check cron.job_run_details`,
         });
+      }
+    }
+
+    // ── 10. Live account balance — early warning before orders start failing ──
+    // 2026-07-25 incident: a live basket kept getting Kalshi's insufficient_balance
+    // 400 for 3 legs / ~10min before anyone noticed — the only signal was noisy
+    // per-order error rows, no proactive "you're low on funds" alert. This check
+    // surfaces the real account balance directly so a shortfall is caught before
+    // it silently blocks every live trade attempt.
+    const { data: liveKeys } = await supabase
+      .from("api_keys")
+      .select("user_id")
+      .eq("provider", "kalshi_live")
+      .not("user_id", "is", null);
+
+    for (const { user_id } of liveKeys ?? []) {
+      try {
+        const { keyId, privateKey } = await getKalshiCredentials(supabase, user_id);
+        if (!keyId || !privateKey) continue;
+        const path = "/trade-api/v2/portfolio/balance";
+        const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
+        const resp = await fetch(`${KALSHI_BASE_URL}${path}`, { headers });
+        if (!resp.ok) continue; // don't let a transient Kalshi/auth hiccup page anyone
+        const data = await resp.json();
+        const balanceUsd = (data?.balance ?? 0) / 100;
+        if (balanceUsd < LOW_BALANCE_FLOOR_USD) {
+          pendingAlerts.push({
+            type: "kalshi_low_balance",
+            fingerprint: `low_balance_${user_id}`,
+            cooldownHours: 12,
+            message: `💸 [TradeAgent] Live Kalshi balance low: $${balanceUsd.toFixed(2)} — live trades will start failing insufficient_balance. Deposit funds.`,
+          });
+        }
+      } catch {
+        // Monitoring-path failure only — never let this block the rest of the sweep.
       }
     }
 

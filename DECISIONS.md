@@ -4,6 +4,83 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-25 — Fixed jsdom-broken signing tests that were silently blocking the balance pre-flight fix from shipping
+
+**Decision:** Added `// @vitest-environment node` to `kalshi-signing.test.ts` and guarded
+`src/test/setup.ts`'s `window.matchMedia` stub behind `typeof window !== "undefined"`.
+**Finding:** Scheduled health check found live trades repeatedly rejected with `insufficient_balance`
+every ~5 min from 18:45–19:00 UTC today, on tickers KXINX-26JUL27H1600-B7412/37/62. The fix for
+this (commit `9d47913`, a Kalshi balance pre-flight check) was already written and sitting on
+`fix/live-pilot-instrumentation` (PR #40), but PR #40's CI had been red since 18:19 UTC on
+`kalshi-signing.test.ts` — 4/4 tests failing with `importKey: 2nd argument is not instance of
+ArrayBuffer...`. Root cause: `vitest.config.ts` sets a global `environment: "jsdom"`; jsdom's Crypto
+shim doesn't implement a working `subtle`, so a suite exercising real RSA-PSS signing (no DOM
+dependency at all) failed for reasons unrelated to the signing code itself — which was correct.
+This masked *two* real fixes behind an unrelated red CI signal (the RSA-PSS signing fix `a73c79a`
+and the balance pre-flight fix `9d47913`), which is why live trading kept hitting both bugs it had
+already been fixed for, cycle after cycle.
+**Separately:** `.github/workflows/ci.yml`'s `canary-gate` job parses the Supabase Management API's
+`/database/query` response as `{data: [...]}` (`jq '.data[0].n'`), but that endpoint returns a bare
+array — every other job in the same file parses it correctly as a plain list. This has crashed the
+canary gate on the first 60s poll of every push to `main` since at least 2026-07-20, showing as a
+misleading CI "failure" even when the actual edge-function deploy (an earlier, independent job)
+succeeded. Fixed to `jq '.[0].n'`. Not yet verified against a real canary run — flag if a future
+`main` push still shows a red canary-gate.
+**Options:** A) Loosen the global jsdom environment — rejected, breaks isolation for the DOM suites
+it exists for. B) Per-file `node` environment override — chosen; zero-risk, scoped to the one suite
+that needs real WebCrypto.
+**Why:** The proximate error (compliance_log `insufficient_balance`/`order_failed`) had already been
+fixed in code; the actual blocker was a test-environment mismatch with no relation to trading logic.
+Fixing test infra was lower-risk and unblocks two already-reviewed real fixes rather than writing a
+third parallel fix.
+**Reversibility:** Easy — both changes are test-only/CI-only, no runtime behavior touched.
+**Trace:** commit `2270490` on `fix/live-pilot-instrumentation` (PR #40). `compliance_log`
+event_type=`order_failed`/`rate_limit_exceeded`, 2026-07-25 18:45–19:05 UTC.
+
+## 2026-07-25 — Replaced HMAC-SHA256 request signing with Kalshi's required RSA-PSS-SHA256
+
+**Decision:** Rewrote `_shared/kalshi-auth.ts` (now `_shared/kalshi-signing.ts`) to sign every
+Kalshi request with RSA-PSS-SHA256 (32-byte salt) over a millisecond-precision timestamp, importing
+the stored PEM as a WebCrypto RSA-PSS key (PKCS8 direct, PKCS1 re-wrapped). Previously it computed
+an HMAC-SHA256 digest over a second-precision timestamp, treating the RSA private key string as a
+raw HMAC secret.
+**Finding:** Today's V1→V2 endpoint migration (previous entry below) exposed that this had been
+wrong since the signing code was written — the retired endpoint returned its deprecation error
+before Kalshi ever validated a signature, so the auth bug had zero observable effect until the
+endpoint fix let requests reach real validation. `select mode,status,count(*) from trades where
+exchange='kalshi' group by mode,status` confirmed 60/60 live orders ever attempted had
+status='failed' — live trading has never placed a successful order since being enabled
+(2026-07-24 21:30).
+**Options:** A) Patch just the timestamp precision and hope the algorithm was somehow already
+correct — rejected, the two live 401s were unambiguously `INCORRECT_API_KEY_SIGNATURE`, not a
+clock-skew error. B) Verify Kalshi's actual required scheme against current docs before writing a
+fix — chosen; confirmed RSA-PSS-SHA256/ms-timestamp/path-only-no-query via docs.kalshi.com, then
+verified the fix against the real API (minted a session token, called read-only `kalshi-ping`,
+first-ever successful authenticated call for this account) before considering it resolved.
+**Why:** This is the actual documented Kalshi auth contract; HMAC was never a valid substitute for
+an RSA key pair. No lower-risk partial fix exists — signing is all-or-nothing correct.
+**Reversibility:** Easy — single shared-module revert, redeploy the 7 dependent functions.
+**Trace:** `failed_trade_queue`/`compliance_log`, `authentication_error`/`INCORRECT_API_KEY_SIGNATURE`
+rows starting 2026-07-25 15:03 UTC. Tests: `supabase/functions/tests/kalshi-signing.test.ts`.
+
+## 2026-07-25 — Migrated execute-trade to Kalshi's V2 order endpoint
+
+**Decision:** Rewrote the live order payload/response handling in `execute-trade/index.ts` to use `POST /trade-api/v2/portfolio/events/orders` instead of the deprecated `/portfolio/orders`.
+**Finding:** Every single live order today (2026-07-24/25) was rejected with `deprecated_v1_order_endpoint` — Kalshi deprecated the legacy order-mutation endpoint (changelog: 2026-06-18, "no earlier than May 6, 2026"). Live P&L was flat at $0 because no order had ever reached the exchange, not because of losing trades.
+**Options:** A) Ship the migration now, since 100% of live trades were already failing safely (no money at risk in the broken state) — chosen. B) Wait for a second independent verification source before touching real-money code — partially done: cross-checked the YES/NO price-complement math (`yes_bid + no_ask == 1.00`) against live Kalshi market data before writing the conversion, since the AI-summarized docs alone weren't sufficient confidence for a real-money payload change.
+**Why:** V2 quotes every order from the YES-book bid/ask side; NO orders are represented as the complementary YES-side order at `1 - price`. A compatibility shim converts the V2 response (flat object, dollar-string fields) back into the legacy `{order: {...}}` cents-based shape so all downstream fill/slippage/notification code is unchanged.
+**Reversibility:** Easy — single file (`execute-trade/index.ts`), redeploy previous version to roll back.
+**Trace:** `compliance_log` event_type=`order_failed`, message containing `deprecated_v1_order_endpoint`, 2026-07-24 through 2026-07-25 10:10 UTC.
+
+## 2026-07-25 — Staggered futures-signal-cron off market-data-fetcher-cron's minutes
+
+**Decision:** Changed `futures-signal-cron` schedule from `6,16,26,36,46,56 * * * *` to `9,19,29,39,49,59 * * * *`.
+**Finding:** `futures-signal-cron` and `market-data-fetcher-cron` (`1,6,11,...,56 * * * *`) fired in the exact same minute on every occurrence, and both call the Kalshi markets endpoint directly — a verifiable, recurring source of the periodic 429/500 `KALSHI api_error` Telegram alerts (2026-07-22 through 2026-07-25).
+**Options:** A) Build a shared cross-function rate limiter/token bucket — bigger lift, deferred. B) Stagger the colliding cron minute — chosen, cheap and directly addresses the confirmed collision.
+**Why:** Simplest fix for a concretely identified cause; doesn't address contention from other functions (auto-trade's S-001 direct Kalshi calls, execute-trade's orderbook checks) which may still contribute — worth revisiting if 429s persist.
+**Reversibility:** Easy — `cron.alter_job` back to the old schedule.
+**Trace:** `cron.job` jobid=16.
+
 ## 2026-07-20 — Flagged market-data-fetcher credential-fetch timeout gap (not auto-fixed)
 
 **Decision:** Logged as a finding for review rather than deploying a fix during an unattended scheduled health-check run.

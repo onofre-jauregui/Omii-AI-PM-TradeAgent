@@ -2,6 +2,69 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-25 (later run, 2nd) — Consolidate `auto-trade`'s daily-cap counter onto `_shared/limits.ts`'s `countTradesInWindow`, once `tenant.ts`'s two latent type errors are cleaned up
+
+**Status:** Recommended, not applied. Full root-cause writeup in `docs/health-log.md`'s matching
+entry — the fix (excluding `status='failed'` from both of today's two independent daily-cap
+counters) is deployed; this is the follow-on structural improvement, deliberately not shipped
+this pass.
+
+**The finding:** `_shared/limits.ts` already carries a header comment stating its
+`countTradesInWindow()` was written to be the *single* source of truth for "how many trades has
+this user placed today," replacing duplicated inline counters in `execute-trade`, `execute-basket`,
+`auto-trade`, and `trading-agent`. In practice `auto-trade` was never migrated onto it — it kept
+its own inline count query. That duplication is exactly why today's failed-order-counting bug had
+to be found and fixed twice, in two files, instead of once.
+
+**Why not applied this pass:** importing `countTradesInWindow` into `auto-trade` pulls in
+`_shared/tenant.ts` transitively (via `limits.ts` → `getRiskSettings`), which carries two
+pre-existing type errors — `supabase.from("risk_state").update(payload)` and
+`.insert({...payload, user_id})` both resolve to a `never`-typed table because of how this
+codebase's Supabase client generic is instantiated. Those errors already exist in the codebase
+(same 2 errors execute-trade's `deno check` already carries) but are not currently reachable from
+`auto-trade`'s type-check graph — importing `limits.ts` would make them newly visible there,
+which fails this repo's own "zero new `deno check` errors vs. baseline" verification bar.
+
+**Recommended fix, in order:** (1) fix `tenant.ts`'s two `never`-type errors — almost certainly a
+missing or wrong type parameter on the `createClient<Database>()` call, or a stale/missing
+generated `Database` type for the `risk_state` table; (2) once clean, migrate `auto-trade`'s
+inline daily-cap query onto `countTradesInWindow`, deleting the duplicate; (3) confirm `deno
+check` on both files stays at their (lower, post-tenant-fix) baseline afterward.
+
+**Why it matters ($ / revenue):** every duplicate implementation of "what counts as a trade for
+risk purposes" is a second place the same bug can hide, and today is the second time this
+specific project has paid for that (see the auth/time_in_force dual-bug entry earlier today, and
+the 07-23 max_open_positions per-strategy-scoping finding — same root pattern: shared risk logic
+re-implemented per call site instead of centralized). Centralizing removes an entire class of
+future recurrence, not just today's instance.
+
+## 2026-07-25 (scheduled health check) — proactive low-balance alert in `health-check`, prompted by fixing the `insufficient_balance` order-rejection bug
+
+**Status:** Deployed. Full root-cause writeup in `docs/health-log.md`'s matching 07-25 entry —
+the underlying bug (`execute-trade` had no balance pre-flight before submitting live orders) is
+the fix, not the improvement; this entry is the improvement made alongside it.
+
+**Improvement:** added a 10th check to `health-check/index.ts` that fetches each live user's real
+Kalshi balance (`GET /portfolio/balance`) and alerts once per 12h if it drops under $15 — before
+orders start failing, not after. Previously the system had zero visibility into account funding
+level; the only signal was noisy per-order `insufficient_balance` rejections once trading was
+already blocked. Fails open on a fetch/auth error so a monitoring hiccup can't page anyone or block
+the sweep.
+
+## 2026-07-24 (scheduled health check, ~14:35 UTC) — `kalshi-proxy`'s own network-blip regex doesn't match one of its two real recurring error strings, so it self-inflicts the false pages the 07-22 entry describes
+
+**Status:** Root cause identified, one-line fix proposed, not deployed (production deploy is a Hard Stop; awaiting go). Found via scheduled health check.
+
+**Telegram/health snapshot (live `compliance_log`, trailing 48h):** 1 `critical` — `market_data_fetcher_aborted` at 07-23 15:11:53 UTC (already logged and analyzed in the 07-23 (1st) entry; self-healed next cycle, no new information). 64 `error`-severity `api_error` rows, of which 62 are the already-resolved 07-23 06:59–07:46 UTC Kalshi 503 window (same self-healing class as prior entries) and **2 are new**: `kalshi-proxy exception: error reading a body from connection` at 00:15:27 and 00:32:57 UTC today, each of which fired its own Telegram page (`diagnostic_needed` / `system_errors`, 01:10 UTC: "🔴 [TradeAgent] 2 error(s): api_error — kalshi-proxy exception: error reading a body from connection"). Separately, `risk_check_failed` fired 103 times in the window (last: 00:05 UTC today, `open=6` vs `limit=4` on S-002/S-005, `open=6` vs `limit=3` on S-001-l) — this is the same `max_open_positions` bug already logged and fix-proposed in the 07-23 (2nd) entry, now confirmed still live and the trading freeze it causes has grown to **76+ hours** (last fill 2026-07-20 20:05 UTC) as of today's 00:10 UTC `trading_silence` page. Not re-logged as a new finding here — flagging the escalation since the proposed fix is still awaiting Onofre's go.
+
+**The finding:** `kalshi-proxy/index.ts:79` classifies TCP-level infrastructure blips as harmless (`isNetworkBlip = /connection reset|connection refused|timed out|network error/i`, routed to `event_type: "kalshi_network_blip"`, `severity: "info"`, explicitly "not Kalshi API errors" per the comment on line 77-78) specifically so the health-check sweep doesn't page on them. But the regex doesn't match `"error reading a body from connection"` — the exact string Deno's fetch throws when an outbound connection to Kalshi is killed mid-response, which is the same class of transient TCP failure the guard exists to suppress. That string has recurred **6 times since 2026-07-03** (`compliance_log` query: `count=6`, span 07-03 to 07-24), every single one logged as `event_type: "api_error"` / `severity: "error"` instead — the exact severity the health-check sweep pages on. Result: `kalshi-proxy`'s own miscategorization is what feeds the over-eager pager described in the 07-22 entry; fixing the regex removes this error class from the false-positive stream at the source, independent of whether the 07-22 entry's separate `health-check/index.ts` sustained-condition-gate fix ever ships.
+
+**Fix (proposed, one line):** at `kalshi-proxy/index.ts:79`, extend the regex to `/connection reset|connection refused|timed out|network error|reading a body|body from connection/i` (or match on `error.name === "TypeError"` combined with a body-read message, since Deno surfaces this as a generic fetch body-stream failure, not a distinct error class).
+
+**Why it matters ($ / revenue):** 6 false-positive critical Telegram pages in 3 weeks for a condition the code was already explicitly designed to suppress — each one an interrupt with zero actionable content (nothing to fix, nothing failed downstream, the proxy call simply gets retried by the caller). This is pure alert-fatigue cost against the same observability system the 07-23 (3rd) entry confirmed is meant to be the source of truth; a pager that cries wolf on its own already-handled case erodes trust in every other page it sends, including the real ones (the 07-23 15:11 critical this same run).
+
+**Verification plan before shipping:** after the regex fix, replay or wait for a natural recurrence of a "reading a body from connection" error and confirm it lands as `kalshi_network_blip`/`info`, not `api_error`/`error`; confirm the health-check sweep no longer pages on it; confirm genuine `connection reset`/`timed out` cases (already matched) are unaffected.
+
 ## 2026-07-22 (scheduled health check, ~10:10 UTC) — Re-verify + escalate: the 07-10 (2nd) double-page fix is still unshipped and reproduced again this morning; single self-healing Kalshi blips are still paging individually with no sustained-condition gate
 
 **Status:** Still open, not yet fixed/deployed (production deploy is a Hard Stop; awaiting go). No code, no commit. Found via scheduled health check — `compliance_log` is the source of truth for the Telegram error stream (bot runs on webhook, so `getUpdates` returns empty by design, consistent with every prior health check's note).

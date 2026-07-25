@@ -65,6 +65,7 @@ export async function countTradesInWindow(
     .from("trades")
     .select("id", { count: "exact", head: true })
     .eq("mode", mode)
+    .neq("status", "failed")
     .gte("created_at", since);
   q = userId ? q.eq("user_id", userId) : q.is("user_id", null);
   const { count } = await q;

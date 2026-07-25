@@ -700,6 +700,9 @@ serve(async (req) => {
           }
 
           // Global daily trade cap (set via Risk tab — allocates across all strategies)
+          // Excludes failed orders: the cap bounds real trading activity/exposure,
+          // not attempts rejected before ever reaching the exchange (e.g. a stale
+          // ticker or a transient API error) — those carry zero market exposure.
           const maxDailyTrades = userRisk.max_daily_trades ?? 30;
           const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
           const { count: dailyTradeCount } = await supabase
@@ -707,6 +710,7 @@ serve(async (req) => {
             .select("id", { count: "exact", head: true })
             .eq("user_id", strategy.user_id)
             .eq("mode", strategy.mode)
+            .neq("status", "failed")
             .gte("created_at", dayAgo);
 
           if ((dailyTradeCount ?? 0) >= maxDailyTrades) {
