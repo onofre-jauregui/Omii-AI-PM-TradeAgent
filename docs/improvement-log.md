@@ -2,6 +2,18 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-25 (3rd run) — early-exit on a known-underfunded S-001 basket, alongside the concurrent-leg race fix
+
+**Status:** Deployed. Full root-cause writeup in `docs/health-log.md`'s matching entry — the
+underlying bug (S-001 legs submitted via `Promise.all`, racing `execute-trade`'s balance
+pre-flight) is the fix; this is the improvement made alongside it.
+
+**Improvement:** the S-001 leg loop now breaks as soon as one leg's pre-flight reports
+`code: "insufficient_balance"`, instead of still attempting the remaining legs of the same
+basket. Balance doesn't recover between legs in the same run, so every attempt past the first
+failure was a guaranteed-doomed round trip that also ate into the 3/min live `execute-trade`
+rate limit. Zero-risk: only skips calls that were already going to fail.
+
 ## 2026-07-25 (later run, 2nd) — Consolidate `auto-trade`'s daily-cap counter onto `_shared/limits.ts`'s `countTradesInWindow`, once `tenant.ts`'s two latent type errors are cleaned up
 
 **Status:** Recommended, not applied. Full root-cause writeup in `docs/health-log.md`'s matching
