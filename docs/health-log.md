@@ -2,6 +2,47 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (later run) — reconcile-orders-cron was never actually registered; live orders could rest unreconciled forever
+
+**Telegram error state:** The two bugs from the same-day entry below (RSA-PSS signing,
+`time_in_force` constraint) are now confirmed fully resolved with live data, not just
+"deployed" — `select mode, status, count(*) from trades where exchange='kalshi' group by
+mode, status` shows 32 live orders now reaching `status='open'` cleanly, zero `error`/`critical`
+compliance_log rows since 15:20:08 UTC (vs. constant failures before). `time_in_force` values are
+correctly `gtc` throughout. This closes the "not yet confirmed against a live order" gap noted in
+the entry below.
+
+**New root cause found and fixed (CRITICAL):** All 30+ resting live limit orders showed `0/N
+filled` no matter how old (oldest 43 min at check time) — before concluding this was a bug I
+invoked `reconcile-orders` directly and it worked fine (`{"checked":30,"unchanged":30,"errors":0}`),
+so the *function* wasn't broken. But `select jobname from cron.job` showed **no
+`reconcile-orders-cron` job at all** — the function's own doc comment says it's "Invoked by the
+reconcile-orders-cron pg_cron job," and a migration (`20260719_realmoney_reconciliation.sql`,
+6 days old) exists to create exactly that job plus widen `agent_trades_pending_resolution` to
+include live trades. It was never applied: the migration file itself has a syntax bug (`) ON
+CONFLICT (jobname) DO UPDATE...` appended to a bare `SELECT cron.schedule(...)`, which Postgres
+rejects — `SELECT` doesn't support `ON CONFLICT`. Applying it verbatim reproduced the exact
+syntax error, confirming why it silently never landed. Fixed by dropping the invalid clause
+(pg_cron 1.6.4's `cron.schedule()` already upserts by jobname) and applying both parts. **Verified
+in prod:** job registered (`cron.job` row, active), fired automatically at its first scheduled
+tick (`cron.job_run_details` runid 260178, `succeeded`), and `agent_trades_pending_resolution`
+now reads `mode = ANY(paper, live)`. Net effect before the fix: every live order that didn't fill
+instantly on submission was invisible to auto-settle and would eventually be wrongly zeroed by the
+expiration sweep — silent live-trade P&L corruption, not just a cosmetic status field.
+
+**Improvement (deployed):** this bug was invisible to the existing cron watchdog
+(`cron_health()`, added 2026-07-06) by construction — it iterates `FROM cron.job`, so a job that
+was never registered in the first place can't appear as stale or failed; it only catches jobs
+that stop running, not jobs that never started. Added `public.expected_cron_jobs` (manifest table
+seeded with all 11 permanent jobs) and rewrote `cron_health()` to `UNION ALL` in a synthetic
+`is_stale=true, last_status='missing'` row for any manifest entry absent from `cron.job`. Gave it
+its own alert branch in `health-check/index.ts` (`cron_missing`, distinct message from
+`cron_stale`) so a future "wrote the migration, forgot to apply it" mistake pages loudly within
+the hour instead of hiding for 6 days. **Verified:** `select * from cron_health()` returns all 11
+manifest jobs healthy with no false-positive missing rows; redeployed `health-check` and invoked
+it once post-deploy — ran clean, no `cron_missing`/`cron_stale`/`cron_failed` alerts.
+Reversible: drop the `UNION ALL` branch and the manifest table to revert.
+
 ## 2026-07-25 — Live trading was 100% broken since going live: HMAC signing instead of Kalshi's required RSA-PSS, plus a second constraint bug it had been hiding
 
 **Telegram error state:** `failed_trade_queue` showed every live order failing. First cluster

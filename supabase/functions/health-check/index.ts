@@ -369,7 +369,16 @@ serve(async (req) => {
       });
     }
     for (const c of cronRows ?? []) {
-      if (c.is_stale) {
+      if (c.last_status === "missing") {
+        // In the manifest (expected_cron_jobs) but absent from cron.job entirely —
+        // never scheduled, not just stalled. Re-alerts every 6h until registered.
+        pendingAlerts.push({
+          type: "cron_missing",
+          fingerprint: `cron_missing_${c.jobname}`,
+          cooldownHours: 6,
+          message: `🚨 [TradeAgent] ${c.jobname} is not registered in cron.job — expected but never scheduled`,
+        });
+      } else if (c.is_stale) {
         const mins = Math.round((c.seconds_since_last_run ?? 0) / 60);
         const expMin = Math.round((c.expected_interval_s ?? 0) / 60);
         // Fingerprint on jobname → one alert per stalled job; re-alerts each 6h it stays stale.
