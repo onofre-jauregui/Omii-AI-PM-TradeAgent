@@ -1270,7 +1270,15 @@ async function runS001SurfaceArb(
     //    The arb is structural: bracket must sum to 100c, market says it sums to >100c.
     //    time_in_force="day" ensures unfilled live limit orders auto-cancel at market close
     //    instead of sitting open indefinitely. Paper mode fills immediately.
-    const legResults = await Promise.all(tradeable.map(async (leg: any) => {
+    //    Legs are submitted sequentially, not via Promise.all: execute-trade's balance
+    //    pre-flight reads real Kalshi balance per call, and firing all legs concurrently
+    //    made every leg check against the same stale (pre-deduction) balance — each one
+    //    individually "passed" the check while the basket as a whole couldn't afford it,
+    //    so Kalshi rejected the later legs with a real insufficient_balance 400 regardless.
+    //    Concurrent submission also burns the whole per-minute live execute-trade rate
+    //    limit (3) on one basket, leaving zero headroom for any other order that minute.
+    const legResults = [];
+    for (const leg of tradeable) {
       const feeHurdle = feeHurdleCentsAt(leg.noPrice);
       const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
@@ -1293,8 +1301,14 @@ async function runS001SurfaceArb(
           traceId: runId,
           systemVersion: "v2",
       });
-      return { ticker: leg.ticker, success: result.success, price: leg.noPrice };
-    }));
+      legResults.push({ ticker: leg.ticker, success: result.success, price: leg.noPrice });
+
+      // Improvement: once one leg's pre-flight reports the account can't cover it,
+      // every remaining leg this cycle will hit the same wall — balance doesn't
+      // replenish mid-run. Stop burning further round trips and rate-limit budget
+      // on a basket we already know is underfunded.
+      if (result.code === "insufficient_balance") break;
+    }
 
     const legsFilled = legResults.filter(r => r.success);
     if (legsFilled.length > 0) {

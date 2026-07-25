@@ -2,6 +2,44 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (3rd run) — S-001 basket legs submitted concurrently raced the balance pre-flight, reproducing the exact `insufficient_balance` failures the earlier pre-flight fix was meant to stop
+
+**Telegram error state:** No new error *class* since the prior run's `daily_trade_cap` fix
+(commit `9062d32`, ~19:12 UTC). But the same S-001 basket (`KXINX-26JUL27H1600-B7412/37/62`)
+kept failing with `order_failed`/`insufficient_balance` every ~5 min from 18:15–19:10 UTC —
+*after* the 13:14 UTC balance pre-flight (commit `9d47913`) was already deployed, which should
+have caught this. 13 `order_failed` rows + 13 `liquidity_fallback` warnings in that window, plus
+3 `rate_limit_exceeded` warnings on `execute-trade` (live limit: 3/min) at 19:05:03 — all three
+fired within the same second.
+
+**Root cause:** `auto-trade/index.ts`'s S-001 handler submitted every leg of a basket via
+`Promise.all(tradeable.map(...))` — concurrently. `execute-trade`'s balance pre-flight (from the
+prior fix) does a fresh `GET /portfolio/balance` per call and compares it to that one order's
+required collateral, but three concurrent calls all read the *same* stale, not-yet-decremented
+balance before any of them locks funds. Each leg's pre-flight independently "passed," Kalshi's
+real order matching only allows the account to actually cover 1–2 of the 3 legs, and the rest come
+back as a real `insufficient_balance` 400 — the exact failure the pre-flight was built to prevent,
+just moved from "before submission" back to "after submission" for anything past the first leg.
+The same concurrency also explains the `rate_limit_exceeded` triple: 3 simultaneous live
+`execute-trade` calls exactly saturate the 3/min live limit, leaving zero headroom for any other
+order (a stop-loss close, another strategy) in that window.
+
+**Fix (deployed):** changed the S-001 leg loop from `Promise.all(...)` to a sequential
+`for...of` with `await` per leg (`auto-trade/index.ts` ~line 1273). Each leg's pre-flight now
+sees Kalshi's real, post-previous-leg balance instead of a stale snapshot, and legs are spread
+across the rate-limit window instead of colliding on it. `deno check`: 17/17 errors, same as
+baseline, none in the changed range. Deployed via `supabase functions deploy auto-trade`.
+**Verification:** watched `compliance_log` through the next live cron cycles post-deploy for a
+fresh multi-leg S-001 alert; see follow-up note below for the result.
+
+**Improvement (deployed same pass):** added an early-exit inside the same loop — once a leg's
+pre-flight returns `code: "insufficient_balance"`, the loop breaks instead of attempting the
+remaining legs, since account balance won't replenish mid-cycle. Saves the wasted round trips and
+the rate-limit budget those doomed calls would otherwise consume.
+
+**Reversibility:** both changes are scoped to one loop in `auto-trade/index.ts`, single-function
+revert.
+
 ## 2026-07-25 (later run, 2nd) — daily-trade-cap counted failed orders in *two* independent places, actively rejecting live trades right now
 
 **Telegram error state:** All errors in the last 6h trace back to the three clusters already
