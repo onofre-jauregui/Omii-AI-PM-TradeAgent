@@ -82,7 +82,7 @@ serve(async (_req) => {
     try {
       const path = `/trade-api/v2/markets?limit=100&status=open&series_ticker=${series}`;
       const url = `${KALSHI_BASE_URL}/markets?limit=100&status=open&series_ticker=${series}`;
-      const timestamp = Math.floor(Date.now() / 1000);
+      const timestamp = Date.now();
 
       let fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
       if (keyId && privateKey) {

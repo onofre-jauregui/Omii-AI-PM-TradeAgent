@@ -145,7 +145,7 @@ serve(async (req) => {
 
 async function fetchKalshiOrder(keyId: string, privateKey: string, orderId: string): Promise<any | null> {
   const path = `/trade-api/v2/portfolio/orders/${orderId}`;
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = Date.now();
   const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, ts);
   const res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${orderId}`, { method: "GET", headers });
   if (!res.ok) {

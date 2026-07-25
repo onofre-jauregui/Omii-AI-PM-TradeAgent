@@ -37,7 +37,7 @@ serve(async (req) => {
         );
       }
 
-      const timestamp = Math.floor(Date.now() / 1000);
+      const timestamp = Date.now();
       headers = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, req.method, apiPath, timestamp);
     }
 
