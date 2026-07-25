@@ -2,6 +2,37 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (5th run) — Telegram clean for 2h post-`314e10c`; unblocked the deferred `tenant.ts` type-error fix instead of re-diagnosing resolved incidents
+
+**Telegram error state:** Queried `compliance_log` directly (REST API, service key — same
+approach as the 4th run). Zero `error`/`critical` rows and zero `health_check_alert` rows from
+20:12 UTC (the `314e10c` sequential-leg-submission deploy) through 22:10 UTC — a full 2h clean
+window, `auto_trade_run` logging normally every 5 min (`0 errors, 0 halted` every cycle). All
+three error classes active earlier today (RSA-PSS/`time_in_force` @ 15:10–15:20, `insufficient_balance`
+@ 16:15–19:00) remain resolved; no new error class appeared. No fix needed this pass — re-verifying
+and re-fixing already-closed incidents from the same day would just be busywork.
+
+**Improvement (deployed — commit only, no function redeploy needed):** the 2nd run's log entry
+flagged `_shared/tenant.ts`'s two `never`-typed Supabase calls (`setRiskHalt`'s `.update()`/`.insert()`)
+as the reason a recommended fix — consolidating `auto-trade`'s duplicate daily-trade-cap counter onto
+`_shared/limits.ts`'s `countTradesInWindow()` — had to be reverted; importing `limits.ts` pulls in
+`tenant.ts`, and its 2 type errors then surface as *new* regressions against files that didn't
+previously reach that import graph. Root cause: `tenant.ts:161-169` chained `.update()`/`.insert()`
+directly off `supabase.from("risk_state")` without a cast, and `SupabaseClient`'s untyped generic
+resolves that table's row type to `never` in strict mode — the same pattern the file *already* works
+around at line 184 (`(query as any).eq(...)`) but the two calls in `setRiskHalt` didn't follow it.
+Applied the identical cast-the-query-builder idiom to both calls (`(supabase.from("risk_state") as any)`)
+— zero runtime behavior change, compile-time only. **Verified:** `deno check` on `tenant.ts` itself:
+2 errors → 0. All 4 functions that import it: `execute-trade` 22→20, `execute-basket` 4→2,
+`kalshi-proxy` 13→11, `switch-trading-mode` 3→1 — every count went down, none went up, confirming no
+new errors were introduced anywhere in the import graph. Not deployed as an edge function (no
+runtime change to ship); committed so CI reflects the lower baseline. This unblocks — but does not
+itself perform — the daily-trade-cap consolidation the 2nd run recommended twice; that's a live
+trading-logic change and stays a separate, reviewed step rather than something to bundle into an
+unattended type-fix pass.
+
+**Reversibility:** single-file, two-line cast change, no schema/runtime impact. Trivial to revert.
+
 ## 2026-07-25 (4th run) — No new Telegram error class; deployed the already-diagnosed cache-eviction fix from 2026-07-23
 
 **Telegram error state:** Clean since the 3rd run's `314e10c`/`baec481` deploy (~20:13 UTC).
