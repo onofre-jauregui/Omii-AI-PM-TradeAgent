@@ -4,6 +4,39 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-25 — Fixed jsdom-broken signing tests that were silently blocking the balance pre-flight fix from shipping
+
+**Decision:** Added `// @vitest-environment node` to `kalshi-signing.test.ts` and guarded
+`src/test/setup.ts`'s `window.matchMedia` stub behind `typeof window !== "undefined"`.
+**Finding:** Scheduled health check found live trades repeatedly rejected with `insufficient_balance`
+every ~5 min from 18:45–19:00 UTC today, on tickers KXINX-26JUL27H1600-B7412/37/62. The fix for
+this (commit `9d47913`, a Kalshi balance pre-flight check) was already written and sitting on
+`fix/live-pilot-instrumentation` (PR #40), but PR #40's CI had been red since 18:19 UTC on
+`kalshi-signing.test.ts` — 4/4 tests failing with `importKey: 2nd argument is not instance of
+ArrayBuffer...`. Root cause: `vitest.config.ts` sets a global `environment: "jsdom"`; jsdom's Crypto
+shim doesn't implement a working `subtle`, so a suite exercising real RSA-PSS signing (no DOM
+dependency at all) failed for reasons unrelated to the signing code itself — which was correct.
+This masked *two* real fixes behind an unrelated red CI signal (the RSA-PSS signing fix `a73c79a`
+and the balance pre-flight fix `9d47913`), which is why live trading kept hitting both bugs it had
+already been fixed for, cycle after cycle.
+**Separately:** `.github/workflows/ci.yml`'s `canary-gate` job parses the Supabase Management API's
+`/database/query` response as `{data: [...]}` (`jq '.data[0].n'`), but that endpoint returns a bare
+array — every other job in the same file parses it correctly as a plain list. This has crashed the
+canary gate on the first 60s poll of every push to `main` since at least 2026-07-20, showing as a
+misleading CI "failure" even when the actual edge-function deploy (an earlier, independent job)
+succeeded. Fixed to `jq '.[0].n'`. Not yet verified against a real canary run — flag if a future
+`main` push still shows a red canary-gate.
+**Options:** A) Loosen the global jsdom environment — rejected, breaks isolation for the DOM suites
+it exists for. B) Per-file `node` environment override — chosen; zero-risk, scoped to the one suite
+that needs real WebCrypto.
+**Why:** The proximate error (compliance_log `insufficient_balance`/`order_failed`) had already been
+fixed in code; the actual blocker was a test-environment mismatch with no relation to trading logic.
+Fixing test infra was lower-risk and unblocks two already-reviewed real fixes rather than writing a
+third parallel fix.
+**Reversibility:** Easy — both changes are test-only/CI-only, no runtime behavior touched.
+**Trace:** commit `2270490` on `fix/live-pilot-instrumentation` (PR #40). `compliance_log`
+event_type=`order_failed`/`rate_limit_exceeded`, 2026-07-25 18:45–19:05 UTC.
+
 ## 2026-07-25 — Replaced HMAC-SHA256 request signing with Kalshi's required RSA-PSS-SHA256
 
 **Decision:** Rewrote `_shared/kalshi-auth.ts` (now `_shared/kalshi-signing.ts`) to sign every
