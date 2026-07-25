@@ -2,6 +2,31 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (4th run) — No new Telegram error class; deployed the already-diagnosed cache-eviction fix from 2026-07-23
+
+**Telegram error state:** Clean since the 3rd run's `314e10c`/`baec481` deploy (~20:13 UTC).
+Queried `compliance_log` directly (`supabase db query --linked` failed auth — `LegacyDbConfigLoginRoleStatusError`
+401; fell back to the REST API with the service key). Zero `error`/`critical` rows in the
+~53-min post-deploy window; system active and healthy (`auto_trade_run`, `market_data_fetch`,
+`auto_reflect_run`, `trade_settled` all logging normally at their usual cadence). The three
+error classes seen in the preceding 6h — `order_failed`/`insufficient_balance` (16:15–19:00 UTC),
+`order_failed`/`INCORRECT_API_KEY_SIGNATURE` (15:10–15:15 UTC), and `trades_time_in_force_check`
+violation (15:20 UTC) — are all already resolved: the signature and time-in-force errors both
+predate `a73c79a` (deployed 15:25 UTC, fixed both in one commit), and the insufficient-balance
+errors predate the 3rd run's `314e10c` (20:13 UTC). No unresolved errors found this run.
+
+**Improvement made (deployed):** shipped the one-line cache-eviction fix that was root-caused
+but left undeployed in the 2026-07-23 entry below — `market-data-fetcher/index.ts`'s eviction
+guard checked `failedSeries.length === 0` but not `skippedSeries.length === 0`, so a
+budget-abort cycle (zero failures, series simply never attempted) would still pass the guard
+and delete live `kalshi_markets_cache` rows for series that were skipped, not closed. Two
+consecutive aborts would have emptied cache for real open markets — surface-scanner and
+signal-generator would see zero markets for those series instead of one-cycle-stale data.
+Changed the guard to `failedSeries.length === 0 && skippedSeries.length === 0`. Deployed
+(commit `57d0969`) and verified in prod: post-deploy invoke → `18/18 series OK, 0 failed,
+0 skipped, 4283ms` — no regression on the non-abort path (the change only alters behavior
+on an already-rare abort branch). Reversible: single-line revert of the guard condition.
+
 ## 2026-07-25 (3rd run) — S-001 basket legs submitted concurrently raced the balance pre-flight, reproducing the exact `insufficient_balance` failures the earlier pre-flight fix was meant to stop
 
 **Telegram error state:** No new error *class* since the prior run's `daily_trade_cap` fix
