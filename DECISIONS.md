@@ -4,6 +4,26 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-25 — Serialized S-001 basket leg submission instead of Promise.all
+
+**Decision:** Changed `auto-trade/index.ts`'s S-001 leg loop from concurrent `Promise.all` to a
+sequential `for...of`, with an early-exit once a leg reports `insufficient_balance`.
+**Finding:** Scheduled health check found the S-001 basket (`KXINX-26JUL27H1600`) still failing
+`insufficient_balance` from 18:15–19:10 UTC — hours after the same-day balance pre-flight fix
+(`9d47913`) had deployed. Root cause: submitting all legs concurrently meant each leg's
+`GET /portfolio/balance` pre-flight read the same stale snapshot, so every leg passed the check
+individually while the basket collectively couldn't be covered; Kalshi's real matching then
+rejected the legs the account couldn't actually afford. The same concurrency also saturated the
+3/min live `execute-trade` rate limit on one basket.
+**Options:** A) Track cumulative reserved collateral across legs in `auto-trade` and pass it into
+each pre-flight call — rejected, adds cross-call state and a second source of truth for balance.
+B) Serialize leg submission — chosen; each pre-flight then reads Kalshi's real post-previous-leg
+balance for free, no new state needed.
+**Why:** Simplest fix that removes the race at its source instead of working around it downstream.
+**Reversibility:** Easy — one loop, single-function revert (`Promise.all` back in place).
+**Trace:** commit `314e10c` on `fix/live-pilot-instrumentation`. `compliance_log`
+event_type=`order_failed`/`rate_limit_exceeded`, 2026-07-25 18:15–19:10 UTC.
+
 ## 2026-07-25 — Fixed jsdom-broken signing tests that were silently blocking the balance pre-flight fix from shipping
 
 **Decision:** Added `// @vitest-environment node` to `kalshi-signing.test.ts` and guarded
