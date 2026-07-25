@@ -593,6 +593,63 @@ serve(async (req) => {
         : (action === "buy" ? "ask" : "bid");
     const v2PriceDollars = side === "yes" ? priceDollars : 1 - priceDollars;
 
+    // Pre-flight balance check. Kalshi's own insufficient_balance rejection only
+    // arrives after we submit the order — every doomed leg still costs a full
+    // round trip, and nothing distinguished "account is out of money" from any
+    // other 400 until this check, so a strategy would keep retrying the same
+    // unaffordable basket every scan cycle indefinitely. Buying costs price*count;
+    // selling (opening a short) requires (1-price)*count in collateral — the
+    // exchange's standard per-contract margin, same formula used by kalshi-ping.
+    const requiredCollateralDollars = v2Side === "bid"
+      ? contractCount * v2PriceDollars
+      : contractCount * (1 - v2PriceDollars);
+
+    const balancePath = "/trade-api/v2/portfolio/balance";
+    const balanceHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", balancePath, Date.now());
+    const balanceResp = await fetch(`${getKalshiBaseUrl()}/portfolio/balance`, { headers: balanceHeaders });
+
+    if (balanceResp.ok) {
+      const balanceData = await balanceResp.json();
+      const availableDollars = (balanceData?.balance ?? 0) / 100;
+
+      if (availableDollars < requiredCollateralDollars) {
+        const { data: failedTrade } = await supabase.from("trades").insert({
+          user_id: userId,
+          ticker: resolvedTicker,
+          market_id: resolvedTicker,
+          market_question: marketQuestion || resolvedTicker,
+          side, action, price, amount,
+          strategy: strategy || null,
+          strategy_id: strategyId || null,
+          mode: "live",
+          status: "failed",
+          exchange: "kalshi",
+          expiration_time: expirationTime || null,
+          notes: `Skipped pre-flight: needs $${requiredCollateralDollars.toFixed(2)}, account has $${availableDollars.toFixed(2)}`,
+        }).select().single();
+
+        await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_insufficient_balance", "warning",
+          `Skipped ${resolvedTicker} ${v2Side} ${contractCount}x @ ${price}c — needs $${requiredCollateralDollars.toFixed(2)}, account has $${availableDollars.toFixed(2)}`,
+          { required_usd: requiredCollateralDollars, available_usd: availableDollars, ticker: resolvedTicker, trace_id: traceId }
+        );
+
+        // Account-level shortfall, not market-level — one alert per user regardless of ticker,
+        // so a multi-leg basket hitting this on every leg doesn't fire N alerts.
+        await alertOnce(supabase, "kalshi_insufficient_balance", userId || "unknown", 4,
+          `💸 <b>[TradeAgent] Live account balance too low to trade</b>\nSkipped ${resolvedTicker} — needs $${requiredCollateralDollars.toFixed(2)}, have $${availableDollars.toFixed(2)}.\nDeposit funds or the agent keeps skipping live trades every cycle.`
+        );
+
+        return new Response(JSON.stringify({
+          success: false,
+          code: "insufficient_balance",
+          error: `Insufficient Kalshi balance: need $${requiredCollateralDollars.toFixed(2)}, have $${availableDollars.toFixed(2)}.`,
+          trade: failedTrade,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+    // If the balance fetch itself fails (network/auth hiccup), fall through and let
+    // the real order call be the source of truth — never block a trade on a monitoring path.
+
     // V2 has no order "type" field — every order is a limit order at `price`.
     // A requested "market" order is approximated with immediate_or_cancel so it
     // either fills immediately at the given price or is cancelled, rather than resting.

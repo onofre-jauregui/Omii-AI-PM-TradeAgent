@@ -2,6 +2,46 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (scheduled health check) — live basket rejected 7x on `insufficient_balance`; no pre-flight balance check existed
+
+**Telegram error state:** 7 `order_failed` / `error` rows, all `insufficient_balance` (Kalshi
+400), clustered 16:10–16:20 UTC — 3 legs of one S-001 arb basket (`KXINX-26JUL27H1600-B7412/
+B7437/B7462`, buy-NO ~80-83c, 12 contracts/leg) each retried 2-3x across two surface-scanner
+cycles before the alert-dedup (`kalshi_order_rejected`, 1h cooldown) went quiet. No occurrences
+in the preceding 7 days — this was a fresh, one-off underfunding, not a chronic condition. One
+unrelated `authentication_error` (401, `INCORRECT_API_KEY_SIGNATURE`) at 15:15 UTC — single
+occurrence, not investigated this pass (no recurrence, likely a transient signing-timestamp skew).
+
+**Root cause:** `execute-trade/index.ts`'s live path (`_shared/kalshi-auth.ts:640-648`) had zero
+balance awareness — it submits every order straight to Kalshi and only learns the account can't
+cover it from the 400 response. Each leg cost a full wasted round trip, and the resulting
+`order_failed` row was indistinguishable from any other rejection reason (rate limit, bad ticker,
+auth) until read closely. Verified: `required collateral ≈ (1 - price) × count` per leg ≈ $9.80-9.96
+each ≈ $29 for the 3-leg basket, which the account's live balance didn't cover.
+
+**Fix (deployed):** added a pre-flight balance check to `execute-trade/index.ts` — before
+submitting a live order, fetch real account balance via `GET /portfolio/balance` (same call
+`kalshi-ping` already uses to validate keys) and compare against the order's actual required
+collateral (`price × count` for a buy, `(1-price) × count` for a sell/short — the exchange's
+standard per-contract margin). If balance is short, skip the Kalshi call entirely, log a distinct
+`order_skipped_insufficient_balance` compliance row (not a generic `order_failed`), and fire one
+account-level Telegram alert (not one per ticker) naming the exact shortfall. Fails open on a
+balance-fetch error — never blocks a trade on a monitoring-path failure. **Verified:** `deno check`
+shows zero new type errors vs. baseline (22 pre-existing esm.sh version-mismatch errors, same count
+before/after, none in the new code); deployed via `supabase functions deploy execute-trade`. Not yet
+observed against a live retry (no basket has re-attempted this specific ticker set since deploy) —
+the next live rejection, if any, is the real-world proof; watch for `order_skipped_insufficient_balance`
+replacing `order_failed`+400 in `compliance_log`.
+
+**Improvement shipped (this pass):** `health-check/index.ts` had no visibility into real Kalshi
+account balance at all — the only way to learn about a funding shortfall was to wait for orders to
+start failing. Added a 10th check: fetch live balance for every `kalshi_live` API key and alert
+(12h cooldown, dedup'd) if it's under $15 — enough to cover a typical single-leg basket cost. This
+turns the exact failure mode above into a proactive warning instead of reactive error-log noise.
+Deployed and invoked once post-deploy (`{"ok":true,...}`, no crash); current live balance is above
+the $15 floor so no alert fired this run — correct behavior, not yet exercised against a real low-
+balance state.
+
 ## 2026-07-25 (later run) — reconcile-orders-cron was never actually registered; live orders could rest unreconciled forever
 
 **Telegram error state:** The two bugs from the same-day entry below (RSA-PSS signing,
