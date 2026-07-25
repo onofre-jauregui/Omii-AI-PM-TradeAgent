@@ -1,3 +1,11 @@
+// @vitest-environment node
+//
+// This suite needs Node's real crypto.subtle (RSA-PSS key import/sign/verify).
+// The project's default vitest environment is jsdom (vitest.config.ts) for
+// component tests; jsdom's Crypto shim lacks a working `subtle`, so
+// importKey() rejected valid PKCS8 ArrayBuffers with a bogus type error.
+// This file has no DOM dependency, so overriding to "node" here is safe and
+// doesn't touch the global config other suites rely on.
 import { describe, it, expect } from "vitest";
 import { generateAuthHeaders, rsaPssSha256Base64 } from "../_shared/kalshi-signing";
 
