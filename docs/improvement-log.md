@@ -2,6 +2,24 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-25 (6th run) — completed the daily-trade-cap consolidation queued since the 2nd run
+
+**Status:** Deployed. Full writeup in `docs/health-log.md`'s matching entry. This closes out the
+3-step plan the 2nd run laid out (fix `tenant.ts` type errors → migrate `auto-trade` onto
+`countTradesInWindow` → confirm no new `deno check` errors) — step 1 landed in the 5th run
+(`06ce7a9`), this run did steps 2 and 3.
+
+**The improvement:** `auto-trade`'s inline daily-cap counter is deleted; it now calls
+`_shared/limits.ts`'s `countTradesInWindow`, the same function `execute-trade`'s 429 gate uses.
+"How many trades count against the daily cap" now has exactly one implementation instead of two,
+so today's failed-order-counting bug (had to be found and fixed in both files independently)
+becomes structurally impossible to reintroduce in only one of them.
+
+**Why it matters ($ / revenue):** this is the second time in one day a risk-limit rule was
+duplicated per call site and had to be patched twice. Centralizing it removes that entire class
+of recurrence going forward — the next new caller of "count today's trades" gets the correct,
+failed-order-excluding logic for free instead of having to remember to reimplement it.
+
 ## 2026-07-25 (3rd run) — early-exit on a known-underfunded S-001 basket, alongside the concurrent-leg race fix
 
 **Status:** Deployed. Full root-cause writeup in `docs/health-log.md`'s matching entry — the
