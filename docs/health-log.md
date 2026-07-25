@@ -2,6 +2,32 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (6th run) — Telegram/`compliance_log` clean; daily trade cap legitimately maxed (52/50), not a bug; completed the daily-trade-cap consolidation the 5th run unblocked
+
+**Telegram error state:** Queried `compliance_log` directly for `error`/`critical` severity
+since 22:00 UTC (the 5th run's cutoff) — zero rows. All routine event types (`market_data_fetch`,
+`auto_trade_run`, `auto_settle_run`, `surface_scan_complete`) logging normally. One live strategy
+(`S-001-l`) is `risk_blocked` on `"Global daily trade cap reached: 52/50 trades today"` — checked
+whether this is a recurrence of the earlier failed-order-counting bug: queried `trades` directly
+for today's live rows by status — `{cancelled: 18, failed: 32, open: 34}`. 34 + 18 = 52 matches
+the reported count exactly, confirming the cap is correctly excluding the 32 `failed` rows (the
+2nd run's fix) and counting only real trades. **Not a bug** — the account has genuinely placed
+52 live trades today and hit its configured 50/day risk limit; trading resumes at the next UTC
+day boundary. No fix needed for this.
+
+**Improvement (deployed):** completed the daily-trade-cap consolidation the 2nd run recommended
+and the 5th run unblocked (by fixing `tenant.ts`'s `never`-typed calls) but didn't itself apply.
+`auto-trade/index.ts`'s inline daily-cap query (duplicate of `_shared/limits.ts`'s
+`countTradesInWindow`) is now replaced with a call to the shared function — the exact
+failed-order-counting bug fixed independently in both files earlier today can no longer be
+reintroduced in only one of them. **Verified:** `deno check` — `auto-trade` 17/17,
+`execute-trade` 20/20, same baseline as post-tenant-fix, zero new errors. Deployed
+(`supabase functions deploy auto-trade`, commit `c20457e`) and invoked directly post-deploy:
+identical output to pre-change (`"Global daily trade cap reached: 52/50"`, `0 errors, 0 halted`),
+confirming no behavior change — purely a duplicate-logic removal.
+
+**Reversibility:** single-file, single-function edit (import + one query call), trivial to revert.
+
 ## 2026-07-25 (5th run) — Telegram clean for 2h post-`314e10c`; unblocked the deferred `tenant.ts` type-error fix instead of re-diagnosing resolved incidents
 
 **Telegram error state:** Queried `compliance_log` directly (REST API, service key — same
