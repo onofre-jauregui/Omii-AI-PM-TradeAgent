@@ -158,14 +158,14 @@ export async function setRiskHalt(
     .eq("date", today)
     .maybeSingle();
   if (existing) {
-    const { error } = await supabase
-      .from("risk_state")
+    const { error } = await (supabase
+      .from("risk_state") as any)
       .update(payload)
       .eq("id", (existing as any).id);
     return { error };
   }
-  const { error } = await supabase
-    .from("risk_state")
+  const { error } = await (supabase
+    .from("risk_state") as any)
     .insert({ ...payload, user_id: userId, date: today });
   return { error };
 }
