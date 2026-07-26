@@ -42,30 +42,21 @@ export async function alertOnce(
   message: string,
 ): Promise<boolean> {
   try {
-    const since = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
+    // Check-and-claim happens atomically inside claim_health_check_alert
+    // (advisory-lock-guarded SQL function) so concurrent callers for the same
+    // alert_type+fingerprint — e.g. basket legs submitted in parallel from
+    // execute-trade — can't all pass the dedup check before any of them has
+    // recorded the send. Only the caller that wins the lock gets `true`.
+    const { data: shouldSend, error } = await supabase.rpc("claim_health_check_alert", {
+      p_alert_type: alertType,
+      p_fingerprint: fingerprint,
+      p_cooldown_hours: cooldownHours,
+    });
 
-    const { data: existing } = await supabase
-      .from("compliance_log")
-      .select("id")
-      .eq("event_type", "health_check_alert")
-      .eq("metadata->>alert_type", alertType)
-      .eq("metadata->>fingerprint", fingerprint)
-      .gte("created_at", since)
-      .limit(1)
-      .maybeSingle();
-
-    if (existing) return false; // already sent within cooldown
+    if (error) throw error;
+    if (!shouldSend) return false; // already sent within cooldown
 
     await sendTelegramAlert(message);
-
-    // Record so health-check sweep and future calls can deduplicate.
-    await supabase.from("compliance_log").insert({
-      event_type: "health_check_alert",
-      severity: "warning",
-      message: `Alert sent: ${alertType}`,
-      metadata: { alert_type: alertType, fingerprint },
-    }).then(undefined, () => {}); // don't let the record insert block the alert path
-
     return true;
   } catch {
     // alertOnce must never crash the caller — fall through to raw send.
