@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
@@ -1205,17 +1205,31 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
 
             let allMarkets: any[] = [];
 
+            // These are public read-only endpoints, but plain fetch() with no
+            // headers hits Kalshi's lowest (anonymous) rate tier — the same
+            // 429-causing bug just fixed in kalshi-proxy (2026-07-26). Sign with
+            // the service-tenant credential when available; fall back to
+            // unauthenticated only if it's missing, same as kalshi-proxy.
+            let kalshiHeaders: Record<string, string> = {};
+            const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
+              await getKalshiCredentials(supabase, null);
+            if (serviceKeyId && servicePrivateKey) {
+              kalshiHeaders = await generateAuthHeaders(
+                serviceKeyId, servicePrivateKey, "GET", "/trade-api/v2/markets", Date.now()
+              );
+            }
+
             if (args.keyword) {
               // Free-text keyword search across all Kalshi markets
               const encoded = encodeURIComponent(args.keyword);
               const url = `${kalshiBase}/markets?limit=50&status=open&search=${encoded}`;
-              const res = await fetch(url);
+              const res = await fetch(url, { headers: kalshiHeaders });
               const data = await res.json();
               allMarkets = (data.markets || []).map(parseMarket);
             } else if (args.category) {
               // Series ticker fetch
               const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 60)}&status=open&series_ticker=${args.category}`;
-              const res = await fetch(url);
+              const res = await fetch(url, { headers: kalshiHeaders });
               const data = await res.json();
               allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
@@ -1232,7 +1246,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               ];
 
               const fetches = series.map(s =>
-                fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
+                fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`, { headers: kalshiHeaders })
                   .then(r => r.json()).catch(() => ({ markets: [] }))
               );
 

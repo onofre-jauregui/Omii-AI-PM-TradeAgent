@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 
 /**
@@ -164,9 +164,20 @@ serve(async (req) => {
   // We fetch markets first, extract meeting months from close_time, then fetch futures prices.
   let kalshiMarkets: any[] = [];
   try {
+    // Same anonymous-rate-tier issue fixed in kalshi-proxy/trading-agent
+    // (2026-07-26): sign with the service-tenant credential when available.
+    let kalshiHeaders: Record<string, string> = { "Accept": "application/json" };
+    const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
+      await getKalshiCredentials(supabase, null);
+    if (serviceKeyId && servicePrivateKey) {
+      kalshiHeaders = {
+        ...kalshiHeaders,
+        ...(await generateAuthHeaders(serviceKeyId, servicePrivateKey, "GET", "/trade-api/v2/markets", Date.now())),
+      };
+    }
     const kalshiResp = await fetch(
       `${KALSHI_BASE_URL}/markets?limit=200&status=open&series_ticker=KXFED`,
-      { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(10_000) }
+      { headers: kalshiHeaders, signal: AbortSignal.timeout(10_000) }
     );
     if (kalshiResp.ok) {
       const kalshiData = await kalshiResp.json().catch(() => ({}));
