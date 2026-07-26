@@ -2,6 +2,57 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (18th run) — Clean Telegram window; `checkLiquidity`'s own compliance-log calls have silently no-op'd since inception
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 17th run's
+10:07 UTC cutoff through this run (11:06 UTC) — zero rows, a clean ~1h window. Widened to the
+full prior 36h to be sure nothing was missed: the last `error`/`critical` row of any kind is the
+`insufficient_balance` wave at 19:00 UTC 07-25, already root-caused and fixed by the S-001
+serialization commit (3rd run) — nothing new since.
+
+**Root cause found and fixed (HIGH — silent since the feature was written):** with no new
+Telegram alert to chase, ran the same event_type write-vs-read cross-reference the 12th/14th/17th
+runs used, this time against `execute-trade/index.ts`. Found: `checkLiquidity()` (lines 94–98 and
+121–125) calls `logCompliance(supabase, userId, tradeId, eventType, severity, message, metadata)`
+but omits the `tradeId` argument entirely — shifting every later positional argument one slot
+left. `eventType` receives the literal string `"warning"`, `severity` receives the human-readable
+message text, and `message` receives the metadata object. `compliance_log_severity_check` only
+allows `('info','warning','error','critical')`, so the malformed insert fails its CHECK
+constraint on every call — and since `logCompliance()` fires the insert with no error handling
+(`await`ed but result discarded, no `.catch`), the failure is invisible. **Confirmed live, not
+inferred:** queried `compliance_log` for `event_type = "warning"` (would prove the bug fires and
+writes garbage) — zero rows, ever. Queried `event_type = "liquidity_fallback"` — 56 rows, but
+every single one carries the message `"Attempting liquidity fallback: ..."`, which is the
+*correctly*-called sibling site at `execute-trade/index.ts:788` (full 5 leading args), not either
+of the two messages checkLiquidity itself tries to log (`"No liquidity on..."` /
+`"Insufficient liquidity for..."`). That proves the malformed insert has failed 100% of the time
+since this code was written, not just rarely — every thin-orderbook / insufficient-depth event on
+live trades has been invisible in the audit trail.
+
+**Fix (deployed):** threaded `userId` into `checkLiquidity()` (wasn't in scope before — added as
+a parameter) and pass `null` explicitly for `tradeId` at both call sites, since no trade row
+exists yet at the pre-flight liquidity-check stage (matches the intended shape proven by the
+correct sibling call at line 788). Single mechanical arg-order fix, no logic changed.
+**Verified:** `deno check` on the fixed file — same 20 pre-existing type errors as the unmodified
+`origin/dev` copy (all pre-existing `esm.sh`/`supabase-js` generic-version skew unrelated to this
+change), zero new errors introduced; confirmed none of the 20 errors are on or near the edited
+lines. Did **not** invoke `execute-trade` directly to force-test the live branch — that function
+places real Kalshi orders on its live path (money, a Hard Stop) and there is no paper-trade path
+through `checkLiquidity` to safely exercise; the next real thin-orderbook event in production is
+the real-world proof, same standard the 14th/17th runs applied to their own untestable branches.
+Built in an isolated worktree off `origin/dev` (per the 12th run's branch-divergence lesson). PR
+#50 → `dev` (`84540f3`, self-merged — audit-trail-only fix, same self-mergeable precedent as the
+9th/10th/12th/13th/14th/17th runs). Deployed to `uyfnezxmgwitpzsrnkst`. Reversible: single-file
+revert (drop the `userId` param, restore the two `null`-only calls).
+
+**Process note:** this session's own working checkout (`fix/live-pilot-instrumentation`) was
+still 4 runs behind `origin/dev` at start (last synced at the 14th run; `dev` had already reached
+the 17th via PR #47's stranded-runs consolidation + PRs #48/#49) — confirms the branch-divergence
+issue flagged by the 12th/16th runs is still open and getting wider each cycle, not self-resolving.
+Still Onofre's call on how to reconcile `fix/live-pilot-instrumentation`'s own uncommitted WIP
+(`DashboardHero.tsx`, `TradeLog.tsx`, `trades.ts`, `vite.config.ts`) against `dev`; not touched or
+investigated further this run, per the scope discipline the 16th run established.
+
 ## 2026-07-26 (17th run) — Clean Telegram window; found the watchdog itself could silently swallow its own alerts
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` from 07:07 UTC (14th
