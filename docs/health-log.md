@@ -2,6 +2,45 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (17th run) — Clean Telegram window; found the watchdog itself could silently swallow its own alerts
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` from 07:07 UTC (14th
+run's cutoff) through 10:07 UTC — zero rows, a clean 3h window. `health_check_alert` still last
+fired 04:12:59 UTC (`live_trading_cap_blocked`, correctly within its 6h cooldown). All 12
+`cron.job` entries confirmed `active: true` with their most recent run `succeeded` (jobid 22,
+`compliance-log-retention-daily`, correctly has no run yet — first fire is tonight 03:17 UTC,
+consistent with the 14th/16th run notes). Cross-checked every `event_type` written across all
+edge functions against every read/query site on `origin/dev` (same method the 12th/14th runs
+used) — the one apparent mismatch (`auto-reflect` querying `memory_compaction_run`) was stale
+local-branch state, already fixed on `dev` by the 14th run; not a live bug, per
+[[reproduce-before-trusting-handoff-diagnosis]].
+
+**Root cause found and fixed (HIGH — the watchdog's own delivery path was unverified):** with no
+live incident to chase, audited `health-check/index.ts`'s alert-send loop itself, since a bug
+there is the one failure mode that hides every other failure mode. Found: `sendTelegram()`
+already returns `resp.ok`, but the call site (`index.ts:485`) discarded it —
+`await sendTelegram(...)` with no use of the result. The `health_check_alert` dedup row was then
+written **unconditionally**, regardless of whether Telegram actually accepted the message. Since
+`isDuped()` keys its cooldown check off that same row, a real delivery failure (expired/rotated
+bot token, Telegram outage, 429) would look identical to a successful send and suppress every
+retry of that alert for its full cooldown window (up to 24h for `system_errors`) — with zero
+signal anywhere that the page never went out. This is the single point of failure for every
+other fix in this log: none of it matters if the watchdog can silently no-op.
+
+**Fix (deployed):** capture `sendTelegram()`'s return into `delivered`; on `false`, skip the
+dedup write entirely (so the alert retries next cycle instead of going dark) and log an
+undeduped `critical` `telegram_delivery_failed` row instead, which the existing `system_errors`
+sweep will itself catch and page on next run — the failure mode becomes self-detecting. Built in
+an isolated worktree off `origin/dev` (per the 12th run's branch-divergence lesson). **Verified
+live:** deployed to `uyfnezxmgwitpzsrnkst`, invoked once immediately after — returned
+`alerts_skipped: ["live_trading_cap_blocked"]` with no change to the normal dedup/skip path (no
+regression on the happy path, confirmed bot token is currently valid via `getMe`). The failure
+branch itself can't be safely forced against the live bot token without risking a real outage —
+the next actual Telegram delivery failure is the real-world proof, same standard the 14th run
+applied to its own untestable abort branch. PR #49 → `dev` (`89e4d08`, self-merged — alerting/
+monitoring-path fix, same self-mergeable precedent as the 9th/10th/12th/13th/14th runs).
+Reversible: single-branch revert (re-add the unconditional insert, drop the `delivered` check).
+
 ## 2026-07-26 (16th run) — Clean Telegram window; found `daily-digest` has 500'd on every invocation since it was written
 
 **Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 15th run
