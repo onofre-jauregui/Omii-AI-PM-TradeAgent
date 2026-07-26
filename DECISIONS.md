@@ -4,6 +4,31 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-26 — Atomic advisory-lock dedup for the shared Telegram alert helper
+
+**Decision:** Added `claim_health_check_alert` (Postgres function, transaction-scoped
+`pg_advisory_xact_lock` keyed on `alert_type`+`fingerprint`) and switched `alertOnce`
+(`_shared/telegram.ts`) to call it via one RPC instead of a separate SELECT-then-INSERT.
+**Finding:** The 23rd run's fix (PR #60, S-001 sequential leg submission) resolved the *specific*
+incident of 3 duplicate `kalshi_insufficient_balance` Telegram alerts within 84ms, but the
+underlying race — `alertOnce`'s dedup check and its record-the-send insert were two unguarded
+steps — was still live for any other concurrent call path into the same alert_type+fingerprint.
+11 edge functions route every Telegram alert through this one helper.
+**Options:** A) Leave it — the acute symptom is fixed, this is speculative hardening — rejected,
+this is the exact "fix the instance, not the class" anti-pattern the project's own root-cause
+standard exists to prevent, and the blast radius (a spurious duplicate page) is low-cost to close.
+B) Unique DB constraint on `(alert_type, fingerprint)` — rejected, doesn't fit a rolling cooldown
+window (a constraint would either never allow re-alerting or require constant cleanup). C)
+Advisory-lock-guarded atomic RPC — chosen: serializes concurrent callers without schema changes,
+verified directly (5 concurrent claims for one key → exactly 1 `true`).
+**Why:** Same class of fix as every other alerting/monitoring-path change made autonomously today
+(9th/10th/12th/13th/14th/17th/20th/24th/25th runs) — no live-trading execution logic touched, only
+how duplicate notifications are suppressed.
+**Reversibility:** Easy — single-PR revert (#67), `alertOnce` reverts to its prior check-then-insert
+behavior (functionally correct, just re-exposes the same race).
+**Trace:** PR #67 (`a1f2fad`), migration `20260726_alert_dedup_race.sql`. Incident:
+`compliance_log` `health_check_alert` rows 2026-07-26T16:05:04.243/.262/.327Z.
+
 ## 2026-07-26 — Re-fixed S-001's concurrent-leg balance race directly on `dev`, not the stranded branch that "fixed" it first
 
 **Decision:** Rewrote `runS001SurfaceArb`'s leg submission from `Promise.all` back to a sequential

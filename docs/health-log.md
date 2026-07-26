@@ -2,6 +2,46 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (26th run) — Clean window since the 25th run; found and fixed the alertOnce dedup race behind the 23rd run's tripled Telegram alert
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 14th run's
+07:07 UTC cutoff (broadest available baseline at start of this run) through invocation (~19:08
+UTC) — zero rows across the full window. `order_skipped_insufficient_balance`/`liquidity_fallback`
+continued firing on the 5-minute auto-trade cycle (last: 19:05:02 UTC) — same real capital
+shortfall the 23rd/24th/25th runs already flagged (live account still $1.66 vs. $9.20/leg
+needed). **Re-flagging for Onofre: still needs a deposit before S-001 can clear a leg; outside
+this run's authority.** No new `health_check_alert` rows fired since the 25th run.
+
+**Root cause found and fixed (MED — alert-delivery correctness, not a trading bug):** with no new
+error to chase, revisited the 23rd run's already-diagnosed incident (3 identical
+`kalshi_insufficient_balance` alerts at 16:05:04.243/.262/.327 UTC, ~84ms apart) to confirm its fix
+closed the hole completely. The 23rd run (PR #60) correctly fixed the *acute* cause — S-001
+submitted its legs via `Promise.all`, so three concurrent legs each hit the balance check at once
+— by serializing leg submission. But `alertOnce` (`_shared/telegram.ts`), the generic dedup helper
+11 functions route every Telegram alert through, still dedupes via a plain SELECT-then-INSERT with
+no locking between the two steps: any future concurrent call path into the same alert_type +
+fingerprint (a different multi-leg strategy, two crons landing in the same minute, a retry storm)
+would reproduce the identical triple-page, just from a different trigger. The specific symptom was
+fixed; the mechanism that let it happen was not.
+
+**Fix (deployed, PR #67):** added `claim_health_check_alert`, a Postgres function that does the
+check-and-insert atomically inside a transaction-scoped advisory lock keyed on
+`(alert_type, fingerprint)` — concurrent callers now serialize instead of racing. `alertOnce`
+calls it via a single RPC round-trip instead of two separate REST calls. Built in an isolated
+worktree off `origin/dev` (branch-divergence precedent, 11th/23rd/24th/25th runs). **Verified
+live:** migration applied to `uyfnezxmgwitpzsrnkst`; `claim_health_check_alert` tested directly —
+sequential calls for the same key return `true` then `false` (cooldown honored), 5 rapid calls for
+a fresh key return exactly one `true` (race closed). All 11 dependent functions redeployed;
+post-deploy invocation of `market-data-fetcher` (18/18 series, 0 failed) and `auto-trade` (0
+errors, both S-001 modes completed) confirm no regression on the happy path. The race itself can't
+be forced against the live bot token without risking a real duplicate page — same standard the
+14th/17th runs applied to their own untestable failure branches. Reversible: single-PR revert of
+#67, `alertOnce` falls back to its prior (racy but functional) behavior.
+
+**Improvement (this run's required deliverable):** the fix above — closing a generic, structural
+dedup race in the shared alert path — is the improvement, chosen over a second speculative sweep
+given a clean error window and 25 prior runs already having covered the obvious bug classes today.
+
 ## 2026-07-26 (25th run) — Clean window since the 24th run; swept for the same unauthenticated-Kalshi-fetch bug class and found it in two more functions
 
 **Telegram error state:** Queried `compliance_log` for the ~1h10m since the 24th run's 17:08 UTC
