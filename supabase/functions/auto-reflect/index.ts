@@ -361,7 +361,7 @@ serve(async (req) => {
           .from("trades")
           .select("pnl, side, action")
           .eq("source_signal_id", sig.id)
-          .eq("status", "filled")
+          .eq("status", "settled")
           .not("settled_at", "is", null)
           .limit(1)
           .single();
