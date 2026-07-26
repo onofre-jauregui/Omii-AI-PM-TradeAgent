@@ -3442,6 +3442,45 @@ shouldn't be triggered speculatively by a monitoring pass when the job is alread
 run on its own within hours. Next run should check `cron.job_run_details` for this job's first
 execution and confirm it succeeded (`status = 'succeeded'`, row count dropped).
 ## 2026-07-26 (8th run) — Both open fixes verified live and holding clean; no new error class. Improvement: opened the review-checkpoint PR flagged (not acted on) by the 6th and 7th runs
+## 2026-07-26 (14th run) — Clean window (~1h since 13th run); found and fixed a broken compaction cooldown that let `compact-memory` run uncapped
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 13th run's
+06:07 UTC cutoff through invocation (07:07 UTC) — zero rows, a full clean hour. Last
+`health_check_alert` remains 04:12:59 UTC (before the 13th run); nothing new fired. Confirmed the
+13th run's `compliance-log-retention-daily` cron (jobid 22) is correctly registered active in
+`cron.job` and present in `expected_cron_jobs` (added 06:13:17 UTC) — it has zero rows in
+`cron.job_run_details` because it was deployed at 06:14 UTC, **after** today's 03:17 UTC slot
+already passed; first fire is tomorrow 03:17 UTC. Not a bug — verified the claim rather than
+trusting it, per [[reproduce-before-trusting-handoff-diagnosis]].
+
+**Root cause found and fixed (MED — cost-control gate, not a trading bug):** with no new Telegram
+error to chase, audited every `event_type` ever written to `compliance_log` against every read
+site (same method the 12th run used to find `diagnostic_needed`'s dead-consumer bug), looking for
+another name-mismatch. Found one: `auto-reflect/index.ts:794`'s 30-minute compaction cooldown
+queries `event_type = "memory_compaction_run"` before invoking `compact-memory` — but
+`compact-memory/index.ts:334` writes `event_type: "memory_compaction"` (no `_run` suffix). The
+query never matches, so `recentCompaction` is always null and the gate never once blocks a call.
+Confirmed live: pulled every `auto_reflect_run`/`memory_compaction` row for the last 6 hours —
+**1:1 pairing, zero gaps** — proving the cooldown has never engaged. This matters because
+`auto-settle/index.ts:427-435` also triggers `auto-reflect` on every settlement batch (~every 10
+min today) on top of the hourly cron — exactly the "doubling LLM spend on high-volume days"
+scenario the gate's own code comment says it exists to prevent.
+
+**Fix (deployed):** one-line change, `auto-reflect/index.ts:794` now checks
+`event_type = "memory_compaction"` to match what `compact-memory` actually writes. No compaction
+logic touched. PR #46 → `dev` (`0b1e...`, self-merged — alerting/cost-control only, same
+self-mergeable precedent the 9th/10th/12th/13th runs established), deployed to
+`uyfnezxmgwitpzsrnkst`. **Verified live:** invoked `auto-reflect` twice, 4s apart, immediately
+after deploy — both calls returned `"compaction": null` and zero new `memory_compaction` rows
+were written in the 10 minutes surrounding the test (only the scheduled 07:07 UTC hourly-cron
+row exists), confirming the cooldown now correctly finds the recent row and skips the redundant
+call. Built in an isolated worktree off `origin/dev` (per the 12th run's branch-divergence
+lesson), leaving this branch's own uncommitted WIP (`DashboardHero.tsx`/`TradeLog.tsx`/
+`trades.ts`/`vite.config.ts`) untouched. Reversible: single-line revert + redeploy.
+
+**Process note:** the 12th-run branch-reconciliation flag (this branch vs. `dev` diverged since
+PR #40) is still open and unresolved — still Onofre's call, not re-investigated this run.
+
 ## 2026-07-26 (13th run) — Clean window (11h+ since last error); found and fixed an unbounded `compliance_log` growth gap
 
 **Telegram error state:** No new `error`/`critical` compliance_log rows since the 07-25 19:00 UTC
