@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-26 — Repointed `futures-signal-cron` from a nonexistent function to the real one
+
+**Decision:** `cron.alter_job(16, command := ...)` — changed the cron's target URL from
+`/functions/v1/futures-oracle` to `/functions/v1/futures-signal`.
+**Finding:** `futures-signal-cron` has fired every 10 minutes since it was registered, 404ing every
+time against a function name (`futures-oracle`) that was never deployed — the real function is
+`futures-signal`. `net.http_post` is fire-and-forget, so `cron.job_run_details.status` recorded
+"succeeded" (dispatch OK) on every one of those runs; nothing monitored the actual HTTP response.
+`compliance_log`'s `futures_signal_run` event — the Fed-funds/KXFED oracle signal source — hadn't
+fired since 2026-05-13, 74 days dead, invisible to every existing alert.
+**Options:** A) Redeploy a new `futures-oracle` function matching the old URL — rejected, the
+working code already lives at `futures-signal`, this would just be renaming the target back to the
+broken one. B) Repoint the cron URL to the function that actually exists — chosen, zero code change,
+zero deploy risk.
+**Why:** Simplest fix for a confirmed cause; DB-level config change only, no edge-function redeploy,
+no trading-path code touched.
+**Reversibility:** Easy — `cron.alter_job(16, ...)` back to the old URL (restores today's
+dead-but-quiet state, not recommended).
+**Trace:** `cron.job` jobid=16; `compliance_log` `futures_signal_run` rows resumed 2026-07-26
+15:19:00 UTC. See `docs/health-log.md` 22nd run.
+
 ## 2026-07-25 — Fixed jsdom-broken signing tests that were silently blocking the balance pre-flight fix from shipping
 
 **Decision:** Added `// @vitest-environment node` to `kalshi-signing.test.ts` and guarded

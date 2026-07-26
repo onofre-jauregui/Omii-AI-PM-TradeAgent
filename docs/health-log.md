@@ -2,6 +2,52 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (22nd run) — `futures-signal-cron` has been silently 404ing for 74 days; the Fed-funds oracle signal source was dead, cron watchdog reported "succeeded" the whole time
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 21st run's
+14:07 UTC cutoff through invocation (15:07 UTC) — zero rows, an hour clean. `live_trading_cap_blocked`
+re-fired once more at 11:10:09 UTC (same fingerprint the 19th/20th/21st runs already diagnosed —
+S-001 dedup gap fixed in PR #55, count is aging out of its 24h window, self-clears ~19:05 UTC today,
+6h re-alert cooldown working as designed). No new failure class from compliance_log.
+
+**Root cause found and fixed (HIGH — a live signal source dead for 10+ weeks, invisible to every
+existing monitor):** with the error stream clean, audited every cron job's target URL against the
+actually-deployed function directory (`ls supabase/functions`) — a check none of the 21 prior runs
+had done end-to-end. `futures-signal-cron` (jobid 16, fires every 10 min) posts to
+`/functions/v1/futures-oracle` — there is no such function; the real one is `futures-signal`.
+Confirmed via `curl` against the deployed endpoint: `futures-oracle` → `404 {"code":"NOT_FOUND"}`;
+`futures-signal` → `200`, 37 signals inserted on the spot. `compliance_log`'s `futures_signal_run`
+event hadn't fired since **2026-05-13** — 74 days dead. Invisible to the cron watchdog because
+`net.http_post` is fire-and-forget: `cron.job_run_details.status` records whether the *dispatch*
+succeeded, not the HTTP response code, so every 10-minute run for 10+ weeks logged `"succeeded"`
+while 100% of them 404'd. This is the same "looks healthy, isn't" shape as the market-data-fetcher
+and reconcile-orders gaps earlier runs found — this one had just never been swept, because nobody
+had diffed cron URLs against the function directory before. Root cause: this cron job (added
+2026-07-25 per `expected_cron_jobs`, re-registered as part of the multi-tenant/production-hardening
+work) was pointed at a function name that either predates a rename or was never deployed under that
+name — the deploy-time gap this log's `expected_cron_jobs` manifest (12th run) catches for *missing*
+crons, it doesn't catch for a cron pointed at the *wrong* target.
+
+**Fix (deployed):** `select cron.alter_job(16, command := ...)` via the Management API, changing
+the URL from `/functions/v1/futures-oracle` to `/functions/v1/futures-signal` — no application code
+touched, single DB-level config change, no edge-function redeploy. **Verified live, not just
+dispatched:** watched the next real scheduled fire (15:19:00 UTC) rather than trusting a manual
+invocation alone — `cron.job_run_details` shows `status: succeeded`, and a fresh `futures_signal_run`
+row landed in `compliance_log` at 15:19:00.745 UTC (98 Kalshi KXFED markets evaluated against 9
+CME Fed-funds futures contracts, `signals_inserted: 0` this pass — no divergence cleared the
+strategy's insert threshold this cycle, which is a normal outcome, not a failure; the manual test
+run seconds earlier had inserted 37). The oracle signal source is live again. Reversible:
+`cron.alter_job(16, command := ...)` back to the old URL (restores the current dead-but-quiet state —
+not recommended).
+
+**Improvement (logged, MED, not built this run):** audited all 12 cron jobs' URLs against the
+deployed function directory this run — one-time manual check. Worth automating: the existing
+`event-type-consistency.test.ts` static-scan pattern (21st run) could extend to a second check —
+extract every `cron.job` URL suffix (via a scheduled query, not a static file scan, since the cron
+config lives in the DB, not the repo) and diff against `ls supabase/functions`. Flagging for a
+future run rather than building it now, since it needs a DB-reading test harness (a new pattern for
+this repo's test suite, not just a text scan) and this run already shipped one live fix.
+
 ## 2026-07-26 (21st run) — Genuinely clean; no new error to chase, so hardened the codebase against the recurring bug class instead of hunting for a new instance of it
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 07-25 19:00 UTC
