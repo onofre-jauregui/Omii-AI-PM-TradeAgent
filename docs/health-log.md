@@ -3442,6 +3442,48 @@ shouldn't be triggered speculatively by a monitoring pass when the job is alread
 run on its own within hours. Next run should check `cron.job_run_details` for this job's first
 execution and confirm it succeeded (`status = 'succeeded'`, row count dropped).
 ## 2026-07-26 (8th run) — Both open fixes verified live and holding clean; no new error class. Improvement: opened the review-checkpoint PR flagged (not acted on) by the 6th and 7th runs
+## 2026-07-26 (12th run) — Genuinely clean window; found and fixed an unbounded dead-letter queue (`diagnostic_needed`) with zero consumers, and caught a real branch-divergence risk before it caused damage
+
+**Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 11th run (04:12:59 UTC,
+~55 min prior). The 11th run's `live_trading_cap_blocked` alert (PR #44, new alert type) fired exactly
+once as designed and is now correctly deduped on every subsequent check (`alerts_skipped`). The
+surface-scanner severity fix (`c29753a`) is confirmed live — `surface_scan_complete` rows have logged
+`severity: "info"` on every run since ~04:xx UTC, no more warning-noise. No action needed on the error
+front this run.
+
+**Improvement (deployed, PR #45):** `health-check/index.ts` wrote a `diagnostic_needed` compliance_log
+row on every alert carrying context, with a comment claiming "the scheduled diagnostic agent polls
+compliance_log for unresolved diagnostic_needed events and posts follow-up messages with specific fix
+steps." Queried every such row ever written (15, going back to 2026-07-21) — **100% still
+`resolved: false`**, and a full grep of the codebase found **zero call sites reading
+`event_type=diagnostic_needed`** anywhere. No such agent exists or ever did; this was aspirational
+instrumentation writing to a queue nobody drains — an unbounded-growth violation of this project's own
+Agent Systems memory-budget standard. Fixed by folding `diagnostic_context` into the existing
+`health_check_alert` row instead (same data, still visible, no second dead event stream) and removing
+the misleading comment. **Verified in prod:** invoked `health-check` once post-deploy → `1 condition(s)
+active but suppressed (deduped)`, zero new `diagnostic_needed` rows written. Reversible: single-block
+revert in `health-check/index.ts`.
+
+**Process finding (not a code bug, logged for future sessions):** discovered mid-run that this branch
+(`fix/live-pilot-instrumentation`) and `dev` have **diverged since PR #40** — `git merge-base --is-ancestor`
+proved `dev`'s PR #44 commit (`2dcca05`, the `live_trading_cap_blocked` alert) is **not an ancestor of
+this branch's HEAD**, despite appearing in this branch's plain `git log` output in a way that read as
+linear history. Nearly copied this branch's stale `health-check/index.ts` (missing PR #44's alert
+entirely) into a `dev`-based worktree for PR #45, which would have silently reverted a same-day
+production alert. Caught by diffing the intended change against `origin/dev` before committing — not
+before generating the diff. **Root cause of the confusion:** this branch has its own independent
+commit history for `supabase/functions/health-check/index.ts` (last touched by `9d47913`, unrelated to
+`dev`'s `2dcca05`/PR #44), while `docs/health-log.md` on this branch has nonetheless been carrying
+narrative entries describing `dev`-side PRs (#41/#43/#44) merged and deployed by prior runs — i.e. the
+**doc history and the code history on this branch tell two different stories**. This branch needs a
+real reconciliation with `dev` (merge or rebase) before its own uncommitted WIP
+(`DashboardHero.tsx`/`TradeLog.tsx`/`trades.ts`/`vite.config.ts`, still sitting unstaged) ships — flagging
+for Onofre's call, not resolved this run (branch reconciliation is a real decision, not a monitoring fix).
+
+**Rule for future runs:** before copying any file from this branch's working tree into a `dev`-based
+fix branch, diff it against `origin/dev` first — do not assume this branch's `git log` reflects `dev`'s
+actual history for that file.
+
 ## 2026-07-26 (11th run) — Clean of new errors; live trading has been silently capped for hours with no alert
 
 **Telegram error state:** No new `error`/`critical` rows since the 19:00 UTC 07-25 `insufficient_balance`
