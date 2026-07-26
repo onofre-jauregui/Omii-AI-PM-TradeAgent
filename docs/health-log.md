@@ -2,6 +2,48 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (24th run) — `kalshi-proxy` was serving dashboard market data unauthenticated, causing recurring 429s
+
+**Telegram error state:** Queried `compliance_log` for the 48h since the 23rd run's 16:07 UTC
+cutoff through this run's invocation (17:08 UTC). No new `error`/`critical` rows. One new
+`api_error` warning at 16:30:21 UTC: `Kalshi API error on GET markets: 429` — 8th occurrence of
+this exact class in the window (17:45, 23:50, 03:45, 06:06 as a 500, 13:55, 15:45, 16:35, 16:30
+today), all self-healing on the next request. `kalshi_insufficient_balance` (16:05:04, deduped 3x)
+and `live_trading_cap_blocked` (04:12, 11:10) both re-confirmed already correctly diagnosed by the
+23rd run: live account balance is $1.66, the strategy needs $9.20/leg — a real capital shortfall,
+not a bug. **Flagging for Onofre: the live account needs a deposit before S-001 can clear its next
+live leg; this is money, outside this run's authority.**
+
+**Root cause found and fixed (HIGH):** `kalshi-proxy/index.ts:21-23` classifies `markets`/`events`/
+`series` as "public" and sent them with **zero auth headers at all** — not just skipping the
+per-user key requirement, but never attempting the already-provisioned service-tenant credential
+either. This is the same anonymous-rate-tier problem the 2026-07-14 run fixed for
+`market-data-fetcher`, just never ported to this proxy (only function frontend calls to fetch
+market data go through, per `src/lib/kalshiApi.ts` — this is why the 429s land at irregular
+intervals rather than on a cron cadence: they track dashboard browsing sessions, not a scheduled
+job). Confirmed the service key (`user_id IS NULL`, id `4306d894…`, seeded 07-14) was sitting
+unused by this specific function.
+
+**Fix (deployed, PR #62):** built in an isolated worktree off `origin/dev` (per the 11th/23rd run's
+rule, since the local checkout still carries unrelated uncommitted WIP on
+`fix/live-pilot-instrumentation`). Public-endpoint requests now sign with the service-tenant
+credential when available, falling back to the previous unauthenticated behavior only if it's
+missing — no per-user key is still required to browse public data. **Verified live:** invoked the
+deployed function directly (`?endpoint=markets&limit=3`) → `200 OK`, real market data returned,
+response shape unchanged from the old anonymous path. `deno check` shows the same pre-existing
+`SupabaseClient` type-mismatch class as `origin/dev` baseline (one more instance, from the added
+`getKalshiCredentials` call site — not a new bug). Reversible: single-file revert of PR #62.
+
+**Improvement (deployed, PR #63):** the new auth path has its own silent-failure mode — if the
+service key is ever deleted, rotated, or fails to decrypt, the function quietly reverts to
+anonymous and the fix regresses invisibly until 429s resurface. Added a one-per-cold-start
+`compliance_log` warning (`kalshi_proxy_unauthenticated_fallback`) when that fallback path is
+taken, which health-check's existing `system_errors` sweep already pages on — same
+"looks-healthy-isn't" pattern the 22nd run's cron-URL audit was watching for, applied here before
+it could bite. **Verified live:** post-deploy invocation logged zero fallback rows (service key
+resolved successfully), zero new `api_error` rows in the 5 minutes surrounding deploy.
+
+
 ## 2026-07-26 (23rd run) — `kalshi_insufficient_balance` fired correctly, but exposed that the 07-25 S-001 concurrency fix never reached `dev`
 
 **Telegram error state:** Zero new `error`/`critical` `compliance_log` rows since the 22nd run's
