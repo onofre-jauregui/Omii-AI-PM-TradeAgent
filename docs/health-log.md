@@ -2,6 +2,45 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (10th run) — Clean window since the 9th run; found and fixed a real (not yet triggered) silent-failure gap in `reconcile-orders`
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical`/`warning` rows created
+after the 9th run's cutoff (02:07 UTC) through invocation time (03:08 UTC) — **zero rows**, a full
+clean hour. Widened to 24h: all `error`/`critical` volume is already-known/resolved (32
+`order_failed` from the 18:15-19:10 UTC S-001 balance-race window, 3 `system_event`, 1 `api_error`)
+— no new failure class. No new Telegram alert to root-cause this run.
+
+**Root cause found and fixed (MED, proactive — not yet observed in production):** with no new
+error to chase, audited `reconcile-orders` (the cron that advances resting live Kalshi orders to
+filled/cancelled) end-to-end since it had never been swept by a prior run. Confirmed live first
+(invoked directly: `{"ok":true,"checked":9,"filled":0,"partial":0,"cancelled":0,"unchanged":9,"errors":0}`)
+that the GET-order endpoint itself is healthy — ruled out a hypothesis that Kalshi's v1→v2
+deprecation (the 07-24/07-25 410 outage on `POST /portfolio/orders`) might also have hit
+`GET /portfolio/orders/{orderId}`; it hasn't. But reading the code turned up a real gap: three
+error branches (missing Kalshi key for a user, a failed Kalshi GET on a resting order, an unhandled
+per-trade exception) plus the top-level fatal catch only did `console.warn`/`console.error` —
+invisible outside raw Deno function logs. `health-check/index.ts:277-279` pages Telegram generically
+off any `severity in ('error','critical')` row in `compliance_log`, but `reconcile-orders` never
+wrote to that table on any of its four failure paths — so a resting live order that started failing
+to reconcile (401, decrypt failure, Kalshi 500) could go silently unreconciled indefinitely with
+zero signal anywhere, the same failure class ("looks healthy, isn't") as the market-data-fetcher and
+cron-registration gaps found in earlier runs.
+
+**Fix (deployed):** wired all four branches through the file's existing `logCompliance` helper
+(extended with an optional `severity` param, default `"info"` unchanged for existing call sites) as
+`event_type: "reconcile_order_check_failed"` / `"reconcile_orders_fatal"`, `severity: "error"` —
+picked up automatically by the existing generic health-check sweep, no other wiring needed.
+Alerting-only, zero trading/order logic touched — treated as self-mergeable per the process
+improvement the 9th run logged (PR #43, `dev` merge `9a1b183`). **Verified in prod:** `deno check`
+confirmed the same 10 pre-existing type errors as the unmodified file (all unrelated,
+`_shared/kalshi-auth.ts` generic Supabase typing); redeployed and invoked once post-deploy →
+identical happy-path output (`9 checked, 0 errors, 9 unchanged`), confirming no regression. The new
+alert paths themselves are unexercised until a real reconcile failure occurs — that's the intended
+next real-world proof, same pattern as prior alerting-only fixes in this log.
+
+**Reversibility:** single-file, additive-only (new `logCompliance` calls + one optional param);
+revert is removing the four call sites and the `severity` param default.
+
 ## 2026-07-26 (9th run) — No new error class since the 8th run; merged and deployed the Kalshi order-outage alert (PR #41) that had been sitting reviewed-but-unmerged for 11+ hours
 
 **Telegram error state:** Queried `compliance_log` for `warning`/`error`/`critical` since the
