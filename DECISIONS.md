@@ -579,6 +579,27 @@ no trading-path code touched.
 dead-but-quiet state, not recommended).
 **Trace:** `cron.job` jobid=16; `compliance_log` `futures_signal_run` rows resumed 2026-07-26
 15:19:00 UTC. See `docs/health-log.md` 22nd run.
+## 2026-07-26 — Added daily retention pruning for `compliance_log`
+
+**Decision:** Added a pg_cron job (`compliance-log-retention-daily`, 03:17 UTC) running
+`prune_compliance_log()`, which deletes `info`/`warning` rows older than 30 days. `error`/
+`critical` rows are never auto-deleted.
+**Finding:** Scheduled health check found `compliance_log` at 297,450 rows since 2026-04-06
+(~2,900 rows/day), 99.1% `info`/`warning` in a 5,000-row sample, with no pruning mechanism ever
+built — every cron across ~10 edge functions writes to it and nothing evicts it. Same
+unbounded-growth failure mode as the `diagnostic_needed` dead queue fixed in the 12th health
+check run today (PR #45), and a direct gap against this project's own Agent Systems standard.
+**Options:** A) Move to a separate cold-storage table via a scheduled export — rejected, more
+moving parts for no benefit since nothing currently reads old `info`/`warning` rows at all. B)
+Prune in place on a daily cron, keep error/critical forever — chosen, simplest fix that matches
+what's actually needed (audit trail for real incidents, not for routine "18/18 series OK" logs).
+**Why:** Every health-check/audit query this session (including this run's own) does a full scan
+of this table; letting it grow unbounded makes every future query slower for zero retained value
+in the pruned rows.
+**Reversibility:** Easy — `select cron.unschedule('compliance-log-retention-daily')`; the index
+and function are harmless to leave in place.
+**Trace:** `supabase/migrations/20260726_compliance_log_retention.sql`, cron.job jobid=22.
+
 ## 2026-07-25 — Serialized S-001 basket leg submission instead of Promise.all
 
 **Decision:** Changed `auto-trade/index.ts`'s S-001 leg loop from concurrent `Promise.all` to a
