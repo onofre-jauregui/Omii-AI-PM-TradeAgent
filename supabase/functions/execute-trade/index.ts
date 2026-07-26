@@ -783,6 +783,16 @@ serve(async (req) => {
         `❌ <b>[TradeAgent] Kalshi Order Rejected</b>\nStatus: ${kalshiResponse.status}\nTicker: ${resolvedTicker} (${side.toUpperCase()} ${action})\nReason: ${kalshiErrorDetail.slice(0, 200)}`
       );
 
+      // Systemic-outage escalation — a per-ticker rejection alert reads as "this one market
+      // is bad" even when the real cause blocks 100% of order submissions (e.g. Kalshi
+      // deprecating the endpoint this code calls). Fire one unmistakable critical page,
+      // deduped globally, so an outage doesn't hide as N separate low-signal per-ticker alerts.
+      if (kalshiResult?.code === "deprecated_v1_order_endpoint") {
+        await alertOnce(supabase, "kalshi_order_endpoint_deprecated", "global", 6,
+          `🔴 <b>[TradeAgent] ALL Kalshi order submissions are failing</b>\nKalshi has deprecated the /portfolio/orders endpoint this system uses (410 deprecated_v1_order_endpoint). Every live and paper order is being rejected — this is a total trading outage, not an isolated ticker issue.\nFix requires migrating execute-trade to POST /portfolio/events/orders (new bid/ask + fixed-point-dollar schema). See docs/improvement-log.md.`
+        );
+      }
+
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
       if (liquidityCheck.fallbackAction && !liquidityCheck.sufficient) {
         await logCompliance(supabase, userId, failedTrade?.id, "liquidity_fallback", "warning",
