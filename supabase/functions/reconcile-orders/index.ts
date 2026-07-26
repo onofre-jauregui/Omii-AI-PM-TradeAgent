@@ -83,6 +83,9 @@ serve(async (req) => {
       const { keyId, privateKey } = await getKalshiCredentials(supabase, userId);
       if (!keyId || !privateKey) {
         console.warn(`reconcile-orders: no Kalshi key for user ${userId} — skipping ${userOrders.length} orders`);
+        await logCompliance(supabase, userId, null, "reconcile_order_check_failed",
+          `reconcile-orders: no Kalshi key for user — ${userOrders.length} resting order(s) not reconciled`,
+          { order_ids: userOrders.map((o) => o.order_id) }, "error");
         summary.errors += userOrders.length;
         continue;
       }
@@ -91,7 +94,13 @@ serve(async (req) => {
         summary.checked++;
         try {
           const kalshiOrder = await fetchKalshiOrder(keyId, privateKey, trade.order_id);
-          if (!kalshiOrder) { summary.errors++; continue; }
+          if (!kalshiOrder) {
+            await logCompliance(supabase, userId, trade.id, "reconcile_order_check_failed",
+              `reconcile-orders: Kalshi GET order ${trade.order_id} failed — order not reconciled this cycle`,
+              { order_id: trade.order_id }, "error");
+            summary.errors++;
+            continue;
+          }
 
           const kStatus = String(kalshiOrder.status ?? "");
           const remaining = Number(kalshiOrder.remaining_count ?? -1);
@@ -128,7 +137,11 @@ serve(async (req) => {
             summary.unchanged++;
           }
         } catch (e) {
-          console.error(`reconcile-orders: error on trade ${trade.id} (order ${trade.order_id}):`, e instanceof Error ? e.message : e);
+          const errMsg = e instanceof Error ? e.message : String(e);
+          console.error(`reconcile-orders: error on trade ${trade.id} (order ${trade.order_id}):`, errMsg);
+          await logCompliance(supabase, userId, trade.id, "reconcile_order_check_failed",
+            `reconcile-orders: unhandled error reconciling order ${trade.order_id}: ${errMsg}`,
+            { order_id: trade.order_id }, "error");
           summary.errors++;
         }
       }
@@ -136,8 +149,15 @@ serve(async (req) => {
 
     return json({ ok: true, ...summary });
   } catch (e) {
-    console.error("reconcile-orders fatal:", e instanceof Error ? e.message : e);
-    return json({ ok: false, error: e instanceof Error ? e.message : String(e), ...summary }, 500);
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error("reconcile-orders fatal:", errMsg);
+    await supabase.from("compliance_log").insert({
+      event_type: "reconcile_orders_fatal",
+      severity: "error",
+      message: `reconcile-orders: run aborted — ${errMsg}`,
+      metadata: summary,
+    }).then(null, () => {});
+    return json({ ok: false, error: errMsg, ...summary }, 500);
   }
 });
 
@@ -164,11 +184,12 @@ async function updateTrade(supabase: any, id: string, patch: Record<string, unkn
 }
 
 async function logCompliance(
-  supabase: any, userId: string, tradeId: string, eventType: string, message: string, metadata: any = {}
+  supabase: any, userId: string | null, tradeId: string | null, eventType: string, message: string,
+  metadata: any = {}, severity: string = "info"
 ) {
   await supabase.from("compliance_log").insert({
     user_id: userId, trade_id: tradeId, event_type: eventType,
-    severity: "info", message, metadata,
+    severity, message, metadata,
   }).then(null, () => {});
 }
 
