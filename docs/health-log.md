@@ -2,6 +2,47 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (23rd run) — `kalshi_insufficient_balance` fired correctly, but exposed that the 07-25 S-001 concurrency fix never reached `dev`
+
+**Telegram error state:** Zero new `error`/`critical` `compliance_log` rows since the 22nd run's
+07:07 UTC cutoff through this run's 16:07 UTC invocation — a clean 9-hour window. One new
+`warning`-level alert did fire at 16:05:04 UTC: `kalshi_insufficient_balance` (deduped, 3x). Live
+account balance is $1.66; the strategy needed $9.20 per leg. This alert and its pre-flight check
+are both working exactly as designed — this is a real capital shortfall, not a bug, and the fix
+is a deposit (money — outside this run's authority, flagging for Onofre).
+
+**Root cause found and fixed (HIGH — live capital-risk + this project's own docs/reality gap):**
+while confirming the insufficient-balance alert wasn't masking a code bug, found that all 3 failed
+legs (`KXINX-26JUL31H1600-B7512/37/62`) shared one `trace_id` and landed within ~100ms of each
+other — inconsistent with the sequential-with-early-exit leg loop the 07-25 3rd-run entry (this
+same file, on a different branch) claimed was "deployed." Checked `origin/dev`'s actual
+`auto-trade/index.ts` directly (per [[reproduce-before-trusting-handoff-diagnosis]]) instead of
+trusting the log: `runS001SurfaceArb` still submitted every leg via `Promise.all(tradeable.map(...))`
+— the exact concurrency bug the 3rd run described. That fix was committed (`314e10c`) on the
+`fix/live-pilot-instrumentation` branch, which was never merged to `dev` — the same branch/doc
+divergence the 11th run flagged as a live risk ("this branch needs a real reconciliation with dev")
+had, by today, already let one specific fix silently fail to ship while its own changelog said
+otherwise. Every concurrent leg reads the same stale, pre-deduction Kalshi balance, so a basket
+that can afford zero legs still burns a full live round trip per leg instead of stopping at one.
+
+**Fix (deployed, PR #60):** built in a fresh worktree off `origin/dev` (not the stale local branch,
+per the 11th run's rule). Converted the `Promise.all` leg submission to a sequential `for...of`,
+and added a cross-alert `accountDepleted` flag: once any leg this cycle reports
+`code: "insufficient_balance"`, every remaining leg *and* every remaining alert this run is skipped
+without another live API round trip, since balance doesn't replenish mid-cycle. This is strictly
+broader than the never-merged 314e10c (which only stopped the current alert's remaining legs, not
+subsequent alerts). **Verified:** `deno check` — same 17 pre-existing baseline errors as unmodified
+`origin/dev`, zero new. Invoked `auto-trade` once post-deploy → S-001 (paper + live) and S-005 all
+completed normally (`no_setup`), no regression. Deployed to `uyfnezxmgwitpzsrnkst`. The account is
+still at $1.66, so the next live bracket-sum alert is the real-world proof the early-exit engages —
+not reproducible on demand today. Reversible: single-file revert of PR #60.
+
+**Process finding (for future runs):** a health-log entry describing a fix as "deployed" is only
+proof that a `supabase functions deploy` command ran against *some* checkout — verify which branch
+that checkout was on and whether that branch is an ancestor of `origin/dev` before trusting the
+claim, especially for any fix logged from a non-`dev` branch (this repo has several stranded
+feature branches with their own independent history for the same files).
+
 ## 2026-07-26 (22nd run) — `futures-signal-cron` has been silently 404ing for 74 days; the Fed-funds oracle signal source was dead, cron watchdog reported "succeeded" the whole time
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 21st run's
