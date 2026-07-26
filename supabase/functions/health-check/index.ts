@@ -484,32 +484,23 @@ serve(async (req) => {
 
       await sendTelegram(telegramToken, telegramChatId, alert.message);
 
-      // Record this send so future runs can deduplicate against it.
+      // Record this send so future runs can deduplicate against it. Diagnostic
+      // context (if any) is folded in here rather than written as a separate
+      // "diagnostic_needed" event — no consumer for that event type has ever
+      // existed (verified: zero call sites read it, and every row written since
+      // 07-21 sat with resolved:false indefinitely), so it was an unbounded,
+      // never-drained queue. The context is still fully visible on this row for
+      // whoever — human or scheduled health-check — investigates the alert.
       await supabase.from("compliance_log").insert({
         event_type: "health_check_alert",
         severity: "warning",
         message: `Alert sent: ${alert.type}`,
-        metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
+        metadata: {
+          alert_type: alert.type,
+          fingerprint: alert.fingerprint,
+          ...(alert.context ? { diagnostic_context: alert.context } : {}),
+        },
       });
-
-      // Write a diagnostic trigger so the scheduled diagnostic agent can
-      // analyze the root cause and send a resolution recommendation to Telegram.
-      // The agent polls compliance_log for unresolved diagnostic_needed events
-      // and posts follow-up messages with specific fix steps.
-      if (alert.context) {
-        await supabase.from("compliance_log").insert({
-          event_type: "diagnostic_needed",
-          severity: "warning",
-          message: `Needs diagnosis: ${alert.type} — ${alert.message.slice(0, 120)}`,
-          metadata: {
-            alert_type: alert.type,
-            alert_message: alert.message,
-            diagnostic_context: alert.context,
-            triggered_at: now.toISOString(),
-            resolved: false,
-          },
-        });
-      }
 
       alertsSent.push(alert.type);
     }
