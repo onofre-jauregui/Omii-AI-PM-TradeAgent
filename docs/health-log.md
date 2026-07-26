@@ -2,6 +2,49 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (20th run) — `live_trading_cap_blocked` re-diagnosed: not a stale race, an active dedup gap in S-001
+
+**Telegram error state:** `live_trading_cap_blocked` fired again at 11:10:09 UTC (same fingerprint
+the 19th run saw). The 19th run's entry attributed this to the already-resolved 07-25 18:15–19:10
+UTC "S-001 concurrency-race window," expecting the 52-count to age out by ~19:05 UTC today. Did not
+take that at face value — pulled the raw `trades` rows behind the count instead (per the standing
+"reproduce before trusting a handoff diagnosis" practice).
+
+**Root cause found and fixed (HIGH — live capital-risk bug, not a stale/aging-out condition):**
+of the 84 non-`failed` live trades in the trailing 24h for user `ea207ba1`, only **53 had unique
+`order_id`s** — 66 of the 84 rows were repeat entries into just **3** event tickers
+(`KXINX-26JUL27H1600-B7437/7462/7412`, 21–23 rows each), all strategy `S-001 Surface Arbitrage`,
+**zero filled**. That pattern (steady 5-minute-interval duplicates on the same 3 tickers, matching
+the surface-scanner cadence) is a deterministic dedup gap, not overlapping/racing invocations.
+`auto-trade/index.ts`'s S-001 dedup query (and the co-located stop-loss check) filtered
+`trades.status = "filled"` only. A resting unfilled limit order carries `status = "open"` — invisible
+to that filter — so every 5-min cycle re-detected the same still-open bracket-sum violation and
+placed *another* duplicate leg on top, burning the daily live-trade cap (50/day) on orders that
+never executed. `execute-trade`/`execute-basket`/`trading-agent` already treat
+`["filled","open","partial"]` as "active exposure" for their own checks — S-001's dedup was the one
+site still on the narrower filter.
+
+**Fix (deployed, PR #55):** dedup now matches `status in (filled, open, partial)`. Also split the
+stop-loss position query out separately — it had shared the same `openTrades` result, but its
+`select("ticker")` was missing `price`/`amount`/`market_question`, so `entryPriceCents` was always
+`0` and the 50%-loss stop-loss has silently never fired since it was written; fixed in the same
+change by giving it its own filled-only, full-field query. **Verified live:** `deno check` — same
+17 pre-existing errors as unmodified `origin/dev` (confirmed via stash diff), zero new. Invoked
+`auto-trade` once post-deploy: paper-mode S-001 correctly reported held tickers as already-open
+("tickers already held"); live-mode S-001 still `risk_blocked` at 52/50 (expected — the cap is a
+rolling 24h window and today's pre-fix duplicates haven't aged out yet) but will stop refilling
+further, since no new duplicate legs are added once the fix is live. Built in an isolated worktree
+off `origin/dev` (this branch's own checkout was still pinned at the 14th run). PR #55 → `dev`
+(`7e95d2d`, squashed, self-merged — dedup/exposure-check fix, same self-mergeable precedent as
+prior runs), deployed to `uyfnezxmgwitpzsrnkst`. Reversible: single-file revert of the commit.
+
+**Improvement (bundled into the same fix, not separately deployed):** the stop-loss field-selection
+bug above — real money sat in live NO positions with a 50%-loss circuit breaker that had never once
+been able to trigger, because its own query never fetched the fields the loss-percent math needs.
+Worth a standing check: any query whose result feeds a downstream calculation should assert the
+fields that calculation reads are actually in the `select()`, not just that the query runs without
+error.
+
 ## 2026-07-26 (19th run) — Clean Telegram window; `auto-reflect`'s signal-outcome backfill has never run, on three independent bugs stacked in one block
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 18th run's
