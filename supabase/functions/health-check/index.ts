@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { countTradesInWindow } from "../_shared/limits.ts";
 
 /**
  * health-check: Monitors the trading agent and alerts via Telegram.
@@ -430,6 +431,37 @@ serve(async (req) => {
             fingerprint: `low_balance_${user_id}`,
             cooldownHours: 12,
             message: `💸 [TradeAgent] Live Kalshi balance low: $${balanceUsd.toFixed(2)} — live trades will start failing insufficient_balance. Deposit funds.`,
+          });
+        }
+      } catch {
+        // Monitoring-path failure only — never let this block the rest of the sweep.
+      }
+    }
+
+    // ── 11. Live trading blocked by daily cap — invisible to the silence check ──
+    // trading_silence (#1) only fires when the whole trades table goes quiet, but
+    // paper-mode strategies keep inserting rows every cycle even when a user's live
+    // trading is fully capped — so a live account can sit `risk_blocked` for hours
+    // with zero signal (found 2026-07-26: 52/50 live trades in the trailing 24h,
+    // blocked since ~19:10 UTC the prior day, no alert). Recomputes the exact same
+    // gate auto-trade enforces (risk_settings.max_daily_trades, countTradesInWindow
+    // over 24h) instead of re-deriving it, so this can't drift from the real block.
+    for (const { user_id } of liveKeys ?? []) {
+      try {
+        const { data: riskRow } = await supabase
+          .from("risk_settings")
+          .select("max_daily_trades")
+          .eq("user_id", user_id)
+          .eq("mode", "live")
+          .maybeSingle();
+        const maxDailyTrades = riskRow?.max_daily_trades ?? 30;
+        const liveTradeCount = await countTradesInWindow(supabase, user_id, "live");
+        if (liveTradeCount >= maxDailyTrades) {
+          pendingAlerts.push({
+            type: "live_trading_cap_blocked",
+            fingerprint: `cap_blocked_${user_id}_${now.toISOString().slice(0, 10)}`,
+            cooldownHours: 6,
+            message: `⏸️ [TradeAgent] Live trading paused: daily cap ${liveTradeCount}/${maxDailyTrades} reached (trailing 24h) — no live orders until the window rolls off`,
           });
         }
       } catch {
