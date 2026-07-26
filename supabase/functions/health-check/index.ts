@@ -356,6 +356,35 @@ serve(async (req) => {
       });
     }
 
+    // ── 8b. Internal live-mode rate limiting — invisible to the API_ERROR_TYPES sweep ──
+    // execute-trade's own per-user rate limiter (checkRateLimit, 3/min live vs 15/min paper)
+    // logs `rate_limit_exceeded` on every rejection, but that event_type isn't in
+    // API_ERROR_TYPES above — it's an internal throttle, not an upstream provider error, so
+    // it was never swept. Found 2026-07-26 20:05 UTC: 5 live rejections in ~1s with zero
+    // Telegram signal, the same "looks fine, isn't" blind spot as the earlier trading_silence
+    // and cron-registration gaps. Paper-mode hits are excluded (15/min is loose and expected
+    // to trip during normal multi-leg baskets); only live matters — a real order didn't clear
+    // because our own throttle blocked it, which is worth knowing even if by design.
+    const { data: liveRateLimits } = await supabase
+      .from("compliance_log")
+      .select("id, created_at")
+      .eq("event_type", "rate_limit_exceeded")
+      .eq("metadata->>mode", "live")
+      .gte("created_at", twoHoursAgo)
+      .limit(50);
+
+    if (liveRateLimits && liveRateLimits.length > 0) {
+      // Fingerprint on the current 2h bucket start so a sustained throttle re-alerts
+      // once per window instead of once per rejection.
+      const fingerprint = `live_rate_limit_${twoHoursAgo.slice(0, 13)}`;
+      pendingAlerts.push({
+        type: "live_rate_limit_exceeded",
+        fingerprint,
+        cooldownHours: 2,
+        message: `🟠 [TradeAgent] Live execute-trade rate-limited ${liveRateLimits.length}x in 2h (cap: 3/min) — real orders were throttled, check basket leg volume`,
+      });
+    }
+
     // ── 9. Cron health — stale (parked/dead) or failing jobs ─────────
     // Closes the silent-death blind spot: the other checks only see FAILED runs,
     // so a job parked to a never-date schedule (or otherwise stalled) fired zero
