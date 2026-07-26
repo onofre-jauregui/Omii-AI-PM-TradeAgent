@@ -791,7 +791,7 @@ Return ONLY valid JSON, no markdown, no extra text:
       const { data: recentCompaction } = await supabase
         .from("compliance_log")
         .select("id")
-        .eq("event_type", "memory_compaction_run")
+        .eq("event_type", "memory_compaction")
         .gte("created_at", thirtyMinAgo)
         .limit(1)
         .maybeSingle();
