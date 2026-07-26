@@ -2,6 +2,67 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (15th run) — Clean window; consolidated 8 runs of stranded audit history back onto `dev`
+
+**Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 14th run
+(07:12 UTC). `health-check-hourly`'s 08:10 UTC run reported `1 condition(s) active but suppressed
+(deduped)` — the `live_trading_cap_blocked` alert from the 11th run, correctly within its 6h
+cooldown, not a new event. Confirmed via the deployed function source (`health-check` v33,
+2026-07-26T05:13:05Z) that both the `live_trading_cap_blocked` alert (PR #44) and the
+`diagnostic_needed` dead-queue removal (PR #45) are live in production, matching `dev`'s HEAD.
+No code changes needed this run — every condition found traces to an already-fixed, already-
+verified root cause from runs 8–14.
+
+**Process finding (root cause, fixed this run — docs only):** `docs/health-log.md` on `dev` had
+**zero entries for any of the 14 health-check runs that happened today (2026-07-26)** — every
+run wrote its narrative to a `docs: log Nth run` commit on the `fix/live-pilot-instrumentation`
+branch, which diverged from `dev` after PR #40 (see the 12th run's finding below) and was never
+merged. The underlying *code* fixes mostly did reach `dev` via their own PRs (#41, #43–#46) or
+were deployed directly via `supabase functions deploy` independent of any PR, but the *narrative*
+— why each fix was needed, what was verified, what's still open — stayed stranded on a branch
+`dev` never merged. Anyone reading `dev`'s health log today would see nothing past the 07-25
+daily-trade-cap entry and have no visibility into 8 more runs of real findings. Root cause: the
+`docs: log` commit for each run was made directly on the working branch instead of being included
+in that run's own PR into `dev`.
+
+**Fix (this run, docs-only, no code):** consolidated the 8 recoverable run summaries from
+`fix/live-pilot-instrumentation` into this entry so `dev` has continuity. Full narrative for each
+lives in these commits (still on that branch, or cherry-pickable):
+- 4th run (`deb2bf5`) — clean Telegram state, cache-eviction fix deployed
+- 6th run (`35a0fee`) — clean state, daily-trade-cap consolidation deployed
+- 8th run (`c3b4483`) — both fixes verified clean, opened dev PR
+- 9th run (`c5fc8d0`) — merged + deployed the Kalshi order-outage alert (PR #41), held unmerged 11+ hours
+- 10th run (`ed13f88`) — fixed reconcile-orders-cron silent-failure gap (PR #43)
+- 11th run (`8cd82d7`) — added the `live_trading_cap_blocked` alert (PR #44)
+- 12th run (`c4aeb7d`) — fixed the dead `diagnostic_needed` queue (PR #45); first to flag the
+  branch/`dev` divergence documented above
+- 14th run (`78e3764`) — fixed a broken memory-compaction cooldown gate (PR #46)
+
+Runs 1, 2, 3, 5, 7, and 13 were not found on this branch — likely stranded on other per-fix
+branches (e.g. `fix/kalshi-order-outage-alert`, `fix/reconcile-orders-silent-failures`,
+`fix/live-mode-admin-bypass`) that also never merged their docs commit. Not chased down this run
+(scope creep risk) — worth a dedicated sweep.
+
+**Not resolved this run (flagged, needs Onofre's call):** `fix/live-pilot-instrumentation` itself
+still has real unmerged code fixes sitting on it — `compliance_log` retention (`6053ba9`, now
+confirmed live via a separate `20260726_compliance_log_retention.sql` migration + registered
+`compliance-log-retention-daily` cron job, so this one did land, just via direct deploy not PR),
+plus `tenant.ts` never-type fixes (`06ce7a9`) and the S-001 concurrent-leg race fix (`314e10c`,
+also confirmed live). The branch's own uncommitted WIP (`DashboardHero.tsx`, `TradeLog.tsx`,
+`src/lib/queries/trades.ts`, `vite.config.ts`) is untouched — not evaluated or discarded, since
+ownership and intent are unknown to this run. Branch reconciliation (merge vs. rebase vs.
+cherry-pick the still-unmerged fixes) is a real decision, not a monitoring action — left for
+Onofre, per the 12th run's original flag.
+
+**Verified:** `compliance-log-retention-daily` cron job confirmed registered, active, and present
+in `expected_cron_jobs` (so the existing stale-cron watchdog covers it) — but it has **zero rows
+in `cron.job_run_details`**, meaning it has never actually fired yet (next scheduled tick 03:17
+UTC). 263,729 of 297,656 `compliance_log` rows currently qualify for pruning (info/warning,
+>30d old). Did not force an early manual run — a first-time ~264k-row delete on production
+shouldn't be triggered speculatively by a monitoring pass when the job is already scheduled to
+run on its own within hours. Next run should check `cron.job_run_details` for this job's first
+execution and confirm it succeeded (`status = 'succeeded'`, row count dropped).
+
 ## 2026-07-25 (later run, 2nd) — daily-trade-cap counted failed orders in *two* independent places, actively rejecting live trades right now
 
 **Telegram error state:** All errors in the last 6h trace back to the three clusters already
