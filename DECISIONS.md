@@ -4,6 +4,21 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-26 — Re-fixed S-001's concurrent-leg balance race directly on `dev`, not the stranded branch that "fixed" it first
+
+**Decision:** Rewrote `runS001SurfaceArb`'s leg submission from `Promise.all` back to a sequential
+loop with a cross-alert `accountDepleted` early-exit, committed and deployed straight to `dev`
+(PR #60), instead of merging or cherry-picking the existing `fix/live-pilot-instrumentation` branch.
+**Options:** (A) merge the stranded branch's 314e10c commit — risked pulling in that branch's other
+uncommitted/diverged changes to the same file; (B) cherry-pick just that commit — same file has
+independently evolved on both branches, high conflict risk; (C) re-implement the fix fresh against
+`dev`'s current code, verified in isolation. Chose C.
+**Why:** The stranded branch's version of this file has its own independent history unrelated to
+`dev`'s (per the 11th run's finding); merging it risked silently reverting or conflicting with 6+
+`dev`-only fixes made since. A small, fresh, isolated reimplementation was lower-risk than any merge.
+**Reversibility:** easy — single-file revert of PR #60 (`6d1b6bd`).
+**Trace:** PR #60, [[health-log.md]] 23rd run entry.
+
 ## 2026-07-26 — Repointed `futures-signal-cron` from a nonexistent function to the real one
 
 **Decision:** `cron.alter_job(16, command := ...)` — changed the cron's target URL from
