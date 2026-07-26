@@ -1071,17 +1071,36 @@ async function runS001SurfaceArb(
     };
   }
 
-  // 2. Dedup: which tickers are already open under this strategy?
+  // 2. Dedup: which tickers already have an active order or position under this strategy?
+  //    "active" = filled, open (resting unfilled), or partial — matches the status set
+  //    execute-trade/execute-basket/trading-agent already use for exposure checks. This
+  //    used to check status="filled" only, so a resting unfilled limit order (the common
+  //    case — legs sit "open" for hours before filling, cancelling, or day-expiring) was
+  //    invisible to dedup: every 5-minute surface-scanner cycle re-detected the same
+  //    still-unfilled bracket-sum violation and stacked ANOTHER duplicate order on the
+  //    same event, burning the daily live-trade cap on orders that never filled (found
+  //    2026-07-26: 66/84 live trades in the trailing 24h were repeat entries into just 3
+  //    events, 0 filled — see docs/health-log.md).
   //    exit_reason IS NULL excludes positions that have been exited but not yet
   //    settled — without this S-001 could re-enter an already-exited position.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
-    .eq("status", "filled")
+    .in("status", ["filled", "open", "partial"])
     .eq("strategy_id", strategy.id)
     .is("settled_at", null)
     .is("exit_reason", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
+
+  // Stop-loss (4b below) only applies to actually-filled positions — a resting unfilled
+  // order has no live position to close. Separate query/fields from the dedup set above.
+  const { data: filledPositions } = await supabase
+    .from("trades")
+    .select("id, ticker, price, amount, market_question")
+    .eq("status", "filled")
+    .eq("strategy_id", strategy.id)
+    .is("settled_at", null)
+    .is("exit_reason", null);
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const allFilled: string[] = [];
@@ -1214,7 +1233,7 @@ async function runS001SurfaceArb(
     // violation was a data artifact — exit before full-settlement loss locks in.
     // Reuses the eventMarkets payload already fetched; no extra Kalshi API call needed.
     {
-      const openS001InEvent = (openTrades || []).filter(
+      const openS001InEvent = (filledPositions || []).filter(
         (t: any) => (t.ticker as string).startsWith(eventTicker)
       );
       for (const openPos of openS001InEvent) {
