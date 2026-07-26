@@ -482,7 +482,23 @@ serve(async (req) => {
         continue;
       }
 
-      await sendTelegram(telegramToken, telegramChatId, alert.message);
+      const delivered = await sendTelegram(telegramToken, telegramChatId, alert.message);
+
+      if (!delivered) {
+        // Delivery failed — do NOT write the health_check_alert dedup row. isDuped()
+        // keys off that row, so writing it unconditionally here would mark a
+        // never-delivered alert as sent, silencing every future retry for the
+        // full cooldown window. Log the failure itself (undeduped, always visible)
+        // so it surfaces via the system_errors sweep on the next run.
+        await supabase.from("compliance_log").insert({
+          event_type: "telegram_delivery_failed",
+          severity: "critical",
+          message: `Telegram send failed for alert "${alert.type}" — will retry next run`,
+          metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
+        });
+        alertsSkipped.push(`${alert.type}(delivery_failed)`);
+        continue;
+      }
 
       // Record this send so future runs can deduplicate against it. Diagnostic
       // context (if any) is folded in here rather than written as a separate
