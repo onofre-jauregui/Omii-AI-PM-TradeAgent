@@ -2,6 +2,54 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (27th run) — Verified the 26th run's dedup fix live under a real concurrent trigger; found and fixed a rate-limit blind spot on live orders
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 26th run's
+~19:08 UTC cutoff through invocation (~20:12 UTC) — zero rows. One new `health_check_alert`
+fired at 20:10:01 UTC (`kalshi_insufficient_balance`, same fingerprint as the 23rd run's
+tripled incident) — **exactly one row, not three** — the first real-world trigger of that
+condition since PR #67 (26th run's `claim_health_check_alert` advisory-lock fix) deployed,
+and it held. Real capital shortfall unchanged: live account still $1.66 vs. $9.20/leg S-001
+needs (confirmed via the same `order_skipped_insufficient_balance` rows, now down to 2 in this
+window vs. every-cycle earlier in the day — most cycles are failing the fee hurdle before ever
+reaching the balance check). **Re-flagging for Onofre, 5th consecutive run: still needs a
+deposit before S-001 can clear a live leg; outside this run's authority (money).**
+
+**Root cause found and fixed (MED — alert-visibility gap, not a trading bug):** with the error
+front clean, found a new gap while investigating an unfamiliar event type: at 20:05:03–04 UTC,
+5 `rate_limit_exceeded` rows fired (`mode: "live"`, `execute-trade`, 3/min cap) — the live S-001
+basket found more qualifying legs than the cap allows and 2 were throttled. Zero Telegram signal:
+health-check's `API_ERROR_TYPES` sweep (`api_error`, `llm_rate_limit`, `api_timeout`,
+`kalshi_circuit_open`) covers upstream provider errors, but `rate_limit_exceeded` is our own
+internal throttle and was never included — the same "looks healthy, isn't" blind spot as the
+`trading_silence` and `cron_missing` gaps found in earlier runs, this time on the one signal that
+means a real live order didn't clear.
+
+**Fix (deployed, PR #69):** added a dedicated check — live-mode `rate_limit_exceeded` rows in
+the trailing 2h page Telegram (`live_rate_limit_exceeded`, 2h cooldown, one alert per window).
+Paper-mode hits excluded on purpose: 15/min is loose and expected to trip during normal
+multi-leg baskets, and paging on it would just be noise. Built in an isolated worktree off
+`origin/dev` (branch-divergence precedent, 11th/23rd–26th runs). **Verified in prod:** `deno
+check` — 12 pre-existing type errors, identical count before/after, none in the new block;
+deployed and invoked `health-check` directly post-deploy → `alerts_sent:
+["live_rate_limit_exceeded"]`, confirmed as a new `health_check_alert` row in `compliance_log`.
+Alerting-only, zero trading-logic touched. Reversible: single-block revert.
+
+**Process note (self-correction):** this run's own investigation probe (a direct RPC call to
+verify `claim_health_check_alert` exists) wrote a throwaway `__probe_test__` row into
+`compliance_log` — deleted it immediately after confirming the function was live, so it doesn't
+sit in the audit trail or skew future severity/volume sweeps.
+
+**Residual gap flagged, not fixed this run:** `health-check/index.ts`'s own alert-send loop
+still dedupes via the old two-step `isDuped()` SELECT-then-INSERT (unchanged) — PR #67 only
+routed `_shared/telegram.ts`'s `alertOnce` (used by `execute-trade` and other functions) through
+the new atomic `claim_health_check_alert` RPC, not health-check's internal loop. Practical risk
+is lower here (health-check isn't naturally invoked per-leg the way execute-trade is), but given
+today's actual run cadence — 27 runs in one day, several clearly overlapping in the same
+5–10 minute window — a genuine concurrent double-invocation of health-check itself is not
+hypothetical. Worth migrating health-check's own send loop onto `claim_health_check_alert` in a
+future run; deferred here to keep this run's improvement to the one item above.
+
 ## 2026-07-26 (26th run) — Clean window since the 25th run; found and fixed the alertOnce dedup race behind the 23rd run's tripled Telegram alert
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 14th run's
