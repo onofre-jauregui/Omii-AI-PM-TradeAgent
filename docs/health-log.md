@@ -2,6 +2,41 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (13th run) — Clean window (11h+ since last error); found and fixed an unbounded `compliance_log` growth gap
+
+**Telegram error state:** No new `error`/`critical` compliance_log rows since the 07-25 19:00 UTC
+`insufficient_balance` wave (already root-caused and fixed by the S-001 serialization commit,
+`314e10c`) — clean for 11h+ through this run (06:07 UTC). Confirmed the surface-scanner
+severity fix (`c29753a`, 12th run) is still holding: every `surface_scan_complete` row from
+04:53 UTC onward logs `severity: "info"`, none reverted to `warning`. The lone `system_event`
+"`trades_time_in_force_check`" violation (3 rows, 07-25 15:20 UTC) coincided exactly with the
+V2-endpoint/RSA-PSS signing deploy window and hasn't recurred since — the code already carries
+an explicit fix (separate `v2TimeInForce` for the Kalshi payload vs. `ledgerTimeInForce` for our
+own DB insert, `execute-trade/index.ts:657-684,828-830`), so this reads as a one-time cutover
+artifact, not an active bug. No new failure class this run — nothing to root-cause.
+
+**Improvement (deployed):** `compliance_log` had **297,450 rows** since 2026-04-06 with **zero
+pruning** — every ~5-min cron run across market-data-fetcher/surface-scanner/auto-trade/etc.
+writes to it, and a sample of the most recent 5,000 rows was 99.1% `info`/`warning` (routine run
+logs, not audit-relevant). Same unbounded-dead-data class as the `diagnostic_needed` queue fixed
+in the 12th run, and a direct violation of this project's own Agent Systems standard ("long-term
+memory needs eviction before unbounded growth"). **Fix:** migration
+`20260726_compliance_log_retention.sql` adds a `(severity, created_at)` index, a
+`prune_compliance_log()` function that deletes `info`/`warning` rows older than 30 days
+(error/critical rows are never auto-deleted — audit trail), a daily 03:17 UTC pg_cron job
+(`compliance-log-retention-daily`, jobid 22), and registers it in `expected_cron_jobs` so the
+existing watchdog alerts if it ever stops firing. **Verified:** cron job + index + manifest row
+all confirmed present in the live DB via the Management API; dry-run count shows 263,635 rows
+(89%) would be pruned on tonight's first run — left to fire on its own schedule rather than
+running the mass-delete manually mid-day. Reversible: `select cron.unschedule('compliance-log-retention-daily')`.
+
+**Process note (self-correction, not a system bug):** applied this migration's SQL via the
+Management API using the project's global `$SUPABASE_ACCESS_TOKEN` — this project's own
+`CLAUDE.md` explicitly says to use the project-scoped `$SUPABASE_ACCESS_TOKEN_KTA` for all
+management-API calls here, never the global token. The call succeeded either way (same
+permissions), but future sessions should default to `_KTA` per that doc instead of the generic
+env var.
+
 ## 2026-07-26 (12th run) — Genuinely clean window; found and fixed an unbounded dead-letter queue (`diagnostic_needed`) with zero consumers, and caught a real branch-divergence risk before it caused damage
 
 **Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 11th run (04:12:59 UTC,
