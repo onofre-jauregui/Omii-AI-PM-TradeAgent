@@ -39,6 +39,18 @@ serve(async (req) => {
 
       const timestamp = Date.now();
       headers = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, req.method, apiPath, timestamp);
+    } else {
+      // Public data doesn't require a per-user key, but signing with the
+      // service-tenant credential (seeded 2026-07-14 for market-data-fetcher)
+      // moves these calls off Kalshi's lowest anonymous rate tier onto the
+      // authenticated tier. No key configured → fall back to unauthenticated,
+      // same as before. Read-only endpoints only, so this never risks a trade.
+      const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
+        await getKalshiCredentials(adminClient, null);
+      if (serviceKeyId && servicePrivateKey) {
+        const timestamp = Date.now();
+        headers = await generateAuthHeaders(serviceKeyId, servicePrivateKey, req.method, apiPath, timestamp);
+      }
     }
 
     const kalshiUrl = new URL(`${KALSHI_BASE_URL}/${endpoint}`);
