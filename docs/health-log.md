@@ -2,6 +2,34 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (21st run) — Genuinely clean; no new error to chase, so hardened the codebase against the recurring bug class instead of hunting for a new instance of it
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 07-25 19:00 UTC
+`insufficient_balance` wave (already root-caused, fixed by the S-001 serialization commit
+`314e10c`) through invocation (14:07 UTC) — zero rows, a genuinely clean ~19h window. The
+`live_trading_cap_blocked` state from the 19th/20th runs is aging out as expected (52/50, clears
+~19:05 UTC today) and the 20th run's dedup fix (PR #55) means it won't refill. No new alert, no
+new failure class.
+
+**Improvement (deployed, PR #57 — regression guard, not an instance fix):** with nothing new to
+root-cause, didn't repeat the manual "audit every event_type write against every read" pass the
+12th/14th/18th/19th/20th runs each did by hand — that pass has now caught **four** separate silent
+bugs this week (`diagnostic_needed` dead queue, `checkLiquidity`'s dropped compliance-log calls,
+`auto-reflect`'s compaction cooldown reading `memory_compaction_run` against `compact-memory`'s
+`memory_compaction` write), all the same shape: a read-site string literal silently mismatched a
+write-site literal, so the read always returned zero rows — no error, no alert, just a gate that
+never engaged. Per this project's own root-cause standard ("fix the system that allowed the bug,
+not just the instance"), added `supabase/functions/tests/event-type-consistency.test.ts` — a
+static, import-free scan (same convention as `kalshi-signing.test.ts`) that extracts every
+`event_type: "X"` write literal and every `.eq("event_type", "Y")` / `=== "Y"` read literal across
+`supabase/functions` and fails if any read is orphaned. **Verified the guard actually works, not
+just that it runs:** reintroduced the 14th-run bug locally (`memory_compaction` →
+`memory_compaction_run`) and confirmed the test fails with the exact orphaned-literal diagnosis,
+then restored and confirmed it passes clean against current `dev`. Test-only change, zero
+production code touched, zero deploy risk. PR #57 → `dev` (`ecb0e12`, squashed, self-merged —
+test-only, lower risk than the alerting-only precedent prior runs established), built in an
+isolated worktree off `origin/dev`. Reversible: delete the one test file.
+
 ## 2026-07-26 (20th run) — `live_trading_cap_blocked` re-diagnosed: not a stale race, an active dedup gap in S-001
 
 **Telegram error state:** `live_trading_cap_blocked` fired again at 11:10:09 UTC (same fingerprint
