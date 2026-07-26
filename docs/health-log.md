@@ -2,6 +2,39 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (11th run) — Clean of new errors; live trading has been silently capped for hours with no alert
+
+**Telegram error state:** No new `error`/`critical` rows since the 19:00 UTC 07-25 `insufficient_balance`
+wave, which the 3rd/4th-run S-001 serialization fix (`314e10c`) already root-caused and resolved — 9h
+clean. No new failure class this run.
+
+**Finding (not a bug — a visibility gap):** with nothing new to fix, checked why live trading looked
+quiet. `auto-trade` has been returning `risk_blocked` for the live S-001 strategy since ~19:10 UTC
+yesterday: `countTradesInWindow` (mode=live, trailing 24h) reads 52, against a configured cap of 50.
+Confirmed this is the cap working as designed, not a counting bug — `auto-trade/index.ts:703-709`'s
+own comment states the cap intentionally counts everything except `failed` orders (including
+`cancelled`), because even a cancelled order reached the exchange and briefly held collateral. The 52
+is real: 43 `cancelled` + 9 `open` legs from the now-fixed S-001 concurrency race that flooded orders
+18:15-19:10 UTC yesterday. The cap did its job and stopped the bleeding — it will self-clear as those
+rows age out of the 24h window (~19:05 UTC today). So: **no code change to the cap itself.**
+
+The actual gap: this multi-hour live-trading pause had **zero Telegram signal**. `health-check`'s
+`trading_silence` check (#1) only fires when the whole `trades` table goes quiet, but paper-mode
+strategies keep inserting rows every 5-min cycle regardless of whether live is capped — so a fully
+blocked live account reads as "healthy" to every existing check.
+
+**Improvement (deployed):** added a dedicated `health-check` section that recomputes the exact gate
+`auto-trade` enforces — `risk_settings.max_daily_trades` + `countTradesInWindow(mode="live")`, the
+same shared `_shared/limits.ts` helper, so it can't drift from the real block — and pages Telegram
+(`live_trading_cap_blocked`, 6h cooldown) whenever a live account is at/over cap. Alerting-only, zero
+trading-logic risk. **Verified live:** invoked `health-check` twice post-deploy — first call sent the
+alert (`alerts_sent: ["live_trading_cap_blocked"]`, confirmed in `compliance_log`), second call
+deduped it (`alerts_skipped`). `deno check` shows the same 10 pre-existing type errors as `dev`
+(unrelated `kalshi-auth.ts`/supabase-js mismatch), zero new. PR #44 → `dev` (self-merged, alerting-only,
+same precedent as the 9th/10th runs), deployed to `uyfnezxmgwitpzsrnkst`.
+
+**Reversibility:** easy — single new check block, additive only, no existing alert logic touched.
+
 ## 2026-07-26 (10th run) — Clean window since the 9th run; found and fixed a real (not yet triggered) silent-failure gap in `reconcile-orders`
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical`/`warning` rows created
