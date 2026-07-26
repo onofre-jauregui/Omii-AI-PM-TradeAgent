@@ -2,6 +2,66 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (29th run) — Clean error window; found and shipped a second stray-branch fix (cache-eviction guard) never merged to dev, closed the branch that caused it
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 28th run's
+21:13 UTC cutoff through invocation (~22:24 UTC) — zero rows, a full clean hour. `surface_scan_complete`
+severity fix from PR #71 verified holding (13 `info` rows with `metadata.high_edge:true` in-window;
+the 3 leftover `warning` rows at 21:13-21:23 predate that fix's 21:27 UTC deploy, already accounted
+for in the 28th run's own entry). `kalshi_insufficient_balance` fired again at 20:10 UTC — 6th
+consecutive run flagging this: live account is still short of the ~$9.20/leg S-001 needs. Money
+decision, outside this run's authority — flagging for Onofre, not re-investigating further.
+
+**Root cause found and fixed (HIGH — live data-integrity risk, same failure class as the 23rd/28th
+runs): `market-data-fetcher`'s cache-eviction guard fix from 2026-07-25 never reached `dev`, exactly
+like the S-001 balance-race and surface-scanner severity fixes before it.** With the error stream
+clean, audited the still-open `fix/live-pilot-instrumentation` PR (#42, open since 2026-07-26 01:09,
+8 commits across 7 health-check runs) against `origin/dev` by content, not just SHA ancestry (the
+23rd/28th runs' lesson — a cherry-pick changes the SHA, so `git merge-base --is-ancestor` alone would
+give a false "not merged" on fixes that actually did land). Checked each of PR #42's 4 non-doc commits
+directly against `dev`'s current file contents:
+
+| Commit | Fix | In `dev`? |
+|---|---|---|
+| `314e10c` | S-001 balance-race (sequential legs) | ✅ superseded by `6d1b6bd`/PR #60 |
+| `c29753a` | surface-scanner severity | ✅ superseded by `baea612`/PR #71 |
+| `6053ba9` | compliance_log retention cron | ✅ present via a separate migration |
+| `57d09695` | cache-eviction guard, skipped series | ❌ **still missing** |
+
+`market-data-fetcher/index.ts:211` still read `if (failedSeries.length === 0)` — no
+`skippedSeries` check — in both `dev` and prod (prod's function was last redeployed 2026-07-26
+19:15 UTC, same content). This is the exact bug the 2026-07-23 entry described: on a run-budget
+abort, `failedSeries` stays empty (nothing errored — the run ran out of time) while `skippedSeries`
+holds every series never attempted, so eviction would proceed and delete live cache rows for
+series that are merely unrefreshed, not closed. Two consecutive aborts (plausible under sustained
+Kalshi latency, as seen 2026-07-23 07:03–07:46 UTC) would empty cache for real, open markets —
+`surface-scanner`/`signal-generator` would see zero markets instead of stale-by-one-cycle.
+
+**Fix (deployed, PR #73 → dev):** built in an isolated worktree off `origin/dev` (branch-divergence
+precedent, 11th/23rd/27th/28th runs) rather than touching the stray branch, and rather than working
+in the current checkout's own uncommitted changes. Changed the guard to
+`if (failedSeries.length === 0 && skippedSeries.length === 0)`. **Verified:** `deno check` — 11
+pre-existing baseline errors, confirmed identical on unmodified `origin/dev`, zero new. Deployed to
+`uyfnezxmgwitpzsrnkst`; invoked directly post-deploy → `18/18 series OK, 0 failed, 0 skipped, 847
+markets, 3.3s` — no regression on the non-abort path (the only path exercisable on demand; the
+fix's effect is on the abort branch, which doesn't fire under normal conditions — the next real
+Kalshi-latency abort is the real-world proof). Reversible: single-line revert. Merged to `dev`
+same run.
+
+**Improvement (done, not just logged): closed PR #42.** That branch is the common ancestor of
+three separate "fix shipped to prod but never merged to dev" incidents now (23rd run, 28th run,
+this run) — the exact landmine this project keeps re-discovering under different names. Rather
+than log a fourth recommendation to "merge or close it," closed it directly with a comment mapping
+each of its live commits to the PR that actually superseded it, so no work is lost and the stray
+branch stops being a trap for the next run. Two remaining commits on that branch (`06ce7a9` tenant.ts
+typing, `c20457e` daily-cap consolidation) are non-urgent hygiene, not live bugs — left for a fresh
+PR off current `dev` if still wanted, rather than reviving stale history.
+
+**Rule reinforced for future runs:** checking `git merge-base --is-ancestor <commit> origin/dev`
+is necessary but not sufficient — a cherry-picked fix lands under a new SHA and will fail that
+check while still being present. Diff the actual file content/behavior against `dev`, not just
+commit ancestry, before concluding a fix is missing (or present).
+
 ## 2026-07-26 (28th run) — No new Telegram errors; found and fixed a silent regression of the 12th/25th-era surface-scanner severity fix
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 27th run's
