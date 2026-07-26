@@ -2,6 +2,58 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (16th run) — Clean Telegram window; found `daily-digest` has 500'd on every invocation since it was written
+
+**Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 15th run
+(08:16 UTC) through this run (09:07 UTC) — clean. Re-verified the 14th run's memory-compaction
+cooldown fix is still holding: `memory_compaction` rows land exactly at the hourly mark
+(07:07/08:07/09:07 UTC) while `auto_reflect_run` fired 2 extra settlement-triggered calls
+(07:11:11, 07:11:15) that correctly did **not** produce a second compaction — no regression.
+`live_trading_cap_blocked` is correctly suppressed within its 6h cooldown (last fired 04:12:59
+UTC, not stuck — confirmed against the deployed `health-check` source, `cooldownHours: 6`). All
+12 active `cron.job` entries have a 1:1 match in `expected_cron_jobs` — no unmonitored cron gap.
+Zero live order fills/rejections in 6h, consistent with the still-open daily-trade-cap window
+from the 11th run self-clearing around 19:05 UTC today, not a new issue.
+
+**Root cause found and fixed (HIGH — silent since inception):** with no new Telegram alert to
+chase, audited `daily-digest` (the per-user email/SMS trade summary, cron'd daily at 22:00 UTC)
+since it had **zero `compliance_log` rows of any kind, ever** — every other cron'd function logs
+at least a heartbeat row per run. Manually invoking it returned `Internal Server Error`; the edge
+function's own console logs showed why: `TypeError: supabase.rpc(...).catch is not a function`
+at `daily-digest/index.ts:20` — the exact same failure class as the already-fixed 2026-07-06
+`auto-trade` bug (Supabase's query builder is a thenable, not a real `Promise`, so `.catch()`
+doesn't exist on it and throws before the RPC even resolves). This meant **every single scheduled
+run of `daily-digest`, every day since it was written, has thrown an unhandled exception and
+returned a 500** — the feature has never successfully sent one digest to any user. `pg_cron`
+never flagged it because it only checks that the HTTP call completed, not its status code.
+Digging further surfaced two more bugs stacked behind the first: the per-user
+`compliance_log.insert()` used column names (`payload`, `channel`) that don't exist on the table
+(only `metadata` jsonb) and omitted the NOT-NULL `message` column — so even after fixing the
+`.catch()` crash, every insert would have continued failing silently (caught by its own
+`.then(undefined, e => console.warn(...))`), just with no visible error at all.
+
+**Fix (deployed):** (1) replaced `.catch()` with the two-arg `.then(onFulfilled, onRejected)`
+form already used elsewhere in this same file, matching the established fix pattern from the
+2026-07-06 auto-trade incident; (2) corrected the per-user log insert to use `metadata` instead
+of the nonexistent `payload`/`channel` columns, and added the required `message` field; (3) added
+a `daily_digest_run` heartbeat row (`{sent, total}`) on every invocation, matching every other
+cron'd function's pattern, so a future silent failure is visible without needing a manual
+`curl` to discover it. **Verified live:** invoked `daily-digest` directly — first call still 500'd
+(caught the column-name bug via a direct SQL insert test showing `null value in column "message"
+violates not-null constraint`); after the `message` fix, invocation returned `{"ok":true,"sent":0}`
+and a `daily_digest_run` row landed in `compliance_log` immediately (`0/0`, expected — no opted-in
+users have live trades right now). `deno check`: 3 pre-existing type errors unchanged (same
+`ReturnType<typeof createClient>` generic-version gap this project already carries elsewhere),
+zero new. Built in an isolated worktree off `origin/dev` (per the 14th/15th run precedent),
+leaving `fix/live-pilot-instrumentation`'s own WIP untouched. Reversible: single-function revert.
+
+**Not investigated further (scope discipline):** did not chase the still-open
+`fix/live-pilot-instrumentation` branch reconciliation (PR #42) — confirmed via `git diff
+origin/dev...HEAD` that its actual code fixes already landed on `dev` through PR #47's
+consolidation and direct deploys; PR #42 itself is now superseded content sitting in a
+`CONFLICTING` mergeable state. Closing it is a documentation/hygiene call, not a monitoring
+action — left for Onofre alongside the branch's uncommitted WIP, per the 12th/15th run precedent.
+
 ## 2026-07-26 (15th run) — Clean window; consolidated 8 runs of stranded audit history back onto `dev`
 
 **Telegram error state:** Zero new `error`/`critical` compliance_log rows since the 14th run
