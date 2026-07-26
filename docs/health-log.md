@@ -2,6 +2,51 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (28th run) — No new Telegram errors; found and fixed a silent regression of the 12th/25th-era surface-scanner severity fix
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 27th run's
+~20:12 UTC cutoff through invocation (~21:13 UTC) — zero rows, a full clean hour. No new
+`health_check_alert` rows beyond the 27th run's own `kalshi_insufficient_balance` /
+`live_rate_limit_exceeded` pages. **Re-flagging for Onofre, 6th consecutive run:** live account
+still short of the $9.20/leg S-001 needs — still a money decision, outside this run's authority.
+
+**Root cause found and fixed (MED — alert-visibility gap, not a trading bug):** with the error
+front clean, audited `compliance_log` volume by `event_type`/`severity` since the 27th run's
+cutoff and found `surface_scan_complete` logging `severity: "warning"` on every 5-minute scan
+again — the exact noise problem `c29753a` (severity-overload fix, first deployed the 7th run,
+re-verified holding through the 26th run's log) was supposed to have closed for good. Root cause:
+**`c29753a` was deployed straight to prod at the time but never actually merged into `dev`** —
+`git merge-base --is-ancestor c29753a origin/dev` proved it wasn't an ancestor, and `git log
+origin/dev -- supabase/functions/surface-scanner/index.ts` confirms dev's copy of the file has
+always carried the pre-fix logic (`severity: warning` whenever `expected_edge_cents >= 10`, no
+`metadata.high_edge`). Every run since the 7th kept correctly re-verifying the *live* behavior
+and moving on, without checking whether the fix's *source* had actually landed in dev — so nobody
+caught that the fix was one stray redeploy away from silently vanishing. That redeploy happened
+at **19:14:42 UTC today** (confirmed via the Management API's function metadata, `surface-scanner`
+bumped to version 36) from dev-sourced code, instantly reverting prod to the noisy pre-fix
+behavior for the ~2h since — 28 warning-severity rows logged in this run's window alone, same
+"buries real error/critical rows behind routine noise" failure this project has fixed twice
+before under different names (`diagnostic_needed`, `compliance_log` retention).
+
+**Fix (deployed, PR #71 → dev):** cherry-picked `c29753a` onto a fresh `origin/dev`-based branch
+(only conflict was in the narrative doc files, resolved by keeping dev's log history and letting
+this entry supersede it) so the fix is now actually part of dev's history — the landmine that let
+one stray redeploy erase it is closed, not just re-patched. Built in an isolated worktree off
+`origin/dev` (branch-divergence precedent, 11th/23rd–27th runs). **Verified in prod:** `deno
+check` — 5 pre-existing type errors on this file both before and after (unrelated
+`.catch`-on-`PostgrestBuilder` issues), none added; deployed to `uyfnezxmgwitpzsrnkst` and
+invoked directly post-deploy → new `compliance_log` row confirms `severity: "info"`,
+`metadata.high_edge: true` (was `"warning"`, no `high_edge` key, on the immediately-prior
+cron-triggered row 5 minutes earlier). The next cron-triggered row (21:28:00 UTC) also came back
+`info`, confirming the fix holds under the real trigger path, not just the manual invoke.
+Reversible: single-block revert of the metadata/severity change.
+
+**Rule for future runs:** re-verifying a fix is *live* is not the same as confirming it's *in
+dev* — a fix that only exists on a stray branch or was hand-deployed can vanish the next time
+anyone redeploys that function from dev. When re-confirming an old fix is "still holding," also
+check `git merge-base --is-ancestor <fix-commit> origin/dev` once; if it fails, merge it in even
+though the live behavior currently looks fine.
+
 ## 2026-07-26 (27th run) — Verified the 26th run's dedup fix live under a real concurrent trigger; found and fixed a rate-limit blind spot on live orders
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 26th run's
