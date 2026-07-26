@@ -208,7 +208,11 @@ serve(async (_req) => {
   // Evict cache entries that weren't refreshed in this cycle (stale markets).
   // Rows with fetched_at older than 15 minutes are from markets no longer returned
   // by the Kalshi API — they're closed/settled and will cause phantom surface alerts.
-  if (failedSeries.length === 0) {
+  // Must also gate on skippedSeries: a run-budget abort leaves failedSeries empty
+  // (nothing errored — the run just ran out of time) while skippedSeries holds every
+  // series never attempted. Without this check, an abort cycle would delete live
+  // cache rows for markets that are merely unrefreshed, not closed.
+  if (failedSeries.length === 0 && skippedSeries.length === 0) {
     const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     supabase.from("kalshi_markets_cache")
       .delete()
