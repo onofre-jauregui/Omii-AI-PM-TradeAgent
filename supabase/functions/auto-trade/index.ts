@@ -1105,8 +1105,13 @@ async function runS001SurfaceArb(
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const allFilled: string[] = [];
   const seenEvents = new Set<string>();
+  // Set once any leg this cycle reports insufficient_balance — balance doesn't
+  // replenish mid-run, so every alert processed after that point is skipped
+  // without spending a live Kalshi round trip on a doomed order.
+  let accountDepleted = false;
 
   for (const alert of alerts) {
+    if (accountDepleted) break;
     const eventTicker = alert.event_ticker as string;
     if (seenEvents.has(eventTicker)) continue;
 
@@ -1289,7 +1294,22 @@ async function runS001SurfaceArb(
     //    The arb is structural: bracket must sum to 100c, market says it sums to >100c.
     //    time_in_force="day" ensures unfilled live limit orders auto-cancel at market close
     //    instead of sitting open indefinitely. Paper mode fills immediately.
-    const legResults = await Promise.all(tradeable.map(async (leg: any) => {
+    //    Legs are submitted sequentially, not via Promise.all: execute-trade's balance
+    //    pre-flight reads real Kalshi balance per call, and firing all legs concurrently
+    //    made every leg check against the same stale (pre-deduction) balance — each one
+    //    individually "passed" the check while the basket as a whole couldn't afford it,
+    //    so Kalshi rejected the later legs with a real insufficient_balance 400 regardless.
+    //    Concurrent submission also burns the whole per-minute live execute-trade rate
+    //    limit (3) on one basket, leaving zero headroom for any other order that minute.
+    const legResults: { ticker: string; success: boolean; price: number }[] = [];
+    for (const leg of tradeable) {
+      // Account balance won't replenish mid-run — once any leg (this alert or an
+      // earlier one this cycle) reports insufficient_balance, every remaining leg
+      // across every remaining alert is guaranteed to fail the same way. Stop
+      // burning further live round trips and rate-limit budget on a cycle we
+      // already know is underfunded.
+      if (accountDepleted) break;
+
       const feeHurdle = feeHurdleCentsAt(leg.noPrice);
       const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
@@ -1312,8 +1332,13 @@ async function runS001SurfaceArb(
           traceId: runId,
           systemVersion: "v2",
       });
-      return { ticker: leg.ticker, success: result.success, price: leg.noPrice };
-    }));
+      legResults.push({ ticker: leg.ticker, success: result.success, price: leg.noPrice });
+
+      if (result.code === "insufficient_balance") {
+        accountDepleted = true;
+        break;
+      }
+    }
 
     const legsFilled = legResults.filter(r => r.success);
     if (legsFilled.length > 0) {
