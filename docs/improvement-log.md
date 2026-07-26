@@ -2,6 +2,21 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-26 (14th run) — RESOLVED: `compact-memory` cooldown gate checked a `event_type` string that was never written, so it never throttled
+
+**Status:** Deployed (PR #46 → `dev`). Full root-cause writeup in `docs/health-log.md`'s matching
+14th-run entry. `auto-reflect`'s 30-min cooldown checked for `memory_compaction_run`;
+`compact-memory` writes `memory_compaction`. Fixed the read side to match the write side.
+
+**Why it matters ($ / revenue):** `compact-memory` makes up to 2 LLM calls per invocation
+(batch-summarize + cluster-merge, per the 07-23 (3rd) improvement-log entry). With the gate
+broken, every `auto-reflect` invocation — hourly cron *and* every settlement-triggered call from
+`auto-settle` — ran a full compaction, uncapped. On a high-volume trading day this is the exact
+LLM-cost multiplication the gate's own comment warns about. Absolute dollar cost is still small
+at today's `gpt-4o-mini` volumes (same order of magnitude as the 07-23 (3rd) entry's numbers), but
+the *control* meant to bound it as volume scales was silently inert — same class of gap as that
+entry's finding: "the observability/cost-control system wasn't fully doing what its own code
+comments claimed."
 ## 2026-07-25 (7th run) — RESOLVED: `surface-scanner` severity-overload (first logged 07-16, re-proposed with a fix 07-23)
 
 **Status:** Deployed. Full writeup in `docs/health-log.md`'s matching 7th-run entry. `surface_scan_complete`
