@@ -2,6 +2,34 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-25 (7th run) — Clean since the 6th run; deployed the surface-scanner severity fix logged 07-16 and re-proposed 07-23, still undeployed after two prior mentions
+
+**Telegram error state:** Queried `compliance_log` directly for `error`/`critical` severity since
+19:00 UTC (the 6th run's `c20457e` deploy) — zero rows through 00:07 UTC, a clean 5h window.
+`auto_trade_run`, `market_data_fetch`, `auto_reflect_run`, `compact-memory` all logging normally.
+The 6th run's "52/50 daily cap" is still the only non-`info` state and remains correct, not a
+bug (resets at the next UTC day boundary). No unresolved errors found this run — checked
+`getUpdates`/`getWebhookInfo` on the Telegram bot too; it's outbound-alert-only (no inbound
+history to mine), so `compliance_log` is the actual source of truth for "errors coming through
+Telegram," consistent with every prior run's approach.
+
+**Improvement (deployed):** the `surface-scanner` severity-overload fix — logged as a finding on
+07-16 and re-proposed with a full fix + verification plan in `improvement-log.md`'s 07-23 entry —
+had been mentioned twice but never applied. Confirmed still live: a fresh scan at 00:08 UTC wrote
+`surface_scan_complete` at `severity: "warning"` (29 alerts, matching the historical ~98% rate).
+Changed `surface-scanner/index.ts:450` to always log `severity: "info"` for `surface_scan_complete`
+(routine heartbeat, not a health signal) and added `metadata.high_edge` (boolean) so the
+trading-opportunity signal isn't lost, just moved out of the tier reserved for things needing a
+human. `cache_stale` (:365) and `surface_scanner_error` (:494) are untouched and still fire at
+`warning`/`error`. `deno check`: 5 baseline errors (pre-existing `.then().catch()` typing issue,
+none in the changed lines) — same count before and after. Deployed
+(`supabase functions deploy surface-scanner`) and verified live: invoked directly post-deploy →
+new row logged `severity: "info"`, `metadata.high_edge: true` (29 alerts, edge ≥10¢ present);
+the two prior `warning` rows from before the deploy are unchanged, confirming this only affects
+new rows. Reversible: single-field revert, no schema change.
+
+**Reversibility:** single-file, single-field edit plus one additive metadata key. Trivial to revert.
+
 ## 2026-07-25 (6th run) — Telegram/`compliance_log` clean; daily trade cap legitimately maxed (52/50), not a bug; completed the daily-trade-cap consolidation the 5th run unblocked
 
 **Telegram error state:** Queried `compliance_log` directly for `error`/`critical` severity

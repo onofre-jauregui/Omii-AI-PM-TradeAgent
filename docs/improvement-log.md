@@ -2,6 +2,15 @@
 
 Chronological log of concrete improvements surfaced by health checks and reviews.
 
+## 2026-07-25 (7th run) — RESOLVED: `surface-scanner` severity-overload (first logged 07-16, re-proposed with a fix 07-23)
+
+**Status:** Deployed. Full writeup in `docs/health-log.md`'s matching 7th-run entry. `surface_scan_complete`
+now always logs `severity: "info"` with a new `metadata.high_edge` boolean carrying the signal that
+used to overload `severity`; `cache_stale`/`surface_scanner_error` unaffected. Verified live —
+new rows are `info`, prior `warning` rows unchanged. Two prior mentions (07-16 finding, 07-23
+fix-with-verification-plan) had gone undeployed for 9 days; this run applied it since it's a pure
+observability change with zero trading-behavior risk.
+
 ## 2026-07-25 (6th run) — completed the daily-trade-cap consolidation queued since the 2nd run
 
 **Status:** Deployed. Full writeup in `docs/health-log.md`'s matching entry. This closes out the
