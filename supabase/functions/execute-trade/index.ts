@@ -68,6 +68,7 @@ interface LiquidityCheck {
 
 async function checkLiquidity(
   supabase: any,
+  userId: string | null,
   ticker: string,
   side: string,
   action: string,
@@ -92,7 +93,7 @@ async function checkLiquidity(
       : (action === "buy" ? orderbook.no?.asks : orderbook.no?.bids);
 
     if (!book || book.length === 0) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
         `No liquidity on ${side} ${action} side for ${ticker}. Placing limit order instead.`,
         { ticker, side, action, price, amount }
       );
@@ -119,7 +120,7 @@ async function checkLiquidity(
     const priceInDollars = price / 100;
     const contractsNeeded = Math.ceil(amount / priceInDollars);
     if (availableContracts < contractsNeeded) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
         `Insufficient liquidity for ${contractsNeeded} contracts on ${ticker}. Available: ${availableContracts}. Splitting order.`,
         { ticker, needed: contractsNeeded, available: availableContracts }
       );
@@ -538,7 +539,7 @@ serve(async (req) => {
     }
 
     // Check liquidity before placing order
-    const liquidityCheck = await checkLiquidity(supabase, resolvedTicker, side, action, price, amount);
+    const liquidityCheck = await checkLiquidity(supabase, userId, resolvedTicker, side, action, price, amount);
 
     if (liquidityCheck.tickerGone) {
       // Ticker no longer exists on Kalshi (delisted/rolled out of the strike ladder
