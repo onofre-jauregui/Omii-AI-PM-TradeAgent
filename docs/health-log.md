@@ -2,6 +2,53 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (25th run) — Clean window since the 24th run; swept for the same unauthenticated-Kalshi-fetch bug class and found it in two more functions
+
+**Telegram error state:** Queried `compliance_log` for the ~1h10m since the 24th run's 17:08 UTC
+cutoff through this run's invocation (18:18 UTC) — zero new `error`/`critical` rows. The 24th
+run's `kalshi-proxy` 429 fix is holding: zero `api_error` (429) rows since 16:30:21 UTC (before
+the fix deployed) and zero `kalshi_proxy_unauthenticated_fallback` warnings, confirming the
+service-tenant key is still resolving. `kalshi_insufficient_balance` continued firing on its
+5-minute auto-trade cycle (last: 18:10:02, account still $1.66 vs. the $9.20/leg S-001 needs) —
+same real capital shortfall the 23rd/24th runs already flagged. **Re-flagging for Onofre: the
+live account still needs a deposit before S-001 can clear a leg; this remains outside this run's
+authority.**
+
+**Root cause found and fixed (HIGH):** with the 24th run's `kalshi-proxy` fix as a known bug
+class, swept every function calling the Kalshi API directly (`getKalshiBaseUrl`/`KALSHI_BASE_URL`
+grep across all edge functions) for the same anonymous-tier pattern instead of waiting for the
+next 429 alert to point at it. Found two more: `trading-agent`'s `fetch_live_markets` tool
+(the AI chat panel's market browser) and `futures-signal`'s KXFED market fetch both call
+`/markets` with a bare `fetch()` — zero auth headers. `trading-agent`'s no-category browse path
+is the worse of the two: it fires 16 concurrent unauthenticated requests (one per hardcoded
+series) on every category-less call, a bigger 429-risk multiplier than kalshi-proxy's single
+request ever was — and since it's chat-triggered rather than cron-scheduled, its 429s land at
+unpredictable times, which is exactly the "irregular interval" pattern the 24th run used to spot
+kalshi-proxy as browsing-driven.
+
+**Fix (deployed, PR #65):** built in an isolated worktree off `origin/dev` (branch-divergence
+precedent from the 11th/23rd/24th runs). Both functions now sign with the same service-tenant
+credential kalshi-proxy uses (`user_id IS NULL`, seeded 2026-07-14) when available, falling back
+to unauthenticated only if it's missing — identical contract to the 24th run's fix, no new
+credential or config needed. `deno check` on both files shows no new type errors beyond the
+pre-existing `SupabaseClient` generic mismatch already present in the deployed `kalshi-proxy`
+baseline (confirmed by running the same check against unmodified `kalshi-proxy` — not a
+regression). **Verified live:** `futures-signal`'s next natural cron tick (18:19:00 UTC, one
+minute post-deploy) returned 98 KXFED markets — identical to the pre-deploy count — with zero
+new error/critical rows in the surrounding window. `trading-agent`'s fix has no cron trigger to
+invoke from this session (chat tool-call path only); verified by code-path parity with the proven
+kalshi-proxy mechanism and a clean type-check, with real-world confirmation deferred to the next
+live chat market-browse. Reversible: single-PR revert of #65, no schema or credential changes.
+
+**Improvement (logged, not deployed):** this is the third time the same unauthenticated-public-
+fetch pattern has been found and fixed in a different function (`market-data-fetcher` 07-14,
+`kalshi-proxy` today, now `trading-agent`/`futures-signal`) — always reactively, after a 429
+alert or an adjacent-code sweep. Worth a proactive guard: a shared `fetchKalshiPublic()` helper
+in `_shared/kalshi-auth.ts` that all four call sites route through, so a fifth occurrence can't
+exist — the fix becomes structural instead of something to keep re-discovering. Not built this
+run (would touch four call sites' worth of blast radius for a MED-priority hardening item, not
+a live error); queued for a future run or Onofre's call.
+
 ## 2026-07-26 (24th run) — `kalshi-proxy` was serving dashboard market data unauthenticated, causing recurring 429s
 
 **Telegram error state:** Queried `compliance_log` for the 48h since the 23rd run's 16:07 UTC
