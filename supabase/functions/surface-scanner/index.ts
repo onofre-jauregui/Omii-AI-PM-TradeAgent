@@ -447,11 +447,17 @@ serve(async (req) => {
     if (supabase && filteredAlerts.length > 0) {
       supabase.from("compliance_log").insert({
         event_type: "surface_scan_complete",
-        severity: filteredAlerts.some((a) => a.expected_edge_cents >= 10) ? "warning" : "info",
+        // Always "info": this is a routine completion heartbeat, not a system-health
+        // signal. A high-edge detection is a trading-opportunity flag (see
+        // metadata.high_edge below), not something that belongs in the same
+        // severity tier as cache_stale/surface_scanner_error — those still fire at
+        // warning/error elsewhere in this file and are unaffected by this change.
+        severity: "info",
         message: `Surface scan found ${filteredAlerts.length} alerts across ${markets.length} markets (${allAlerts.length} total detections)`,
         metadata: {
           total_markets: markets.length,
           total_alerts: filteredAlerts.length,
+          high_edge: filteredAlerts.some((a) => a.expected_edge_cents >= 10),
           by_type: {
             monotonicity: filteredAlerts.filter((a) => a.alert_type === "monotonicity_violation").length,
             bracket_sum: filteredAlerts.filter((a) => a.alert_type === "bracket_sum_violation").length,
