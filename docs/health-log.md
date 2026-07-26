@@ -2,6 +2,67 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26 (19th run) — Clean Telegram window; `auto-reflect`'s signal-outcome backfill has never run, on three independent bugs stacked in one block
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 18th run's
+11:06 UTC cutoff through invocation (12:07 UTC) — zero rows, a clean ~1h window. `health_check_alert`
+last fired 11:10:09 UTC (`live_trading_cap_blocked`) — verified this is the same known condition
+the 11th run added the check for, not a new bug: live `trades` still holds exactly 52 non-`failed`
+rows (43 `cancelled` + 9 `open`) in the trailing 24h from the 07-25 18:15-19:10 UTC S-001
+concurrency-race window, correctly re-firing after its 6h cooldown expired because the window
+hasn't aged out yet (clears ~19:05 UTC today). No new failure class.
+
+**Also confirmed:** this session's own checkout (`fix/live-pilot-instrumentation`) was still
+pinned at the 14th run at start — `origin/dev` had already reached the 18th via PRs #47-#51. Per
+the 12th/15th/16th/18th run precedent, did not trust this branch's working tree; built in a fresh
+worktree off `origin/dev` instead. The branch-reconciliation flag remains open, still Onofre's call.
+
+**Root cause found and fixed (HIGH — silent since inception, three bugs in one feature):** with
+no new Telegram alert to chase, ran the same event_type/write-site audit the 12th/14th/17th/18th
+runs used, this time against `auto-reflect`'s "Signal Outcome Tracking via source_signal_id" block
+(item 4). Found `deno check` itself flags it: `TS2551: Property 'catch' does not exist on type
+'PostgrestFilterBuilder<...>'` on `supabase.rpc("update_signal_outcomes_from_trades").catch(...)`
+— the same thenable-not-a-real-Promise class as the 2026-07-06 auto-trade bug and the 16th run's
+`daily-digest` bug. The outer `try/catch` around the whole block swallowed the resulting TypeError
+via `console.error`, so **the entire block — including the fallback direct-UPDATE loop after it —
+never ran once.** Confirmed live: 123 `was_acted_on=true` signals, zero ever had `outcome_pnl` or
+`outcome_correct` populated; `update_signal_outcomes_from_trades` has no matching row in `pg_proc`
+— never migrated, so the fallback was the only real implementation and it never executed.
+
+Fixing the crash exposed two more bugs stacked behind it, both of which would have kept the
+feature silently broken even with the crash gone: (1) the update payload wrote to
+`direction_correct`/`profitable`, neither of which exist on the `signals` table (schema only has
+`outcome_pnl`/`outcome_correct`) — every write would have failed its own query; (2) the select
+before it only fetched `id`, so `sig.direction` was always `undefined`, making `directionMatch`
+always `false` even once the write succeeded; (3) **the real blocker for live verification:** the
+per-signal trade lookup filtered `.eq("status", "filled").not("settled_at", "is", null)`, but this
+schema only ever populates `settled_at`/`pnl` once a trade reaches `status="settled"` — confirmed
+live, 752/752 `settled` rows carry `settled_at`, 0/12 `filled` rows do. That combination is
+structurally impossible in this schema, so the join was guaranteed to return zero rows regardless
+of the first two fixes.
+
+**Fix (deployed, PR #52 + #53):** dropped the dead RPC-call attempt (no DB function exists to
+call), selected `direction` alongside `id`, filtered on `outcome_correct` instead of the
+nonexistent `direction_correct`, wrote only the two columns that actually exist, and corrected the
+trade-status filter to `"settled"`. **Verified live, not inferred:** before the status fix, 0
+signals were eligible for backfill under the old `"filled"` filter; after, 79 were correctly
+eligible. Invoked `auto-reflect` post-deploy → `signal_outcomes: {"updated": 56}` (was always `0`
+before this run) — confirmed directly in `compliance_log`'s backing table: `signals.outcome_pnl`
+and `outcome_correct` now populated on 56 rows (26 correct, 30 incorrect — a plausible real split,
+not garbage data). `deno check`: same single pre-existing, unrelated error (`updated_at` on a
+memory row, line 58) as unmodified `origin/dev`; zero new errors on either commit. Built in an
+isolated worktree off `origin/dev`. PRs #52/#53 → `dev` (`e4e1e5c`/`5c3d0a3` squashed,
+self-merged — audit/data-quality fix on a read/write path with no live-order side effects, same
+self-mergeable precedent as the 9th/10th/12th/13th/14th/17th/18th runs), deployed to
+`uyfnezxmgwitpzsrnkst`. Reversible: single-file revert of both commits.
+
+**Why this matters for the platform's actual moat:** this project's own `CLAUDE.md` names the
+community knowledge-sharing flywheel — "wins and losses are reflected into `agent_memory`" — as
+the strategic moat, not the code. `signal_outcomes` backfill is part of that reflection loop
+(closing the gap between "signal fired" and "was it actually right"); it had been fully inert
+since whenever this code was written, silently discarding the exact ground-truth labels that loop
+depends on.
+
 ## 2026-07-26 (18th run) — Clean Telegram window; `checkLiquidity`'s own compliance-log calls have silently no-op'd since inception
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` from the 17th run's
