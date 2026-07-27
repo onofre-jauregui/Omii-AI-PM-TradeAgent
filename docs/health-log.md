@@ -2,6 +2,54 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (36th run) — Clean error window continues (3rd run in a row); S-001 Surface Arb was silently discarding execute-trade leg errors into the same generic "no fill" message as a routine day
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 35th run's
+~18:09 UTC cutoff through this run's ~19:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run). Also checked the last 6h of
+`health_check_alert`/`health_check_run` output: `kalshi_low_balance` is firing/suppressing as
+designed (live account genuinely low, per the 2026-07-25 balance-monitor feature) — correctly
+working monitoring, not a bug. All other activity in the window (`market_data_fetch`,
+`auto_trade_run`, `surface_scan_complete`, `auto_settle_run`, `futures_signal_run`) is `info`.
+
+**Root cause found and fixed (MED — 3rd instance of the observability gap the 34th/35th runs
+closed elsewhere, this time in `auto-trade/index.ts`'s S-001 Surface Arb leg loop):**
+`runS001SurfaceArb`'s per-leg `callExecuteTrade` result (`supabase/functions/auto-trade/index.ts:1315-1335`)
+only ever recorded `result.success` into `legResults` — `result.error`/`result.message` was read
+nowhere. When every leg in a cycle failed for a genuine reason (execute-trade 5xx, bad creds,
+malformed response — anything other than the already-tracked `insufficient_balance` case), the
+strategy's final `details` string fell into the same fixed sentence used for the routine "nothing
+qualified" day: `"Alerts found but all events failed fee hurdle, settled on Kalshi, or tickers
+already held"` — indistinguishable from normal operation in the `auto_trade_strategy_run`
+`compliance_log` row (which is logged at `info` severity unconditionally). Contrast: S-002 and
+S-005's callers already surface `result.error` on failure (via `captureMessage` + the returned
+`detail` string) — S-001 was the one caller of `callExecuteTrade` that dropped it entirely.
+
+**Fix (this run):** Added a `legErrors: string[]` accumulator scoped to the whole `alerts` loop.
+Any leg failure other than `insufficient_balance` (already tracked separately via
+`accountDepleted`, and already visible via the `kalshi_low_balance` health-check alert) now pushes
+`"${ticker}: ${error}"` onto it. If the run ends with zero legs filled AND at least one real leg
+error, (1) the returned `details` string says `"S-001 execute-trade failed on every attempted leg:
+..."` with the actual errors instead of the generic fee-hurdle sentence, and (2) a dedicated
+`s001_leg_execution_failed` `warning`-severity `compliance_log` row is inserted with the full error
+list in `metadata`, matching the standard the 34th/35th runs established (raw error surfaced,
+`warning` severity, additive — no retry/decision logic touched).
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` reproduces the same 17
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop` — identical count and locations before and after, all pre-existing `_shared/tenant.ts`
+Supabase generic-type issues plus unrelated `cityWinLoss`/`lessonsByCity` implicit-`any` findings
+elsewhere in the file — zero new errors from this change). Deployed live via `supabase functions
+deploy auto-trade`. Watched the next scheduled `auto-trade-cron` run (5-min interval) post-deploy:
+`compliance_log` shows `"Surface Arbitrage": no_setup — Alerts found but all events failed fee
+hurdle..."` unchanged for the routine case (no regression — alerts existed but were filtered by
+the fee-hurdle check before ever reaching `callExecuteTrade`, so `legErrors` correctly stayed
+empty) and `auto_trade_run` completed `0 traded, 0 errors, 0 halted`. The new
+`s001_leg_execution_failed` path hasn't fired yet since no genuine leg failure occurred in the
+verification window — same standard as the 35th run's fix: this makes the *next* real failure
+visible, it doesn't manufacture one to prove itself. **Reversibility:** easy — single-file diff,
+git revert; no schema or data changes.
+
 ## 2026-07-27 (35th run) — Clean error window continues; found and fixed the same silent-JSON-failure gap as the 34th run's kalshi-proxy fix, in the shared orderbook-read path
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 34th run's
