@@ -4,6 +4,15 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-27 — Paper trading simulates real fill risk + Kalshi fees (PR #81)
+
+**Decision:** Rewrote `execute-trade`'s paper branch to simulate fills against the real, public Kalshi orderbook (`_shared/fill-sim.ts`: `simulatePaperFill`, `estimateKalshiFee`) instead of unconditionally inserting `status:"filled"` at the exact requested price with $0 fee. Added a `paper-reconcile` cron to advance resting paper orders over time, the same way `reconcile-orders` does for live. Adopted `docs/design/full-transaction-cost.md`'s schema (`entry_fee_cents`/`exit_fee_cents`/`ai_qualify_cost_usd`/`net_pnl`) for fee accounting.
+**Finding:** Paper S-001 showed 354 attempts / 12 fills / $930.77 P&L while live S-001 had placed 265 real order attempts and filled zero — paper was measuring signal-detection quality only, not real fill risk, making it useless as a live-performance preview (the entire point of paper mode).
+**Options:** A) Simpler ad-hoc `fee_dollars` column — rejected once a more thorough, already-written, unmerged design (`feat/full-transaction-cost-tracking` worktree, 2026-07-23, awaiting sign-off) was found covering the same need with a more complete two-layer cost model. B) Adopt that design's schema (Option A within it: direct cost per-trade, shared AI cost as a separate platform-overhead line) — chosen, per Onofre's confirmation.
+**Why:** Live captures Kalshi's own reported fee from the real order response (zero formula risk); only paper needs to estimate via the published fee formula, since there's no real order to read a fee from. `ai_qualify_cost_usd` ships nullable/unpopulated — no per-model pricing table exists yet; scoping it out now rather than faking it, per the design's own two-layer split.
+**Reversibility:** Easy — new columns are additive/nullable, `paper-reconcile-cron` can be unscheduled, `checkLiquidity`'s refactor is behavior-preserving (verified via `deno check` error-count parity against `origin/dev`).
+**Trace:** PR #81 on `feature/paper-fill-realism` → `dev`. `docs/design/full-transaction-cost.md`.
+
 ## 2026-07-26 — Fixed health-check's kalshi_low_balance alert: doubled URL path, 404'd since inception
 
 **Decision:** In `health-check/index.ts`'s live-balance check, fetch `${KALSHI_BASE_URL}/portfolio/balance` instead of `${KALSHI_BASE_URL}${path}` where `path` was already the full `/trade-api/v2/portfolio/balance`.

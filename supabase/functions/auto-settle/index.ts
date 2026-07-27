@@ -161,7 +161,7 @@ serve(async (req) => {
       //    Langfuse scoring if auto-settle fires twice before the first run commits.
       const { data: trades, error: tradesErr } = await supabase
         .from("trades")
-        .select("id, user_id, side, action, price, amount, created_at, trace_id, mode")
+        .select("id, user_id, side, action, price, amount, created_at, trace_id, mode, entry_fee_cents, exit_fee_cents")
         .in("id", tradeIds)
         .eq("status", "filled")
         .is("settled_at", null);
@@ -173,12 +173,14 @@ serve(async (req) => {
 
       let settledInTicker = 0;
       for (const t of trades) {
-        const { pnl, outcome } = computePnl(
+        const feeCents = (t.entry_fee_cents ?? 0) + (t.exit_fee_cents ?? 0);
+        const { pnl, netPnl, outcome } = computePnl(
           t.side as string,
           t.action as string,
           Number(t.price),
           Number(t.amount),
-          resolution
+          resolution,
+          feeCents
         );
 
         // 4. Update the trade row
@@ -189,6 +191,7 @@ serve(async (req) => {
             settled_at: new Date().toISOString(),
             resolution: resolution === "yes" || resolution === "no" ? resolution : "void",
             pnl: Math.round(pnl * 100) / 100,
+            net_pnl: Math.round(netPnl * 100) / 100,
           })
           .eq("id", t.id);
 
@@ -394,11 +397,19 @@ serve(async (req) => {
     //    would destroy a real outcome. Live orders settle via market resolution (the
     //    pending-resolution view now includes live) or are handled by reconcile-orders;
     //    anything that genuinely can't resolve stays 'filled' for manual review.
+    //
+    //    Includes 'open'/'partial' — since paper fills are now simulated against the
+    //    real orderbook (may never fill, or only partially), a paper order still
+    //    resting at the underlying market's close never would have (fully) filled
+    //    live either. Crediting any pnl there is exactly the phantom-win problem this
+    //    whole system exists to avoid, so it washes out at pnl=0 like a fully-filled
+    //    expired trade — known simplification: a partial fill's already-filled
+    //    sub-quantity isn't separately priced here, the whole position washes to $0.
     const expiryCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const { data: expiredByTime } = await supabase
       .from("trades")
       .select("id, ticker")
-      .eq("status", "filled")
+      .in("status", ["filled", "open", "partial"])
       .eq("mode", "paper")
       .is("settled_at", null)
       .not("expiration_time", "is", null)
@@ -410,6 +421,7 @@ serve(async (req) => {
         settled_at: new Date().toISOString(),
         resolution: "expired",
         pnl: 0,
+        net_pnl: 0,
       }).in("id", expiredByTime.map((t: any) => t.id));
       await supabase.from("compliance_log").insert({
         event_type: "auto_settle_expiry_sweep",

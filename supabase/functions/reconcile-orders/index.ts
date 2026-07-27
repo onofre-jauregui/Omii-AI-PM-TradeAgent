@@ -107,6 +107,11 @@ serve(async (req) => {
           const initialCount = contractCount(trade.amount, trade.price);
           const avgPriceCents = pickAvgPrice(kalshiOrder);
           const decision = decideReconcile(kStatus, remaining, initialCount);
+          // Kalshi's own fee fields on the order object — captured verbatim,
+          // same as execute-trade's immediate-fill path (zero formula risk).
+          const entryFeeCents = Math.round(
+            parseFloat(kalshiOrder.maker_fees_dollars ?? kalshiOrder.taker_fees_dollars ?? "0") * 100
+          );
 
           if (decision === "cancel") {
             await updateTrade(supabase, trade.id, {
@@ -121,6 +126,7 @@ serve(async (req) => {
               status: "filled",
               filled_price: avgPriceCents ?? trade.price,
               filled_at: new Date().toISOString(),
+              entry_fee_cents: entryFeeCents,
             });
             await logCompliance(supabase, userId, trade.id, "order_filled",
               `Live order ${trade.order_id} fully filled`, { order_id: trade.order_id, avg_price: avgPriceCents });
@@ -130,6 +136,7 @@ serve(async (req) => {
             await updateTrade(supabase, trade.id, {
               status: "partial",
               filled_price: avgPriceCents ?? trade.price,
+              entry_fee_cents: entryFeeCents,
             });
             summary.partial++;
           } else {
