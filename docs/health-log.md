@@ -2,6 +2,68 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (16th run) — Clean window since the 15th run; found and fixed a second instance of the same alert-dedup race the 15th run only partially closed
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 15th run's
+01:12 UTC cutoff through invocation (02:20 UTC) — zero rows, another clean window. The only
+non-`info` activity is the account's live Kalshi balance sitting at $1.66 (real, live-fetched
+via `GET /portfolio/balance` each call, not a stale cache — checked, since a caching bug would
+have been a real false-positive) against a ~$9-10 typical order requirement: 14
+`order_skipped_insufficient_balance` warnings and 3 `liquidity_fallback` warnings in this
+window (79 skips / ~6h total), all correctly pre-empted before any Kalshi round trip per the
+07-25 pre-flight-balance fix — working as designed, not a bug. Both dedicated alerts
+(`kalshi_insufficient_balance`, `kalshi_low_balance`) fired once each on their own cooldowns
+(00:10:06, 00:43:18 UTC) with zero re-fires despite dozens of qualifying cron cycles since —
+this is real evidence the 15th run's dedup fix is holding, on top of the synthetic RPC test
+that run already ran.
+
+**Root cause found and fixed (MED — a real, still-live gap in the same fix class the 15th run
+addressed):** the 15th run's `alertOnce()` fix only covers callers of that shared helper
+(`execute-trade`, `auto-reflect`, `signal-generator`, `surface-scanner`, etc.). Read
+`health-check/index.ts` itself line by line rather than assuming "the alert-dedup race is fixed"
+now covered every alerting path, and found it has its **own separate** `isDuped()` — a plain
+SELECT-then-INSERT, the exact pattern that caused the 15th run's triple-page — used for all 10
+of its own internal checks (`kalshi_low_balance`, `trading_silence`, `cron_stale`,
+`live_trading_cap_blocked`, etc.). Confirmed this isn't a branch-divergence artifact: diffed
+against `origin/dev` directly (this branch's local copy is stale — missing PR #44/#45/#75 and
+counting — per the still-open 12th-run branch-reconciliation flag) and `origin/dev`'s actual
+deployed `isDuped()` has the identical unpatched race. The trigger here is concurrent
+*invocations* of health-check (e.g. an overlapping manual + cron run) rather than concurrent
+basket legs, so lower-probability than what the 15th run fixed, but the same bug class and
+cheap to close.
+
+**Fix (deployed, PR #76 → `dev`, merge `02:43:12Z`):** replaced `isDuped()` + the manual
+insert with the same `claim_health_check_alert()` RPC `alertOnce()` uses. Preserved two
+correctness properties `alertOnce()` itself doesn't have and that this file's own code
+intentionally added: delivery-failure rollback (`unclaimAlert()` deletes the just-claimed row
+if `sendTelegram` fails, so a dead Telegram delivery doesn't silently eat the next retry for a
+full cooldown window) and `diagnostic_context` folding (via an `UPDATE` on the claimed row
+instead of the old separate insert). Built in an isolated worktree off `origin/dev` (per the
+12th/14th/15th run's branch-divergence lesson) — this branch's own diverged/stale
+`health-check/index.ts` was never touched. **Verified:** `deno check` 12/12 baseline errors
+before and after, none in the changed lines; invoked live post-deploy
+(`{"ok":true,"alerts_sent":[],"alerts_skipped":["kalshi_low_balance"]}`, no crash, existing
+cooldown respected); fired two genuinely concurrent `claim_health_check_alert` calls against a
+fresh test fingerprint via the Management API — first returned `true`, second `false`,
+confirming the advisory lock serializes concurrent claims exactly like the 15th run's test did
+for the other call site (test row deleted after). Reversible: revert the two functions
+(`claimAlert`/`unclaimAlert`) back to `isDuped()` + the original insert block.
+
+**Improvement (this run's finding, folded into the fix rather than logged separately):** the
+15th run's own process lesson — "grep for at least one call site before marking an RPC-backed
+fix complete" — get applied here in the *other* direction: this run should not have assumed
+"the alertOnce fix closed alert-dedup races" without grepping for every place `compliance_log`
+is used as a dedup store, not just every `alertOnce` call site. Recommend a standing check for
+future runs: `grep -rn "isDuped\|check-then-act\|SELECT.*maybeSingle" supabase/functions/` before
+closing out any alert-dedup-race finding, since a helper being fixed doesn't mean every caller
+uses the helper.
+
+**Process note:** the 12th-run branch-reconciliation flag (this branch vs. `dev`, diverged
+since PR #40, now also missing PR #44/#45/#75/#76) is still open and unresolved — still
+Onofre's call, not re-investigated this run. This run's fix landed on `dev` via its own
+isolated worktree, same as the 14th/15th run's approach, so it isn't blocked by the
+divergence — but the underlying reconciliation still hasn't happened.
+
 ## 2026-07-26/27 (15th run) — Clean window (18h+); found and finished a half-shipped fix (alert-dedup RPC deployed but never called)
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 14th run's
