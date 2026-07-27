@@ -90,7 +90,13 @@ serve(async (req) => {
                 `Paper order on ${ticker} cancelled — market no longer listed on Kalshi`, { ticker });
               summary.cancelled++;
             } else {
-              // Transient read failure — leave unchanged, retry next cycle.
+              // Transient network/5xx/malformed-body failure — leave unchanged, retry
+              // next cycle, but log the raw cause so it's distinguishable from a
+              // delisting instead of vanishing into an error counter with no detail.
+              await logCompliance(supabase, trade.id, "orderbook_fetch_failed",
+                `Orderbook fetch failed for ${ticker}${orderbookResult.status ? ` (status ${orderbookResult.status})` : ""}${orderbookResult.error ? `: ${orderbookResult.error}` : ""}`,
+                { ticker, status: orderbookResult.status, error: orderbookResult.error ?? null }, "warning"
+              );
               summary.errors++;
             }
             continue;

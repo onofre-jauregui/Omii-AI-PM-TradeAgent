@@ -2,6 +2,52 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (35th run) — Clean error window continues; found and fixed the same silent-JSON-failure gap as the 34th run's kalshi-proxy fix, in the shared orderbook-read path
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 34th run's
+post-deploy verification pass (17:08 UTC) through this run's ~18:09 UTC invocation — zero new
+rows. Most recent `error`-severity row is still `d1514b15` (16:29:30 UTC, the kalshi-proxy parse
+failure the 34th run fixed). All activity in the window was `info` (market-data-fetcher, futures
+signals, surface scan, compact-memory, auto-reflect) — no new failure.
+
+**Root cause found and fixed (MED — observability gap in the shared `fetchOrderbook` read path,
+same class as the 34th run's kalshi-proxy fix):** `supabase/functions/_shared/kalshi-market-data.ts`
+wraps its Kalshi orderbook fetch in a `try/catch` that discards the actual error on any exception
+(network failure, non-2xx before the body is read, or `response.json()` throwing on a malformed
+body) and returns a bare `{ ok: false, tickerGone: false, status: null }` — no raw message, no
+distinction from a normal 404. Both callers then treated a **genuine failure identically to an
+expected ticker delisting**: `execute-trade`'s `checkLiquidity` silently fell through to
+`retry_with_limit` with no log line at all when `tickerGone` was false, and `paper-reconcile`'s
+reconciliation loop incremented an `errors` counter with zero detail ("Transient read failure —
+leave unchanged, retry next cycle"). If Kalshi's orderbook endpoint had started failing or
+returning malformed bodies, there would have been no way to see it — exactly the invisible-failure
+pattern the 34th run's fix closed for `kalshi-proxy`, just one hop over in a different shared
+module neither call site of which had been touched by that fix.
+
+**Fix (this run):** `fetchOrderbook` now captures the caught exception's message onto the failure
+result as `error?: string` (additive field, existing `tickerGone`/`status` unchanged). Both call
+sites — `execute-trade/index.ts` (`checkLiquidity` and the paper-fill skip path) and
+`paper-reconcile/index.ts` (the reconcile loop's transient-failure branch) — now log a
+`orderbook_fetch_failed`/`warning` `compliance_log` row with the ticker, status, and raw error
+whenever the failure isn't a real delisting, instead of the failure being invisible (execute-trade
+liquidity check) or logged with no cause (paper-reconcile). No decision logic changed — same
+retry/fallback behavior, only visibility added.
+
+**Verified:** `deno check` on all three modified files reproduces the same 20 pre-existing type
+errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git stash pop` — count
+identical before and after, all in `_shared/tenant.ts` Supabase generic-type resolution, zero new
+errors introduced). Deployed live via `supabase functions deploy execute-trade` and
+`supabase functions deploy paper-reconcile`. Called both live: `paper-reconcile` returned
+`{"ok":true,"checked":0,...,"errors":0,"message":"no resting paper orders"}` (clean run, no
+resting paper positions currently open to exercise the new log path against); `execute-trade`
+returned its normal validation error on an empty body (`Missing required fields...`), confirming
+the deploy is live and the non-crash path is intact. Checked `compliance_log` post-deploy through
+the next few scheduled runs (market-data-fetcher, futures-signal, surface-scanner, compact-memory,
+auto-reflect all completed at `info` severity, 18:06–18:09 UTC) — zero new errors, consistent with
+normal operation. The new log path itself hasn't fired yet since no orderbook fetch failure
+occurred in the verification window — this fix makes the *next* one visible, same standard as the
+34th run's fix. **Reversibility:** easy — three-file diff, git revert; no schema or data changes.
+
 ## 2026-07-27 (34th run) — First error in 45h: kalshi-proxy threw on a malformed Kalshi response with no visibility into the actual body; fixed to capture and degrade gracefully
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 33rd run's
