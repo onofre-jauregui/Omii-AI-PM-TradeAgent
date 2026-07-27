@@ -4,6 +4,15 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-26 — Fixed health-check's kalshi_low_balance alert: doubled URL path, 404'd since inception
+
+**Decision:** In `health-check/index.ts`'s live-balance check, fetch `${KALSHI_BASE_URL}/portfolio/balance` instead of `${KALSHI_BASE_URL}${path}` where `path` was already the full `/trade-api/v2/portfolio/balance`.
+**Finding:** `KALSHI_BASE_URL` (`_shared/kalshi-signing.ts`) already ends in `/trade-api/v2`; appending the fully-qualified signed path doubled the segment (`.../v2/trade-api/v2/portfolio/balance`), which Kalshi 404's. `if (!resp.ok) continue` swallowed every failure silently, so `kalshi_low_balance` had zero rows in `compliance_log` — ever — despite the live account sitting at $1.66 (floor $15) for hours today. execute-trade's separate per-order `kalshi_insufficient_balance` alert (correct URL construction there, matched against `getKalshiBaseUrl()`) still caught the condition reactively, which is the only reason it wasn't silent end-to-end — but the proactive early-warning this function exists for had never once fired since it was added.
+**Options:** A) Leave it — the reactive execute-trade alert already covers the user-facing outcome — rejected, this function's entire purpose is catching it *before* orders start failing, and a monitoring path that silently no-ops is worse than one that's absent (looks healthy, isn't). B) Fix the URL construction — chosen, one-line change, zero trading-logic surface.
+**Why:** Monitoring-only code path (GET balance + Telegram send, no order placement) — safe to fix and deploy unattended, unlike the 2026-07-20 market-data-fetcher finding (that one fed live execution and was correctly left for review). Verified root cause directly against the live Kalshi API before touching code: doubled path → 404, correct path → 401 (auth required, as expected unauthenticated) — not a guess.
+**Reversibility:** Easy — single-line revert, redeploy `health-check`.
+**Trace:** PR #75, deployed to `uyfnezxmgwitpzsrnkst`. Verified live: manual invoke → `alerts_sent: ["kalshi_low_balance"]`, confirmed row `a8899b4c` in `compliance_log` at 2026-07-27T00:43:18Z.
+
 ## 2026-07-26 — Atomic advisory-lock dedup for the shared Telegram alert helper
 
 **Decision:** Added `claim_health_check_alert` (Postgres function, transaction-scoped
