@@ -2,6 +2,52 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (38th run) — Clean error/critical window continues (5th run in a row); the 36th run's new `s001_leg_execution_failed` observability path fired for real and exposed a genuine live-trade-starvation bug in the rate limiter
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 37th run's
+~20:06 UTC cutoff through this run's ~21:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run). Breaking down all activity in the
+window by `event_type`/`severity` surfaced one `warning`-severity `s001_leg_execution_failed` row
+(20:10:09 UTC) — the exact path the 36th run added — reporting all 5 attempted S-001 legs failing
+with `"Rate limit exceeded. Maximum 3 trades per minute."` This isn't a new bug in that observability
+path; it's that path doing its job and surfacing something worth investigating.
+
+**Root cause found and fixed (MED-HIGH — live-trading rate limiter shares its counter with paper
+trading, letting paper activity silently starve live orders): `supabase/functions/execute-trade/index.ts`'s
+`checkRateLimit` calls `upsert_rate_limit` with a hardcoded `p_endpoint: "execute-trade"` regardless
+of trade mode, and the `rate_limits` table's unique constraint is `(user_id, endpoint, window_start)`
+— no mode column. Paper trades are allowed 15/min, live trades only 3/min, but both increment the
+*same* counter under the *same* key. Pulling the exact one-second window from `compliance_log`
+(20:10:06–20:10:09 UTC) for `user_id ea207ba1-…` showed 3 `order_submitted` (paper) rows immediately
+followed by 5 `rate_limit_exceeded` (live) rows for the same user — the 3 paper fills alone pushed
+the shared counter to 3+, so every one of the 5 live legs was rejected against the 3/min live cap
+before a single live order that minute had actually been attempted. `pg_get_functiondef` on
+`upsert_rate_limit` confirmed the RPC increments strictly on `(user_id, endpoint, window_start)` with
+no mode awareness, and `checkRateLimit` is the RPC's only caller in the codebase (grepped) — this is
+not a one-off, it's structural: any user running both paper and live strategies has their live
+execute-trade budget silently subject to depletion by unrelated paper activity, with no log line
+distinguishing "live actually got 3/3 live orders through" from "live got zero because paper used the
+budget first."
+
+**Fix (this run):** `checkRateLimit` now passes `p_endpoint: isPaper ? "execute-trade:paper" :
+"execute-trade:live"` — one string change, giving paper and live independent counters under the
+existing free-text `endpoint` column (no schema migration needed; old bare `"execute-trade"` rows
+simply age out with their per-minute `window_start`). No retry/decision logic touched — the 3/min and
+15/min caps themselves are unchanged, only which counter each mode increments.
+
+**Verified:** `deno check supabase/functions/execute-trade/index.ts` reproduces the same 20
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop`, identical count and locations before and after — zero new errors). Deployed live via
+`supabase functions deploy execute-trade`. Polled `rate_limits` post-deploy: a new
+`execute-trade:live` row appeared within one cron cycle, confirming the mode-scoped key is live and
+being written. Checked `compliance_log` from deploy through 21:12 UTC: zero `rate_limit_exceeded` and
+zero `s001_leg_execution_failed` rows, `auto_trade_strategy_run`/`auto_trade_run` continuing at
+`info` severity with no regression. One `health_check_alert` (`live_rate_limit_exceeded`) fired at
+21:10 UTC, but its fingerprint is a 2h lookback bucket and 2h cooldown — it's correctly reporting the
+*pre-fix* 20:10 UTC incident still inside that window, not a new post-deploy failure; confirmed no
+`rate_limit_exceeded` rows exist between the fix's deploy and this alert. **Reversibility:** easy —
+single-line key change, git revert; no schema or data changes, existing rate_limit caps untouched.
+
 ## 2026-07-27 (37th run) — Clean error window continues (4th run in a row); S-002 Resolution Fade's 2h time-based position close had the same silent-error gap the 36th run closed for S-001's leg loop
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 36th run's
