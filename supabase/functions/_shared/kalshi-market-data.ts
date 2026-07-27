@@ -22,12 +22,14 @@ export interface Orderbook {
 
 export type FetchOrderbookResult =
   | { ok: true; orderbook: Orderbook }
-  | { ok: false; tickerGone: boolean; status: number | null };
+  | { ok: false; tickerGone: boolean; status: number | null; error?: string };
 
 /**
  * Real-time public orderbook read for a single ticker. 404/410 mean the
  * market doesn't exist or was delisted (e.g. a bracket rolled out of the
- * strike ladder) — every other failure is transient (network/5xx).
+ * strike ladder) — every other failure is transient (network/5xx/malformed
+ * body). `error` carries the raw exception message on that path so callers
+ * can log it instead of the failure being indistinguishable from a delisting.
  */
 export async function fetchOrderbook(
   kalshiBase: string,
@@ -44,7 +46,12 @@ export async function fetchOrderbook(
     }
     const orderbook = (await response.json()) as Orderbook;
     return { ok: true, orderbook };
-  } catch {
-    return { ok: false, tickerGone: false, status: null };
+  } catch (err) {
+    return {
+      ok: false,
+      tickerGone: false,
+      status: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }

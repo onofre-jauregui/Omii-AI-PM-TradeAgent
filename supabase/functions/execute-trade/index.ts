@@ -84,6 +84,15 @@ async function checkLiquidity(
       // out of the strike ladder between signal detection and execution) — submitting
       // an order to Kalshi for it will always fail. Flag it so the caller skips the
       // doomed order submission instead of wasting a round trip on a dead ticker.
+      if (!result.tickerGone) {
+        // Transient network/5xx/malformed-body failure, not a real delisting — log it
+        // so a genuine Kalshi outage is visible instead of silently falling through to
+        // the same retry path as an expected ticker rollout.
+        await logCompliance(supabase, userId, null, "orderbook_fetch_failed", "warning",
+          `Orderbook fetch failed for ${ticker}${result.status ? ` (status ${result.status})` : ""}${result.error ? `: ${result.error}` : ""}`,
+          { ticker, status: result.status, error: result.error ?? null }
+        );
+      }
       return { sufficient: false, fallbackAction: "retry_with_limit", tickerGone: result.tickerGone };
     }
 
@@ -444,8 +453,8 @@ serve(async (req) => {
         }).select().single();
 
         await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_ticker_gone", "warning",
-          `Paper: skipped ${resolvedTicker} — real orderbook unavailable (tickerGone: ${orderbookResult.tickerGone})`,
-          { ticker: resolvedTicker, trace_id: traceId }
+          `Paper: skipped ${resolvedTicker} — real orderbook unavailable (tickerGone: ${orderbookResult.tickerGone}${orderbookResult.error ? `, error: ${orderbookResult.error}` : ""})`,
+          { ticker: resolvedTicker, trace_id: traceId, status: orderbookResult.status, error: orderbookResult.error ?? null }
         );
 
         return new Response(JSON.stringify({
