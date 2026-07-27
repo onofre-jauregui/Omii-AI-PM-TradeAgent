@@ -4,6 +4,13 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-27 — Fixed migrate-staging's silent-failure swallow; deliberately did not re-key VERSION or re-run the backlog
+**Decision:** In `.github/workflows/ci.yml`'s `migrate-staging` job, a failed migration `curl -sf` now `exit 1`s the job, and the `schema_migrations` history INSERT only runs after a confirmed-successful apply.
+**Options:** A) Fix all three items from the prior entry's proposed fix (fail-loud, record-on-success-only, full-stem VERSION + backlog re-run) in one pass — rejected, re-keying VERSION makes all ~40 existing history rows look unapplied and would re-trigger the entire backlog against live shared staging with unverified idempotency. B) Fix only fail-loud + record-on-success (chosen) — closes the "reports success on failure" root cause for every future migration without touching existing history rows or triggering any DB writes this run.
+**Why:** The swallow-and-record bug is a pure CI-config defect, safe to fix unattended (zero migrations executed, zero deploys). The VERSION re-key + backlog re-run is a data-shaped decision on live shared infrastructure that needs an explicit reset call — same blast-radius line the prior entry drew.
+**Reversibility:** Easy — single-file workflow diff, git revert.
+**Trace:** PR (this run, 33rd health-check), `docs/health-log.md` 33rd-run entry.
+
 ## 2026-07-27 — Flagged: staging Supabase DB is largely unmigrated despite CI claiming success (not auto-fixed)
 
 **Decision:** Logging as a critical finding for review rather than attempting a fix — this is shared CI/deploy infrastructure, not scoped to any one feature.
