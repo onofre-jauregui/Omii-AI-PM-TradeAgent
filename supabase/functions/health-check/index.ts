@@ -448,9 +448,15 @@ serve(async (req) => {
       try {
         const { keyId, privateKey } = await getKalshiCredentials(supabase, user_id);
         if (!keyId || !privateKey) continue;
+        // Sign against the full path (Kalshi's HMAC scheme includes it), but fetch
+        // against KALSHI_BASE_URL alone — it already ends in /trade-api/v2, so
+        // appending the full path here doubled the segment (.../v2/trade-api/v2/...),
+        // Kalshi 404'd every call, and the silent `if (!resp.ok) continue` below
+        // swallowed it — this alert has never once fired, including today, with the
+        // live account sitting at $1.66 (floor $15) for hours.
         const path = "/trade-api/v2/portfolio/balance";
         const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
-        const resp = await fetch(`${KALSHI_BASE_URL}${path}`, { headers });
+        const resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, { headers });
         if (!resp.ok) continue; // don't let a transient Kalshi/auth hiccup page anyone
         const data = await resp.json();
         const balanceUsd = (data?.balance ?? 0) / 100;
