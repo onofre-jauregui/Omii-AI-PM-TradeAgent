@@ -68,6 +68,7 @@ interface LiquidityCheck {
 
 async function checkLiquidity(
   supabase: any,
+  userId: string | null,
   ticker: string,
   side: string,
   action: string,
@@ -92,7 +93,7 @@ async function checkLiquidity(
       : (action === "buy" ? orderbook.no?.asks : orderbook.no?.bids);
 
     if (!book || book.length === 0) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
         `No liquidity on ${side} ${action} side for ${ticker}. Placing limit order instead.`,
         { ticker, side, action, price, amount }
       );
@@ -119,7 +120,7 @@ async function checkLiquidity(
     const priceInDollars = price / 100;
     const contractsNeeded = Math.ceil(amount / priceInDollars);
     if (availableContracts < contractsNeeded) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
         `Insufficient liquidity for ${contractsNeeded} contracts on ${ticker}. Available: ${availableContracts}. Splitting order.`,
         { ticker, needed: contractsNeeded, available: availableContracts }
       );
@@ -538,7 +539,7 @@ serve(async (req) => {
     }
 
     // Check liquidity before placing order
-    const liquidityCheck = await checkLiquidity(supabase, resolvedTicker, side, action, price, amount);
+    const liquidityCheck = await checkLiquidity(supabase, userId, resolvedTicker, side, action, price, amount);
 
     if (liquidityCheck.tickerGone) {
       // Ticker no longer exists on Kalshi (delisted/rolled out of the strike ladder
@@ -782,6 +783,16 @@ serve(async (req) => {
       await alertOnce(supabase, "kalshi_order_rejected", `${resolvedTicker}_${kalshiResponse.status}`, 1,
         `❌ <b>[TradeAgent] Kalshi Order Rejected</b>\nStatus: ${kalshiResponse.status}\nTicker: ${resolvedTicker} (${side.toUpperCase()} ${action})\nReason: ${kalshiErrorDetail.slice(0, 200)}`
       );
+
+      // Systemic-outage escalation — a per-ticker rejection alert reads as "this one market
+      // is bad" even when the real cause blocks 100% of order submissions (e.g. Kalshi
+      // deprecating the endpoint this code calls). Fire one unmistakable critical page,
+      // deduped globally, so an outage doesn't hide as N separate low-signal per-ticker alerts.
+      if (kalshiResult?.code === "deprecated_v1_order_endpoint") {
+        await alertOnce(supabase, "kalshi_order_endpoint_deprecated", "global", 6,
+          `🔴 <b>[TradeAgent] ALL Kalshi order submissions are failing</b>\nKalshi has deprecated the /portfolio/orders endpoint this system uses (410 deprecated_v1_order_endpoint). Every live and paper order is being rejected — this is a total trading outage, not an isolated ticker issue.\nFix requires migrating execute-trade to POST /portfolio/events/orders (new bid/ask + fixed-point-dollar schema). See docs/improvement-log.md.`
+        );
+      }
 
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
       if (liquidityCheck.fallbackAction && !liquidityCheck.sufficient) {

@@ -4,6 +4,11 @@ import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL, fetchWithRe
 import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant } from "../_shared/tenant.ts";
 
+// Module-level, so it resets on cold start but doesn't spam compliance_log on
+// every warm-instance request — one warning per instance lifetime is enough
+// to catch a silent regression back to the anonymous (rate-limited) tier.
+let loggedMissingServiceKey = false;
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight(req, "extended");
 
@@ -39,6 +44,25 @@ serve(async (req) => {
 
       const timestamp = Date.now();
       headers = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, req.method, apiPath, timestamp);
+    } else {
+      // Public data doesn't require a per-user key, but signing with the
+      // service-tenant credential (seeded 2026-07-14 for market-data-fetcher)
+      // moves these calls off Kalshi's lowest anonymous rate tier onto the
+      // authenticated tier. No key configured → fall back to unauthenticated,
+      // same as before. Read-only endpoints only, so this never risks a trade.
+      const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
+        await getKalshiCredentials(adminClient, null);
+      if (serviceKeyId && servicePrivateKey) {
+        const timestamp = Date.now();
+        headers = await generateAuthHeaders(serviceKeyId, servicePrivateKey, req.method, apiPath, timestamp);
+      } else if (!loggedMissingServiceKey) {
+        loggedMissingServiceKey = true;
+        await adminClient.from("compliance_log").insert({
+          event_type: "kalshi_proxy_unauthenticated_fallback",
+          severity: "warning",
+          message: "kalshi-proxy public endpoint has no service-tenant Kalshi key — falling back to the anonymous rate tier (429-prone).",
+        });
+      }
     }
 
     const kalshiUrl = new URL(`${KALSHI_BASE_URL}/${endpoint}`);

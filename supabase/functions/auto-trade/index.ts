@@ -9,7 +9,6 @@ import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
-import { countTradesInWindow } from "../_shared/limits.ts";
 import {
   computeWinStreakFromTrades,
   s002VolumeCheck,
@@ -219,18 +218,11 @@ async function countOpenPositions(
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // Prefer stored expiration_time; fall back to ticker parsing for older trades.
-  // Includes resting orders (open/partial), not just filled — a resting live order
-  // still reserves capital and exchange exposure even before it fills, and Kalshi's
-  // self_trade_prevention_type="taker_at_cross" will cancel our own resting order
-  // if a later one we place crosses it, which is exactly what was happening when
-  // this only counted 'filled': every 5-minute cron cycle kept piling new orders
-  // onto the same persistent bracket-sum violation while the prior cycle's orders
-  // were still resting, unseen by this cap.
+  // Prefer stored expiration_time; fall back to ticker parsing for older trades
   let query = supabase
     .from("trades")
     .select("ticker, expiration_time, strategy_id")
-    .in("status", ["filled", "open", "partial"])
+    .eq("status", "filled")
     .is("exit_reason", null)
     .is("settled_at", null);
 
@@ -711,18 +703,17 @@ serve(async (req) => {
           // Excludes failed orders: the cap bounds real trading activity/exposure,
           // not attempts rejected before ever reaching the exchange (e.g. a stale
           // ticker or a transient API error) — those carry zero market exposure.
-          // Uses the shared countTradesInWindow (single source of truth — see
-          // _shared/limits.ts) instead of a duplicate inline query, so this exact
-          // failed-order-counting bug can't be reintroduced in one place and not
-          // the other again.
           const maxDailyTrades = userRisk.max_daily_trades ?? 30;
-          const dailyTradeCount = await countTradesInWindow(
-            supabase,
-            strategy.user_id,
-            strategy.mode as "paper" | "live",
-          );
+          const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const { count: dailyTradeCount } = await supabase
+            .from("trades")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", strategy.user_id)
+            .eq("mode", strategy.mode)
+            .neq("status", "failed")
+            .gte("created_at", dayAgo);
 
-          if (dailyTradeCount >= maxDailyTrades) {
+          if ((dailyTradeCount ?? 0) >= maxDailyTrades) {
             strategyResults.push({
               strategy_id: strategy.id,
               strategy_name: strategy.name,
@@ -1080,14 +1071,18 @@ async function runS001SurfaceArb(
     };
   }
 
-  // 2. Dedup: which tickers are already open (or still resting) under this strategy?
+  // 2. Dedup: which tickers already have an active order or position under this strategy?
+  //    "active" = filled, open (resting unfilled), or partial — matches the status set
+  //    execute-trade/execute-basket/trading-agent already use for exposure checks. This
+  //    used to check status="filled" only, so a resting unfilled limit order (the common
+  //    case — legs sit "open" for hours before filling, cancelling, or day-expiring) was
+  //    invisible to dedup: every 5-minute surface-scanner cycle re-detected the same
+  //    still-unfilled bracket-sum violation and stacked ANOTHER duplicate order on the
+  //    same event, burning the daily live-trade cap on orders that never filled (found
+  //    2026-07-26: 66/84 live trades in the trailing 24h were repeat entries into just 3
+  //    events, 0 filled — see docs/health-log.md).
   //    exit_reason IS NULL excludes positions that have been exited but not yet
   //    settled — without this S-001 could re-enter an already-exited position.
-  //    Includes 'open'/'partial' — a resting unfilled order on this event must
-  //    also block re-entry, or every 5-minute cron cycle piles another order onto
-  //    the same persistent violation while the prior one is still on the book,
-  //    which is what was causing Kalshi's self_trade_prevention to cancel our own
-  //    earlier resting orders once a later cycle's order crossed them.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
@@ -1097,11 +1092,26 @@ async function runS001SurfaceArb(
     .is("exit_reason", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
 
+  // Stop-loss (4b below) only applies to actually-filled positions — a resting unfilled
+  // order has no live position to close. Separate query/fields from the dedup set above.
+  const { data: filledPositions } = await supabase
+    .from("trades")
+    .select("id, ticker, price, amount, market_question")
+    .eq("status", "filled")
+    .eq("strategy_id", strategy.id)
+    .is("settled_at", null)
+    .is("exit_reason", null);
+
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const allFilled: string[] = [];
   const seenEvents = new Set<string>();
+  // Set once any leg this cycle reports insufficient_balance — balance doesn't
+  // replenish mid-run, so every alert processed after that point is skipped
+  // without spending a live Kalshi round trip on a doomed order.
+  let accountDepleted = false;
 
   for (const alert of alerts) {
+    if (accountDepleted) break;
     const eventTicker = alert.event_ticker as string;
     if (seenEvents.has(eventTicker)) continue;
 
@@ -1228,7 +1238,7 @@ async function runS001SurfaceArb(
     // violation was a data artifact — exit before full-settlement loss locks in.
     // Reuses the eventMarkets payload already fetched; no extra Kalshi API call needed.
     {
-      const openS001InEvent = (openTrades || []).filter(
+      const openS001InEvent = (filledPositions || []).filter(
         (t: any) => (t.ticker as string).startsWith(eventTicker)
       );
       for (const openPos of openS001InEvent) {
@@ -1291,8 +1301,15 @@ async function runS001SurfaceArb(
     //    so Kalshi rejected the later legs with a real insufficient_balance 400 regardless.
     //    Concurrent submission also burns the whole per-minute live execute-trade rate
     //    limit (3) on one basket, leaving zero headroom for any other order that minute.
-    const legResults = [];
+    const legResults: { ticker: string; success: boolean; price: number }[] = [];
     for (const leg of tradeable) {
+      // Account balance won't replenish mid-run — once any leg (this alert or an
+      // earlier one this cycle) reports insufficient_balance, every remaining leg
+      // across every remaining alert is guaranteed to fail the same way. Stop
+      // burning further live round trips and rate-limit budget on a cycle we
+      // already know is underfunded.
+      if (accountDepleted) break;
+
       const feeHurdle = feeHurdleCentsAt(leg.noPrice);
       const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
@@ -1317,11 +1334,10 @@ async function runS001SurfaceArb(
       });
       legResults.push({ ticker: leg.ticker, success: result.success, price: leg.noPrice });
 
-      // Improvement: once one leg's pre-flight reports the account can't cover it,
-      // every remaining leg this cycle will hit the same wall — balance doesn't
-      // replenish mid-run. Stop burning further round trips and rate-limit budget
-      // on a basket we already know is underfunded.
-      if (result.code === "insufficient_balance") break;
+      if (result.code === "insufficient_balance") {
+        accountDepleted = true;
+        break;
+      }
     }
 
     const legsFilled = legResults.filter(r => r.success);

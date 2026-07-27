@@ -17,6 +17,10 @@ serve(async (_req) => {
   const twilioFrom  = Deno.env.get("TWILIO_FROM_NUMBER");
 
   // 1. Fetch all users opted in to daily_summary
+  // NOTE: supabase.rpc(...) returns a PostgrestFilterBuilder — a thenable, not a
+  // real Promise — so .catch() doesn't exist on it and throws a TypeError before
+  // this line even resolves (same failure class already fixed in auto-trade,
+  // 2026-07-06). Use the two-arg .then(onFulfilled, onRejected) form instead.
   const { data: users, error: usersErr } = await supabase.rpc("exec_sql", {
     query: `
       SELECT p.id, p.phone, p.notification_prefs, u.email
@@ -24,7 +28,10 @@ serve(async (_req) => {
       JOIN auth.users u ON u.id = p.id
       WHERE (p.notification_prefs->>'daily_summary')::boolean = true
     `,
-  }).catch(() => ({ data: null, error: "rpc_unavailable" }));
+  }).then(
+    (r: { data: unknown; error: unknown }) => r,
+    () => ({ data: null, error: "rpc_unavailable" }),
+  );
 
   // Fall back to direct table query if exec_sql isn't available
   const userRows: Array<{ id: string; phone: string | null; notification_prefs: Record<string, unknown>; email: string }> =
@@ -34,6 +41,7 @@ serve(async (_req) => {
 
   if (!userRows.length) {
     console.log("daily-digest: no opted-in users, nothing to send");
+    await logRunSummary(supabase, 0, 0);
     return new Response(JSON.stringify({ ok: true, sent: 0 }), { status: 200 });
   }
 
@@ -64,8 +72,9 @@ serve(async (_req) => {
       await supabase.from("compliance_log").insert({
         user_id: user.id,
         event_type: "daily_digest",
-        channel,
-        payload: stats,
+        severity: "info",
+        message: `Daily digest sent via ${channel}: ${stats.totalTrades} trade(s), net P&L ${stats.netPnl >= 0 ? "+" : ""}${stats.netPnl.toFixed(2)}`,
+        metadata: { channel, ...stats },
         created_at: new Date().toISOString(),
       }).then(undefined, (e: unknown) => console.warn("compliance_log insert failed:", e));
 
@@ -76,8 +85,29 @@ serve(async (_req) => {
   }
 
   console.log(`daily-digest: sent ${sent}/${userRows.length}`);
+  await logRunSummary(supabase, sent, userRows.length);
   return new Response(JSON.stringify({ ok: true, sent }), { status: 200 });
 });
+
+// Per-invocation heartbeat so a silent failure (e.g. the exec_sql/profiles
+// query itself throwing before any user is processed) is visible in
+// compliance_log — every other cron'd function (auto-trade, market-data-
+// fetcher, auto-settle, etc.) already logs an `_run` row on every execution;
+// daily-digest was the one cron job with zero record that it ran at all.
+// deno-lint-ignore no-explicit-any
+async function logRunSummary(
+  supabase: any,
+  sent: number,
+  total: number,
+): Promise<void> {
+  await supabase.from("compliance_log").insert({
+    event_type: "daily_digest_run",
+    severity: "info",
+    message: `daily-digest run: ${sent}/${total} digest(s) sent`,
+    metadata: { sent, total },
+    created_at: new Date().toISOString(),
+  }).then(undefined, (e: unknown) => console.warn("daily_digest_run log failed:", e));
+}
 
 async function fetchUsersDirectly(supabase: ReturnType<typeof createClient>) {
   const { data, error } = await supabase
