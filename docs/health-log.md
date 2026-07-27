@@ -2,7 +2,65 @@
 
 Findings from automated health-check runs. Newest first.
 
-## 2026-07-27 (39th run) — Clean error/critical window continues (6th run in a row); found and fixed S-001 re-thrashing the same doomed ticker every 5-min cycle while the live account is balance-depleted
+## 2026-07-27 (40th run) — One-off 404 traced and ruled harmless; found and fixed a real bug: `cancel_order` fired an unauthenticated, unchecked Kalshi DELETE and lied to the DB about cancellation
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 39th run's
+~22:06 UTC cutoff through this run's ~23:06 UTC invocation — one new row: an `api_error` at
+23:05:44 UTC, `"Kalshi API returned non-JSON response on POST portfolio/orders/7dfb3f09-...
+(status 404)"`. Investigated: this is `kalshi-proxy`'s generic pass-through (`supabase/functions/
+kalshi-proxy/index.ts`), which forwards whatever method the caller sends. Grepped every caller —
+`src/lib/kalshiApi.ts` is the *only* consumer of `kalshi-proxy`, and its three wrappers
+(`kalshiProxyGet`/`Post`/`Delete`) never construct a POST to `portfolio/orders/{id}` — placeOrder
+POSTs to bare `portfolio/orders` (no id), cancelOrder correctly uses DELETE. `git log -p` on
+`cancelKalshiOrder` shows it was DELETE from the day it was added — never POST. Confirmed only one
+such row exists in `compliance_log` ever. The order itself (`7dfb3f09-...`, a 2-day-old resting
+S-001 leg) filled normally 5 minutes later via the ordinary GET-based `reconcile-orders` path with
+no downstream error. Edge-function request logs had already rolled past the timestamp by the time
+of investigation (high-volume Markets-page GET traffic exhausts the log buffer in seconds), so the
+exact origin (most likely a stray manual/dev-tools call against the proxy) couldn't be pinned down
+further — but it is not reproducible from any code path in the repo and caused zero harm. Not
+treating this as a system bug; no fix applied for it.
+
+**Root cause found and fixed (HIGH — live order cancellation was silently non-functional and
+could desync the DB from reality): while investigating the above, read every Kalshi-order code
+path and found `trading-agent/index.ts`'s `cancel_order` tool (used when the chat agent decides to
+cancel a live order) did, in live mode: (1) immediately mark the local `trades` row `status:
+'cancelled'` in the DB, unconditionally; (2) fire `fetch(`${KALSHI_BASE_URL}/portfolio/orders/
+${orderId}`, { method: "DELETE" })` with **no headers at all** — no HMAC signature, no API key.
+Kalshi requires signed auth on every private endpoint, so this call was guaranteed to be rejected
+(401/403) every single time, and the response was never checked (`await fetch(...)` with the
+result discarded). Net effect: **cancel_order has never actually cancelled a live order on Kalshi**
+— it only ever updated our own database, which then reports the position as closed/no-risk while
+the order keeps resting live on Kalshi's book and can fill at any time. `reconcile-orders` (the
+only other process watching order state) only polls `status IN ('open','partial')`, so once
+`cancel_order` marked a row `'cancelled'`, reconciliation would never look at that order again —
+a fill on Kalshi after a "cancel" would go completely unnoticed by the system. No evidence yet
+that this branch has actually fired in live mode (no `order_cancelled` compliance rows found with
+a `trade_id` from a live-mode order in the queried window), so no known live position is currently
+mis-tracked from this — but the very next live cancel the agent attempted would have hit it.
+
+**Fix (deployed):** Reordered `cancel_order`'s live-mode path so it signs and sends the Kalshi
+DELETE *first* (`getKalshiCredentials(supabase, userId)` + `generateAuthHeaders(... "DELETE",
+"/trade-api/v2/portfolio/orders/{id}" ...)` + `fetchWithRetry`, the same pattern `reconcile-orders`
+already uses for its authenticated GET) and only updates the local `trades` row to `'cancelled'`
+if Kalshi's response is `ok`. On a non-ok response, the DB row is left untouched and a new
+`order_cancel_failed`/`error` `compliance_log` row is written with the order id, Kalshi status, and
+raw body — so a future genuine cancel failure surfaces instead of silently lying. Paper mode is
+unchanged (DB is the only source of truth there, no Kalshi call needed).
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 errors with the fix vs.
+12 on unmodified `dev` (confirmed via `git stash`/`deno check`/`git stash pop`); the one new error
+is the identical pre-existing `getKalshiCredentials(supabase, ...)` / `SupabaseClient` generic-type
+mismatch already present at this file's other `getKalshiCredentials` call site (line ~1215, the
+market-data service-key lookup) — a known repo-wide TS-strictness gap, not a new logic error.
+Deployed via `supabase functions deploy trading-agent`. **Not exercised end-to-end against a real
+live cancel this run** — doing so would require either a fabricated chat turn forcing the LLM to
+pick `cancel_order` (real token spend for a code path this audit can already verify statically) or
+cancelling a genuine live resting order (real trading action, out of scope for an unattended
+health-check run). The change is isolated to the `cancel_order` branch only and does not touch any
+path that fires on the current 5-minute trading cadence, so this carries no regression risk to
+today's active strategies. **Reversibility:** easy — single-function, single-branch change; git
+revert restores the prior (broken) behavior exactly.
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 38th run's
 ~21:06 UTC cutoff through this run's ~22:06 UTC invocation — zero new rows. Last `error`-severity

@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
+import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
@@ -1402,29 +1402,76 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── cancel_order ──
         else if (fnName === "cancel_order") {
           try {
-            const { data: trades } = await supabase
-              .from("trades")
-              .update({
-                status: "cancelled",
-                cancelled_at: new Date().toISOString(),
-                notes: `Cancelled by agent: ${args.reason}`,
-              })
-              .eq("order_id", args.orderId)
-              .select();
-
+            // Live mode: cancel on Kalshi FIRST, and only mark the local trade
+            // row cancelled if Kalshi confirms it. The previous version fired
+            // an unauthenticated, unchecked DELETE (no HMAC headers at all —
+            // Kalshi rejects this) and marked the DB row cancelled regardless,
+            // so a still-resting live order could fill later while our system
+            // believed it was long closed, with reconcile-orders never
+            // re-checking it (it only polls status IN ('open','partial')).
             if (mode === "live") {
-              await fetch(`${KALSHI_BASE_URL}/portfolio/orders/${args.orderId}`, { method: "DELETE" });
+              const { keyId, privateKey } = await getKalshiCredentials(supabase, userId);
+              if (!keyId || !privateKey) {
+                toolResult = JSON.stringify({ success: false, error: "No Kalshi credentials configured for this account — cancel not attempted." });
+              } else {
+                const path = `/trade-api/v2/portfolio/orders/${args.orderId}`;
+                const ts = Date.now();
+                const headers = await generateAuthHeaders(keyId, privateKey, "DELETE", path, ts);
+                const res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${args.orderId}`, { method: "DELETE", headers });
+
+                if (!res.ok) {
+                  const bodyText = await res.text().catch(() => "");
+                  await supabase.from("compliance_log").insert({
+                    event_type: "order_cancel_failed",
+                    severity: "error",
+                    message: `Kalshi DELETE order ${args.orderId} failed (status ${res.status}) — local trade row left unchanged, order may still be live`,
+                    metadata: { order_id: args.orderId, status: res.status, raw_body: bodyText.slice(0, 500) },
+                  });
+                  toolResult = JSON.stringify({ success: false, error: `Kalshi rejected the cancel (status ${res.status}) — order may still be live, local record left unchanged.` });
+                } else {
+                  const { data: trades } = await supabase
+                    .from("trades")
+                    .update({
+                      status: "cancelled",
+                      cancelled_at: new Date().toISOString(),
+                      notes: `Cancelled by agent: ${args.reason}`,
+                    })
+                    .eq("order_id", args.orderId)
+                    .select();
+
+                  await supabase.from("compliance_log").insert({
+                    trade_id: trades?.[0]?.id || null,
+                    event_type: "order_cancelled",
+                    severity: "info",
+                    message: `Order ${args.orderId} cancelled: ${args.reason}`,
+                    metadata: { order_id: args.orderId, reason: args.reason },
+                  });
+
+                  toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
+                }
+              }
+            } else {
+              // Paper mode: no live order to cancel — DB is the only source of truth.
+              const { data: trades } = await supabase
+                .from("trades")
+                .update({
+                  status: "cancelled",
+                  cancelled_at: new Date().toISOString(),
+                  notes: `Cancelled by agent: ${args.reason}`,
+                })
+                .eq("order_id", args.orderId)
+                .select();
+
+              await supabase.from("compliance_log").insert({
+                trade_id: trades?.[0]?.id || null,
+                event_type: "order_cancelled",
+                severity: "info",
+                message: `Order ${args.orderId} cancelled: ${args.reason}`,
+                metadata: { order_id: args.orderId, reason: args.reason },
+              });
+
+              toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
             }
-
-            await supabase.from("compliance_log").insert({
-              trade_id: trades?.[0]?.id || null,
-              event_type: "order_cancelled",
-              severity: "info",
-              message: `Order ${args.orderId} cancelled: ${args.reason}`,
-              metadata: { order_id: args.orderId, reason: args.reason },
-            });
-
-            toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Cancel failed: " + e.message });
           }
