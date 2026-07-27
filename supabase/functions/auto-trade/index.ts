@@ -1434,6 +1434,7 @@ async function runS002LongshotBias(
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const timeExitResults: string[] = [];
+  const timeExitErrors: string[] = [];
   for (const pos of expiringPositions ?? []) {
     // We bought NO to open — sell NO to close (or equivalently buy YES).
     // Use a market-price sell at 1¢ above NO bid (aggressive close).
@@ -1457,6 +1458,12 @@ async function runS002LongshotBias(
       systemVersion: "v2",
     });
     timeExitResults.push(`${pos.ticker}: ${closeResult.success ? "closed" : "close_failed"}`);
+    if (!closeResult.success) {
+      // Same class of gap the 34th-36th runs closed elsewhere: without the raw
+      // error, a genuine execute-trade outage on this path is indistinguishable
+      // from a routine unfilled limit order in the info-severity strategy-run row.
+      timeExitErrors.push(`${pos.ticker}: ${closeResult.error || closeResult.message || "unknown error"}`);
+    }
 
     // Mark the original position as exited regardless of fill success — prevents
     // the query from re-finding it every cycle if the exit order isn't filled
@@ -1467,6 +1474,15 @@ async function runS002LongshotBias(
         .update({ exit_reason: "time_exit_2h" })
         .eq("id", pos.id);
     } catch { /* non-critical — worst case is one duplicate next cycle */ }
+  }
+  if (timeExitErrors.length > 0) {
+    await supabase.from("compliance_log").insert({
+      event_type: "s002_time_exit_failed",
+      severity: "warning",
+      message: `S-002 time-exit close failed on ${timeExitErrors.length} position(s): ${timeExitErrors.join("; ")}`,
+      metadata: { run_id: runId, errors: timeExitErrors },
+      user_id: strategy.user_id || null,
+    }).then(null, () => {});
   }
 
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();

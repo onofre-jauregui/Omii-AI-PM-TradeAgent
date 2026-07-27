@@ -2,6 +2,43 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (37th run) — Clean error window continues (4th run in a row); S-002 Resolution Fade's 2h time-based position close had the same silent-error gap the 36th run closed for S-001's leg loop
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 36th run's
+~19:06 UTC cutoff through this run's ~20:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run).
+
+**Root cause found and fixed (MED — 4th instance of the observability gap the 34th-36th runs have
+been closing, this time in `auto-trade/index.ts`'s S-002 Resolution Fade time-exit loop):** The 2h
+time-based position close (`supabase/functions/auto-trade/index.ts:1436-1470`, sells a NO position
+within 2h of expiry) only recorded `closeResult.success` into `timeExitResults` as the bare string
+`"close_failed"` — `closeResult.error`/`closeResult.message` was read nowhere, and no dedicated
+`compliance_log` row was ever inserted for a close failure. That result string flows into the
+`auto_trade_strategy_run` row logged unconditionally at `info` severity (same sink as the S-001 gap
+the 36th run fixed), so a genuine execute-trade outage on this path — a live position stuck at
+expiry, unable to close — would have been indistinguishable from a routine unfilled limit order.
+
+**Fix (this run):** Added a `timeExitErrors: string[]` accumulator to the time-exit loop. Any close
+failure now captures `closeResult.error || closeResult.message || "unknown error"` per ticker. If at
+least one close fails, a dedicated `s002_time_exit_failed`/`warning` `compliance_log` row is inserted
+with the full error list in `metadata`, matching the standard the 34th-36th runs established
+(additive, no retry/decision logic touched).
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` reproduces the same 17
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop`, identical count before and after — zero new errors). Deployed live via `supabase
+functions deploy auto-trade`. Watched two post-deploy cron cycles (20:10, 20:15 UTC):
+`auto_trade_strategy_run` rows for Surface Arbitrage and Weather Edge are unchanged from pre-deploy
+behavior (S-001 correctly logged `s001_leg_execution_failed` on a real rate-limit hit, Weather Edge's
+routine `no_setup` message is untouched) — no regression on the paths currently exercised. **Caveat:**
+S-002 (`Resolution Fade`, `strategies.id = S-002-ea207ba1`) is itself `active: false` account-wide
+(`last_run_at` 2026-07-24, no runs since) — this is an existing account setting, not something this
+run changed — so the new `s002_time_exit_failed` path is deployed and correct but dormant until S-002
+is reactivated. Flagging this rather than claiming live verification of the new path itself, per the
+35th/36th run standard: this closes the gap for the *next* time S-002 runs and a close genuinely
+fails, it doesn't manufacture a failure to prove itself now. **Reversibility:** easy — single-file
+diff, git revert; no schema or data changes.
+
 ## 2026-07-27 (36th run) — Clean error window continues (3rd run in a row); S-001 Surface Arb was silently discarding execute-trade leg errors into the same generic "no fill" message as a routine day
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 35th run's
