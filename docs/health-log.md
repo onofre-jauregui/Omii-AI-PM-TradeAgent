@@ -2,6 +2,43 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (30th run) — Clean error window; found and backfilled a docs-sync gap: PR #76's code merged to dev, its health-log entry never did
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 29th run's
+~22:24 UTC cutoff through invocation (~03:20 UTC) — zero rows across the full ~5-hour window,
+the longest clean stretch logged so far. `kalshi_insufficient_balance` has not re-fired in this
+window (last was 20:10 UTC, predating the cutoff) — still a live low-balance condition, still a
+money decision outside this run's authority, not re-flagging further until it re-fires.
+
+**Root cause found and fixed (MED — same failure class as the 23rd/28th/29th runs' "shipped to
+prod but never merged to dev," this time for docs instead of code):** `origin/dev`'s HEAD
+(`a7d70cd`, merged 2026-07-27T02:43:12Z) already contains PR #76's fix — `health-check/index.ts`'s
+own `isDuped()` check-then-act replaced with the atomic `claim_health_check_alert()` RPC, same
+pattern the 26th run's `alertOnce()` fix used. But PR #76 only touched code files; the write-up
+describing it (what became this file's "15th"/"16th run" entries) was committed to a local,
+long-diverged working branch (`fix/live-pilot-instrumentation` — the same stray branch the 29th
+run partially closed as PR #42) and never reached `dev`'s copy of `health-log.md`. That branch has
+been accumulating its own independently-numbered run log since a point after this file's "11th
+run" entry, invisible to any run that reads `dev` as the source of truth (which is every run that
+audits "is this fix merged" by checking `dev`) — the exact mechanism that let PR #76 sit deployed-
+but-undocumented here for ~5 hours across at least one intervening run.
+
+**Fix (this run, docs-only):** backfilled this entry describing PR #76 (content verified via
+`gh pr view 76` — merge time, deno-check pass, live post-deploy invocation, and the two-concurrent-
+calls advisory-lock test all confirmed in the PR body) directly into `dev`'s `health-log.md`, built
+in an isolated worktree off `origin/dev` per the 23rd/27th/28th/29th runs' precedent — not by
+touching the stray branch itself. No code changed; PR #76's fix was already live in production.
+
+**Improvement (logged, process — the actual root cause):** `fix/live-pilot-instrumentation` is
+still live locally and still gets used as this task's default checkout for at least some runs,
+which is how its `health-log.md` re-diverged after the 29th run already closed its GitHub PR (#42).
+Closing a GitHub PR doesn't stop the underlying local branch from being checked out and committed
+to again by the next scheduled invocation. Until that branch is deleted or the scheduled task is
+pointed at a fresh clone/worktree of `dev` by default, this exact "two logs, two numbering
+schemes" split will keep recurring every time a run happens to execute from that stale checkout
+instead of an isolated `dev` worktree. Flagging directly to Onofre this run rather than re-logging
+as an open item a fifth time.
+
 ## 2026-07-26 (29th run) — Clean error window; found and shipped a second stray-branch fix (cache-eviction guard) never merged to dev, closed the branch that caused it
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 28th run's
