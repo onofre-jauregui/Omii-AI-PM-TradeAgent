@@ -2,6 +2,41 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (34th run) — First error in 45h: kalshi-proxy threw on a malformed Kalshi response with no visibility into the actual body; fixed to capture and degrade gracefully
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 33rd run's
+~16:07 UTC cutoff — one new row, breaking the 45h clean window: `d1514b15` at 16:29:30 UTC,
+`api_error`/`kalshi-proxy exception: Unexpected non-whitespace character after JSON at position 4
+(line 1 column 5)`. First occurrence of this message ever (confirmed via `ILIKE` search across all
+of `compliance_log`) — not a recurring pattern yet, but a genuine new failure mode, not the known
+`kalshi_insufficient_balance` condition.
+
+**Root cause found and fixed (MED — resilience + observability gap in `kalshi-proxy`):**
+`supabase/functions/kalshi-proxy/index.ts` called `response.json()` directly on every Kalshi API
+response. When Kalshi returned a body that wasn't valid JSON (looks like a short primitive, e.g.
+`true` or `null`, followed by trailing bytes — no reproduction of Kalshi's exact payload was
+possible since the parse exception fires before the raw text is ever captured), the proxy threw,
+was caught by the generic exception handler, and returned a 500 with only the *parse error
+message* logged — not the response body that caused it. If this recurs, there was no way to see
+what Kalshi actually sent; the failure mode was invisible to the next run. **Fix (this run):**
+read the response as text first, then `JSON.parse` it explicitly; a parse failure now logs the raw
+body (truncated to 500 chars) plus status/endpoint/full_path to `compliance_log` under its own
+handler (not the generic catch-all), and returns a `502` (upstream returned a bad payload) instead
+of an opaque `500` (implies our own server errored). One occurrence isn't enough to diagnose the
+upstream cause with certainty — this fix makes the *next* occurrence diagnosable instead of
+guessing again from a bare parse-error string.
+
+**Verified:** `deno check` on the modified file reproduces the same 14 pre-existing type errors on
+unmodified `dev` (confirmed via `git stash`/`deno check`/`git stash pop` — all in
+`_shared/tenant.ts` Supabase generic-type resolution, unrelated to this change, zero new errors
+introduced). Deployed live via `supabase functions deploy kalshi-proxy` (one transient Cloudflare
+502 on the deploy API itself, succeeded on retry) and called the live public `markets` endpoint
+directly against production — returned clean market data, confirming the deploy is live and the
+non-error path still works. Checked `compliance_log` post-deploy through the next scheduled
+surface-scan pass (17:08 UTC, 26 alerts across 577 markets) — zero new `api_error`/parse-failure
+rows, consistent with normal operation. **Reversibility:** easy — single-file diff, git revert;
+no schema or data changes.
+
 ## 2026-07-27 (33rd run) — Clean error window continues; fixed the silent-migration-failure root cause flagged by PR #82 (scoped: guard only, no backlog re-run)
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 32nd run's
