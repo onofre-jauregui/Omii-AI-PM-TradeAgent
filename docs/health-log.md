@@ -2,6 +2,49 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (32nd run) — Clean error window; closed the stale-checkout/branch-divergence root cause at its actual source: the scheduled task's own config
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` independently of the
+31st run's check — most recent row is still 2026-07-25T19:00:04 UTC
+(`order_failed`/`insufficient_balance`), zero `error`/`critical` since, through this run's
+~15:07 UTC invocation (a ~44h clean window, one hour longer than the 31st run's). Confirmed via
+the REST API against `compliance_log` directly (not relying on the 31st run's numbers). No new
+alert classes; `kalshi_low_balance`/`kalshi_insufficient_balance` continue firing correctly on
+their 4h cooldown against the same known ~$1.66 live balance — a deposit decision, not a bug.
+
+**Root cause found and fixed — the actual source of the 26th–31st runs' repeatedly-flagged
+stale-checkout/branch-divergence problem:** `mcp__scheduled-tasks__list_scheduled_tasks` showed
+this task (`kalshitradeagent-health`) fires **hourly** (`0 * * * *`) with no pinned working
+directory in its config — each invocation lands wherever the session happens to start, which in
+practice was often the shared interactive checkout at
+`Documents/Projects/Omii-AI-PM-TradeAgent` (branch `fix/live-pilot-instrumentation`, now 50+
+commits behind `origin/dev`). That's a workspace Onofre or another live session also uses
+interactively, so `git-tree-guard` correctly blocks any branch/checkout mutation there when
+another session holds it (as it did for the 31st run) — but nothing stopped a run from reading,
+committing, and pushing docs *from* that stale branch when no other session happened to be
+active, which is how two independently-numbered health-log sequences (this file's own "17 runs"
+vs. `origin/dev`'s "31 runs") diverged in the first place. **Fix (this run, config-only, zero
+code/deploy risk):** this run did its own work in a brand-new isolated worktree at
+`Documents/Projects/.worktrees/TradeAgent-health-check` (off `origin/dev`, never touching the
+shared checkout — same pattern the 23rd/27th–30th runs used ad hoc), then closed the gap
+permanently by editing the scheduled task's own prompt (`~/.claude/scheduled-tasks/
+kalshitradeagent-health/SKILL.md` via `update_scheduled_task`) to require every future run to
+create/reuse that same fixed isolated-worktree path off `origin/dev` before touching anything,
+and to never read, commit to, or push from `fix/live-pilot-instrumentation` or any other
+long-lived local branch. This is a guard at the config level, not another autonomous attempt from
+inside a run that could re-collide — it removes the *chance* of landing in the shared checkout at
+all, rather than relying on each run noticing and self-correcting after the fact.
+
+**Verified:** `list_scheduled_tasks` after the update shows the new prompt text live for
+`kalshitradeagent-health`; this entry itself is proof of the pattern working (written and pushed
+from the new fixed worktree path, not the stale branch). **Not fixed this run (deliberately left
+alone):** the stray `fix/live-pilot-instrumentation` branch and its own uncommitted WIP — per the
+31st run's finding, a different live session owns that checkout's uncommitted changes, and
+nothing about this fix requires touching it; it can be reconciled or abandoned independently
+whenever that session is done. **Reversibility:** the scheduled-task prompt edit is a single
+`update_scheduled_task` call, revertible by re-pasting the prior prompt text (unchanged in git,
+only the live task config moved).
+
 ## 2026-07-27 (31st run) — Clean error window; root-caused and fixed unbounded branch sprawl (44→20 remote), hit the concurrent-session guard on the deeper stale-checkout fix
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` — most recent row is
