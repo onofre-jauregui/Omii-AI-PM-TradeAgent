@@ -2,6 +2,45 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (31st run) — Clean error window; root-caused and fixed unbounded branch sprawl (44→20 remote), hit the concurrent-session guard on the deeper stale-checkout fix
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` — most recent row is
+2026-07-25T19:00:04 UTC (`order_failed`/`insufficient_balance`, expected given the live account's
+known low balance); zero `error`/`critical` rows since, a clean ~43h window through this run's
+14:07 UTC invocation. `kalshi_insufficient_balance` fired again at 14:05:03 UTC (`$1.66` on
+account, needs `$9.90` for the next S-001 leg) — same live-money condition every recent run has
+correctly declined to auto-fix; it's a deposit decision, not a bug, and the 4h alert cooldown is
+firing correctly (last prior fire 09:05:02, 5h apart).
+
+**Root cause found and fixed (MED — repo hygiene, growing every run): merged PRs never delete
+their branch.** `git branch -r --merged origin/dev` found **24 remote branches** (and their local
+copies) whose entire history was already an ancestor of `origin/dev` — some going back to
+`feat/production-hardening` from the earliest health-check runs — sitting undeleted because every
+`gh pr merge` in this workflow's history omitted `--delete-branch`. Confirmed via `gh pr list
+--state merged`: PRs #71-#78, all merged in the last ~24h, left every head branch on the remote.
+At this run's cadence (multiple runs/day, most opening a new branch) this is unbounded growth with
+no natural ceiling. **Fix (this run):** re-verified each of the 24 against current `origin/dev` via
+`git merge-base --is-ancestor` immediately before deleting (zero risk — ancestry means no unique
+commits, nothing lost), then `git push origin --delete` on each, plus the matching local branches
+where not checked out in another worktree. Remote branch count: 44 → 20. Local: 49 → 25.
+**Convention going forward:** every future `gh pr merge` in this workflow should pass
+`--delete-branch` so this doesn't re-accumulate.
+
+**Deeper root cause found, NOT fixed this run (structural, flagged by the 5 prior runs — see
+26th/27th/28th/29th/30th entries): this task's default checkout keeps landing on the stale,
+long-diverged `fix/live-pilot-instrumentation` branch instead of `dev`.** Attempted the concrete
+fix this run — stash the branch's uncommitted WIP (verified stale: its uncommitted
+`health-check/index.ts` differs from `origin/dev`'s by ~199 lines and is missing the atomic
+`claim_health_check_alert()` fix already live in production) and check the primary working
+directory out onto `dev` so the *next* run inherits a clean checkout by default. **Blocked by this
+session's own `git-tree-guard` hook**: another live Claude session is currently working in that
+exact checkout, and the hook correctly refused to move HEAD/index out from under it. This is
+good — the guard did its job — but it means the fix needs either (a) the scheduled task
+configured to always launch in its own isolated worktree rather than the shared interactive
+checkout, or (b) a moment when no other session holds that checkout, to land. Flagging to Onofre
+directly rather than re-logging as an open item a sixth time: the actual unblock is scheduler
+config, not another autonomous attempt from inside a run that may collide again.
+
 ## 2026-07-27 (30th run) — Clean error window; found and backfilled a docs-sync gap: PR #76's code merged to dev, its health-log entry never did
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 29th run's
