@@ -10,28 +10,39 @@
  * Kalshi contracts pay $1 per contract if correct, $0 otherwise.
  * Amount is USD deployed; priceInCents is entry price (1–99).
  */
+/**
+ * feeCents: total attributable cost in cents to subtract for net_pnl — Kalshi
+ * entry + exit fee (see docs/design/full-transaction-cost.md, Option A). AI
+ * qualify cost isn't folded in here yet (no pricing table exists) — net_pnl
+ * is fee-only for now, an honest partial step toward the design's full number.
+ * Gross pnl is always returned unmodified alongside net_pnl.
+ */
 export function computePnl(
   side: string,
   action: string,
   priceInCents: number,
   amountUsd: number,
-  result: string
-): { pnl: number; outcome: "win" | "loss" | "void" } {
+  result: string,
+  feeCents = 0
+): { pnl: number; netPnl: number; outcome: "win" | "loss" | "void" } {
   if (result !== "yes" && result !== "no") {
-    return { pnl: 0, outcome: "void" };
+    return { pnl: 0, netPnl: 0, outcome: "void" };
   }
   const priceDollars = priceInCents / 100;
   const contracts = priceDollars > 0 ? amountUsd / priceDollars : 0;
+  const feeDollars = feeCents / 100;
 
   if (action !== "buy") {
-    return { pnl: 0, outcome: "void" };
+    return { pnl: 0, netPnl: 0, outcome: "void" };
   }
 
   const correctSide = (side === "yes" && result === "yes") || (side === "no" && result === "no");
   if (correctSide) {
-    return { pnl: contracts * (1 - priceDollars), outcome: "win" };
+    const pnl = contracts * (1 - priceDollars);
+    return { pnl, netPnl: pnl - feeDollars, outcome: "win" };
   }
-  return { pnl: -contracts * priceDollars, outcome: "loss" };
+  const pnl = -contracts * priceDollars;
+  return { pnl, netPnl: pnl - feeDollars, outcome: "loss" };
 }
 
 // ─── Kalshi Status Resolution ─────────────────────────────────────────────────

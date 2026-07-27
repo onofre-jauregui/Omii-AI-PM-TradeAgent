@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { decideReconcile, contractCount, pickAvgPrice } from "./reconcile-logic";
+import { decideReconcile, contractCount, pickAvgPrice, decidePaperReconcile } from "./reconcile-logic";
 
 describe("decideReconcile", () => {
   it("fills when remaining_count is 0", () => {
@@ -63,5 +63,35 @@ describe("pickAvgPrice", () => {
     expect(pickAvgPrice({})).toBe(null);
     expect(pickAvgPrice({ avg_price: "47" })).toBe(null);
     expect(pickAvgPrice(null)).toBe(null);
+  });
+});
+
+describe("decidePaperReconcile", () => {
+  it("cancels when the ticker is gone, regardless of fill state", () => {
+    expect(decidePaperReconcile(true, 0, 10)).toBe("cancel");
+    expect(decidePaperReconcile(true, 10, 10)).toBe("cancel");
+  });
+
+  it("fills when the full requested size is now covered", () => {
+    expect(decidePaperReconcile(false, 10, 10)).toBe("fill");
+    expect(decidePaperReconcile(false, 12, 10)).toBe("fill"); // over-covered still counts as filled
+  });
+
+  it("marks partial when some but not all is covered", () => {
+    expect(decidePaperReconcile(false, 4, 10)).toBe("partial");
+  });
+
+  it("does nothing when nothing is covered yet", () => {
+    expect(decidePaperReconcile(false, 0, 10)).toBe("none");
+  });
+
+  it("does nothing when requested size is unknown (0)", () => {
+    expect(decidePaperReconcile(false, 0, 0)).toBe("none");
+  });
+
+  it("is idempotent — repeated calls with the same inputs return the same decision", () => {
+    const first = decidePaperReconcile(false, 4, 10);
+    const second = decidePaperReconcile(false, 4, 10);
+    expect(first).toBe(second);
   });
 });
