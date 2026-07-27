@@ -46,25 +46,51 @@ async function sendTelegram(token: string, chatId: string, text: string) {
   return resp.ok;
 }
 
-// Returns true if we should SKIP sending this alert (already sent same fingerprint within cooldown).
-// Uses compliance_log as state store — no new tables needed.
-async function isDuped(
+// Atomically checks-and-claims a dedup slot via the same advisory-lock-guarded
+// claim_health_check_alert() RPC that _shared/telegram.ts's alertOnce() uses.
+// Health-check previously ran its own check-then-act isDuped() + separate insert
+// here — the exact same race class alertOnce() was fixed for (concurrent callers
+// can all pass a plain SELECT-then-INSERT before either commits) — except this
+// path is only exercised by concurrent *invocations* of health-check itself
+// (e.g. an overlapping manual + cron run), not concurrent basket legs. Returns
+// true if this caller won the claim (dedup row already inserted by the RPC) and
+// should send; false if an unexpired dedup row already exists.
+async function claimAlert(
   supabase: any,
   alertType: string,
   fingerprint: string,
   cooldownHours: number
 ): Promise<boolean> {
-  const since = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
-  const { data } = await supabase
+  const { data: shouldSend, error } = await supabase.rpc("claim_health_check_alert", {
+    p_alert_type: alertType,
+    p_fingerprint: fingerprint,
+    p_cooldown_hours: cooldownHours,
+  });
+  if (error) {
+    // Fail open — a monitoring-path RPC hiccup should never silently swallow a real alert.
+    console.error(`claim_health_check_alert failed for ${alertType}:`, error);
+    return true;
+  }
+  return !!shouldSend;
+}
+
+// Undoes a successful claim after a failed Telegram delivery, so the next run's
+// claimAlert() doesn't treat a never-delivered alert as already sent for the
+// full cooldown window. Scoped to rows created at/after `claimedAfter` so it
+// can't delete an older, already-delivered dedup row for the same fingerprint.
+async function unclaimAlert(
+  supabase: any,
+  alertType: string,
+  fingerprint: string,
+  claimedAfter: string
+) {
+  await supabase
     .from("compliance_log")
-    .select("id")
+    .delete()
     .eq("event_type", "health_check_alert")
     .eq("metadata->>alert_type", alertType)
     .eq("metadata->>fingerprint", fingerprint)
-    .gte("created_at", since)
-    .limit(1)
-    .maybeSingle();
-  return !!data;
+    .gte("created_at", claimedAfter);
 }
 
 serve(async (req) => {
@@ -511,8 +537,9 @@ serve(async (req) => {
     const alertsSkipped: string[] = [];
 
     for (const alert of pendingAlerts) {
-      const skip = await isDuped(supabase, alert.type, alert.fingerprint, alert.cooldownHours);
-      if (skip) {
+      const claimedAt = new Date().toISOString();
+      const shouldSend = await claimAlert(supabase, alert.type, alert.fingerprint, alert.cooldownHours);
+      if (!shouldSend) {
         alertsSkipped.push(alert.type);
         continue;
       }
@@ -520,11 +547,12 @@ serve(async (req) => {
       const delivered = await sendTelegram(telegramToken, telegramChatId, alert.message);
 
       if (!delivered) {
-        // Delivery failed — do NOT write the health_check_alert dedup row. isDuped()
-        // keys off that row, so writing it unconditionally here would mark a
-        // never-delivered alert as sent, silencing every future retry for the
-        // full cooldown window. Log the failure itself (undeduped, always visible)
-        // so it surfaces via the system_errors sweep on the next run.
+        // Delivery failed — the RPC already claimed the dedup slot (that's the
+        // atomicity fix), so undo it here rather than leaving a never-delivered
+        // alert marked as sent for the full cooldown window. Log the failure
+        // itself (undeduped, always visible) so it surfaces via the
+        // system_errors sweep on the next run.
+        await unclaimAlert(supabase, alert.type, alert.fingerprint, claimedAt);
         await supabase.from("compliance_log").insert({
           event_type: "telegram_delivery_failed",
           severity: "critical",
@@ -535,23 +563,22 @@ serve(async (req) => {
         continue;
       }
 
-      // Record this send so future runs can deduplicate against it. Diagnostic
-      // context (if any) is folded in here rather than written as a separate
-      // "diagnostic_needed" event — no consumer for that event type has ever
-      // existed (verified: zero call sites read it, and every row written since
-      // 07-21 sat with resolved:false indefinitely), so it was an unbounded,
-      // never-drained queue. The context is still fully visible on this row for
-      // whoever — human or scheduled health-check — investigates the alert.
-      await supabase.from("compliance_log").insert({
-        event_type: "health_check_alert",
-        severity: "warning",
-        message: `Alert sent: ${alert.type}`,
-        metadata: {
-          alert_type: alert.type,
-          fingerprint: alert.fingerprint,
-          ...(alert.context ? { diagnostic_context: alert.context } : {}),
-        },
-      });
+      // claim_health_check_alert() already wrote the health_check_alert dedup row
+      // (event_type/severity/message/alert_type/fingerprint). Diagnostic context (if
+      // any) is folded into that same row via an update rather than a separate
+      // "diagnostic_needed" event — no consumer for that event type has ever existed
+      // (verified: zero call sites read it, every row written since 07-21 sat with
+      // resolved:false indefinitely), so it was an unbounded, never-drained queue.
+      // The context is still fully visible on this row for whoever investigates.
+      if (alert.context) {
+        await supabase
+          .from("compliance_log")
+          .update({ metadata: { alert_type: alert.type, fingerprint: alert.fingerprint, diagnostic_context: alert.context } })
+          .eq("event_type", "health_check_alert")
+          .eq("metadata->>alert_type", alert.type)
+          .eq("metadata->>fingerprint", alert.fingerprint)
+          .gte("created_at", claimedAt);
+      }
 
       alertsSent.push(alert.type);
     }
