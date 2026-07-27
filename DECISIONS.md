@@ -679,6 +679,38 @@ an RSA key pair. No lower-risk partial fix exists — signing is all-or-nothing 
 **Trace:** `failed_trade_queue`/`compliance_log`, `authentication_error`/`INCORRECT_API_KEY_SIGNATURE`
 rows starting 2026-07-25 15:03 UTC. Tests: `supabase/functions/tests/kalshi-signing.test.ts`.
 
+## 2026-07-26 — Wired `alertOnce` to the atomic dedup RPC (previous fix was half-shipped)
+
+**Decision:** `_shared/telegram.ts`'s `alertOnce()` now calls `claim_health_check_alert()` (a
+Postgres function with an advisory-lock-guarded check-and-insert) instead of doing its own
+`SELECT` then `INSERT` against `compliance_log`.
+**Finding:** A same-day migration (`20260726_alert_dedup_race.sql`) had already created
+`claim_health_check_alert` to close a duplicate-Telegram-alert race — three concurrent
+`execute-trade` basket legs each ran the dedup `SELECT` before any of them committed the
+`INSERT`, so all three passed the check and paged Onofre three times for one condition
+(`kalshi_insufficient_balance`, 2026-07-25 16:05:04, three rows 84ms apart). The migration was
+applied to the live DB (`claim_health_check_alert` confirmed present via `pg_proc`), but
+`alertOnce()` itself was never updated to call it — the fix was deployed at the DB layer only,
+so the original check-then-act race was still live in every function that alerts.
+**Options:** A) Leave the RPC as dead code and re-do the race analysis later — rejected, the race
+was still actively able to triple-page. B) Wire `alertOnce` to the RPC now, since the hard part
+(the atomic primitive) was already written and verified — chosen.
+**Why:** A fix that exists in the database but isn't called by the code it was meant to protect
+provides zero protection; this closes the actual gap the migration was written for.
+**Reversibility:** Easy — revert `alertOnce` to the old select-then-insert body; the RPC can stay
+unused with no side effects.
+**Trace:** `compliance_log` `health_check_alert` rows, 2026-07-25 16:05:04.243/.262/.327 UTC
+(triple page). Redeployed all 11 functions importing `_shared/telegram.ts`.
+
+## 2026-07-26 — Dedup gates now count resting (open/partial) orders, not just filled
+
+**Decision:** In `auto-trade/index.ts`, both S-001's per-event dedup query and `countOpenPositions()` (the position-cap risk gate) now match `status IN ('filled','open','partial')` instead of `status = 'filled'` only.
+**Finding:** Root-caused why 43 of ~55 live orders placed 2026-07-25 were cancelled with zero fills. Pulled a real cancelled order directly from Kalshi (`debug-order`, temp function, deleted after use): resting 5.5h then cancelled with `fill_count=0`. Every order carries `self_trade_prevention_type: taker_at_cross`, and both dedup checks only ever looked at `status='filled'` — a resting unfilled order was invisible to them. Result: every 5-minute cron cycle kept placing new orders on the same persistent KXINX bracket-sum violation while prior cycles' orders were still resting on the book; once a later cycle's order price crossed an earlier resting one, Kalshi's self-trade prevention cancelled the older resting order. This also meant the 10-position risk cap never engaged, since resting orders never counted toward it.
+**Options:** A) Add exchange-side self-trade avoidance (e.g. cancel-replace instead of always placing new) — bigger lift, deferred. B) Make dedup/position-cap resting-order-aware so a strategy never re-enters an event it already has live exposure in — chosen, directly closes the gap and is a two-line query change.
+**Why:** The dedup and risk-cap's entire purpose is to stop redundant/over-exposed entries; blindness to resting orders defeated both simultaneously. This is the right fix at the right layer — no strategy-specific logic needed.
+**Reversibility:** Easy — revert the two `.in(...)` filters back to `.eq("status","filled")`.
+**Trace:** `compliance_log` event_type=`order_cancelled` (43 rows, 2026-07-25); real Kalshi order `8a3b4154-...` confirmed `status:"canceled"`, `fill_count_fp:"0.00"` after 5.5h resting.
+
 ## 2026-07-25 — Migrated execute-trade to Kalshi's V2 order endpoint
 
 **Decision:** Rewrote the live order payload/response handling in `execute-trade/index.ts` to use `POST /trade-api/v2/portfolio/events/orders` instead of the deprecated `/portfolio/orders`.

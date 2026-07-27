@@ -220,11 +220,18 @@ async function countOpenPositions(
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // Prefer stored expiration_time; fall back to ticker parsing for older trades
+  // Prefer stored expiration_time; fall back to ticker parsing for older trades.
+  // Includes resting orders (open/partial), not just filled — a resting live order
+  // still reserves capital and exchange exposure even before it fills, and Kalshi's
+  // self_trade_prevention_type="taker_at_cross" will cancel our own resting order
+  // if a later one we place crosses it, which is exactly what was happening when
+  // this only counted 'filled': every 5-minute cron cycle kept piling new orders
+  // onto the same persistent bracket-sum violation while the prior cycle's orders
+  // were still resting, unseen by this cap.
   let query = supabase
     .from("trades")
     .select("ticker, expiration_time, strategy_id")
-    .eq("status", "filled")
+    .in("status", ["filled", "open", "partial"])
     .is("exit_reason", null)
     .is("settled_at", null);
 
@@ -1099,6 +1106,11 @@ async function runS001SurfaceArb(
   //    events, 0 filled — see docs/health-log.md).
   //    exit_reason IS NULL excludes positions that have been exited but not yet
   //    settled — without this S-001 could re-enter an already-exited position.
+  //    Includes 'open'/'partial' — a resting unfilled order on this event must
+  //    also block re-entry, or every 5-minute cron cycle piles another order onto
+  //    the same persistent violation while the prior one is still on the book,
+  //    which is what was causing Kalshi's self_trade_prevention to cancel our own
+  //    earlier resting orders once a later cycle's order crossed them.
   const { data: openTrades } = await supabase
     .from("trades")
     .select("ticker")
