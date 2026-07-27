@@ -2,6 +2,52 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (39th run) — Clean error/critical window continues (6th run in a row); found and fixed S-001 re-thrashing the same doomed ticker every 5-min cycle while the live account is balance-depleted
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 38th run's
+~21:06 UTC cutoff through this run's ~22:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run).
+
+**Root cause found and fixed (MED — S-001 Surface Arb re-attempts a known-unaffordable ticker
+every cron cycle instead of backing off): breaking down the window's activity by `event_type`
+surfaced 12 `liquidity_fallback` warnings and 12 `order_skipped_insufficient_balance` warnings, both
+for the identical ticker/price/amount (`KXBTC-26JUL2817-B64875` @ 89c, then `-B64625` @ 88c after the
+hourly bracket rolled), one pair per 5-min `auto-trade-cron` cycle from 21:10 to 22:05 UTC — 11
+straight cycles, zero `order_submitted` in between. Reading `supabase/functions/auto-trade/index.ts`'s
+`runS001SurfaceArb`: its dedup query (added 2026-07-26, see the entry below this one in the log)
+only looks for `trades` rows with `status IN ('filled','open','partial')` to skip an event ticker
+already being worked. But `execute-trade`'s pre-flight balance check (`index.ts:661-694`) returns
+*before* ever placing an order when the account can't cover the leg's collateral, inserting a
+`status: "failed"` trade row and returning early — a row the dedup query can't see. Since the live
+account is genuinely balance-depleted (the same state the 34th-38th runs' `kalshi_low_balance`
+alerts have been tracking, confirmed still true this run — `health_check_run` shows it firing/
+suppressing as designed), and balance doesn't replenish on a 5-minute cadence, S-001 was re-detecting
+the same still-unresolved bracket-sum alert every cycle and re-spending a live Kalshi orderbook fetch
++ balance check on a ticker already known to fail — pure waste, not a financial-risk bug (no
+duplicate orders reached Kalshi; `accountDepleted` correctly stops the loop mid-cycle once hit,
+this was purely cross-cycle).
+
+**Fix (this run):** Added a second dedup query in `runS001SurfaceArb` — recent `status: "failed"`
+trades for this strategy with `notes LIKE 'Skipped pre-flight:%'` (the balance-check's own failure
+marker) within the last 15 minutes (3 cron cycles) — and folded their event tickers into the same
+`alreadyInMarket`-style skip check the loop already uses. 15 min is long enough to stop the thrash,
+short enough that S-001 resumes on the same ticker immediately once the account is funded. No retry/
+decision/balance logic touched — purely an additional skip condition, same pattern as the
+filled/open/partial dedup it sits next to.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` initially showed 18 errors (17
+pre-existing + 1 new from an untyped `Set` spread); annotated `balanceSkippedTickers` as `Set<string>`
+and re-ran — 17 errors, matching the exact pre-existing baseline confirmed via `git stash`/`deno
+check`/`git stash pop` on unmodified `dev` (identical count and locations, zero new errors after the
+type fix). Deployed live via `supabase functions deploy auto-trade`. Watched the first post-deploy
+`auto-trade-cron` cycle (22:15 UTC): zero `liquidity_fallback` and zero
+`order_skipped_insufficient_balance` rows — S-001 correctly skipped the still-depleted ticker family
+(within the 15-min window) and moved on to evaluate a different bracket (`KXBTC-26JUL2719`, filtered
+out normally at `info` severity by the existing fee-hurdle check, unrelated to this fix) —
+`auto_trade_strategy_run`/`auto_trade_run` continuing at `info` severity with no regression.
+**Reversibility:** easy — single-function, additive dedup query + one skip condition; git revert;
+no schema or data changes, no existing dedup/balance/decision logic touched.
+
 ## 2026-07-27 (38th run) — Clean error/critical window continues (5th run in a row); the 36th run's new `s001_leg_execution_failed` observability path fired for real and exposed a genuine live-trade-starvation bug in the rate limiter
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 37th run's
