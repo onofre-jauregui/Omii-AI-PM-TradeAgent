@@ -2,6 +2,58 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-26/27 (15th run) — Clean window (18h+); found and finished a half-shipped fix (alert-dedup RPC deployed but never called)
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 14th run's
+07:07 UTC cutoff through invocation (2026-07-27 01:12 UTC) — zero rows, an 18-hour clean window,
+the longest of the 15 runs so far. Independently re-verified the 14th run's memory-compaction
+cooldown fix is holding by comparing `auto_reflect_run`/`memory_compaction` pairs over the same
+window rather than trusting the prior write-up: found three cron cycles (12:13, 12:15, 21:07 UTC)
+that ran `auto_reflect` but correctly produced **no** `memory_compaction` row because the prior
+compaction was inside the 30-minute cooldown — the fix is live and working.
+
+**Root cause found and fixed (HIGH — a real, still-live alert race, not a false alarm):** with
+no new Telegram error to chase, audited every uncommitted file sitting in this branch's working
+tree (a habit from the 12th/13th run's `event_type` audit) instead of assuming "no local diff" =
+"nothing to check." Found `supabase/migrations/20260726_alert_dedup_race.sql` — a same-day,
+never-committed migration creating `claim_health_check_alert()`, an advisory-lock-guarded atomic
+dedup function, written to fix a real incident: three `execute-trade` basket legs raced the old
+`alertOnce()`'s check-then-act `SELECT`-then-`INSERT`, all three passed the dedup check before
+any commit landed, and Onofre got paged three times for one `kalshi_insufficient_balance`
+condition (2026-07-25 16:05:04.243/.262/.327 UTC — 84ms apart). Confirmed the migration **was**
+applied live (`claim_health_check_alert` present in `pg_proc`), but `_shared/telegram.ts`'s
+`alertOnce()` was never updated to call it — the fix existed in the database and did nothing,
+because nothing invoked it. The original race was still fully live in every alerting path.
+
+**Fix (deployed):** Rewrote `alertOnce()` to call `claim_health_check_alert()` atomically instead
+of the old select-then-insert, removing the race entirely. **Verified:** called the RPC twice
+back-to-back with the same `(alert_type, fingerprint)` via the Management API — first call
+returned `true`, second returned `false`, confirming the advisory lock correctly serializes
+concurrent claims (test row deleted after). Redeployed all 11 edge functions that import
+`_shared/telegram.ts` (`auto-trade`, `signal-generator`, `settle-signals`, `surface-scanner`,
+`market-data-fetcher`, `compact-memory`, `auto-settle`, `futures-signal`, `weather-signal`,
+`execute-trade`, `auto-reflect`) — all confirmed `"message":"Deployed Functions."`. Reversible:
+revert `alertOnce()` to the prior body; the unused RPC has no side effects on its own.
+
+**Improvement (logged):** the underlying gap this run closes is process, not code — a fix can be
+deployed at the database layer via direct API call (this project's own migration convention,
+since `supabase db push` is broken here) while the *application code* that was supposed to call it
+never gets updated or deployed, and nothing catches the mismatch. Recommend a lightweight check in
+a future run: after any migration that adds a new RPC/function, grep the codebase for at least one
+call site before marking the fix complete — "the DB object exists" and "something calls it" are
+different claims and this run's finding shows they can silently diverge.
+
+**Also committed this run (pre-existing, already-live, never-committed WIP found in the working
+tree):** the 2026-07-26 resting-order dedup fix (`auto-trade/index.ts`, DECISIONS.md entry already
+present) — confirmed still live and working via `order_cancelled` counts (18 rows 2026-07-25 16:00
+UTC hour, 25 rows through 2026-07-26 00:00 UTC hour, **zero rows since** through this run). Left
+`supabase/functions/switch-trading-mode/` untouched — unrelated in-progress billing/live-trading
+feature, out of scope for a health check.
+
+**Process note:** the 12th-run branch-reconciliation flag (this branch vs. `dev`, diverged since
+PR #40) is still open and unresolved — still Onofre's call, not re-investigated this run. This
+run's commits land on this branch only; no PR opened against `dev` given that open divergence.
+
 ## 2026-07-26 (14th run) — Clean window (~1h since 13th run); found and fixed a broken compaction cooldown that let `compact-memory` run uncapped
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 13th run's

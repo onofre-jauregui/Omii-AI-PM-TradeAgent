@@ -42,30 +42,22 @@ export async function alertOnce(
   message: string,
 ): Promise<boolean> {
   try {
-    const since = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
+    // Atomic claim (see 20260726_alert_dedup_race.sql) — a Postgres advisory
+    // lock serializes concurrent callers for the same alert_type+fingerprint
+    // so only one of them claims the send. The old select-then-insert here
+    // was check-then-act: concurrent callers (e.g. basket legs) could all
+    // pass the SELECT before any INSERT committed, sending the same alert
+    // multiple times.
+    const { data: claimed, error } = await supabase.rpc("claim_health_check_alert", {
+      p_alert_type: alertType,
+      p_fingerprint: fingerprint,
+      p_cooldown_hours: cooldownHours,
+    });
 
-    const { data: existing } = await supabase
-      .from("compliance_log")
-      .select("id")
-      .eq("event_type", "health_check_alert")
-      .eq("metadata->>alert_type", alertType)
-      .eq("metadata->>fingerprint", fingerprint)
-      .gte("created_at", since)
-      .limit(1)
-      .maybeSingle();
-
-    if (existing) return false; // already sent within cooldown
+    if (error) throw error;
+    if (!claimed) return false; // already sent within cooldown, or lost the race
 
     await sendTelegramAlert(message);
-
-    // Record so health-check sweep and future calls can deduplicate.
-    await supabase.from("compliance_log").insert({
-      event_type: "health_check_alert",
-      severity: "warning",
-      message: `Alert sent: ${alertType}`,
-      metadata: { alert_type: alertType, fingerprint },
-    }).then(undefined, () => {}); // don't let the record insert block the alert path
-
     return true;
   } catch {
     // alertOnce must never crash the caller — fall through to raw send.
