@@ -89,10 +89,7 @@ serve(async (_req) => {
         user_id: user.id,
         event_type: "daily_digest",
         severity: "info",
-        message:
-          `Daily digest sent via ${channel}: ${stats.totalTrades} trade(s), net P&L ${
-            stats.netPnl >= 0 ? "+" : ""
-          }${stats.netPnl.toFixed(2)}`,
+        message: `Daily digest sent via ${channel}: ${stats.totalTrades} trade(s), net P&L ${stats.netPnl >= 0 ? "+" : ""}${stats.netPnl.toFixed(2)}`,
         metadata: { channel, ...stats },
         created_at: new Date().toISOString(),
       }).then(
@@ -128,10 +125,7 @@ async function logRunSummary(
     message: `daily-digest run: ${sent}/${total} digest(s) sent`,
     metadata: { sent, total },
     created_at: new Date().toISOString(),
-  }).then(
-    undefined,
-    (e: unknown) => console.warn("daily_digest_run log failed:", e),
-  );
+  }).then(undefined, (e: unknown) => console.warn("daily_digest_run log failed:", e));
 }
 
 async function fetchUsersDirectly(supabase: ReturnType<typeof createClient>) {

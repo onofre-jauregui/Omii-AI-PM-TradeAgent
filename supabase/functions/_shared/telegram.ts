@@ -57,20 +57,19 @@ export async function alertOnce(
   message: string,
 ): Promise<boolean> {
   try {
-    // Atomic claim (see 20260726_alert_dedup_race.sql) — a Postgres advisory
-    // lock serializes concurrent callers for the same alert_type+fingerprint
-    // so only one of them claims the send. The old select-then-insert here
-    // was check-then-act: concurrent callers (e.g. basket legs) could all
-    // pass the SELECT before any INSERT committed, sending the same alert
-    // multiple times.
-    const { data: claimed, error } = await supabase.rpc("claim_health_check_alert", {
+    // Check-and-claim happens atomically inside claim_health_check_alert
+    // (advisory-lock-guarded SQL function) so concurrent callers for the same
+    // alert_type+fingerprint — e.g. basket legs submitted in parallel from
+    // execute-trade — can't all pass the dedup check before any of them has
+    // recorded the send. Only the caller that wins the lock gets `true`.
+    const { data: shouldSend, error } = await supabase.rpc("claim_health_check_alert", {
       p_alert_type: alertType,
       p_fingerprint: fingerprint,
       p_cooldown_hours: cooldownHours,
     });
 
     if (error) throw error;
-    if (!claimed) return false; // already sent within cooldown, or lost the race
+    if (!shouldSend) return false; // already sent within cooldown
 
     await sendTelegramAlert(message);
     return true;

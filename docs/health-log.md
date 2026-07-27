@@ -3442,6 +3442,57 @@ shouldn't be triggered speculatively by a monitoring pass when the job is alread
 run on its own within hours. Next run should check `cron.job_run_details` for this job's first
 execution and confirm it succeeded (`status = 'succeeded'`, row count dropped).
 ## 2026-07-26 (8th run) — Both open fixes verified live and holding clean; no new error class. Improvement: opened the review-checkpoint PR flagged (not acted on) by the 6th and 7th runs
+## 2026-07-27 (17th run, this branch's count) — Clean window; verified the 16th run's dedup fix is live and holding, fixed a repo-hygiene gap
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 16th run's
+02:20 UTC cutoff through invocation (12:46 UTC) — zero rows across 1,341 events in the window,
+a clean ~10.5h. Two `health_check_alert` rows (`kalshi_insufficient_balance`, 04:15:02 and
+09:05:02 UTC, same fingerprint) — checked these weren't a dedup-race repeat given the 15th/16th
+run's history with this exact bug class: the call site (`execute-trade/index.ts:638`) uses a
+4h cooldown and the two fires are 4h50m apart, i.e. the cooldown legitimately expired and
+re-alerted on a still-low balance ($1.66, same condition as the 16th run) — correct behavior,
+not a race.
+
+**Verified the 16th run's fix is actually deployed, not just claimed:** re-read this branch's
+local `health-check/index.ts` and it still shows the old check-then-act `isDuped()` — expected,
+per the long-open branch-divergence flag (this branch is 53 commits behind `origin/dev`, 17
+ahead, all local-only). Checked what's actually *live* instead of trusting either copy: pulled
+the deployed function metadata via the Management API — `health-check` is at version 37,
+updated 2026-07-27 02:38 UTC, matching the 16th run's PR #76 deploy — and confirmed
+`origin/dev`'s copy has the `claim_health_check_alert()` RPC, not `isDuped()`. The fix is live
+in production; only this branch's stale working copy still shows the old code.
+
+**No new root-cause bug found in the trading/alerting path this run** — genuinely clean, not
+under-investigated: grepped every function in `origin/dev` for `maybeSingle()` (the shape of
+the check-then-act pattern that caused the 15th/16th run's races) and manually reviewed every
+money/dedup-relevant hit (`stripe-webhook`, `create-checkout`, `manage-billing`) — all three use
+atomic unique-constraint inserts (`23505` conflict handling) for idempotency, not check-then-act.
+No other instance of the bug class found.
+
+**Improvement (found, fixed, deployed — PR #78 → `dev`, merged 12:50:24 UTC):** while auditing,
+`git status` on this branch showed 5 kinds of untracked, non-gitignored clutter:
+`deno.lock`, `test-results/`, `playwright-report/`, `.claude/worktrees/`, `supabase/.temp/`.
+The worktrees dir is the sharp edge — it nests other active worktrees' own `.git` directories
+(confirmed 3 present: `feat/full-transaction-cost-tracking`, a differently-branched
+`fix/pwa-navigate-fallback`, and a `frontend-fixes` worktree on a branch literally named
+`fix/hero-timeout-error-surfacing-30th-run`, plus a sibling `TradeAgent-perf` checkout outside
+`.claude/` entirely) — a careless `git add -A` on any of these trees could pull nested-repo
+state into a commit. Fixed via isolated worktree off `origin/dev` (same pattern as prior runs),
+added all five paths to `.gitignore`, opened and self-merged PR #78 (docs/config only, zero
+deploy risk, same self-merge precedent as the 9th run's alerting-only fix).
+
+**Process note (escalating, 5th consecutive run to flag it):** the branch-divergence issue first
+flagged in the 12th run is still open. New evidence this run that it's worse than "this branch
+vs. dev" — there are now at minimum 4 other active worktrees/checkouts of this repo
+(`TradeAgent-perf`, plus 3 under `.claude/worktrees/`) on their own diverging branches, one of
+which is already labeled "30th run" while this branch's own count is only at 17, meaning **at
+least two independent health-check run-count sequences exist and have never been reconciled.**
+This strongly suggests concurrent/parallel scheduled-task instances are each building their own
+fix history against a moving `dev` HEAD rather than one linear sequence. Recommend Onofre
+either designate one worktree as the canonical one for this scheduled task or fold the numbering
+into a single source (e.g. count PRs merged to `dev`, not local commits) — continuing to flag
+this without resolving it is no longer useful signal.
+
 ## 2026-07-27 (16th run) — Clean window since the 15th run; found and fixed a second instance of the same alert-dedup race the 15th run only partially closed
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 15th run's
