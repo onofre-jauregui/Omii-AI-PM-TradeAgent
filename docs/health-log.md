@@ -2,6 +2,38 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-27 (33rd run) — Clean error window continues; fixed the silent-migration-failure root cause flagged by PR #82 (scoped: guard only, no backlog re-run)
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 32nd run's
+~15:07 UTC cutoff through this run's ~16:07 UTC invocation — zero new rows; most recent is still
+2026-07-25T19:00:04 UTC (`order_failed`/`insufficient_balance`), extending the clean window to
+~45h. Confirmed via direct REST query, not carried over from the prior entry. Activity in the
+window was all `info`/`warning` (trade/strategy/settle/futures runs, `order_skipped_insufficient_balance`
+×4, one `api_timeout`) — none crossed the `error` threshold. `kalshi_insufficient_balance` continues
+firing correctly on the same known ~$1.66 live-balance condition — still a deposit decision, not a bug.
+
+**Root cause found and fixed (MED — CI/deploy infra, flagged but explicitly left unfixed by PR
+#82/DECISIONS.md 2026-07-27): `.github/workflows/ci.yml`'s `migrate-staging` job swallowed failed
+migrations and recorded them as applied anyway.** The job ran each migration via
+`curl -sf ... && echo OK || echo WARN`, then **unconditionally** inserted a
+`schema_migrations` history row regardless of success — a failed migration was marked applied and
+silently never retried. This is confirmed live: staging's `public` schema has only 2 tables
+against ~40 migration versions recorded as applied. **Fix (this run):** rewrote the loop so a
+failed `curl -sf` now `exit 1`s the job (visible CI failure, matches the "fail loud, never a quiet
+exit 0" standard) and the `INSERT INTO schema_migrations` only runs after a confirmed-successful
+apply — a migration that fails is no longer recorded as applied. **Deliberately NOT fixed this
+run:** PR #82's other two proposed items — deriving `VERSION` from the full filename stem (fixes
+same-day collisions) and re-running the ~40-migration backlog against staging. Both require
+touching the *existing* `schema_migrations` history, whose ~40 rows already use the old
+date-prefix-only version scheme; changing the derivation now would make every one of them look
+unapplied on the next `dev` push and re-trigger the full historical backlog against a live shared
+staging DB with unknown idempotency — exactly the blast-radius PR #82 itself flagged as needing a
+deliberate reset decision, not an unattended fix. Left as an open follow-up requiring Onofre's
+call on resetting staging first.
+**Verified:** `python3 -c "import yaml; yaml.safe_load(...)"` confirms the edited workflow parses;
+change is config-only (no migration executed, no deploy), diff limited to the swallow/record
+lines. **Reversibility:** easy — single-file workflow diff, git revert.
+
 ## 2026-07-27 (32nd run) — Clean error window; closed the stale-checkout/branch-divergence root cause at its actual source: the scheduled task's own config
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` independently of the
