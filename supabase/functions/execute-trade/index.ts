@@ -23,9 +23,14 @@ async function checkRateLimit(supabase: any, userId: string, isPaper: boolean): 
   const limit = isPaper ? 15 : 3;
   const windowStart = new Date(Math.floor(Date.now() / 60000) * 60000).toISOString();
 
+  // Keyed per mode: the (user_id, endpoint, window_start) unique constraint has no
+  // mode column, so a bare "execute-trade" key lets paper fills (15/min budget) and
+  // live orders (3/min budget) increment the same counter. A user's own paper
+  // activity can then exhaust the shared count before any live order is attempted,
+  // rejecting every live leg that minute even though live made zero prior calls.
   const { data, error } = await supabase.rpc("upsert_rate_limit", {
     p_user_id: userId,
-    p_endpoint: "execute-trade",
+    p_endpoint: isPaper ? "execute-trade:paper" : "execute-trade:live",
     p_window_start: windowStart,
     p_limit: limit,
   });
