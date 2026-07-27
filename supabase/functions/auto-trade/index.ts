@@ -1104,6 +1104,7 @@ async function runS001SurfaceArb(
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
   const allFilled: string[] = [];
+  const legErrors: string[] = [];
   const seenEvents = new Set<string>();
   // Set once any leg this cycle reports insufficient_balance — balance doesn't
   // replenish mid-run, so every alert processed after that point is skipped
@@ -1334,6 +1335,14 @@ async function runS001SurfaceArb(
       });
       legResults.push({ ticker: leg.ticker, success: result.success, price: leg.noPrice });
 
+      if (!result.success && result.code !== "insufficient_balance") {
+        // insufficient_balance is a known, already-surfaced condition (accountDepleted
+        // below, plus the health-check kalshi_low_balance alert) — only capture genuine
+        // unexpected failures here so a real execute-trade outage isn't masked by the
+        // generic "failed fee hurdle" message every other rejection reason falls into.
+        legErrors.push(`${leg.ticker}: ${result.error || result.message || "unknown error"}`);
+      }
+
       if (result.code === "insufficient_balance") {
         accountDepleted = true;
         break;
@@ -1351,6 +1360,18 @@ async function runS001SurfaceArb(
     }
   }
 
+  if (allFilled.length === 0 && legErrors.length > 0) {
+    // Distinguishes a genuine execute-trade outage from the routine "nothing qualified"
+    // case — previously both looked identical in compliance_log (see health-log.md, this run).
+    await supabase.from("compliance_log").insert({
+      event_type: "s001_leg_execution_failed",
+      severity: "warning",
+      message: `S-001 execute-trade failed on every attempted leg (${legErrors.length}): ${legErrors.join("; ")}`,
+      metadata: { run_id: runId, leg_errors: legErrors },
+      user_id: strategy.user_id || null,
+    }).then(null, () => {});
+  }
+
   return {
     strategy_id: strategy.id,
     strategy_name: strategy.name,
@@ -1361,7 +1382,9 @@ async function runS001SurfaceArb(
       ? `S-001 Surface Arb: ${allFilled.length} legs filled — ${allFilled.join(", ")}`
       : alerts.length === 0
         ? "No fresh KXINX/KXBTC bracket-sum violations in last 10 min (surface-scanner must run first)"
-        : "Alerts found but all events failed fee hurdle, settled on Kalshi, or tickers already held",
+        : legErrors.length > 0
+          ? `S-001 execute-trade failed on every attempted leg: ${legErrors.join("; ")}`
+          : "Alerts found but all events failed fee hurdle, settled on Kalshi, or tickers already held",
   };
 }
 
