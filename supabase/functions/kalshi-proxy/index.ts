@@ -77,7 +77,25 @@ serve(async (req) => {
     }
 
     const response = await fetchWithRetry(kalshiUrl.toString(), fetchOptions);
-    const data = await response.json();
+    const rawBody = await response.text();
+    let data: unknown;
+    try {
+      data = rawBody ? JSON.parse(rawBody) : null;
+    } catch (parseError) {
+      // Capture the actual malformed body — without this, a bad Kalshi response
+      // is indistinguishable from any other exception and undiagnosable on repeat.
+      const parseErrMsg = parseError instanceof Error ? parseError.message : "JSON parse failed";
+      await adminClient.from("compliance_log").insert({
+        event_type: "api_error",
+        severity: "error",
+        message: `Kalshi API returned non-JSON response on ${req.method} ${endpoint} (status ${response.status}): ${parseErrMsg}`,
+        metadata: { status: response.status, endpoint, full_path: apiPath, raw_body: rawBody.slice(0, 500) },
+      });
+      return new Response(
+        JSON.stringify({ error: "Kalshi API returned an unexpected response format", status: response.status }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     if (!response.ok) {
       await adminClient.from("compliance_log").insert({
