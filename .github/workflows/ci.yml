@@ -240,7 +240,7 @@ jobs:
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
               -d "{\"query\": \"SELECT COUNT(*)::int AS n FROM compliance_log WHERE created_at > NOW() - INTERVAL '5 minutes' AND event_type IN ('auto_trade_error','auto_trade_strategy_error','strategy_auto_halted','kalshi_circuit_open','risk_check_failed')\"}" \
-              | jq -r '.data[0].n // 0')
+              | jq -r '.[0].n // 0')
 
             if [ "${ERRORS:-0}" -gt "$ERROR_THRESHOLD" ]; then
               echo "THRESHOLD BREACHED: $ERRORS error/halt events in last 5 min (limit: $ERROR_THRESHOLD)"

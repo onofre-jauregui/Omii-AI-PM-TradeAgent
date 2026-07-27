@@ -5,36 +5,12 @@ import {
   type EncryptedSecret,
 } from "./encryption.ts";
 
-// HMAC-SHA256 using built-in Web Crypto (no external imports needed)
-export async function hmacSHA256Base64(key: string, message: string): Promise<string> {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
-  return btoa(String.fromCharCode(...new Uint8Array(sig)));
-}
-
-export async function generateAuthHeaders(
-  apiKeyId: string,
-  privateKey: string,
-  method: string,
-  path: string,
-  timestamp: number
-): Promise<Record<string, string>> {
-  const message = `${timestamp}${method.toUpperCase()}${path}`;
-  const signature = await hmacSHA256Base64(privateKey, message);
-  return {
-    "KALSHI-ACCESS-KEY": apiKeyId,
-    "KALSHI-ACCESS-SIGNATURE": signature,
-    "KALSHI-ACCESS-TIMESTAMP": String(timestamp),
-    "Content-Type": "application/json",
-  };
-}
+export {
+  rsaPssSha256Base64,
+  generateAuthHeaders,
+  KALSHI_BASE_URL,
+  fetchWithRetry,
+} from "./kalshi-signing.ts";
 
 /**
  * Read Kalshi live credentials for a specific user.
@@ -114,33 +90,4 @@ export async function getKalshiCredentials(
   if (!privateKey) privateKey = Deno.env.get("KALSHI_API_PRIVATE_KEY") || null;
 
   return { keyId, privateKey };
-}
-
-export const KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
-
-/**
- * Fetch with exponential backoff on 429 responses.
- * Retries up to maxRetries times before returning the final response.
- * All other status codes are returned immediately.
- */
-export async function fetchWithRetry(
-  url: string,
-  options: RequestInit = {},
-  maxRetries = 3,
-  baseDelayMs = 1000,
-): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (res.status !== 429 || attempt === maxRetries) return res;
-      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
-      await new Promise((r) => setTimeout(r, delay));
-    } catch (err) {
-      // Network-level errors (TCP reset, connection refused, timeout) — retry before giving up.
-      if (attempt === maxRetries) throw err;
-      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw new Error("fetchWithRetry: exhausted retries");
 }

@@ -4,6 +4,179 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-27 — Fixed migrate-staging's silent-failure swallow; deliberately did not re-key VERSION or re-run the backlog
+**Decision:** In `.github/workflows/ci.yml`'s `migrate-staging` job, a failed migration `curl -sf` now `exit 1`s the job, and the `schema_migrations` history INSERT only runs after a confirmed-successful apply.
+**Options:** A) Fix all three items from the prior entry's proposed fix (fail-loud, record-on-success-only, full-stem VERSION + backlog re-run) in one pass — rejected, re-keying VERSION makes all ~40 existing history rows look unapplied and would re-trigger the entire backlog against live shared staging with unverified idempotency. B) Fix only fail-loud + record-on-success (chosen) — closes the "reports success on failure" root cause for every future migration without touching existing history rows or triggering any DB writes this run.
+**Why:** The swallow-and-record bug is a pure CI-config defect, safe to fix unattended (zero migrations executed, zero deploys). The VERSION re-key + backlog re-run is a data-shaped decision on live shared infrastructure that needs an explicit reset call — same blast-radius line the prior entry drew.
+**Reversibility:** Easy — single-file workflow diff, git revert.
+**Trace:** PR (this run, 33rd health-check), `docs/health-log.md` 33rd-run entry.
+
+## 2026-07-27 — Flagged: staging Supabase DB is largely unmigrated despite CI claiming success (not auto-fixed)
+
+**Decision:** Logging as a critical finding for review rather than attempting a fix — this is shared CI/deploy infrastructure, not scoped to any one feature.
+**Finding:** Verifying PR #81 (paper-fill-realism) on staging, `information_schema.tables` showed **only 2 tables exist in `public`** (`expected_cron_jobs`, plus the `agent_cron_health` view) — `trades`, `strategies`, and every other core table are absent. Yet `supabase_migrations.schema_migrations` on the same project lists ~40 versions back to 2026-05-11 as applied, and `cron.job` has **zero rows** despite `reconcile-orders-cron`/`auto-trade-cron`/etc. all being long-standing. Root cause: `.github/workflows/ci.yml`'s `migrate-staging` job (lines 34-65) runs each migration via `curl -sf ... && echo OK || echo WARN`, then **unconditionally** inserts a `schema_migrations` row regardless of whether the SQL succeeded — a failed migration is recorded as applied and never retried, silently, forever. It also derives `VERSION` from only the date prefix (`cut -d_ -f1`), so same-day multi-file migrations (this PR shipped two `20260727_*.sql` files) collide on one version key. This is the same failure shape already fixed once for `reconcile-orders-cron` specifically (`20260725_expected_cron_manifest.sql`) but never generalized — the fix there added a job-existence manifest, not a fix to the migration runner that let it happen.
+**Impact:** Every past PR's "verified on staging" claim in this repo has likely been checking Vercel/frontend behavior only — the backend DB schema on staging has probably never matched what migrations describe. `dev`'s E2E suite passing is not evidence the DB layer works; it only proves the frontend bundle loads.
+**Not fixed here:** repairing months of accumulated migration failures on shared infrastructure is a separate, larger effort with its own blast-radius considerations — out of scope for a feature PR. This PR's own two migrations (`20260727_trade_fees.sql`, `20260727_paper_reconcile_cron.sql`) are very likely among the silently-failed ones on staging as a result.
+**Proposed fix (for review, not applied):** (1) make the migration runner treat a failed `curl -sf` as a hard job failure (`exit 1`), not a swallowed `WARN`; (2) only insert the `schema_migrations` history row on confirmed success; (3) derive `VERSION` from the full filename stem, not just the date prefix, so same-day files don't collide; (4) once the runner is fixed, re-run the full migration backlog against staging from scratch (likely needs to start from a clean/reset staging DB given how far behind it is) to get it to actually match `main`'s schema.
+**Reversibility:** N/A — no code changed by this entry.
+**Trace:** Found while verifying PR #81. `curl -X POST https://api.supabase.com/v1/projects/<staging_ref>/database/query` against `information_schema.tables`, `cron.job`, `supabase_migrations.schema_migrations` — all queried directly, 2026-07-27.
+
+## 2026-07-27 — Paper trading simulates real fill risk + Kalshi fees (PR #81)
+
+**Decision:** Rewrote `execute-trade`'s paper branch to simulate fills against the real, public Kalshi orderbook (`_shared/fill-sim.ts`: `simulatePaperFill`, `estimateKalshiFee`) instead of unconditionally inserting `status:"filled"` at the exact requested price with $0 fee. Added a `paper-reconcile` cron to advance resting paper orders over time, the same way `reconcile-orders` does for live. Adopted `docs/design/full-transaction-cost.md`'s schema (`entry_fee_cents`/`exit_fee_cents`/`ai_qualify_cost_usd`/`net_pnl`) for fee accounting.
+**Finding:** Paper S-001 showed 354 attempts / 12 fills / $930.77 P&L while live S-001 had placed 265 real order attempts and filled zero — paper was measuring signal-detection quality only, not real fill risk, making it useless as a live-performance preview (the entire point of paper mode).
+**Options:** A) Simpler ad-hoc `fee_dollars` column — rejected once a more thorough, already-written, unmerged design (`feat/full-transaction-cost-tracking` worktree, 2026-07-23, awaiting sign-off) was found covering the same need with a more complete two-layer cost model. B) Adopt that design's schema (Option A within it: direct cost per-trade, shared AI cost as a separate platform-overhead line) — chosen, per Onofre's confirmation.
+**Why:** Live captures Kalshi's own reported fee from the real order response (zero formula risk); only paper needs to estimate via the published fee formula, since there's no real order to read a fee from. `ai_qualify_cost_usd` ships nullable/unpopulated — no per-model pricing table exists yet; scoping it out now rather than faking it, per the design's own two-layer split.
+**Reversibility:** Easy — new columns are additive/nullable, `paper-reconcile-cron` can be unscheduled, `checkLiquidity`'s refactor is behavior-preserving (verified via `deno check` error-count parity against `origin/dev`).
+**Trace:** PR #81 on `feature/paper-fill-realism` → `dev`. `docs/design/full-transaction-cost.md`.
+
+## 2026-07-26 — Fixed health-check's kalshi_low_balance alert: doubled URL path, 404'd since inception
+
+**Decision:** In `health-check/index.ts`'s live-balance check, fetch `${KALSHI_BASE_URL}/portfolio/balance` instead of `${KALSHI_BASE_URL}${path}` where `path` was already the full `/trade-api/v2/portfolio/balance`.
+**Finding:** `KALSHI_BASE_URL` (`_shared/kalshi-signing.ts`) already ends in `/trade-api/v2`; appending the fully-qualified signed path doubled the segment (`.../v2/trade-api/v2/portfolio/balance`), which Kalshi 404's. `if (!resp.ok) continue` swallowed every failure silently, so `kalshi_low_balance` had zero rows in `compliance_log` — ever — despite the live account sitting at $1.66 (floor $15) for hours today. execute-trade's separate per-order `kalshi_insufficient_balance` alert (correct URL construction there, matched against `getKalshiBaseUrl()`) still caught the condition reactively, which is the only reason it wasn't silent end-to-end — but the proactive early-warning this function exists for had never once fired since it was added.
+**Options:** A) Leave it — the reactive execute-trade alert already covers the user-facing outcome — rejected, this function's entire purpose is catching it *before* orders start failing, and a monitoring path that silently no-ops is worse than one that's absent (looks healthy, isn't). B) Fix the URL construction — chosen, one-line change, zero trading-logic surface.
+**Why:** Monitoring-only code path (GET balance + Telegram send, no order placement) — safe to fix and deploy unattended, unlike the 2026-07-20 market-data-fetcher finding (that one fed live execution and was correctly left for review). Verified root cause directly against the live Kalshi API before touching code: doubled path → 404, correct path → 401 (auth required, as expected unauthenticated) — not a guess.
+**Reversibility:** Easy — single-line revert, redeploy `health-check`.
+**Trace:** PR #75, deployed to `uyfnezxmgwitpzsrnkst`. Verified live: manual invoke → `alerts_sent: ["kalshi_low_balance"]`, confirmed row `a8899b4c` in `compliance_log` at 2026-07-27T00:43:18Z.
+
+## 2026-07-26 — Atomic advisory-lock dedup for the shared Telegram alert helper
+
+**Decision:** Added `claim_health_check_alert` (Postgres function, transaction-scoped
+`pg_advisory_xact_lock` keyed on `alert_type`+`fingerprint`) and switched `alertOnce`
+(`_shared/telegram.ts`) to call it via one RPC instead of a separate SELECT-then-INSERT.
+**Finding:** The 23rd run's fix (PR #60, S-001 sequential leg submission) resolved the *specific*
+incident of 3 duplicate `kalshi_insufficient_balance` Telegram alerts within 84ms, but the
+underlying race — `alertOnce`'s dedup check and its record-the-send insert were two unguarded
+steps — was still live for any other concurrent call path into the same alert_type+fingerprint.
+11 edge functions route every Telegram alert through this one helper.
+**Options:** A) Leave it — the acute symptom is fixed, this is speculative hardening — rejected,
+this is the exact "fix the instance, not the class" anti-pattern the project's own root-cause
+standard exists to prevent, and the blast radius (a spurious duplicate page) is low-cost to close.
+B) Unique DB constraint on `(alert_type, fingerprint)` — rejected, doesn't fit a rolling cooldown
+window (a constraint would either never allow re-alerting or require constant cleanup). C)
+Advisory-lock-guarded atomic RPC — chosen: serializes concurrent callers without schema changes,
+verified directly (5 concurrent claims for one key → exactly 1 `true`).
+**Why:** Same class of fix as every other alerting/monitoring-path change made autonomously today
+(9th/10th/12th/13th/14th/17th/20th/24th/25th runs) — no live-trading execution logic touched, only
+how duplicate notifications are suppressed.
+**Reversibility:** Easy — single-PR revert (#67), `alertOnce` reverts to its prior check-then-insert
+behavior (functionally correct, just re-exposes the same race).
+**Trace:** PR #67 (`a1f2fad`), migration `20260726_alert_dedup_race.sql`. Incident:
+`compliance_log` `health_check_alert` rows 2026-07-26T16:05:04.243/.262/.327Z.
+
+## 2026-07-26 — Re-fixed S-001's concurrent-leg balance race directly on `dev`, not the stranded branch that "fixed" it first
+
+**Decision:** Rewrote `runS001SurfaceArb`'s leg submission from `Promise.all` back to a sequential
+loop with a cross-alert `accountDepleted` early-exit, committed and deployed straight to `dev`
+(PR #60), instead of merging or cherry-picking the existing `fix/live-pilot-instrumentation` branch.
+**Options:** (A) merge the stranded branch's 314e10c commit — risked pulling in that branch's other
+uncommitted/diverged changes to the same file; (B) cherry-pick just that commit — same file has
+independently evolved on both branches, high conflict risk; (C) re-implement the fix fresh against
+`dev`'s current code, verified in isolation. Chose C.
+**Why:** The stranded branch's version of this file has its own independent history unrelated to
+`dev`'s (per the 11th run's finding); merging it risked silently reverting or conflicting with 6+
+`dev`-only fixes made since. A small, fresh, isolated reimplementation was lower-risk than any merge.
+**Reversibility:** easy — single-file revert of PR #60 (`6d1b6bd`).
+**Trace:** PR #60, [[health-log.md]] 23rd run entry.
+
+## 2026-07-26 — Repointed `futures-signal-cron` from a nonexistent function to the real one
+
+**Decision:** `cron.alter_job(16, command := ...)` — changed the cron's target URL from
+`/functions/v1/futures-oracle` to `/functions/v1/futures-signal`.
+**Finding:** `futures-signal-cron` has fired every 10 minutes since it was registered, 404ing every
+time against a function name (`futures-oracle`) that was never deployed — the real function is
+`futures-signal`. `net.http_post` is fire-and-forget, so `cron.job_run_details.status` recorded
+"succeeded" (dispatch OK) on every one of those runs; nothing monitored the actual HTTP response.
+`compliance_log`'s `futures_signal_run` event — the Fed-funds/KXFED oracle signal source — hadn't
+fired since 2026-05-13, 74 days dead, invisible to every existing alert.
+**Options:** A) Redeploy a new `futures-oracle` function matching the old URL — rejected, the
+working code already lives at `futures-signal`, this would just be renaming the target back to the
+broken one. B) Repoint the cron URL to the function that actually exists — chosen, zero code change,
+zero deploy risk.
+**Why:** Simplest fix for a confirmed cause; DB-level config change only, no edge-function redeploy,
+no trading-path code touched.
+**Reversibility:** Easy — `cron.alter_job(16, ...)` back to the old URL (restores today's
+dead-but-quiet state, not recommended).
+**Trace:** `cron.job` jobid=16; `compliance_log` `futures_signal_run` rows resumed 2026-07-26
+15:19:00 UTC. See `docs/health-log.md` 22nd run.
+
+## 2026-07-25 — Fixed jsdom-broken signing tests that were silently blocking the balance pre-flight fix from shipping
+
+**Decision:** Added `// @vitest-environment node` to `kalshi-signing.test.ts` and guarded
+`src/test/setup.ts`'s `window.matchMedia` stub behind `typeof window !== "undefined"`.
+**Finding:** Scheduled health check found live trades repeatedly rejected with `insufficient_balance`
+every ~5 min from 18:45–19:00 UTC today, on tickers KXINX-26JUL27H1600-B7412/37/62. The fix for
+this (commit `9d47913`, a Kalshi balance pre-flight check) was already written and sitting on
+`fix/live-pilot-instrumentation` (PR #40), but PR #40's CI had been red since 18:19 UTC on
+`kalshi-signing.test.ts` — 4/4 tests failing with `importKey: 2nd argument is not instance of
+ArrayBuffer...`. Root cause: `vitest.config.ts` sets a global `environment: "jsdom"`; jsdom's Crypto
+shim doesn't implement a working `subtle`, so a suite exercising real RSA-PSS signing (no DOM
+dependency at all) failed for reasons unrelated to the signing code itself — which was correct.
+This masked *two* real fixes behind an unrelated red CI signal (the RSA-PSS signing fix `a73c79a`
+and the balance pre-flight fix `9d47913`), which is why live trading kept hitting both bugs it had
+already been fixed for, cycle after cycle.
+**Separately:** `.github/workflows/ci.yml`'s `canary-gate` job parses the Supabase Management API's
+`/database/query` response as `{data: [...]}` (`jq '.data[0].n'`), but that endpoint returns a bare
+array — every other job in the same file parses it correctly as a plain list. This has crashed the
+canary gate on the first 60s poll of every push to `main` since at least 2026-07-20, showing as a
+misleading CI "failure" even when the actual edge-function deploy (an earlier, independent job)
+succeeded. Fixed to `jq '.[0].n'`. Not yet verified against a real canary run — flag if a future
+`main` push still shows a red canary-gate.
+**Options:** A) Loosen the global jsdom environment — rejected, breaks isolation for the DOM suites
+it exists for. B) Per-file `node` environment override — chosen; zero-risk, scoped to the one suite
+that needs real WebCrypto.
+**Why:** The proximate error (compliance_log `insufficient_balance`/`order_failed`) had already been
+fixed in code; the actual blocker was a test-environment mismatch with no relation to trading logic.
+Fixing test infra was lower-risk and unblocks two already-reviewed real fixes rather than writing a
+third parallel fix.
+**Reversibility:** Easy — both changes are test-only/CI-only, no runtime behavior touched.
+**Trace:** commit `2270490` on `fix/live-pilot-instrumentation` (PR #40). `compliance_log`
+event_type=`order_failed`/`rate_limit_exceeded`, 2026-07-25 18:45–19:05 UTC.
+
+## 2026-07-25 — Replaced HMAC-SHA256 request signing with Kalshi's required RSA-PSS-SHA256
+
+**Decision:** Rewrote `_shared/kalshi-auth.ts` (now `_shared/kalshi-signing.ts`) to sign every
+Kalshi request with RSA-PSS-SHA256 (32-byte salt) over a millisecond-precision timestamp, importing
+the stored PEM as a WebCrypto RSA-PSS key (PKCS8 direct, PKCS1 re-wrapped). Previously it computed
+an HMAC-SHA256 digest over a second-precision timestamp, treating the RSA private key string as a
+raw HMAC secret.
+**Finding:** Today's V1→V2 endpoint migration (previous entry below) exposed that this had been
+wrong since the signing code was written — the retired endpoint returned its deprecation error
+before Kalshi ever validated a signature, so the auth bug had zero observable effect until the
+endpoint fix let requests reach real validation. `select mode,status,count(*) from trades where
+exchange='kalshi' group by mode,status` confirmed 60/60 live orders ever attempted had
+status='failed' — live trading has never placed a successful order since being enabled
+(2026-07-24 21:30).
+**Options:** A) Patch just the timestamp precision and hope the algorithm was somehow already
+correct — rejected, the two live 401s were unambiguously `INCORRECT_API_KEY_SIGNATURE`, not a
+clock-skew error. B) Verify Kalshi's actual required scheme against current docs before writing a
+fix — chosen; confirmed RSA-PSS-SHA256/ms-timestamp/path-only-no-query via docs.kalshi.com, then
+verified the fix against the real API (minted a session token, called read-only `kalshi-ping`,
+first-ever successful authenticated call for this account) before considering it resolved.
+**Why:** This is the actual documented Kalshi auth contract; HMAC was never a valid substitute for
+an RSA key pair. No lower-risk partial fix exists — signing is all-or-nothing correct.
+**Reversibility:** Easy — single shared-module revert, redeploy the 7 dependent functions.
+**Trace:** `failed_trade_queue`/`compliance_log`, `authentication_error`/`INCORRECT_API_KEY_SIGNATURE`
+rows starting 2026-07-25 15:03 UTC. Tests: `supabase/functions/tests/kalshi-signing.test.ts`.
+
+## 2026-07-25 — Migrated execute-trade to Kalshi's V2 order endpoint
+
+**Decision:** Rewrote the live order payload/response handling in `execute-trade/index.ts` to use `POST /trade-api/v2/portfolio/events/orders` instead of the deprecated `/portfolio/orders`.
+**Finding:** Every single live order today (2026-07-24/25) was rejected with `deprecated_v1_order_endpoint` — Kalshi deprecated the legacy order-mutation endpoint (changelog: 2026-06-18, "no earlier than May 6, 2026"). Live P&L was flat at $0 because no order had ever reached the exchange, not because of losing trades.
+**Options:** A) Ship the migration now, since 100% of live trades were already failing safely (no money at risk in the broken state) — chosen. B) Wait for a second independent verification source before touching real-money code — partially done: cross-checked the YES/NO price-complement math (`yes_bid + no_ask == 1.00`) against live Kalshi market data before writing the conversion, since the AI-summarized docs alone weren't sufficient confidence for a real-money payload change.
+**Why:** V2 quotes every order from the YES-book bid/ask side; NO orders are represented as the complementary YES-side order at `1 - price`. A compatibility shim converts the V2 response (flat object, dollar-string fields) back into the legacy `{order: {...}}` cents-based shape so all downstream fill/slippage/notification code is unchanged.
+**Reversibility:** Easy — single file (`execute-trade/index.ts`), redeploy previous version to roll back.
+**Trace:** `compliance_log` event_type=`order_failed`, message containing `deprecated_v1_order_endpoint`, 2026-07-24 through 2026-07-25 10:10 UTC.
+
+## 2026-07-25 — Staggered futures-signal-cron off market-data-fetcher-cron's minutes
+
+**Decision:** Changed `futures-signal-cron` schedule from `6,16,26,36,46,56 * * * *` to `9,19,29,39,49,59 * * * *`.
+**Finding:** `futures-signal-cron` and `market-data-fetcher-cron` (`1,6,11,...,56 * * * *`) fired in the exact same minute on every occurrence, and both call the Kalshi markets endpoint directly — a verifiable, recurring source of the periodic 429/500 `KALSHI api_error` Telegram alerts (2026-07-22 through 2026-07-25).
+**Options:** A) Build a shared cross-function rate limiter/token bucket — bigger lift, deferred. B) Stagger the colliding cron minute — chosen, cheap and directly addresses the confirmed collision.
+**Why:** Simplest fix for a concretely identified cause; doesn't address contention from other functions (auto-trade's S-001 direct Kalshi calls, execute-trade's orderbook checks) which may still contribute — worth revisiting if 429s persist.
+**Reversibility:** Easy — `cron.alter_job` back to the old schedule.
+**Trace:** `cron.job` jobid=16.
+
 ## 2026-07-20 — Flagged market-data-fetcher credential-fetch timeout gap (not auto-fixed)
 
 **Decision:** Logged as a finding for review rather than deploying a fix during an unattended scheduled health-check run.

@@ -10,6 +10,8 @@ import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement } from "../_shared/billing.ts";
 import { alertOnce } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
+import { fetchOrderbook } from "../_shared/kalshi-market-data.ts";
+import { computeDepthAtPrice, simulatePaperFill, estimateKalshiFee } from "../_shared/fill-sim.ts";
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -63,10 +65,12 @@ interface LiquidityCheck {
   sufficient: boolean;
   adjustedPrice?: number;
   fallbackAction?: string;
+  tickerGone?: boolean;
 }
 
 async function checkLiquidity(
   supabase: any,
+  userId: string | null,
   ticker: string,
   side: string,
   action: string,
@@ -74,19 +78,19 @@ async function checkLiquidity(
   amount: number
 ): Promise<LiquidityCheck> {
   try {
-    const kalshiBase = getKalshiBaseUrl();
-    const response = await fetch(`${kalshiBase}/markets/${ticker}/orderbook`);
-    if (!response.ok) {
-      return { sufficient: false, fallbackAction: "retry_with_limit" };
+    const result = await fetchOrderbook(getKalshiBaseUrl(), ticker);
+    if (!result.ok) {
+      // 404/410 mean the ticker doesn't exist or was delisted (e.g. a bracket rolled
+      // out of the strike ladder between signal detection and execution) — submitting
+      // an order to Kalshi for it will always fail. Flag it so the caller skips the
+      // doomed order submission instead of wasting a round trip on a dead ticker.
+      return { sufficient: false, fallbackAction: "retry_with_limit", tickerGone: result.tickerGone };
     }
 
-    const orderbook = await response.json();
-    const book = side === "yes"
-      ? (action === "buy" ? orderbook.yes?.asks : orderbook.yes?.bids)
-      : (action === "buy" ? orderbook.no?.asks : orderbook.no?.bids);
+    const depth = computeDepthAtPrice(result.orderbook, side as "yes" | "no", action as "buy" | "sell", price, amount);
 
-    if (!book || book.length === 0) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
+    if (depth.availableContracts === 0) {
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
         `No liquidity on ${side} ${action} side for ${ticker}. Placing limit order instead.`,
         { ticker, side, action, price, amount }
       );
@@ -97,25 +101,10 @@ async function checkLiquidity(
       };
     }
 
-    // Check if there's enough depth at our price
-    // Kalshi orderbook levels have { price (in cents), quantity (number of contracts) }
-    let availableContracts = 0;
-    const priceCents = price; // price is already in cents (1-99)
-    for (const level of book) {
-      const levelPriceCents = level.price < 1 ? Math.round(level.price * 100) : level.price;
-      if (action === "buy" && levelPriceCents <= priceCents) {
-        availableContracts += (level.quantity ?? level.count ?? 0);
-      } else if (action === "sell" && levelPriceCents >= priceCents) {
-        availableContracts += (level.quantity ?? level.count ?? 0);
-      }
-    }
-
-    const priceInDollars = price / 100;
-    const contractsNeeded = Math.ceil(amount / priceInDollars);
-    if (availableContracts < contractsNeeded) {
-      await logCompliance(supabase, null, "liquidity_fallback", "warning",
-        `Insufficient liquidity for ${contractsNeeded} contracts on ${ticker}. Available: ${availableContracts}. Splitting order.`,
-        { ticker, needed: contractsNeeded, available: availableContracts }
+    if (!depth.sufficient) {
+      await logCompliance(supabase, userId, null, "liquidity_fallback", "warning",
+        `Insufficient liquidity for ${depth.contractsNeeded} contracts on ${ticker}. Available: ${depth.availableContracts}. Splitting order.`,
+        { ticker, needed: depth.contractsNeeded, available: depth.availableContracts }
       );
       return {
         sufficient: false,
@@ -295,6 +284,10 @@ serve(async (req) => {
     // ── Atomic position cap — race-condition-proof enforcement ──
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
+    // Captured for the risk check below: risk_state.open_position_count is mode-blind
+    // (no mode column yet — PR6), so paper positions would otherwise block live trades.
+    // We override it with this mode-scoped count so the per-mode cap is honored.
+    let modeScopedOpenCount: number | null = null;
     if (userId && effective) {
       // effective.maxOpenPositions already applies the tier ceiling for live
       // (min(user, tier)) and the user's own cap for paper — the single source
@@ -310,6 +303,7 @@ serve(async (req) => {
         .eq("status", "filled")
         .is("settled_at", null)
         .is("exit_reason", null);
+      modeScopedOpenCount = openCount ?? 0;
 
       if ((openCount ?? 0) >= maxPos) {
         await logCompliance(supabase, userId, null, "position_cap_enforced", "warning",
@@ -331,6 +325,12 @@ serve(async (req) => {
     const settings: RiskSettings | null =
       effective && effective.configured ? effective.riskSettings : null;
     const riskState = await getRiskStateToday(supabase, userId);
+    // risk_state is mode-blind (shared paper+live) until PR6. Override its open-position
+    // count with the mode-scoped count computed above so a user's paper positions can't
+    // block a live trade (and vice-versa) via evaluateRisk's open-positions check.
+    if (riskState && modeScopedOpenCount !== null) {
+      (riskState as any).open_position_count = modeScopedOpenCount;
+    }
 
     // Fail-closed for live: evaluateRisk treats a missing risk_settings row as "no limits",
     // which would let a real-money order through unbounded. Require configured limits before
@@ -417,6 +417,51 @@ serve(async (req) => {
 
     // ── Paper Trading ──
     if (tradeMode === "paper") {
+      // Simulate the fill against the REAL Kalshi orderbook — paper is meant to
+      // preview live performance, so it must face the same fill risk (and cost)
+      // live does, not an unconditional instant fill at the requested price.
+      const orderbookResult = await fetchOrderbook(getKalshiBaseUrl(), resolvedTicker);
+
+      if (!orderbookResult.ok) {
+        // A dead/delisted ticker fails identically to live — no silent paper fill
+        // on a market that couldn't actually be traded.
+        const { data: failedTrade } = await supabase.from("trades").insert({
+          user_id: userId,
+          ticker: resolvedTicker,
+          market_id: resolvedTicker,
+          market_question: marketQuestion || resolvedTicker,
+          side, action, price, amount,
+          strategy: strategy || null,
+          strategy_id: strategyId || null,
+          mode: "paper",
+          status: "failed",
+          exchange: "paper",
+          expiration_time: expirationTime || null,
+          notes: orderbookResult.tickerGone
+            ? "Market no longer listed on Kalshi (stale signal) — skipped before simulated fill"
+            : "Could not read real orderbook to simulate fill — skipped",
+          trace_id: traceId || null,
+        }).select().single();
+
+        await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_ticker_gone", "warning",
+          `Paper: skipped ${resolvedTicker} — real orderbook unavailable (tickerGone: ${orderbookResult.tickerGone})`,
+          { ticker: resolvedTicker, trace_id: traceId }
+        );
+
+        return new Response(JSON.stringify({
+          success: false,
+          error: orderbookResult.tickerGone
+            ? `Market ${resolvedTicker} is no longer listed on Kalshi.`
+            : `Could not read real orderbook for ${resolvedTicker}.`,
+          trade: failedTrade,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      const fillResult = simulatePaperFill(orderbookResult.orderbook, side as "yes" | "no", action as "buy" | "sell", price, amount);
+      const hasFill = fillResult.status === "filled" || fillResult.status === "partial";
+      const isMakerFill = fillResult.status !== "filled"; // didn't fully cross the book immediately
+      const entryFeeCents = hasFill ? estimateKalshiFee(fillResult.filledPrice!, fillResult.filledContracts, isMakerFill) : 0;
+
       const { data: trade, error: insertError } = await supabase.from("trades").insert({
         user_id: userId,
         ticker: resolvedTicker,
@@ -426,14 +471,17 @@ serve(async (req) => {
         strategy: strategy || null,
         strategy_id: strategyId || null,
         mode: "paper",
-        status: "filled",
-        filled_price: price,
-        filled_at: new Date().toISOString(),
+        status: fillResult.status,
+        order_id: `paper-${crypto.randomUUID()}`,
+        filled_price: fillResult.filledPrice,
+        filled_at: hasFill ? new Date().toISOString() : null,
+        slippage_cents: fillResult.slippageCents,
+        entry_fee_cents: entryFeeCents,
         exchange: "paper",
         order_type: orderType || "limit",
         expiration_time: expirationTime || null,
         pnl: 0,
-        notes: notes || "Paper trade - simulated execution",
+        notes: (notes ? `${notes} ` : "") + `Paper (simulated vs real book): ${fillResult.status}, ${fillResult.filledContracts}/${fillResult.requestedContracts} filled` + (fillResult.filledPrice != null ? ` @ ${fillResult.filledPrice}c (intended ${price}c, slippage ${fillResult.slippageCents}c)` : ""),
         trace_id: traceId || null,
         source_signal_id: sourceSignalId || null,
         influenced_by_memory_ids: influencedByMemoryIds || [],
@@ -470,8 +518,9 @@ serve(async (req) => {
         await supabase.from("memory_attribution").insert(attributionRows);
       }
 
-      await logCompliance(supabase, userId, trade.id, "order_filled", "info",
-        `Paper trade filled: ${action} ${side} ${resolvedTicker} @ ${price}c for $${amount}`,
+      const eventType = fillResult.status === "filled" ? "order_filled" : "order_submitted";
+      await logCompliance(supabase, userId, trade.id, eventType, "info",
+        `Paper trade ${fillResult.status}: ${action} ${side} ${resolvedTicker} @ ${price}c for $${amount}`,
         { trade_id: trade.id, mode: "paper", reasoning: notes, authenticated }
       );
 
@@ -480,7 +529,7 @@ serve(async (req) => {
 
       return new Response(JSON.stringify({
         success: true, trade,
-        message: `Paper trade: ${action.toUpperCase()} ${side.toUpperCase()} ${resolvedTicker} @ ${price}c for $${amount}`,
+        message: `Paper trade ${fillResult.status}: ${action.toUpperCase()} ${side.toUpperCase()} ${resolvedTicker} @ ${price}c for $${amount}`,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
@@ -521,32 +570,153 @@ serve(async (req) => {
     }
 
     // Check liquidity before placing order
-    const liquidityCheck = await checkLiquidity(supabase, resolvedTicker, side, action, price, amount);
+    const liquidityCheck = await checkLiquidity(supabase, userId, resolvedTicker, side, action, price, amount);
+
+    if (liquidityCheck.tickerGone) {
+      // Ticker no longer exists on Kalshi (delisted/rolled out of the strike ladder
+      // since the signal was detected) — submitting would just 410. Fail fast instead
+      // of wasting a round trip on a dead order.
+      const { data: failedTrade } = await supabase.from("trades").insert({
+        user_id: userId,
+        ticker: resolvedTicker,
+        market_id: resolvedTicker,
+        market_question: marketQuestion || resolvedTicker,
+        side, action, price, amount,
+        strategy: strategy || null,
+        strategy_id: strategyId || null,
+        mode: tradeMode,
+        status: "failed",
+        exchange: "kalshi",
+        expiration_time: expirationTime || null,
+        notes: "Market no longer listed on Kalshi (stale signal) — skipped before order submission",
+      }).select().single();
+
+      await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_ticker_gone", "warning",
+        `Skipped ${resolvedTicker}: market no longer listed on Kalshi (stale signal)`,
+        { ticker: resolvedTicker, trace_id: traceId }
+      );
+
+      return new Response(JSON.stringify({
+        success: false,
+        error: `Market ${resolvedTicker} is no longer listed on Kalshi.`,
+        trade: failedTrade,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const resolvedOrderType = liquidityCheck.sufficient ? (orderType || "limit") : "limit";
 
     // Calculate contract count: amount in dollars / price per contract
     const pricePerContract = price / 100; // cents to dollars
     const contractCount = Math.max(1, Math.floor(amount / pricePerContract));
 
-    // Build Kalshi order payload
-    const kalshiOrderPayload: any = {
-      ticker: resolvedTicker,
-      action: action,
-      side: side,
-      type: resolvedOrderType,
-      count: contractCount,
-    };
+    // ── Kalshi V2 order schema (legacy /portfolio/orders is deprecated) ──
+    // V2 quotes every order from the YES-book bid/ask perspective — there is no
+    // separate yes/no side. Buying/selling NO is represented as the complementary
+    // YES-side order at (1 - price): confirmed against live Kalshi market data,
+    // where yes_bid + no_ask == 1.00 and yes_ask + no_bid == 1.00 exactly.
+    //   buy YES  -> bid @ price
+    //   sell YES -> ask @ price
+    //   buy NO   -> ask @ (1 - price)   (economically: selling YES at 1-price)
+    //   sell NO  -> bid @ (1 - price)   (economically: buying YES at 1-price)
+    const priceDollars = price / 100;
+    const v2Side: "bid" | "ask" =
+      side === "yes"
+        ? (action === "buy" ? "bid" : "ask")
+        : (action === "buy" ? "ask" : "bid");
+    const v2PriceDollars = side === "yes" ? priceDollars : 1 - priceDollars;
 
-    if (resolvedOrderType === "limit") {
-      if (side === "yes") {
-        kalshiOrderPayload.yes_price = price; // in cents
-      } else {
-        kalshiOrderPayload.no_price = price;
+    // Pre-flight balance check. Kalshi's own insufficient_balance rejection only
+    // arrives after we submit the order — every doomed leg still costs a full
+    // round trip, and nothing distinguished "account is out of money" from any
+    // other 400 until this check, so a strategy would keep retrying the same
+    // unaffordable basket every scan cycle indefinitely. Buying costs price*count;
+    // selling (opening a short) requires (1-price)*count in collateral — the
+    // exchange's standard per-contract margin, same formula used by kalshi-ping.
+    const requiredCollateralDollars = v2Side === "bid"
+      ? contractCount * v2PriceDollars
+      : contractCount * (1 - v2PriceDollars);
+
+    const balancePath = "/trade-api/v2/portfolio/balance";
+    const balanceHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", balancePath, Date.now());
+    const balanceResp = await fetch(`${getKalshiBaseUrl()}/portfolio/balance`, { headers: balanceHeaders });
+
+    if (balanceResp.ok) {
+      const balanceData = await balanceResp.json();
+      const availableDollars = (balanceData?.balance ?? 0) / 100;
+
+      if (availableDollars < requiredCollateralDollars) {
+        const { data: failedTrade } = await supabase.from("trades").insert({
+          user_id: userId,
+          ticker: resolvedTicker,
+          market_id: resolvedTicker,
+          market_question: marketQuestion || resolvedTicker,
+          side, action, price, amount,
+          strategy: strategy || null,
+          strategy_id: strategyId || null,
+          mode: "live",
+          status: "failed",
+          exchange: "kalshi",
+          expiration_time: expirationTime || null,
+          notes: `Skipped pre-flight: needs $${requiredCollateralDollars.toFixed(2)}, account has $${availableDollars.toFixed(2)}`,
+        }).select().single();
+
+        await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_insufficient_balance", "warning",
+          `Skipped ${resolvedTicker} ${v2Side} ${contractCount}x @ ${price}c — needs $${requiredCollateralDollars.toFixed(2)}, account has $${availableDollars.toFixed(2)}`,
+          { required_usd: requiredCollateralDollars, available_usd: availableDollars, ticker: resolvedTicker, trace_id: traceId }
+        );
+
+        // Account-level shortfall, not market-level — one alert per user regardless of ticker,
+        // so a multi-leg basket hitting this on every leg doesn't fire N alerts.
+        await alertOnce(supabase, "kalshi_insufficient_balance", userId || "unknown", 4,
+          `💸 <b>[TradeAgent] Live account balance too low to trade</b>\nSkipped ${resolvedTicker} — needs $${requiredCollateralDollars.toFixed(2)}, have $${availableDollars.toFixed(2)}.\nDeposit funds or the agent keeps skipping live trades every cycle.`
+        );
+
+        return new Response(JSON.stringify({
+          success: false,
+          code: "insufficient_balance",
+          error: `Insufficient Kalshi balance: need $${requiredCollateralDollars.toFixed(2)}, have $${availableDollars.toFixed(2)}.`,
+          trade: failedTrade,
+        }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
+    // If the balance fetch itself fails (network/auth hiccup), fall through and let
+    // the real order call be the source of truth — never block a trade on a monitoring path.
+
+    // V2 has no order "type" field — every order is a limit order at `price`.
+    // A requested "market" order is approximated with immediate_or_cancel so it
+    // either fills immediately at the given price or is cancelled, rather than resting.
+    const requestedTif = (orderType === "market") ? "immediate_or_cancel" : (timeInForce || "gtc");
+    // Our own trades ledger predates the V2 migration and its time_in_force
+    // column is constrained to the legacy 3-value vocabulary (trades_time_in_force_check:
+    // gtc/ioc/day). Normalize any V2-style or "market"-derived value down to that set —
+    // this is purely our bookkeeping label, separate from kalshiOrderPayload.time_in_force
+    // (the actual value sent to Kalshi) below.
+    const ledgerTimeInForce: "gtc" | "ioc" | "day" =
+      requestedTif === "day" ? "day" : requestedTif === "gtc" ? "gtc" : "ioc";
+    let v2TimeInForce: "fill_or_kill" | "good_till_canceled" | "immediate_or_cancel";
+    let v2ExpirationTime: number | undefined;
+    if (requestedTif === "fok" || requestedTif === "fill_or_kill") {
+      v2TimeInForce = "fill_or_kill";
+    } else if (requestedTif === "ioc" || requestedTif === "immediate_or_cancel") {
+      v2TimeInForce = "immediate_or_cancel";
+    } else {
+      // "gtc" and legacy "day" both rest as good_till_canceled; "day" additionally
+      // sets expiration_time (Unix seconds) so it still auto-cancels at market close.
+      v2TimeInForce = "good_till_canceled";
+      if (requestedTif === "day" && expirationTime) {
+        v2ExpirationTime = Math.floor(new Date(expirationTime).getTime() / 1000);
       }
     }
 
-    // Set time in force
-    kalshiOrderPayload.time_in_force = timeInForce || "gtc";
+    const kalshiOrderPayload: any = {
+      ticker: resolvedTicker,
+      side: v2Side,
+      count: contractCount.toFixed(2),
+      price: v2PriceDollars.toFixed(4),
+      time_in_force: v2TimeInForce,
+      self_trade_prevention_type: "taker_at_cross",
+    };
+    if (v2ExpirationTime) kalshiOrderPayload.expiration_time = v2ExpirationTime;
 
     // Log order submission
     await logCompliance(supabase, userId, null, "order_submitted", "info",
@@ -556,21 +726,48 @@ serve(async (req) => {
 
     // Place order on Kalshi
     const kalshiBase = getKalshiBaseUrl();
-    const orderPath = "/trade-api/v2/portfolio/orders";
-    const timestamp = Math.floor(Date.now() / 1000);
+    const orderPath = "/trade-api/v2/portfolio/events/orders";
+    const timestamp = Date.now();
     const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "POST", orderPath, timestamp);
 
-    const kalshiResponse = await fetch(`${kalshiBase}/portfolio/orders`, {
+    const kalshiResponse = await fetch(`${kalshiBase}/portfolio/events/orders`, {
       method: "POST",
       headers: authHeaders,
       body: JSON.stringify(kalshiOrderPayload),
     });
 
-    const kalshiResult = await kalshiResponse.json();
+    const kalshiResultRaw = await kalshiResponse.json();
+    // Compatibility shim: downstream code expects the legacy `{order: {...}}` shape
+    // with remaining_count/avg_price as cents-scale numbers. V2 returns a flat
+    // object with fixed-point dollar strings, always quoted from the YES side —
+    // convert avg_price back to OUR side's cents convention before it flows further.
+    const kalshiResult: any = kalshiResponse.ok
+      ? {
+          order: {
+            order_id: kalshiResultRaw.order_id,
+            remaining_count: Math.round(parseFloat(kalshiResultRaw.remaining_count ?? "0")),
+            avg_price:
+              kalshiResultRaw.average_fill_price != null
+                ? Math.round(
+                    (side === "yes"
+                      ? parseFloat(kalshiResultRaw.average_fill_price)
+                      : 1 - parseFloat(kalshiResultRaw.average_fill_price)) * 100
+                  )
+                : null,
+            status: parseFloat(kalshiResultRaw.remaining_count ?? "0") === 0 ? "executed" : "resting",
+            // Kalshi reports the real fee it charged directly on the order object —
+            // capture it verbatim rather than compute it, so live fee accounting has
+            // zero formula risk (unlike paper's estimateKalshiFee, which has none to read).
+            maker_fees_dollars: kalshiResultRaw.maker_fees_dollars ?? null,
+            taker_fees_dollars: kalshiResultRaw.taker_fees_dollars ?? null,
+          },
+        }
+      : kalshiResultRaw;
 
     if (!kalshiResponse.ok) {
       // Log full Kalshi error internally — never expose raw API responses to the client
-      const kalshiErrorDetail = kalshiResult.message || kalshiResult.error || JSON.stringify(kalshiResult);
+      const rawKalshiError = kalshiResult.message || kalshiResult.error || kalshiResult;
+      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : JSON.stringify(rawKalshiError);
       console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
         ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
       });
@@ -623,6 +820,16 @@ serve(async (req) => {
         `❌ <b>[TradeAgent] Kalshi Order Rejected</b>\nStatus: ${kalshiResponse.status}\nTicker: ${resolvedTicker} (${side.toUpperCase()} ${action})\nReason: ${kalshiErrorDetail.slice(0, 200)}`
       );
 
+      // Systemic-outage escalation — a per-ticker rejection alert reads as "this one market
+      // is bad" even when the real cause blocks 100% of order submissions (e.g. Kalshi
+      // deprecating the endpoint this code calls). Fire one unmistakable critical page,
+      // deduped globally, so an outage doesn't hide as N separate low-signal per-ticker alerts.
+      if (kalshiResult?.code === "deprecated_v1_order_endpoint") {
+        await alertOnce(supabase, "kalshi_order_endpoint_deprecated", "global", 6,
+          `🔴 <b>[TradeAgent] ALL Kalshi order submissions are failing</b>\nKalshi has deprecated the /portfolio/orders endpoint this system uses (410 deprecated_v1_order_endpoint). Every live and paper order is being rejected — this is a total trading outage, not an isolated ticker issue.\nFix requires migrating execute-trade to POST /portfolio/events/orders (new bid/ask + fixed-point-dollar schema). See docs/improvement-log.md.`
+        );
+      }
+
       // Liquidity fallback: if rejected due to insufficient liquidity, try limit at worse price
       if (liquidityCheck.fallbackAction && !liquidityCheck.sufficient) {
         await logCompliance(supabase, userId, failedTrade?.id, "liquidity_fallback", "warning",
@@ -643,6 +850,20 @@ serve(async (req) => {
     const orderStatus = kalshiOrder.remaining_count === 0 ? "filled" :
                         kalshiOrder.remaining_count < contractCount ? "partial" : "open";
 
+    // Instrumentation for the live pilot: capture the REAL fill price and slippage
+    // on ANY fill (full OR partial), not just full fills. This is how we learn
+    // whether the favorable-priced limit orders actually get filled at our price —
+    // the one unknown paper cannot answer. Positive slippage = filled worse than intended.
+    const hasFill = orderStatus === "filled" || orderStatus === "partial";
+    const realFillPrice = hasFill && kalshiOrder.avg_price != null ? kalshiOrder.avg_price : null;
+    const slippageCents = realFillPrice != null ? Math.round(realFillPrice - price) : null;
+    const filledContracts = contractCount - (kalshiOrder.remaining_count ?? 0);
+    // Kalshi reports whichever fee type actually applied (maker if it rested,
+    // taker if it crossed immediately) — the other field comes back null/0.
+    const entryFeeCents = hasFill
+      ? Math.round(parseFloat(kalshiOrder.maker_fees_dollars ?? kalshiOrder.taker_fees_dollars ?? "0") * 100)
+      : null;
+
     const { data: trade, error: insertError } = await supabase.from("trades").insert({
         user_id: userId,
         ticker: resolvedTicker,
@@ -656,12 +877,16 @@ serve(async (req) => {
         exchange: "kalshi",
         order_id: kalshiOrder.order_id,
         order_type: resolvedOrderType,
-        time_in_force: kalshiOrderPayload.time_in_force,
+        // Store OUR ledger's time_in_force vocabulary (gtc/ioc/day — trades_time_in_force_check),
+        // not Kalshi's v2 payload vocabulary (fill_or_kill/good_till_canceled/immediate_or_cancel).
+        time_in_force: ledgerTimeInForce,
         expiration_time: expirationTime || null,
-        filled_price: orderStatus === "filled" ? kalshiOrder.avg_price : null,
-        filled_at: orderStatus === "filled" ? new Date().toISOString() : null,
+        filled_price: realFillPrice,
+        filled_at: hasFill ? new Date().toISOString() : null,
+        slippage_cents: slippageCents,
+        entry_fee_cents: entryFeeCents,
         pnl: 0,
-        notes: notes || `Live order on Kalshi: ${kalshiOrder.order_id}`,
+        notes: (notes ? `${notes} ` : "") + `Live Kalshi order ${kalshiOrder.order_id}: ${orderStatus}, ${filledContracts}/${contractCount} filled` + (realFillPrice != null ? ` @ ${realFillPrice}c (intended ${price}c, slippage ${slippageCents}c)` : ""),
         trace_id: traceId || null,
         source_signal_id: sourceSignalId || null,
         influenced_by_memory_ids: influencedByMemoryIds || [],

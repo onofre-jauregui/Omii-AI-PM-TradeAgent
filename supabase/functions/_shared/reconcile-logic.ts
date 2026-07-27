@@ -43,3 +43,21 @@ export function pickAvgPrice(order: any): number | null {
   const v = order?.avg_price ?? order?.average_fill_price ?? order?.avg_fill_price ?? null;
   return typeof v === "number" ? v : null;
 }
+
+/**
+ * Decide how a resting PAPER order should advance, given a fresh re-simulation
+ * against the real orderbook (paper-reconcile). Mirrors decideReconcile's
+ * forward-only/idempotent contract: a paper order only ever moves
+ * open -> partial -> filled, or -> cancelled if the ticker is gone — never
+ * backward, so repeated cron runs are no-ops once nothing has changed.
+ */
+export function decidePaperReconcile(
+  tickerGone: boolean,
+  filledContracts: number,
+  requestedContracts: number
+): ReconcileAction {
+  if (tickerGone) return "cancel";
+  if (filledContracts >= requestedContracts && requestedContracts > 0) return "fill";
+  if (filledContracts > 0) return "partial";
+  return "none";
+}

@@ -1,6 +1,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { countTradesInWindow } from "../_shared/limits.ts";
 
 /**
  * health-check: Monitors the trading agent and alerts via Telegram.
@@ -25,6 +27,7 @@ const WIN_RATE_FLOOR = 0.60;
 const WIN_RATE_SAMPLE = 20;
 const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not manual burst sessions
 const BLOCKED_SERIES = ["KXETH"];
+const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -43,25 +46,51 @@ async function sendTelegram(token: string, chatId: string, text: string) {
   return resp.ok;
 }
 
-// Returns true if we should SKIP sending this alert (already sent same fingerprint within cooldown).
-// Uses compliance_log as state store — no new tables needed.
-async function isDuped(
+// Atomically checks-and-claims a dedup slot via the same advisory-lock-guarded
+// claim_health_check_alert() RPC that _shared/telegram.ts's alertOnce() uses.
+// Health-check previously ran its own check-then-act isDuped() + separate insert
+// here — the exact same race class alertOnce() was fixed for (concurrent callers
+// can all pass a plain SELECT-then-INSERT before either commits) — except this
+// path is only exercised by concurrent *invocations* of health-check itself
+// (e.g. an overlapping manual + cron run), not concurrent basket legs. Returns
+// true if this caller won the claim (dedup row already inserted by the RPC) and
+// should send; false if an unexpired dedup row already exists.
+async function claimAlert(
   supabase: any,
   alertType: string,
   fingerprint: string,
   cooldownHours: number
 ): Promise<boolean> {
-  const since = new Date(Date.now() - cooldownHours * 60 * 60 * 1000).toISOString();
-  const { data } = await supabase
+  const { data: shouldSend, error } = await supabase.rpc("claim_health_check_alert", {
+    p_alert_type: alertType,
+    p_fingerprint: fingerprint,
+    p_cooldown_hours: cooldownHours,
+  });
+  if (error) {
+    // Fail open — a monitoring-path RPC hiccup should never silently swallow a real alert.
+    console.error(`claim_health_check_alert failed for ${alertType}:`, error);
+    return true;
+  }
+  return !!shouldSend;
+}
+
+// Undoes a successful claim after a failed Telegram delivery, so the next run's
+// claimAlert() doesn't treat a never-delivered alert as already sent for the
+// full cooldown window. Scoped to rows created at/after `claimedAfter` so it
+// can't delete an older, already-delivered dedup row for the same fingerprint.
+async function unclaimAlert(
+  supabase: any,
+  alertType: string,
+  fingerprint: string,
+  claimedAfter: string
+) {
+  await supabase
     .from("compliance_log")
-    .select("id")
+    .delete()
     .eq("event_type", "health_check_alert")
     .eq("metadata->>alert_type", alertType)
     .eq("metadata->>fingerprint", fingerprint)
-    .gte("created_at", since)
-    .limit(1)
-    .maybeSingle();
-  return !!data;
+    .gte("created_at", claimedAfter);
 }
 
 serve(async (req) => {
@@ -353,6 +382,35 @@ serve(async (req) => {
       });
     }
 
+    // ── 8b. Internal live-mode rate limiting — invisible to the API_ERROR_TYPES sweep ──
+    // execute-trade's own per-user rate limiter (checkRateLimit, 3/min live vs 15/min paper)
+    // logs `rate_limit_exceeded` on every rejection, but that event_type isn't in
+    // API_ERROR_TYPES above — it's an internal throttle, not an upstream provider error, so
+    // it was never swept. Found 2026-07-26 20:05 UTC: 5 live rejections in ~1s with zero
+    // Telegram signal, the same "looks fine, isn't" blind spot as the earlier trading_silence
+    // and cron-registration gaps. Paper-mode hits are excluded (15/min is loose and expected
+    // to trip during normal multi-leg baskets); only live matters — a real order didn't clear
+    // because our own throttle blocked it, which is worth knowing even if by design.
+    const { data: liveRateLimits } = await supabase
+      .from("compliance_log")
+      .select("id, created_at")
+      .eq("event_type", "rate_limit_exceeded")
+      .eq("metadata->>mode", "live")
+      .gte("created_at", twoHoursAgo)
+      .limit(50);
+
+    if (liveRateLimits && liveRateLimits.length > 0) {
+      // Fingerprint on the current 2h bucket start so a sustained throttle re-alerts
+      // once per window instead of once per rejection.
+      const fingerprint = `live_rate_limit_${twoHoursAgo.slice(0, 13)}`;
+      pendingAlerts.push({
+        type: "live_rate_limit_exceeded",
+        fingerprint,
+        cooldownHours: 2,
+        message: `🟠 [TradeAgent] Live execute-trade rate-limited ${liveRateLimits.length}x in 2h (cap: 3/min) — real orders were throttled, check basket leg volume`,
+      });
+    }
+
     // ── 9. Cron health — stale (parked/dead) or failing jobs ─────────
     // Closes the silent-death blind spot: the other checks only see FAILED runs,
     // so a job parked to a never-date schedule (or otherwise stalled) fired zero
@@ -369,7 +427,16 @@ serve(async (req) => {
       });
     }
     for (const c of cronRows ?? []) {
-      if (c.is_stale) {
+      if (c.last_status === "missing") {
+        // In the manifest (expected_cron_jobs) but absent from cron.job entirely —
+        // never scheduled, not just stalled. Re-alerts every 6h until registered.
+        pendingAlerts.push({
+          type: "cron_missing",
+          fingerprint: `cron_missing_${c.jobname}`,
+          cooldownHours: 6,
+          message: `🚨 [TradeAgent] ${c.jobname} is not registered in cron.job — expected but never scheduled`,
+        });
+      } else if (c.is_stale) {
         const mins = Math.round((c.seconds_since_last_run ?? 0) / 60);
         const expMin = Math.round((c.expected_interval_s ?? 0) / 60);
         // Fingerprint on jobname → one alert per stalled job; re-alerts each 6h it stays stale.
@@ -391,6 +458,78 @@ serve(async (req) => {
       }
     }
 
+    // ── 10. Live account balance — early warning before orders start failing ──
+    // 2026-07-25 incident: a live basket kept getting Kalshi's insufficient_balance
+    // 400 for 3 legs / ~10min before anyone noticed — the only signal was noisy
+    // per-order error rows, no proactive "you're low on funds" alert. This check
+    // surfaces the real account balance directly so a shortfall is caught before
+    // it silently blocks every live trade attempt.
+    const { data: liveKeys } = await supabase
+      .from("api_keys")
+      .select("user_id")
+      .eq("provider", "kalshi_live")
+      .not("user_id", "is", null);
+
+    for (const { user_id } of liveKeys ?? []) {
+      try {
+        const { keyId, privateKey } = await getKalshiCredentials(supabase, user_id);
+        if (!keyId || !privateKey) continue;
+        // Sign against the full path (Kalshi's HMAC scheme includes it), but fetch
+        // against KALSHI_BASE_URL alone — it already ends in /trade-api/v2, so
+        // appending the full path here doubled the segment (.../v2/trade-api/v2/...),
+        // Kalshi 404'd every call, and the silent `if (!resp.ok) continue` below
+        // swallowed it — this alert has never once fired, including today, with the
+        // live account sitting at $1.66 (floor $15) for hours.
+        const path = "/trade-api/v2/portfolio/balance";
+        const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
+        const resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, { headers });
+        if (!resp.ok) continue; // don't let a transient Kalshi/auth hiccup page anyone
+        const data = await resp.json();
+        const balanceUsd = (data?.balance ?? 0) / 100;
+        if (balanceUsd < LOW_BALANCE_FLOOR_USD) {
+          pendingAlerts.push({
+            type: "kalshi_low_balance",
+            fingerprint: `low_balance_${user_id}`,
+            cooldownHours: 12,
+            message: `💸 [TradeAgent] Live Kalshi balance low: $${balanceUsd.toFixed(2)} — live trades will start failing insufficient_balance. Deposit funds.`,
+          });
+        }
+      } catch {
+        // Monitoring-path failure only — never let this block the rest of the sweep.
+      }
+    }
+
+    // ── 11. Live trading blocked by daily cap — invisible to the silence check ──
+    // trading_silence (#1) only fires when the whole trades table goes quiet, but
+    // paper-mode strategies keep inserting rows every cycle even when a user's live
+    // trading is fully capped — so a live account can sit `risk_blocked` for hours
+    // with zero signal (found 2026-07-26: 52/50 live trades in the trailing 24h,
+    // blocked since ~19:10 UTC the prior day, no alert). Recomputes the exact same
+    // gate auto-trade enforces (risk_settings.max_daily_trades, countTradesInWindow
+    // over 24h) instead of re-deriving it, so this can't drift from the real block.
+    for (const { user_id } of liveKeys ?? []) {
+      try {
+        const { data: riskRow } = await supabase
+          .from("risk_settings")
+          .select("max_daily_trades")
+          .eq("user_id", user_id)
+          .eq("mode", "live")
+          .maybeSingle();
+        const maxDailyTrades = riskRow?.max_daily_trades ?? 30;
+        const liveTradeCount = await countTradesInWindow(supabase, user_id, "live");
+        if (liveTradeCount >= maxDailyTrades) {
+          pendingAlerts.push({
+            type: "live_trading_cap_blocked",
+            fingerprint: `cap_blocked_${user_id}_${now.toISOString().slice(0, 10)}`,
+            cooldownHours: 6,
+            message: `⏸️ [TradeAgent] Live trading paused: daily cap ${liveTradeCount}/${maxDailyTrades} reached (trailing 24h) — no live orders until the window rolls off`,
+          });
+        }
+      } catch {
+        // Monitoring-path failure only — never let this block the rest of the sweep.
+      }
+    }
+
     // ── Deduplicate and send ──────────────────────────────────────────
     // For each pending alert, check compliance_log to see if the same fingerprint
     // was already sent within the cooldown window. Only send new or escalating alerts.
@@ -398,39 +537,47 @@ serve(async (req) => {
     const alertsSkipped: string[] = [];
 
     for (const alert of pendingAlerts) {
-      const skip = await isDuped(supabase, alert.type, alert.fingerprint, alert.cooldownHours);
-      if (skip) {
+      const claimedAt = new Date().toISOString();
+      const shouldSend = await claimAlert(supabase, alert.type, alert.fingerprint, alert.cooldownHours);
+      if (!shouldSend) {
         alertsSkipped.push(alert.type);
         continue;
       }
 
-      await sendTelegram(telegramToken, telegramChatId, alert.message);
+      const delivered = await sendTelegram(telegramToken, telegramChatId, alert.message);
 
-      // Record this send so future runs can deduplicate against it.
-      await supabase.from("compliance_log").insert({
-        event_type: "health_check_alert",
-        severity: "warning",
-        message: `Alert sent: ${alert.type}`,
-        metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
-      });
-
-      // Write a diagnostic trigger so the scheduled diagnostic agent can
-      // analyze the root cause and send a resolution recommendation to Telegram.
-      // The agent polls compliance_log for unresolved diagnostic_needed events
-      // and posts follow-up messages with specific fix steps.
-      if (alert.context) {
+      if (!delivered) {
+        // Delivery failed — the RPC already claimed the dedup slot (that's the
+        // atomicity fix), so undo it here rather than leaving a never-delivered
+        // alert marked as sent for the full cooldown window. Log the failure
+        // itself (undeduped, always visible) so it surfaces via the
+        // system_errors sweep on the next run.
+        await unclaimAlert(supabase, alert.type, alert.fingerprint, claimedAt);
         await supabase.from("compliance_log").insert({
-          event_type: "diagnostic_needed",
-          severity: "warning",
-          message: `Needs diagnosis: ${alert.type} — ${alert.message.slice(0, 120)}`,
-          metadata: {
-            alert_type: alert.type,
-            alert_message: alert.message,
-            diagnostic_context: alert.context,
-            triggered_at: now.toISOString(),
-            resolved: false,
-          },
+          event_type: "telegram_delivery_failed",
+          severity: "critical",
+          message: `Telegram send failed for alert "${alert.type}" — will retry next run`,
+          metadata: { alert_type: alert.type, fingerprint: alert.fingerprint },
         });
+        alertsSkipped.push(`${alert.type}(delivery_failed)`);
+        continue;
+      }
+
+      // claim_health_check_alert() already wrote the health_check_alert dedup row
+      // (event_type/severity/message/alert_type/fingerprint). Diagnostic context (if
+      // any) is folded into that same row via an update rather than a separate
+      // "diagnostic_needed" event — no consumer for that event type has ever existed
+      // (verified: zero call sites read it, every row written since 07-21 sat with
+      // resolved:false indefinitely), so it was an unbounded, never-drained queue.
+      // The context is still fully visible on this row for whoever investigates.
+      if (alert.context) {
+        await supabase
+          .from("compliance_log")
+          .update({ metadata: { alert_type: alert.type, fingerprint: alert.fingerprint, diagnostic_context: alert.context } })
+          .eq("event_type", "health_check_alert")
+          .eq("metadata->>alert_type", alert.type)
+          .eq("metadata->>fingerprint", alert.fingerprint)
+          .gte("created_at", claimedAt);
       }
 
       alertsSent.push(alert.type);

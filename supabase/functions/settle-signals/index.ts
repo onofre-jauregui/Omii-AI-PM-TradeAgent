@@ -70,7 +70,7 @@ serve(async (req) => {
       try {
         // Fetch market details to check settlement status
         const marketPath = `/trade-api/v2/markets/${ticker}`;
-        const timestamp = Math.floor(Date.now() / 1000);
+        const timestamp = Date.now();
         const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", marketPath, timestamp);
 
         const marketResp = await fetch(`${kalshiBase}${marketPath}`, {

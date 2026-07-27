@@ -341,20 +341,18 @@ serve(async (req) => {
 
     // ── 4. Signal Outcome Tracking via source_signal_id ───────────
     // Direct linkage — no more 2-hour time-window heuristic.
-    // Sets direction_correct and profitable on signals from trade outcomes.
+    // Sets outcome_pnl and outcome_correct on signals from trade outcomes.
 
     let signalsUpdated = 0;
     try {
-      await supabase.rpc("update_signal_outcomes_from_trades").catch(() => {
-        // RPC may not exist — use raw query fallback
-      });
-
-      // Fallback: direct UPDATE from trades where source_signal_id is set
+      // Direct UPDATE from trades where source_signal_id is set.
+      // (No DB-side update_signal_outcomes_from_trades RPC exists — never
+      // migrated — so this raw-query path is the only implementation.)
       const { data: linkedSignals } = await supabase
         .from("signals")
-        .select("id")
+        .select("id, direction")
         .eq("was_acted_on", true)
-        .is("direction_correct", null)
+        .is("outcome_correct", null)
         .limit(100);
 
       for (const sig of linkedSignals || []) {
@@ -363,7 +361,7 @@ serve(async (req) => {
           .from("trades")
           .select("pnl, side, action")
           .eq("source_signal_id", sig.id)
-          .eq("status", "filled")
+          .eq("status", "settled")
           .not("settled_at", "is", null)
           .limit(1)
           .single();
@@ -375,10 +373,8 @@ serve(async (req) => {
                                (trade.side === "no" && trade.action === "buy" && sig.direction === "buy_no");
 
         await supabase.from("signals").update({
-          direction_correct: directionMatch,
-          profitable: pnl > 0,
           outcome_pnl: pnl,
-          outcome_correct: directionMatch && pnl > 0, // deprecated but kept for compat
+          outcome_correct: directionMatch && pnl > 0,
         }).eq("id", sig.id);
 
         signalsUpdated++;
@@ -791,7 +787,7 @@ Return ONLY valid JSON, no markdown, no extra text:
       const { data: recentCompaction } = await supabase
         .from("compliance_log")
         .select("id")
-        .eq("event_type", "memory_compaction_run")
+        .eq("event_type", "memory_compaction")
         .gte("created_at", thirtyMinAgo)
         .limit(1)
         .maybeSingle();
