@@ -62,6 +62,17 @@ function collect(files: string[], patterns: RegExp[]): Map<string, string[]> {
   return hits;
 }
 
+// Genuinely written, but invisible to WRITE_PATTERN's `event_type: "..."`
+// object-literal scan — not orphaned reads, just written through indirection
+// the static scan can't follow. Verified by hand; re-verify before removing
+// an entry if the underlying write site changes.
+const KNOWN_INDIRECT_WRITES: Record<string, string> = {
+  health_check_alert:
+    "written by the claim_health_check_alert() Postgres RPC (SQL, not a .ts literal) — see _shared/telegram.ts's alertOnce()",
+  rate_limit_exceeded:
+    "written via logCompliance(..., \"rate_limit_exceeded\", ...) — a positional arg to a wrapper function, not an `event_type:` object key",
+};
+
 describe("compliance_log event_type consistency", () => {
   const files = listTsFiles(FUNCTIONS_DIR);
   const writes = collect(files, [WRITE_PATTERN]);
@@ -74,7 +85,7 @@ describe("compliance_log event_type consistency", () => {
   it("every event_type a read site filters on is actually written somewhere", () => {
     const orphaned: string[] = [];
     for (const [value, readFiles] of reads) {
-      if (!writes.has(value)) {
+      if (!writes.has(value) && !KNOWN_INDIRECT_WRITES[value]) {
         orphaned.push(`"${value}" — read in ${readFiles.join(", ")}, never written by any event_type: literal`);
       }
     }
