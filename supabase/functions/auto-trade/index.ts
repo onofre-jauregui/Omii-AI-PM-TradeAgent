@@ -1092,6 +1092,23 @@ async function runS001SurfaceArb(
     .is("exit_reason", null);
   const openTickers = new Set((openTrades || []).map((t: any) => t.ticker));
 
+  // Recent-insufficient-balance dedup: a "failed" trade never reaches filled/open/partial,
+  // so the query above can't see it — every 5-min cycle re-detected the same still-unresolved
+  // bracket-sum alert and re-spent a live orderbook fetch + balance check on a ticker already
+  // known to be unaffordable this cycle-window (found 2026-07-27: KXBTC-26JUL2817-B64875 hit
+  // liquidity_fallback + order_skipped_insufficient_balance on 11 straight 5-min cycles with
+  // zero order_submitted in between — see docs/health-log.md). Balance doesn't replenish on a
+  // 5-min cadence, so skip event tickers that failed pre-flight in the last 15 min (3 cycles) —
+  // long enough to stop the thrash, short enough to resume immediately once funded.
+  const { data: balanceSkippedTrades } = await supabase
+    .from("trades")
+    .select("ticker")
+    .eq("status", "failed")
+    .eq("strategy_id", strategy.id)
+    .like("notes", "Skipped pre-flight:%")
+    .gte("created_at", new Date(Date.now() - 15 * 60 * 1000).toISOString());
+  const balanceSkippedTickers: Set<string> = new Set((balanceSkippedTrades || []).map((t: any) => t.ticker));
+
   // Stop-loss (4b below) only applies to actually-filled positions — a resting unfilled
   // order has no live position to close. Separate query/fields from the dedup set above.
   const { data: filledPositions } = await supabase
@@ -1116,12 +1133,16 @@ async function runS001SurfaceArb(
     const eventTicker = alert.event_ticker as string;
     if (seenEvents.has(eventTicker)) continue;
 
-    // Event-level dedup across runs: skip if we already have any open position in this event.
+    // Event-level dedup across runs: skip if we already have any open position in this event,
+    // or if this event just failed pre-flight on balance in the last 15 min.
     // Prevents the surface scanner's 30s refresh from re-triggering new brackets on the same event.
     const alreadyInMarket = (openTrades || []).some(
       (t: any) => (t.ticker as string).startsWith(eventTicker)
     );
-    if (alreadyInMarket) continue;
+    const recentlyBalanceSkipped = [...balanceSkippedTickers].some(
+      (t: string) => t.startsWith(eventTicker)
+    );
+    if (alreadyInMarket || recentlyBalanceSkipped) continue;
 
     seenEvents.add(eventTicker);
 
