@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Confirmed the canary-gate `jq` fix on its first real run; hoisted a static object out of `RiskControlsPanel` to close a stale lint warning
+
+**Decision:** (1) Verified — not re-decided — that the 2026-07-25 canary-gate `jq` parsing fix
+held: PR #86's push to `main` (2026-07-27T18:05:31Z) is the first `main` push since that fix, and
+its `Canary health gate (30 min)` job completed `success`. Closing that entry's open "not yet
+verified" caveat. (2) Moved `RiskControlsPanel.tsx`'s `liveDefaults` object literal from inside
+the component body to a module-level `LIVE_RISK_DEFAULTS` constant.
+**Options (for the lint fix):** A) Add `liveDefaults` to the `useCallback` dependency array as-is
+— rejected, the object is a new reference every render, so this would invalidate `loadAll`'s
+identity every render and loop the `useEffect` that calls it. B) Suppress the eslint rule for that
+line — rejected, papers over a real (if minor) per-render allocation instead of fixing it. C)
+Hoist the static value to module scope — chosen, matches ESLint's own guidance for exactly this
+shape and removes the per-render allocation.
+**Why:** Zero-risk, in-scope cleanup once the mandatory error/cron/CI sweep came back clean and
+the two real open backlog items (migration-backlog replay, HITL gate build) are both explicitly
+Onofre's call per their own `DECISIONS.md` entries below, not something to auto-execute.
+**Reversibility:** Trivial — single-file, single-component revert. No schema, no edge function, no
+trading-path code touched.
+**Trace:** PR (this run, 49th health-check), `docs/health-log.md` 49th-run entry. Canary-gate fix
+originally: 2026-07-25 entry below. Run verified: `gh run view 30292213095`.
+
 ## 2026-07-28 — Bounded market-data-fetcher's credential fetch with a timeout (closing an 8-day-old flagged gap)
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `market-data-fetcher/index.ts` in

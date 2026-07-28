@@ -10,6 +10,18 @@ import { supabase } from "@/integrations/supabase/client";
 import { useStrategies } from "@/lib/strategiesContext";
 import { toast } from "sonner";
 
+const LIVE_RISK_DEFAULTS = {
+  maxDailyLoss:     [50],
+  maxDrawdown:      [10],
+  maxPositionSize:  [25],
+  maxOpenPositions: [3],
+  maxDailyTrades:   [10],
+  autoStopLoss:     true,
+  stopLossPct:      [10],
+  defaultOrderType: "limit",
+  allocatedCapital: [100],
+};
+
 export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" }) {
   const { strategies: allStrategies } = useStrategies();
   const strategies = allStrategies.filter(s => s.mode === mode);
@@ -99,18 +111,6 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
     }
   };
 
-  const liveDefaults = {
-    maxDailyLoss:     [50],
-    maxDrawdown:      [10],
-    maxPositionSize:  [25],
-    maxOpenPositions: [3],
-    maxDailyTrades:   [10],
-    autoStopLoss:     true,
-    stopLossPct:      [10],
-    defaultOrderType: "limit",
-    allocatedCapital: [100],
-  };
-
   const loadAll = useCallback(async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -130,7 +130,7 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
           allocatedCapital: [data.allocated_capital ?? 500],
         });
       } else if (mode === "live") {
-        setRiskSettings(liveDefaults);
+        setRiskSettings(LIVE_RISK_DEFAULTS);
       }
     } finally {
       setLoaded(true);

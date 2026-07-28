@@ -2,6 +2,43 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (49th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; confirmed the 2026-07-25 canary-gate jq fix held on its first real run; closed a stale exhaustive-deps lint warning in `RiskControlsPanel`
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 48th run's
+~08:07 UTC cutoff through this run's ~09:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 48th run's own push and this run's.
+
+**Verified a prior run's self-flagged open item:** the 2026-07-25 entry that fixed the
+`canary-gate` job's `jq` parsing bug (`.data[0].n` → `.[0].n`) explicitly noted it was "not yet
+verified against a real canary run — flag if a future `main` push still shows a red canary-gate."
+No push to `main` had happened since that fix until PR #86 (2026-07-27T18:05:31Z, 34m16s).
+Checked that run directly: `gh run view 30292213095 --json jobs -q '.jobs[] | select(.name |
+contains("Canary"))'` → `{"conclusion":"success","name":"Canary health gate (30 min)"}`. The fix
+held on its first real exercise — closing this as confirmed rather than leaving it an open
+question in `DECISIONS.md`.
+
+**Minor fix (LOW, zero deploy risk, UI-only):** with zero live errors and no other in-scope
+backlog item (the two remaining open items — the migration-backlog replay and the HITL gate build
+— are both explicitly flagged in `DECISIONS.md` as needing Onofre's call, not something to
+auto-execute), swept `npm run lint` for anything closeable without touching trading logic.
+`RiskControlsPanel.tsx`'s `loadAll` `useCallback` had a `liveDefaults` object literal declared
+inside the component body and used inside the callback but not listed as a dependency — ESLint's
+`react-hooks/exhaustive-deps` flagged it correctly: the object was recreated every render, so
+adding it to the dependency array as-is would have invalidated `loadAll`'s identity on every
+render and re-triggered the `useEffect` that calls it, on every render, in a loop. Root cause was
+that a static value (never depends on props/state) was placed inside the component instead of at
+module scope. Hoisted it to a module-level `LIVE_RISK_DEFAULTS` constant — closes the warning
+without suppressing the rule and without introducing a render loop.
+
+**Verified:** `npm run lint` — 12 problems → 11 (the `RiskControlsPanel` warning is gone, no new
+warnings). `npx tsc --noEmit` — clean. `npm run build` — succeeds, same bundle shape. No edge
+function touched, no deploy, no trading-path code changed — frontend-only, display-mode risk
+defaults for a settings form.
+
+**Reversibility:** trivial — single-file, single-component revert.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (48th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a 8-day-old flagged-not-fixed gap — `market-data-fetcher`'s credential fetch had no timeout, the exact cause of two prior full-run stalls
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 47th run's
