@@ -2,6 +2,56 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (47th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the 46th run's own watch item — `settle-signals` was stuck re-hitting the same unresolvable 200-ticker batch forever instead of rotating through the backlog
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 46th run's
+~06:07 UTC cutoff through this run's ~07:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs (including `settle-signals-cron`, now live since the 46th run)
+`active: true`, `is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI
+green through the 46th run's own push (PR #99) and this run's.
+
+**Root cause found and fixed (MED — a fix from the immediately-prior run had a second bug baked
+in, self-flagged there as an unconfirmed "watch item" rather than assumed safe):** the 46th run
+registered `settle-signals-cron` and fixed a swallowed-error bug, but left its query as
+`WHERE settlement_price IS NULL AND expires_at < now() LIMIT 200` with no `ORDER BY` and no way to
+mark a row "checked, permanently unsettleable." Read `compliance_log`'s `settle_signals_run` rows
+across all 5 ticks that had fired since the fix went live (06:13, 06:15, 06:30, 06:45, 07:00 UTC)
+and found every tick returned the exact same 200 tickers (`KXBTC-26MAY1901-*` through
+`KXHIGHNY-26MAY18-*`), all `api_error`. Cross-checked `compliance_log`'s raw `api_error` rows for
+the window: 1000/1000 were HTTP 404 specifically (not a mix of transient failures) — these are
+~2.5-month-old tickers Kalshi's archive retention has aged out of the public markets endpoint, per
+the 46th run's own finding, and they can never resolve via this endpoint. With zero live errors,
+zero CI issues, and this being the only open finding in scope, chose to close it this run rather
+than defer again. Total backlog confirmed at 20,936 unsettled signals, 20,936 distinct tickers —
+every one of the stuck batch's 200 rows was blocking the other 20,736 from ever being checked,
+since nothing in the pipeline ever changed which 200 rows the no-`ORDER BY` query would return.
+
+**Fix (deployed):** new migration (`20260728_settle_signals_unsettleable_status.sql`) adds a
+`settlement_status` text column. `settle-signals/index.ts` now stamps `settled_at` (with
+`settlement_status = 'unsettleable_404'`, `settlement_price`/`shadow_pnl` intentionally left null
+so ROI aggregates aren't polluted with fake settlements) on any ticker Kalshi returns a definitive
+404 for, and the eligibility query now gates on `settled_at IS NULL` instead of
+`settlement_price IS NULL` — so 404'd tickers stop being re-selected while everything else
+(not-yet-resolved markets, transient 5xx/timeout failures) stays untouched and eligible for retry,
+same as before. No trading/order-placement path touched — read-only against Kalshi, writes only to
+`signals.settled_at`/`settlement_status`.
+
+**Verified against real data, not statically:** applied the migration, confirmed the column exists.
+Deployed the fixed function and manually fired it via the same `net.http_post` call the cron makes
+— `compliance_log` shows the run marked 207 signals `unsettleable_404`, and the eligible batch
+measurably rotated (`KXBTC-26MAY19*` → `KXBTC-26JUL01*`; backlog 20,936 → 20,736). Then waited for
+the next *actual* scheduled tick rather than trusting the manual call alone: `07:15:13 UTC` fired
+automatically on pg_cron's own schedule, processed a third, further-rotated batch
+(`KXBTCD-26MAY1917-*`, all `unsettleable_404`), and backlog dropped again to 20,536 — confirming
+the fix holds end-to-end under the real cron trigger, not just a manual invocation. At the observed
+rate (~200/tick, 96 ticks/day) the ~20.5k backlog of archived-unsettleable May/June signals clears
+in roughly a day, after which the cron reaches genuinely-recent signals and starts producing real
+shadow-PnL data for `qualifier_roi_v2` — the actual goal of the 46th run's original fix.
+**Reversibility:** easy — additive/nullable column; `git revert` restores the prior (stuck) query,
+and the ~400+ rows already marked `unsettleable_404` this run remain correctly excluded regardless
+since they were, in fact, unsettleable.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (46th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; found and fixed `settle-signals-cron` — never registered since inception, so shadow-PnL/qualifier-ROI measurement has run zero times in 2.5 months
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 45th run's

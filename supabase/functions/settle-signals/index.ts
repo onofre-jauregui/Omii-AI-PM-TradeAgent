@@ -38,10 +38,17 @@ serve(async (req) => {
     // ── 1. Find unsettled signals whose markets have likely resolved ─────────
     // Use expires_at as a filter: only check signals past their expiration.
     // This avoids unnecessary Kalshi API calls for active markets.
+    // Gate on settled_at (not settlement_price): a permanently-unsettleable
+    // signal (Kalshi 404 — aged out of archive retention) gets settled_at
+    // stamped with settlement_price left null, so it's excluded from future
+    // batches instead of being re-selected every tick forever (see the
+    // "watch item" in the 2026-07-28 46th-run health-check entry — without
+    // this, the same oldest ~200 rows never rotate and the real backlog
+    // behind them never gets a chance to settle).
     const { data: unsettledSignals, error: unsettledError } = await supabase
       .from("signals")
       .select("id, ticker, direction, mid_price, expires_at, system_version")
-      .is("settlement_price", null)
+      .is("settled_at", null)
       .lt("expires_at", new Date().toISOString())
       .limit(200); // batch size — next run catches the rest
 
@@ -89,7 +96,23 @@ serve(async (req) => {
             message: `settle-signals: Kalshi ${marketResp.status} fetching ${ticker}`,
             metadata: { provider: "kalshi", status: marketResp.status, endpoint: ticker },
           }).then(undefined, () => {});
-          results.push({ ticker, status: "api_error" });
+
+          if (marketResp.status === 404) {
+            // Definitive "this ticker doesn't exist" — Kalshi's archive
+            // retention has aged it out, it will never return non-404.
+            // Stamp settled_at (settlement_price/shadow_pnl stay null, so
+            // ROI aggregates aren't polluted with fake settlements) so this
+            // ticker's signals stop consuming a batch slot on every future
+            // tick. Non-404 failures (5xx/timeout) are left untouched —
+            // those are plausibly transient and should be retried.
+            await supabase.from("signals").update({
+              settled_at: new Date().toISOString(),
+              settlement_status: "unsettleable_404",
+            }).eq("ticker", ticker).is("settled_at", null);
+            results.push({ ticker, status: "unsettleable_404" });
+          } else {
+            results.push({ ticker, status: "api_error" });
+          }
           continue;
         }
 
