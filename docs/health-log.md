@@ -2,6 +2,45 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (56th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — futures-signal's service-tenant credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 55th run's
+~15:07 UTC cutoff through this run's ~16:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 55th run's own push (run `30372086425`,
+4m19s) and no pushes since.
+
+**Fix (LOW risk, monitoring/signal path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 55th run's log explicitly left open: `futures-signal`,
+`kalshi-proxy` (×2), and `trading-agent` (×2) all still call `getKalshiCredentials()` unguarded.
+Fixed `futures-signal/index.ts:170` — the service-tenant (`userId = null`) credential fetch used
+to sign the KXFED markets request, which sits inside a `try` block whose `catch` only fires on a
+*thrown* error. A stalled query doesn't throw, it just never resolves, so the existing catch
+never engages — the whole `futures-signal-cron` run (every 10 minutes) would stall past its next
+scheduled tick instead of degrading gracefully to the unauthenticated Kalshi request it already
+falls back to when no service credential is available. Applied the identical `Promise.race(...,
+8s)` guard used in `market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`/
+`kalshi-ping`, same `8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`), and let the timeout
+propagate into the same enclosing `catch` that already handles a failed Kalshi fetch by warning
+and falling through to the existing consecutive-miss counter and Telegram alert on the 5th miss.
+
+**Scope check:** left `kalshi-proxy` ×2 and `trading-agent` ×2 untouched this run — same
+one-narrow-fix-per-run discipline as the 51st/52nd/53rd/54th/55th runs, and `execute-trade`'s
+real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/futures-signal/index.ts` — 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(10) after this change — no new errors introduced. Deployed via `supabase functions deploy
+futures-signal`. Verified live against the real deployed Supabase project: `OPTIONS` preflight
+returns HTTP 200, a no-auth `GET` returns HTTP 401 — confirms the function is live. Also confirmed
+`futures-signal-cron`'s first scheduled run after deploy (16:09 UTC) completed with
+`last_status: succeeded`, `last_run_failed: false` via `cron_health()` — the guarded code path ran
+successfully end-to-end on the real schedule. The timeout branch itself (a genuinely stalled
+query) is unexercised — same unexercised-timeout-branch caveat as the 53rd/54th/55th runs' notes.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (55th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-ping's onboarding credential fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 54th run's
