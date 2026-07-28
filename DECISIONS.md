@@ -4,6 +4,29 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Corrected the 57th run's risk assessment and guarded kalshi-proxy's public-endpoint service-tenant credential fetch
+
+**Decision:** Wrapped `getKalshiCredentials(adminClient, null)` in `kalshi-proxy/index.ts`'s public
+(`markets`/`events`/`series`) branch (line 90) in the same `Promise.race(..., 8s)` guard used at
+every other call site. On timeout, logs `kalshi_proxy_service_credential_fetch_failed` (`error`) to
+`compliance_log` and falls through to the pre-existing unauthenticated-fallback branch.
+**Options:** A) Leave it, trusting the 57th run's note that it already degrades safely — rejected
+after reading `getKalshiCredentials()`: it has no internal timeout, so a stalled query never
+resolves and the bare `await` hangs exactly like every already-fixed site; the "degrades" claim only
+holds for a *resolved-falsy* credential, not a *stalled* one. B) Fix `cancel_order` or `execute-trade`
+instead — rejected: real-money order paths, off-limits per the 48th-run's standing caution,
+unchanged across 51st–59th runs. C) Apply the guard, degrade-on-timeout to the existing fallback
+(**chosen**) — this is the highest-traffic remaining unguarded site (every public frontend market
+browse, not just a cron tick), and closes out the safe backlog from this campaign.
+**Why:** A prior run's stated risk assessment turned out to be based on an incorrect read of the
+fallback's trigger condition; re-verifying against the actual `getKalshiCredentials()` source before
+trusting a prior "already safe" call was the only way to catch it. Matches the proven-safe pattern
+from 8 prior runs; read-only path, no trading-decision impact.
+**Reversibility:** trivial — single-block revert, no schema or trading-path change.
+**Trace:** PR this run, `docs/health-log.md` 59th-run entry.
+
+---
+
 ## 2026-07-28 — Guarded trading-agent's fetch_live_markets service-tenant credential fetch with the same 8s timeout pattern
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `trading-agent/index.ts`'s
