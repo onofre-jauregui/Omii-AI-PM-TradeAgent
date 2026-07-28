@@ -48,6 +48,7 @@ serve(async (req) => {
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
   const kalshiBase = Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
+  const startedAt = Date.now();
 
   const summary = { checked: 0, filled: 0, partial: 0, cancelled: 0, unchanged: 0, errors: 0 };
 
@@ -63,6 +64,7 @@ serve(async (req) => {
     if (qErr) throw qErr;
     const trades = (openTrades ?? []) as TradeRow[];
     if (trades.length === 0) {
+      await logRunSummary(supabase, summary, Date.now() - startedAt);
       return json({ ok: true, ...summary, message: "no resting paper orders" });
     }
 
@@ -140,6 +142,7 @@ serve(async (req) => {
       }
     }
 
+    await logRunSummary(supabase, summary, Date.now() - startedAt);
     return json({ ok: true, ...summary });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
@@ -148,11 +151,33 @@ serve(async (req) => {
       event_type: "paper_reconcile_fatal",
       severity: "error",
       message: `paper-reconcile: run aborted — ${errMsg}`,
-      metadata: summary,
+      metadata: { ...summary, elapsed_ms: Date.now() - startedAt },
     }).then(null, () => {});
     return json({ ok: false, error: errMsg, ...summary }, 500);
   }
 });
+
+// Run-level heartbeat so a slow or lagging pass is visible in compliance_log
+// instead of only reconstructable from scattered per-order rows — the same gap
+// reconcile-orders had until the 2026-07-28 health-check run (see docs/
+// health-log.md 41st run). paper-reconcile-cron shipped a day earlier
+// (20260727_paper_reconcile_cron.sql) as a direct mirror of reconcile-orders
+// but without this. Warns when a pass runs long enough to risk overlapping
+// the next 5-min cycle.
+async function logRunSummary(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  summary: { checked: number; filled: number; partial: number; cancelled: number; unchanged: number; errors: number },
+  elapsedMs: number,
+) {
+  const severity = elapsedMs > 4 * 60 * 1000 ? "warning" : "info";
+  await supabase.from("compliance_log").insert({
+    event_type: "paper_reconcile_run",
+    severity,
+    message: `paper-reconcile: ${summary.checked} checked, ${summary.filled} filled, ${summary.partial} partial, ${summary.cancelled} cancelled, ${summary.errors} errors (${elapsedMs}ms)`,
+    metadata: { ...summary, elapsed_ms: elapsedMs },
+  }).then(null, () => {});
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
