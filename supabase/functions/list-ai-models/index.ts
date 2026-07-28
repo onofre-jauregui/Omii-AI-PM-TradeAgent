@@ -10,6 +10,27 @@ export interface AIModel {
   pricing?: { prompt: string; completion: string };
 }
 
+// Same bound as market-data-fetcher/health-check/reconcile-orders/trading-agent's
+// CREDENTIAL_FETCH_TIMEOUT_MS — these are simple model-list GETs, not LLM generations.
+const MODEL_LIST_TIMEOUT_MS = 8_000;
+
+/** fetch() with an AbortController timeout; converts AbortError into a message
+ *  that matches this file's existing `errors[provider] = e.message` convention. */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(`request timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /** Test whether a model's provider is allowed by the account's data policy.
  *  Uses max_tokens:1 — the "no allowed providers" error fires at the routing
  *  layer before any tokens are generated, so blocked models cost $0. */
@@ -88,9 +109,11 @@ serve(async (req) => {
     const orKey = keyMap["openrouter"] || Deno.env.get("OPENROUTER_API_KEY");
     if (orKey) {
       try {
-        const res = await fetch("https://openrouter.ai/api/v1/models", {
-          headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" },
-        });
+        const res = await fetchWithTimeout(
+          "https://openrouter.ai/api/v1/models",
+          { headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" } },
+          MODEL_LIST_TIMEOUT_MS
+        );
         if (res.ok) {
           const data = await res.json();
           const models: AIModel[] = (data.data || [])
@@ -149,9 +172,11 @@ serve(async (req) => {
     const oaiKey = keyMap["openai"] || Deno.env.get("OPENAI_API_KEY");
     if (oaiKey && !orKey) {
       try {
-        const res = await fetch("https://api.openai.com/v1/models", {
-          headers: { Authorization: `Bearer ${oaiKey}` },
-        });
+        const res = await fetchWithTimeout(
+          "https://api.openai.com/v1/models",
+          { headers: { Authorization: `Bearer ${oaiKey}` } },
+          MODEL_LIST_TIMEOUT_MS
+        );
         if (res.ok) {
           const data = await res.json();
           const models: AIModel[] = (data.data || [])
@@ -174,8 +199,10 @@ serve(async (req) => {
     const googleKey = keyMap["google"] || Deno.env.get("GOOGLE_AI_API_KEY");
     if (googleKey && !orKey) {
       try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${googleKey}`
+        const res = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${googleKey}`,
+          {},
+          MODEL_LIST_TIMEOUT_MS
         );
         if (res.ok) {
           const data = await res.json();

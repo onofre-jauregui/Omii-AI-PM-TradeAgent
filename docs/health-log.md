@@ -2,6 +2,51 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (61st run) — Clean window, all cron healthy, CI green; found and fixed the same unguarded-fetch class in `list-ai-models`'s three model-provider list calls
+
+**Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, already
+current with `origin/dev` (`a82abb6`, the 60th run's own merge) — no fetch/reset needed, no
+stale-branch divergence risk per the 32nd-run config fix.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 60th run's
+~20:11 UTC cutoff through this run's ~21:07 UTC invocation — zero rows across 1,004 events in
+the ~56-minute window. `cron_health()` confirms all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green
+through the 60th run's own push (run `30395472131`, 4m26s) and no pushes since.
+
+**New instance of the recurring class:** the 56th–60th runs' campaign guarded every
+`getKalshiCredentials()` lookup and, in the 60th run, `trading-agent`'s own Anthropic call —
+but never asked the same question of `list-ai-models/index.ts`, the settings-page endpoint that
+populates the AI-model dropdown. It made three sequential, fully unguarded `fetch()` calls (no
+`AbortController`, no bound) to `openrouter.ai/api/v1/models`, `api.openai.com/v1/models`, and
+`generativelanguage.googleapis.com/v1beta/models` — a stall on any one of them (most likely
+OpenRouter, since it's tried first and gates whether OpenAI/Google are tried at all) hangs the
+whole request until the platform's own execution timeout kills it, with no error surfaced to the
+user beyond a spinner that never resolves. The file's own `isProviderAvailable()` helper already
+guards its POST call with a 6s `AbortController` — the three GET calls a few lines below it were
+just never brought up to the same bar.
+
+**Fix (LOW risk, read-only endpoint, no schema change):** added a shared `fetchWithTimeout()`
+helper (`MODEL_LIST_TIMEOUT_MS = 8_000`, matching the `CREDENTIAL_FETCH_TIMEOUT_MS` convention
+used by `market-data-fetcher`/`health-check`/`reconcile-orders`/`trading-agent`/etc. — these are
+simple metadata GETs, not LLM generations) and routed all three provider calls through it. On
+abort, converts the `AbortError` into a clear `request timed out after 8000ms` message that
+flows into the existing `errors[provider]` object already returned to the frontend — no new
+response shape, just a bounded and legible failure instead of an indefinite hang.
+
+**Verified:** `deno check supabase/functions/list-ai-models/index.ts` — clean, no errors.
+`deno lint` — 16 pre-existing `no-explicit-any` problems, confirmed identical count on
+unmodified `dev` via `git stash`/lint/`git stash pop` — no new lint issues. Deployed
+(`supabase functions deploy list-ai-models`) and **invoked against the real API**, not a mock:
+`POST /functions/v1/list-ai-models` → `HTTP 200` in 2.8s, real OpenRouter model list returned
+(`openrouter/auto`, `~google/gemini-flash-latest`, etc.) — confirms no regression on the happy
+path. The fix only changes behavior on the abort branch, which doesn't fire under normal
+conditions; the next real provider stall is the live-world proof, same caveat as every prior
+timeout-guard fix in this campaign.
+
+**Reversibility:** single-file change, three call sites route through one new local helper —
+revert is a one-file diff.
+
 ## 2026-07-28 (60th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the unguarded-credential-fetch campaign's sibling gap — trading-agent's own LLM provider call had no timeout
 
 **Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, `origin/dev`
