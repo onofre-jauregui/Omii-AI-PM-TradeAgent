@@ -2,6 +2,84 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (60th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the unguarded-credential-fetch campaign's sibling gap — trading-agent's own LLM provider call had no timeout
+
+**Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, `origin/dev`
+already current (`22e55b7`, the 59th run's own merge) — no fetch/reset needed, no stale-branch
+divergence risk per the 32nd-run config fix.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 59th run's
+~19:10 UTC cutoff through this run's ~20:11 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 59th run's own push (run `30390952593`,
+4m43s) and no pushes since.
+
+**Campaign status check:** grepped every remaining `getKalshiCredentials()` call site across all
+edge functions to confirm the backlog the 59th run's entry claimed was exhausted — it is. All ten
+call sites are either already `Promise.race`-guarded or one of the two off-limits live-trading
+paths (`execute-trade:552`, `trading-agent`'s `cancel_order` at line ~1460, unchanged across
+51st–60th runs). No new safe instance of that specific class exists to close.
+
+**New instance of the broader class:** the credential-fetch campaign only ever guarded the
+Supabase *lookup* that precedes each Kalshi API call — the actual downstream network calls were a
+separate question. Auditing `trading-agent/index.ts` for unguarded `fetch()` calls (the same
+question asked of every other function in this campaign, just never asked of this file's own LLM
+provider calls) found `callAnthropicNonStream()` — the sole live call site for this function's
+LLM turn (`streamAnthropicAsSSE`, defined a few lines below it, is dead code with zero call sites,
+confirmed via grep) — calling `fetch("https://api.anthropic.com/v1/messages")` with a bare
+`await`, no `AbortController`, no bound at all. A stalled Anthropic connection hangs the entire
+chat turn until the platform's own execution timeout kills it, with zero `compliance_log` signal
+in the meantime — the identical failure shape as the seven credential-fetch fixes, just one level
+up the stack (the LLM call itself, not the lookup before it).
+
+**Scope correction on this file's own commentary:** the existing code comment at the
+`fetch_live_markets` tool call site (added during the 58th-run campaign) describes this file as
+being "invoked... inside auto-trade-cron (every 5 min)". Queried `cron.job` directly
+(`select jobname, command from cron.job where command ilike '%trading-agent%'`) — zero rows.
+`auto-trade-cron` calls the separate `auto-trade` function, which has its own independent code
+path and never calls `trading-agent`. `trading-agent` is the interactive AgentPanel chat endpoint
+only. Left the pre-existing comment as-is (out of scope for this run — it doesn't affect that
+fix's correctness, only its stated rationale) but did not repeat the inaccuracy in this run's new
+comment, which correctly scopes the fix to the user-facing chat session it actually protects.
+
+**Fix (LOW risk, read path — no trading logic touched, no schema change):**
+`trading-agent/index.ts` — wrapped the `fetch()` in `callAnthropicNonStream()` in an
+`AbortController` guard (`LLM_FETCH_TIMEOUT_MS = 60_000`, new module-level constant; longer than
+the 8s `CREDENTIAL_FETCH_TIMEOUT_MS` used elsewhere since LLM generation legitimately takes tens of
+seconds for a large tool-schema + long-history turn). On abort, converts the `AbortError` into a
+clear `Error("Anthropic API call exceeded 60000ms")` rather than letting a generic abort signal
+surface. Also wrapped the call site (the turn loop, ~line 1053) in a `try/catch` that logs a new
+`trading_agent_llm_call_failed` `error` row to `compliance_log` (model, turn index, duration) before
+rethrowing — previously *any* LLM-call failure here (timeout, network drop, rate limit) was fully
+invisible to `compliance_log`/Telegram alerting, caught only by the outer handler that writes an
+error string into the user's chat stream and closes it silently otherwise. The rethrow preserves
+that existing user-facing behavior unchanged; the fix only adds the missing observability plus the
+upstream bound.
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every `getKalshiCredentials` call site, same class flagged in prior runs' log
+entries), same count (13) after this change — no new type errors. `deno lint` showed 58 pre-existing
+problems on unmodified `dev` vs. 59 after — the one addition is a `let anthropicResult: any` matching
+this same function's pre-existing `let result: any` one line above it, consistent with the file's
+established (if imperfect) style, not a new pattern. Deployed via `supabase functions deploy
+trading-agent` (twice — the first deploy shipped before a stale/inaccurate claim in this run's own
+new comment about cron invocation was caught and corrected; redeployed with the fix). **Exercised
+against the real deployed function this run:** a direct unauthenticated POST to the live endpoint
+returned a real `401 UNAUTHORIZED_INVALID_JWT_FORMAT` from Supabase's auth layer post-deploy,
+confirming the function booted cleanly with no import/syntax failure. **Not exercised through a
+full authenticated chat turn this run** — doing so needs a real user JWT and spends real Anthropic
+tokens against a live account, the same category of caveat the 58th run's `fetch_live_markets` entry
+and the 51st run's `cancel_order` entry both explicitly accepted rather than fabricating a forced
+test. Re-confirmed zero new `compliance_log` `error`/`critical` rows after both deploys.
+
+**Reversibility:** trivial — single-function, single-call-site revert (remove the
+`AbortController`/`try-catch` wrapper), no schema or trading-path change.
+
+**Improvement made:** the LLM-call timeout + observability fix above.
+`DECISIONS.md` this run, PR → `dev`, self-merged per established precedent for a verified low-risk
+fix.
+
 ## 2026-07-28 (59th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; corrected a prior run's mischaracterization and closed the real last unguarded-credential-fetch site — kalshi-proxy's public-endpoint service-tenant fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 58th run's

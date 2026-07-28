@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded trading-agent's own Anthropic LLM call with a fetch timeout (60th health-check run)
+
+**Decision:** Wrapped the `fetch("https://api.anthropic.com/v1/messages")` call inside
+`callAnthropicNonStream()` (`trading-agent/index.ts`) in an `AbortController` bound to a new
+`LLM_FETCH_TIMEOUT_MS = 60_000` constant, and wrapped its call site in a `try/catch` that logs a
+`trading_agent_llm_call_failed` row to `compliance_log` before rethrowing.
+**Options:** A) Leave unguarded — rejected, this is the exact failure shape (bare `await fetch`,
+no bound, no compliance_log signal on hang) already root-caused and fixed 7x for the credential
+lookup that precedes this call; leaving the LLM call itself unguarded left the class only
+half-closed. B) Guard only, no compliance_log logging — rejected, every LLM-call failure
+(timeout, network drop, rate limit) was previously invisible to the alerting path this whole
+health-check campaign exists to feed; the gap was as much about observability as about the hang
+itself. C) Guard + log — chosen.
+**Why:** Matches the established pattern (`Promise.race`/`AbortController` + `compliance_log` on
+timeout) used across market-data-fetcher/health-check/reconcile-orders/settle-signals/
+kalshi-ping/futures-signal/kalshi-proxy/trading-agent's own credential fetches; 60s (vs. those
+functions' 8s) because LLM generation legitimately takes tens of seconds for a large tool-schema +
+long-history turn, unlike a Postgres lookup.
+**Reversibility:** Easy — single-function revert, no schema or trading-path change.
+**Trace:** `docs/health-log.md` 60th-run entry; deployed via `supabase functions deploy trading-agent`.
+
 ## 2026-07-28 — Corrected the 57th run's risk assessment and guarded kalshi-proxy's public-endpoint service-tenant credential fetch
 
 **Decision:** Wrapped `getKalshiCredentials(adminClient, null)` in `kalshi-proxy/index.ts`'s public
