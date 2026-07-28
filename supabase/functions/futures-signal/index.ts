@@ -4,6 +4,8 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping
+
 /**
  * futures-signal: Fed funds futures vs Kalshi KXFED cross-market oracle.
  *
@@ -167,8 +169,28 @@ serve(async (req) => {
     // Same anonymous-rate-tier issue fixed in kalshi-proxy/trading-agent
     // (2026-07-26): sign with the service-tenant credential when available.
     let kalshiHeaders: Record<string, string> = { "Accept": "application/json" };
-    const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-      await getKalshiCredentials(supabase, null);
+    // Bare `await` here would hang this whole try block forever on a stalled
+    // query — same class of unguarded-credential-fetch bug fixed in
+    // market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping.
+    // The outer catch below only fires on a *thrown* error, so an indefinite
+    // hang would never reach it and this cron run (every 10 min) would stall.
+    let serviceKeyId: string | null, servicePrivateKey: string | null;
+    {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+          CREDENTIAL_FETCH_TIMEOUT_MS
+        );
+      });
+      try {
+        const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+        serviceKeyId = creds.keyId;
+        servicePrivateKey = creds.privateKey;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
     if (serviceKeyId && servicePrivateKey) {
       kalshiHeaders = {
         ...kalshiHeaders,

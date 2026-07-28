@@ -4,6 +4,28 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded futures-signal's service credential fetch with the same 8s timeout pattern
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `futures-signal/index.ts` in a
+`Promise.race` against an 8s timeout, identical to the pattern applied to `market-data-fetcher`
+(48th run), `health-check` (51st run), `reconcile-orders` (52nd run), `settle-signals` (54th run),
+and `kalshi-ping` (55th run).
+**Options:** A) Leave it — rejected: same unguarded shape, and the site sits inside a `try` block
+whose `catch` only fires on a thrown error, so an indefinite hang never reaches it — the cron run
+(every 10 min) would stall past its next scheduled tick. B) Fix the shared `getKalshiCredentials()`
+helper globally — rejected, same reasoning as every prior run: broader blast radius, and the
+remaining call sites (`execute-trade`, `trading-agent` ×2, `kalshi-proxy` ×2) stay a deliberate,
+reviewed decision, not a side effect of a health-check sweep. C) Scope the fix to
+`futures-signal`'s single call site — **chosen**: smallest possible diff, matches the file's
+existing degrade-gracefully behavior (falls through to the unauthenticated Kalshi request and the
+consecutive-miss counter), consistent with the established one-narrow-fix-per-run discipline.
+**Why:** Same class of bug closed five times before in this codebase — the fix pattern is proven,
+low-risk, and each additional unguarded call site is a live production stall waiting to happen on
+a cron job. Leaving it unfixed after the 55th run explicitly flagged it as backlog would repeat the
+mistake documented in the log.
+**Reversibility:** easy — single-file, single-block revert, no schema or trading-path change.
+**Trace:** commit `e646f43` on `dev`, this run's `docs/health-log.md` entry (56th run).
+
 ## 2026-07-28 — Guarded kalshi-ping's credential fetch with the same 8s timeout pattern
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, user.id)` in `kalshi-ping/index.ts` in a
