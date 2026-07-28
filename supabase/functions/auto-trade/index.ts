@@ -1866,10 +1866,17 @@ async function runS005WeatherEdge(
       // Fetch current market price from Kalshi
       let currentMid: number | null = null;
       try {
-        const mktResp = await fetch(
-          `${KALSHI_API_BASE}/markets/${encodeURIComponent(pos.ticker)}`,
-          { headers: { "Content-Type": "application/json" } }
-        );
+        const priceController = new AbortController();
+        const priceTimeoutId = setTimeout(() => priceController.abort(), KALSHI_FETCH_TIMEOUT_MS);
+        let mktResp: Response;
+        try {
+          mktResp = await fetch(
+            `${KALSHI_API_BASE}/markets/${encodeURIComponent(pos.ticker)}`,
+            { headers: { "Content-Type": "application/json" }, signal: priceController.signal }
+          );
+        } finally {
+          clearTimeout(priceTimeoutId);
+        }
         if (mktResp.ok) {
           const mktData = await mktResp.json();
           const mkt = mktData?.market ?? mktData;

@@ -2,6 +2,54 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (63rd run) — Clean window, all cron healthy, CI green; fixed the 62nd run's flagged leftover — `runS005WeatherEdge`'s profit-lock price fetch had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
+`origin/dev` (`bf1ed56`, the 62nd run's own merge) — no fetch/reset needed. Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 62nd run's
+~22:07 UTC cutoff through this run's ~23:07 UTC invocation — zero rows across 1,276 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 62nd
+run's own push (run `30403838222`, 4m38s) and no pushes since.
+
+**Fix (the exact instance the 62nd run identified and deliberately left untouched):** the 62nd
+run's entry flagged a second unguarded `fetch()` in `auto-trade/index.ts` — the S-005 profit-lock
+position-price check inside `runS005WeatherEdge()`, called once per open S-005 position every
+5-minute `auto-trade-cron` tick to decide whether to close early on favorable price movement. That
+call had no `AbortController` at all, one level looser than the primary `kalshiFetch()` wrapper
+fixed last run: a stall here doesn't just delay one position's check, it blocks the `for` loop
+iterating every open S-005 position in that tick until the platform's own execution timeout kills
+the whole invocation, and — because this call bypasses `kalshiFetch()`/`kalshiCircuit` entirely —
+the failure never reaches the circuit breaker either. Wrapped the fetch in a scoped
+`AbortController` + `setTimeout(..., KALSHI_FETCH_TIMEOUT_MS)` (reusing the existing 8s constant
+from the 62nd run rather than introducing a new one), with `clearTimeout` in a `finally`. On abort
+the surrounding `try/catch { /* non-critical — skip this position */ }` already handles it
+correctly — no new error-handling plumbing needed, the fix is purely the timeout guard.
+
+**Scope check:** same as every fix in this campaign, this is a public read-only market-data GET
+(`markets/{ticker}`) used only to decide *whether* to close a position; the actual close order
+still routes through the untouched `execute-trade` call via `callExecuteTrade()`.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` — 17 pre-existing errors,
+confirmed identical on unmodified `dev` via `git stash`/`deno check`/`git stash pop` — no new type
+errors. `deno lint` — 87 pre-existing problems, confirmed identical via the same stash comparison
+— no new lint issues. Deployed via `supabase functions deploy auto-trade`. Invoked the deployed
+function directly via `net.http_post` matching `auto-trade-cron`'s own `cron.job.command` exactly
+(25s `timeout_milliseconds`) — response `HTTP 200`, `timed_out: false`,
+`{"ran":1,"traded":0,"errors":0,"halted":0}`; `compliance_log` shows zero new `error`/`critical`
+rows in the following 2 minutes, only expected `info`/`warning` trading telemetry (surface scan,
+signal generation, liquidity fallbacks). **Caveat — narrower than usual:** unlike prior runs where
+the modified code path was hit by live alerts, `trades` shows zero open S-005 positions right now
+(`S-005` strategy exists, `mode: paper`, confirmed live), so this invocation exercised the
+surrounding function cleanly but did not actually enter the `for` loop containing the fix. The
+change itself is a minimal, mechanically-identical repeat of the pattern already proven in
+production by the 58th/59th/60th/61st/62nd runs' fixes, but the specific new code path is
+unexercised by real position data this run — flagging honestly rather than overstating coverage.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or order-path change.
+
 ## 2026-07-28 (62nd run) — Clean window, all cron healthy, CI green; closed the campaign's next read-path instance — `auto-trade`'s own `kalshiFetch()` wrapper had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was left on a stray branch from
