@@ -218,7 +218,15 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
   // Reset visible count when search or horizon changes
   useEffect(() => { setVisibleCount(50); }, [search, horizon, sortBy]);
 
-  // Open a market by ticker when navigated from agent chat
+  // Open a market by ticker when navigated from agent chat.
+  // onMarketOpened is read via ref, not a direct dependency: Index.tsx passes a new
+  // inline callback on every render, so depending on it directly would re-fire this
+  // fetch on unrelated parent re-renders (tab switches, mode changes, etc).
+  const onMarketOpenedRef = useRef(onMarketOpened);
+  useEffect(() => {
+    onMarketOpenedRef.current = onMarketOpened;
+  }, [onMarketOpened]);
+
   useEffect(() => {
     if (!openMarketTicker) return;
     fetchKalshiMarket(openMarketTicker)
@@ -226,7 +234,7 @@ export function MarketsPanel({ mode = "paper", openMarketTicker, onMarketOpened 
         if (parsed) setSelectedMarket(parsed);
       })
       .catch(() => {})
-      .finally(() => onMarketOpened?.());
+      .finally(() => onMarketOpenedRef.current?.());
   }, [openMarketTicker]);
 
   const filtered = useMemo(() => {
