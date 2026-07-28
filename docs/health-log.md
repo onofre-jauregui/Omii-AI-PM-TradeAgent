@@ -2,6 +2,47 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (43rd run) — Zero new compliance errors; found and fixed `signal-generator-cron` was the last remaining cron job with no success-path heartbeat, same gap class as the last 3 runs
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 42nd run's
+~02:07 UTC cutoff through this run's ~03:07 UTC invocation (2026-07-28) — zero new rows. All 13
+registered cron jobs confirmed healthy via `cron_health()` (`active: true`, `is_stale: false`,
+`last_run_failed: false` on every row) — the reconcile-orders and paper-reconcile fixes from the
+41st/42nd runs are both running clean now.
+
+**Root cause found and fixed (LOW-MED — observability gap, same class the last 3 runs closed for
+other functions):** with zero live errors and all cron jobs reporting healthy, swept the remaining
+cron'd edge functions for the "success path never writes to `compliance_log`" gap the 41st/42nd
+runs found in `reconcile-orders` and `paper-reconcile`. Cross-checked all 13 `expected_cron_jobs`
+entries against `compliance_log` event types over the last 24h: `market-data-fetcher` and
+`surface-scanner` both log a full-coverage success event per run (`market_data_fetch` and
+`surface_scan_complete`, 288/288 matching their 5-min schedules) — not missing, just not named with
+a `_run` suffix, so they didn't show up in the naive search. `signal-generator`
+(`supabase/functions/signal-generator/index.ts`) was the real gap: it had **only** two error-path
+event types (`signal_persist_error`, `signal_generator_error`) and zero rows of any kind on
+success — confirmed via a 24h query returning 0 rows for any signal-generator event type outside
+those two. Same failure mode as the closed gaps: `cron_health()` only proves the pg_cron scheduler
+invoked the function, not that the function's internal logic did anything — a run that silently
+scores zero signals (empty market cache, all markets filtered as illiquid) or hangs mid-scoring
+would be invisible except by hand-checking `signals` table timestamps.
+
+**Fix (deployed):** added a `logRunSummary()` heartbeat to `signal-generator/index.ts`, matching
+the exact pattern from the 41st/42nd runs' `reconcile-orders`/`paper-reconcile` fixes —
+`event_type: "signal_generator_run"`, `elapsed_ms` tracked from `startedAt`, severity escalates to
+`warning` past 4 minutes. Wired into all three exit paths: the empty-cache early return, the
+no-liquid-markets early return, and the normal success return (with `total_scored`/`actionable`/
+`strong` counts). Deployed via `supabase functions deploy signal-generator`.
+
+**Verified against real production data:** `deno check` on the modified file surfaces 3 pre-existing
+errors (`volume_fp`/`volume_24h_fp` not in the `RawMarket` interface, a `.then().catch()` chain on a
+non-thenable) — confirmed identical before and after this change via `git stash`, so nothing new was
+introduced. Directly invoked the deployed function (`POST .../functions/v1/signal-generator`) —
+returned 831 scored signals, 20 actionable, 12 strong — then confirmed the new heartbeat row landed:
+`compliance_log` → `signal_generator_run`, `"signal-generator: 831 scored, 20 actionable, 12 strong
+(505ms)"` at `2026-07-28 03:09:30 UTC`. Every cron'd edge function in the system now has full
+success-path observability coverage. **Reversibility:** easy — additive logging only, no schema or
+behavior change; reverting the file and redeploying fully restores prior behavior.
+
 ## 2026-07-28 (42nd run) — Zero new compliance errors; found and fixed `paper-reconcile-cron` was never registered at all — same "migration syntax error silently no-ops" failure mode as the reconcile-orders 6-day gap, one day old
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 41st run's
