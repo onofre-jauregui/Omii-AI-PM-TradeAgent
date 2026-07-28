@@ -60,16 +60,44 @@ serve(async (_req) => {
   let consecutiveFailures = 0;
   let abortReason: string | null = null;
 
-  const { keyId, privateKey } = await getKalshiCredentials(supabase, null);
+  let keyId: string | null = null;
+  let privateKey: string | null = null;
 
-  if (!keyId || !privateKey) {
+  // Credential fetch has no per-request budget check like the series loop below,
+  // so a stalled query here (2026-07-13: 130.6s, 2026-07-16: 61.4s) silently ate the
+  // entire run and skipped all series with no accurate cause. Bound it to the same
+  // REQUEST_TIMEOUT_MS used per-series so a hang fails fast with a real reason
+  // instead of a generic "run budget exceeded".
+  try {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`credential fetch exceeded ${REQUEST_TIMEOUT_MS}ms`)),
+        REQUEST_TIMEOUT_MS
+      );
+    });
+    try {
+      const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`market-data-fetcher: credential fetch failed or timed out: ${msg}`);
+    abortReason = `credential fetch failed or timed out (${msg})`;
+    skippedSeries = [...SERIES];
+  }
+
+  if (!abortReason && (!keyId || !privateKey)) {
     console.warn(
       "market-data-fetcher: Kalshi credentials not configured. " +
       "Running unauthenticated — rate limits are lower."
     );
   }
 
-  for (const series of SERIES) {
+  for (const series of abortReason ? [] : SERIES) {
     // ── Run budget check ──────────────────────────────────────────
     const elapsed = Date.now() - runStart;
     if (elapsed >= RUN_BUDGET_MS) {

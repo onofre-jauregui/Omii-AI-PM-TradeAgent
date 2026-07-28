@@ -2,6 +2,62 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (48th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a 8-day-old flagged-not-fixed gap — `market-data-fetcher`'s credential fetch had no timeout, the exact cause of two prior full-run stalls
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 47th run's
+~07:07 UTC cutoff through this run's ~08:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 47th run's own push (PR #100) and this
+run's.
+
+**Root cause found and fixed (LOW-MED — a finding logged 8 days ago and explicitly never
+auto-fixed, still open in the code):** with zero live errors and CI green, swept `DECISIONS.md`
+for anything logged-but-not-shipped, the same sweep pattern the 33rd run used to close a
+similar backlog item. The 2026-07-20 entry "Flagged market-data-fetcher credential-fetch
+timeout gap (not auto-fixed)" was deliberately left as a proposal rather than a deploy, per
+protocol for unattended runs touching a live-trading-adjacent path — but the proposed one-line
+fix was never picked up by any of runs 21–47. Read `market-data-fetcher/index.ts:63` directly:
+`getKalshiCredentials(supabase, null)` executed with no timeout, *before* `runStart`'s
+`RUN_BUDGET_MS` (50s) enforcement begins in the series loop below it. The two incidents that
+prompted the original flag — 2026-07-13 (130.6s abort, 0/18 series failed, all 18 skipped) and
+2026-07-16 (61.4s, 3 skipped) — are exactly consistent with this: a stalled Supabase query
+outside any budget check, silently consuming the whole run and firing a critical Telegram alert
+with no accurate cause (`abortReason` stayed `null` in both incidents' logged metadata since the
+loop never started). No recurrence in the 8 days since, but the code path was still live and
+unguarded.
+
+**Fix (deployed):** wrapped the credential fetch in `market-data-fetcher/index.ts` with a
+`Promise.race` against the same `REQUEST_TIMEOUT_MS` (8s) already used per-series below it — the
+exact fix proposed in the 2026-07-20 `DECISIONS.md` entry. On timeout or query error, sets
+`abortReason` and `skippedSeries = [...SERIES]` and skips the series loop entirely, which routes
+through the run's existing abort-alert path (Telegram + `market_data_fetcher_aborted` critical
+`compliance_log` row) unchanged — so a future stall now fails in ~8s with an accurate
+`"credential fetch failed or timed out (...)"` reason instead of silently eating the full 50s+
+budget with a generic message. The "credentials not configured" warning path (no error, just
+null keys — expected when unauthenticated) is untouched. Scoped to `market-data-fetcher` only —
+no change to the shared `getKalshiCredentials()` used by `execute-trade`/`auto-trade`/other
+live-trading-adjacent functions, so this doesn't touch the real-money order path at all; it's a
+read-only market-data cache poller.
+
+**Verified against real data, not just statically:** `deno check` — 11 pre-existing type errors
+both before and after (confirmed via `git stash`/`stash pop` diff), one new error introduced by
+an untyped `setTimeout` return value, fixed with `ReturnType<typeof setTimeout>` before deploy.
+Deployed via `supabase functions deploy market-data-fetcher`, then invoked the live function
+directly (`POST .../functions/v1/market-data-fetcher`) — `{"success":true,"series_fetched":18,
+"series_failed":[],"series_skipped":[],"abort_reason":null,"total_markets_cached":817,
+"elapsed_ms":3293}`, and `compliance_log` shows the matching `market_data_fetch` `info` row,
+confirming the happy path (credentials configured, fetch fast) is unregressed. **Not verified
+end-to-end:** the actual timeout branch itself, since triggering a real Supabase query stall
+on demand isn't reproducible without fault injection — this mirrors how the 40th run's
+`cancel_order` fix and others noted a hard-to-trigger path as code-reviewed rather than
+live-fired. Low risk: the new code path is a straight `Promise.race` around an existing call,
+falls back to the pre-existing abort-and-alert mechanism verified working since inception, and
+touches nothing on the trading/order side.
+
+**Reversibility:** easy — single-function revert (`market-data-fetcher/index.ts` only), redeploy
+previous version.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (47th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the 46th run's own watch item — `settle-signals` was stuck re-hitting the same unresolvable 200-ticker batch forever instead of rotating through the backlog
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 46th run's
