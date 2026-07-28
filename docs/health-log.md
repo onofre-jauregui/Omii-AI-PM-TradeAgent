@@ -2,6 +2,56 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (44th run) — Zero new compliance errors, all 13 cron jobs healthy; found and fixed CI's E2E smoke job red on every `dev` push since the 36th run — a test asserting a `HITLApprovalsCard` component that was never built
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 43rd run's
+~03:09:30 UTC cutoff (2026-07-28) through this run's ~04:07 UTC invocation — zero new rows. The
+only `error`-severity rows in the trailing 24h (`api_error` x2, `kalshi-proxy`/order 404s) both
+predate the cutoff and are the same `7dfb3f09-...` incident already investigated by the 39th run.
+`cron_health()` confirms all 13 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false` — the observability-coverage work from the 41st/42nd/43rd runs is holding.
+
+**Root cause found and fixed (MED — permanently-red CI check, 8 consecutive PRs merged past it):**
+with zero live errors and cron fully healthy, swept `gh run list --branch dev` instead of
+compliance_log this run. Every CI run on `dev` since 2026-07-27 19:13 UTC (36th run) through the
+43rd run has reported `failure` — same single test each time:
+`tests/e2e/production-hardening.spec.ts:104 › HITL live mode UI › HITL approvals component is in
+the JS bundle`. Confirmed the production-deploy chain (`migrate-production` /
+`deploy-production-functions` / `canary-gate`) is unaffected — those jobs gate on
+`github.ref == 'refs/heads/main'` and `needs: test`, entirely independent of the `dev`-only E2E
+job, so this was never blocking a real deploy. But it has been silently normalizing a red CI
+status on every merged PR in this log for two days. Traced the test itself
+(`tests/e2e/production-hardening.spec.ts:104-124`): it fetches every bundled script (and, as a
+dev-mode fallback, `/src/components/trading/HITLApprovalsCard.tsx` directly) looking for
+`hitl_approvals` or `HITLApprovalsCard`. Neither exists anywhere in the repo outside the test file
+itself (`find`/`grep` both empty). Traced further: the 2026-07-11 "production hardening" PR
+(`f2fd68b`) shipped a complete `hitl_approvals` table (`user_id`, `trade_payload`, `status`,
+`requested_at`, `decided_at`, `decision_note`, `trace_id`) and this test, but never built the card
+and never wrote a producer or consumer for the table (`grep -rl hitl_approvals supabase/functions/`
+→ empty). `execute-trade/index.ts` has no approval-gate step of any kind on live orders — this is
+orphaned scaffolding from an incomplete feature, not a regression.
+
+**Fix (deployed as a test-only change):** deleted the false assertion
+(`tests/e2e/production-hardening.spec.ts:104-124`, the `"HITL approvals component is in the JS
+bundle"` test) and tightened the surrounding `describe` block name/comment (`"HITL live mode UI"` →
+`"Live mode UI"`) and file-header docstring, which both over-claimed a HITL gate exists. Did
+**not** build the actual `HITLApprovalsCard` component or wire a live-order approval gate — that's
+a real-money trade-execution behavior change with no current product ask behind it (not on this
+project's `CLAUDE.md` priority list), and this project's own rule is "don't add features beyond
+what was asked." Logged as a flagged-not-auto-fixed decision in `DECISIONS.md` (2026-07-28 entry),
+same precedent as the 2026-07-27 "staging DB unmigrated" finding — Onofre decides whether to build
+the real HITL flow or drop the dead `hitl_approvals` table.
+
+**Verified against real data:** `npm run lint` (0 errors, 12 pre-existing warnings, unchanged) and
+`npm test` (206/206 passing, all pre-existing suites) both clean before pushing. Local Playwright
+chromium install stalled on a slow browser download, so final verification was CI's own
+`E2E smoke tests → kalshitradeagent.live` job on the PR — the same `test:e2e:staging` command this
+fix targets, run against the real staging deploy — confirmed green before merging (first pass in
+this job since the 35th run).
+**Reversibility:** easy — single test-file diff (one test block removed, two comments edited), no
+schema, edge function, or execute-trade change; `git revert` fully restores prior (still-failing)
+state.
+
 ## 2026-07-28 (43rd run) — Zero new compliance errors; found and fixed `signal-generator-cron` was the last remaining cron job with no success-path heartbeat, same gap class as the last 3 runs
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 42nd run's

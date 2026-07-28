@@ -4,6 +4,41 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Removed the permanently-failing "HITL approvals component" E2E assertion; flagged (not built) the missing HITL gate on live trades
+
+**Decision:** Deleted the `"HITL approvals component is in the JS bundle"` test from
+`tests/e2e/production-hardening.spec.ts` (added 2026-07-11, PR `f2fd68b` "production hardening").
+Did **not** build the asserted `HITLApprovalsCard` component or wire any approval gate into
+`execute-trade`.
+**Finding:** CI's `E2E smoke tests → kalshitradeagent.live` job has failed on every push to `dev`
+since at least the 36th run (2026-07-27 19:13 UTC) through the 43rd (2026-07-28 03:10 UTC) — 8
+consecutive PRs merged with this one test red. Root cause: the 2026-07-11 PR shipped a
+`hitl_approvals` table (`user_id`, `trade_payload`, `status`, `requested_at`, `decided_at`,
+`decision_note`, `trace_id` — a complete approval-queue schema) and an E2E test asserting a
+`HITLApprovalsCard` UI component exists, but never built that component and never wrote any
+producer/consumer for the table — `grep -rl hitl_approvals supabase/functions/` returns nothing.
+No code path inserts into, reads from, or blocks on `hitl_approvals`; live trade execution in
+`execute-trade/index.ts` has no human-approval step of any kind. The table and test are dead,
+orphaned scaffolding from an incomplete feature, not a regression.
+**Options:** A) Build the real HITL gate (UI card + backend block on live orders pending approval)
+to make the test's assertion true — rejected for this run: it's a live-trade-execution behavior
+change (money-logic) with no current product ask behind it (not on `CLAUDE.md`'s priority list),
+squarely in "ask first" territory, and this project's own rules say don't add features beyond
+what was asked. B) Patch the test to pass some other way (e.g. check for the table instead of a
+component) — rejected, that's re-decorating a false assertion rather than fixing the root cause.
+C) Delete the false assertion and flag the real gap for an explicit decision (chosen) — matches the
+precedent set by the 2026-07-27 "staging DB unmigrated" entry: surface money/architecture-shaped
+gaps for review rather than auto-deciding them.
+**Why:** Zero-risk, in-scope fix (test-file-only, no execute-trade or schema change) that stops CI
+lying red on every dev push — a permanently-failing check trains reviewers to ignore CI, the same
+"looks healthy but isn't / looks broken but isn't" failure class multiple prior health-check runs
+have closed elsewhere. The actual product decision — build the HITL approval flow for real, or
+drop the orphaned `hitl_approvals` table — needs Onofre's call, not an autonomous one, since a
+real-money trading agent's live-order path is explicitly out of this task's "just decide" bucket.
+**Reversibility:** Easy — single test-file diff, git revert restores the (still-failing) assertion.
+No schema, no edge function, no execute-trade change.
+**Trace:** PR (this run, 44th health-check), `docs/health-log.md` 44th-run entry.
+
 ## 2026-07-27 — Fixed migrate-staging's silent-failure swallow; deliberately did not re-key VERSION or re-run the backlog
 **Decision:** In `.github/workflows/ci.yml`'s `migrate-staging` job, a failed migration `curl -sf` now `exit 1`s the job, and the `schema_migrations` history INSERT only runs after a confirmed-successful apply.
 **Options:** A) Fix all three items from the prior entry's proposed fix (fail-loud, record-on-success-only, full-stem VERSION + backlog re-run) in one pass — rejected, re-keying VERSION makes all ~40 existing history rows look unapplied and would re-trigger the entire backlog against live shared staging with unverified idempotency. B) Fix only fail-loud + record-on-success (chosen) — closes the "reports success on failure" root cause for every future migration without touching existing history rows or triggering any DB writes this run.
