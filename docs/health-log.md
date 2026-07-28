@@ -2,6 +2,53 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (57th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-proxy's per-user credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 56th run's
+~16:07 UTC cutoff through this run's ~17:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 56th run's own push (run `30377039099`,
+4m40s) and no pushes since.
+
+**Fix (LOW risk, read/portfolio-proxy path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 56th run's log explicitly left open: `kalshi-proxy` (×2) and
+`trading-agent` (×2) still call `getKalshiCredentials()` unguarded. Fixed `kalshi-proxy/index.ts:36`
+— the per-user credential fetch on the authenticated (non-public) branch. Unlike the cron-driven
+call sites fixed in runs 48–56, this one is hit **synchronously on every authenticated frontend
+request through the proxy** (portfolio, orders, trades) — the highest-traffic remaining unguarded
+call site in the backlog. A stalled query here doesn't throw, so the request would hang until the
+platform's own execution timeout killed it, leaving the user's UI spinning with no error. Applied
+the identical `Promise.race(..., 8s)` guard used in
+market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal, same
+`8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`). On timeout, logs a `kalshi_proxy_credential_fetch_failed`
+`error` row to `compliance_log` (console.error too) and returns a distinct `503` with "please try
+again" — deliberately different from the existing `401` "not configured" response, since a timeout
+means the user's credentials likely exist but the query stalled, and the old fallthrough would have
+told them to re-enter credentials that were never the problem.
+
+**Scope check:** left `kalshi-proxy`'s service-tenant fallback (line 54, has its own existing
+unauthenticated-fallback path so a stall there degrades rather than hangs) and `trading-agent` ×2
+untouched this run — same one-narrow-fix-per-run discipline as the 51st–56th runs, and
+`execute-trade`'s real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 14 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(14) after this change — no new errors introduced. Deployed via `supabase functions deploy
+kalshi-proxy`. Verified live against the real deployed Supabase project with the project's actual
+anon key (fetched via the Management API's `/api-keys?reveal=true` endpoint, since no
+TradeAgent-scoped anon key exists in `~/.omii_env`): `OPTIONS` preflight returns HTTP 200; a public
+`GET ?endpoint=markets` returns live market data through the untouched service-tenant fallback
+branch; and — unlike prior runs' unexercised-timeout-branch caveat — the authenticated
+`GET ?endpoint=portfolio/balance` call **actually ran the modified `Promise.race` guard end-to-end**
+(the anon-key JWT resolves through `resolveTenant`) and returned a real `200` with a live portfolio
+balance (`balance_dollars: "29.8068"`, `portfolio_value: 6377`). This is the first run in this
+backlog series to observe the guarded code path succeed against real data rather than only proving
+the function is live — the timeout-reject branch itself remains unexercised (would need an
+artificially stalled query to trigger), same caveat as every prior run in this series.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (56th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — futures-signal's service-tenant credential fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 55th run's

@@ -9,6 +9,8 @@ import { resolveTenant } from "../_shared/tenant.ts";
 // to catch a silent regression back to the anonymous (rate-limited) tier.
 let loggedMissingServiceKey = false;
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight(req, "extended");
 
@@ -32,8 +34,42 @@ serve(async (req) => {
 
     if (!isPublicEndpoint) {
       const { userId } = await resolveTenant(req, adminClient);
-      const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } =
-        await getKalshiCredentials(adminClient, userId);
+      // Bare `await` here would hang this request indefinitely on a stalled
+      // query — same class of unguarded-credential-fetch bug fixed in
+      // market-data-fetcher/health-check/reconcile-orders/settle-signals/
+      // kalshi-ping/futures-signal. Unlike those cron-driven paths, this one
+      // is hit synchronously by every authenticated frontend call through the
+      // proxy (portfolio, orders, trades) — a hang here stalls the user's
+      // request until the platform's own execution timeout kills it.
+      let kalshiKeyId: string | null, kalshiPrivateKey: string | null;
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        try {
+          const creds = await Promise.race([getKalshiCredentials(adminClient, userId), timeout]);
+          kalshiKeyId = creds.keyId;
+          kalshiPrivateKey = creds.privateKey;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (credError) {
+        const msg = credError instanceof Error ? credError.message : String(credError);
+        console.error(`kalshi-proxy: credential fetch failed or timed out for user ${userId}: ${msg}`);
+        await adminClient.from("compliance_log").insert({
+          event_type: "kalshi_proxy_credential_fetch_failed",
+          severity: "error",
+          message: `kalshi-proxy credential fetch failed or timed out: ${msg}`,
+        });
+        return new Response(
+          JSON.stringify({ error: "Could not verify Kalshi credentials right now — please try again." }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       if (!kalshiKeyId || !kalshiPrivateKey) {
         return new Response(

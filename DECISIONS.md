@@ -4,6 +4,36 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded kalshi-proxy's per-user credential fetch with the same 8s timeout pattern, plus a distinct 503 on timeout
+
+**Decision:** Wrapped `getKalshiCredentials(adminClient, userId)` in `kalshi-proxy/index.ts`'s
+authenticated branch (line 36) in a `Promise.race` against an 8s timeout, same pattern as
+`market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`/`kalshi-ping`/
+`futures-signal`. On timeout, logs a `kalshi_proxy_credential_fetch_failed` `error` row to
+`compliance_log` and returns `503` "please try again" instead of falling through to the existing
+`401` "not configured" response.
+**Options:** A) Leave it — rejected: this is the highest-traffic remaining unguarded call site in
+the backlog (hit on every authenticated frontend request through the proxy, not just a cron tick),
+so a stall directly hangs a live user request. B) On timeout, fall through silently to the existing
+`401` "credentials not configured" response (matches the bare-minimum pattern used elsewhere) —
+rejected: that message is actively misleading for a timeout, since the user's credentials likely
+exist and the query just stalled; telling them to re-enter credentials that were never the problem
+would send confused support-ish traffic nowhere useful. C) Distinct `503` + `compliance_log` `error`
+row + console.error, matching `kalshi-ping`'s "try again" precedent — **chosen**: correctly
+distinguishes "transient failure, retry" from "you haven't set this up," and gives compliance_log a
+searchable signal if this ever fires for real. D) Fix `kalshi-proxy`'s other call site (line 54,
+service-tenant fallback) in the same pass — rejected: that site already has its own
+unauthenticated-fallback degrade path (a stall there doesn't hang the request, it just misses the
+authenticated-tier optimization), so it's lower priority and stays a separate, reviewed change per
+the one-narrow-fix-per-run discipline.
+**Why:** Matches the timeout-guard pattern proven safe across 6 prior runs, and the response-shape
+change (503 vs 401) is the first behavioral divergence from the established file-header comment
+convention — worth flagging as its own decision rather than folding into "just another instance of
+the same fix."
+**Reversibility:** easy — single file, single block, revert restores the bare `await` and the old
+401-only fallthrough. No schema change, no trading-path change.
+**Trace:** PR to `dev`, 57th health-check run, `docs/health-log.md` this run's entry.
+
 ## 2026-07-28 — Guarded futures-signal's service credential fetch with the same 8s timeout pattern
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `futures-signal/index.ts` in a
