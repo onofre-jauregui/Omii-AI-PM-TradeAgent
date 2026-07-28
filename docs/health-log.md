@@ -2,6 +2,77 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (62nd run) — Clean window, all cron healthy, CI green; closed the campaign's next read-path instance — `auto-trade`'s own `kalshiFetch()` wrapper had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was left on a stray branch from
+the 61st run (`fix/list-ai-models-timeout-guard-61st-run`, already merged as PR #114) with a
+clean working tree — no WIP lost. Reset to `origin/dev` (`935ef34`) and started this run's branch
+fresh from there, per the pinned-worktree config from the 32nd run.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 61st run's
+~21:07 UTC cutoff through this run's ~22:07 UTC invocation — zero rows across 1,013 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 61st
+run's own push (run `30399622316`, 9m42s) and no pushes since.
+
+**New instance of the recurring class:** surveyed every edge function for `fetch()` calls without
+an `AbortController`/`fetchWithTimeout`/`Promise.race` guard nearby (the same audit question asked
+of `list-ai-models` last run and `trading-agent` the run before). `auto-trade/index.ts`'s own
+`kalshiFetch()` — the shared wrapper the file's comment describes as providing "single retry +
+circuit breaker" protection, with its sole call site fetching bracket markets for every alert
+`auto-trade-cron` processes every 5 minutes — called `fetch(url, options)` with a bare `await`, no
+bound at all. A stalled Kalshi response here doesn't just fail one position check: it hangs the
+entire cron invocation (every alert in that tick, not just the current one) until the platform's
+own execution timeout kills it, and the circuit breaker's failure counter — which exists
+specifically to detect and react to exactly this kind of degradation — never even increments,
+because a hang never resolves to a caught error for it to count. Confirmed via read-through that
+this is the same failure shape as every credential-fetch and LLM-call fix in this campaign, one
+level closer to the actual trading-decision loop than any prior fix. A second, smaller instance
+(a plain `fetch()` at line ~1855, the S-005 profit-lock position-price check) exists in the same
+file — left untouched this run, one-narrow-fix-per-run discipline, same as every prior entry in
+this campaign.
+
+**Scope check — real-money path confirmed out of scope:** `kalshiFetch()`'s only call site
+(`markets?event_ticker=...&status=open`) is a public, read-only market-data GET used to decide
+*whether* to open a position; the actual order placement/cancellation happens through a separate
+call to the `execute-trade` function (`executeUrl`), which remains untouched — the same
+off-limits real-money boundary maintained since the 48th run for `execute-trade`'s live-mode
+fetch and `trading-agent`'s `cancel_order`.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`KALSHI_FETCH_TIMEOUT_MS = 8_000` (matching the `CREDENTIAL_FETCH_TIMEOUT_MS`/`MODEL_LIST_TIMEOUT_MS`
+convention already used across this campaign for simple metadata/market-data GETs) and wrapped
+`kalshiFetch`'s `attempt()` closure in an `AbortController`. On abort, converts the generic
+`AbortError` into a clear `Kalshi request timed out after 8000ms: <url>` message and rethrows —
+this flows straight into the existing outer `catch` block at the call site, which already
+increments `kalshiCircuit.failures` and trips the circuit breaker after 5 consecutive failures, so
+a stall is now finally visible to the exact failure-detection mechanism the file already built for
+this purpose, with zero new plumbing. The existing single-retry-on-429/500 behavior is unchanged;
+a timeout on the first attempt fails immediately rather than retrying, keeping worst-case overhead
+bounded rather than doubling an already-slow call.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` — 17 pre-existing errors
+confirmed identical on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic
+Supabase-client type mismatches, same class flagged in prior entries) — no new type errors.
+`deno lint` — 87 pre-existing problems on unmodified `dev`; an initial `catch (err: any)` briefly
+introduced a new `no-explicit-any` (88 total), corrected to the `catch (err) { if (err instanceof
+Error && ...) }` pattern already used at `trading-agent/index.ts:513-514` and
+`list-ai-models/index.ts:25` — back to 87, matching baseline exactly. Deployed via `supabase
+functions deploy auto-trade`. **Exercised end-to-end against the real Kalshi API and real
+strategy state**, not a mock: invoked the deployed function directly via `net.http_post` matching
+`auto-trade-cron`'s own `cron.job.command` exactly (25s `timeout_milliseconds`) — response
+`HTTP 200`, `timed_out: false`, `{"success":true,...,"summary":{"ran":2,"traded":0,"errors":0,
+"halted":0}}`. The run found live S-001 alerts and processed them through the modified
+`kalshiFetch` code path (bracket-market fetch → fee-hurdle/qualify checks → a live-mode
+`execute-trade` attempt that failed only on real order-book liquidity, unrelated to this change).
+Confirmed via `compliance_log` that the invocation produced zero new `error`/`critical` rows — 27
+new `info`/`warning` rows, all expected trading-decision telemetry. The timeout branch itself
+(an actual Kalshi stall) is unexercised — same unexercised-timeout-branch caveat as every prior
+run in this series.
+
+**Reversibility:** trivial — single-file, single-function-body revert, no schema or order-path
+change.
+
 ## 2026-07-28 (61st run) — Clean window, all cron healthy, CI green; found and fixed the same unguarded-fetch class in `list-ai-models`'s three model-provider list calls
 
 **Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, already

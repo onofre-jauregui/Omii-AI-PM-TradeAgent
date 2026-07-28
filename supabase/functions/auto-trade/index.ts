@@ -42,6 +42,7 @@ import {
 const LOCK_STALE_MS = 5 * 60 * 1000; // 5 min — auto-release stuck locks (longest strategy loop is ~90s)
 const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
 const KALSHI_RETRY_DELAY_MS = 500; // single retry delay for Kalshi API calls
+const KALSHI_FETCH_TIMEOUT_MS = 8_000; // matches CREDENTIAL_FETCH_TIMEOUT_MS convention — public market-data GET, not an LLM call
 const CIRCUIT_TRIP_THRESHOLD = 5; // consecutive post-retry Kalshi failures before circuit opens
 const CIRCUIT_WINDOW_MS = 10 * 60 * 1000; // 10 min — circuit auto-resets after this window
 const MIN_KALSHI_REQUEST_SPACING_MS = 100; // 10 req/sec max — stay well under Kalshi rate limits
@@ -302,7 +303,20 @@ async function kalshiFetch(
   }
   lastKalshiRequestMs = Date.now();
 
-  const attempt = () => fetch(url, options);
+  const attempt = async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), KALSHI_FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new Error(`Kalshi request timed out after ${KALSHI_FETCH_TIMEOUT_MS}ms: ${url}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
   const res = await attempt();
   if (res.status === 429 || res.status >= 500) {
     const retryAfterMs = parseInt(res.headers.get("Retry-After") ?? "0", 10) * 1000;

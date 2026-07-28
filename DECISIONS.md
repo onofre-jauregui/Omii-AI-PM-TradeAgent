@@ -4,6 +4,28 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded auto-trade's own `kalshiFetch()` wrapper with a fetch timeout (62nd health-check run)
+
+**Decision:** Wrapped the `fetch(url, options)` call inside `kalshiFetch()`'s `attempt()` closure
+(`auto-trade/index.ts`) in an `AbortController` bound to a new `KALSHI_FETCH_TIMEOUT_MS = 8_000`
+constant. On abort, throws a clear "Kalshi request timed out after 8000ms" error instead of a bare
+`AbortError`.
+**Options:** A) Leave unguarded — rejected, this is the shared wrapper gating whether
+`auto-trade-cron`'s every-5-minute loop can even evaluate an event's bracket markets; a stall here
+hangs the whole cron tick and the circuit breaker's failure counter never increments because a
+hang never resolves to a caught error. B) Guard only the shared `getKalshiCredentials()` lookup
+pattern from the 51st-59th runs — rejected, that campaign only ever covered the Supabase
+credential lookup, not this file's own downstream Kalshi API call. C) Guard `kalshiFetch` +
+convert AbortError to a clear message so it flows into the existing `kalshiCircuit.failures`
+counter — chosen, zero new plumbing needed.
+**Why:** Same failure shape as the 7 credential-fetch fixes and the 60th/61st runs' LLM/model-list
+fixes, one level closer to the live trading-decision loop; `kalshiFetch`'s only call site is a
+public read (bracket-market list), not the real-money order path — those stay off-limits per the
+48th run's caution.
+**Reversibility:** Trivial — single-file, single-function-body revert, no schema or order-path
+change.
+**Trace:** `docs/health-log.md` 62nd-run entry.
+
 ## 2026-07-28 — Guarded trading-agent's own Anthropic LLM call with a fetch timeout (60th health-check run)
 
 **Decision:** Wrapped the `fetch("https://api.anthropic.com/v1/messages")` call inside
