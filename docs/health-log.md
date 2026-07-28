@@ -2,6 +2,44 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (52nd run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next instance of the unguarded-credential-fetch class — reconcile-orders' per-user loop, explicitly left untouched by the 51st run
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 51st run's
+~11:07 UTC cutoff through this run's ~12:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 51st run's own push (PR #104, 3m58s) and
+no pushes since.
+
+**Fix (LOW risk, monitoring/reconciliation path only, no trading logic touched):** with zero live
+errors, picked up the 51st run's own noted backlog: `settle-signals`, `reconcile-orders`, and 4
+other `getKalshiCredentials()` call sites left unguarded after the health-check fix. Fixed
+`reconcile-orders/index.ts` — its credential fetch sits inside a `for (const [userId, userOrders]
+of byUser)` loop (multi-tenant reconciliation of resting live orders), wrapped only in the outer
+handler's `try/catch`, which a hang doesn't trip since a stalled query never throws. Unlike the
+single-tenant fetches already fixed in `market-data-fetcher`/`health-check`, this one runs once per
+user with resting orders — a hang on one user's fetch would silently stall every remaining user's
+reconciliation for the rest of that invocation, not just skip one check. Applied the identical
+`Promise.race(..., 8s)` guard, same `8_000`ms constant and per-user error path (logs
+`reconcile_order_check_failed` to `compliance_log` with the affected `order_ids`, same as the
+existing no-key branch, rather than the whole invocation failing silently).
+
+**Scope check:** left `settle-signals` and the other 4 call sites (`futures-signal`, `kalshi-ping`,
+`kalshi-proxy` ×2, `trading-agent` ×2) untouched this run — same one-narrow-fix-per-run discipline
+as the 51st run, and `execute-trade`'s real-money path stays off-limits per the 48th run's original
+caution.
+
+**Verified:** `deno check supabase/functions/reconcile-orders/index.ts` — same 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, no new
+errors from this change. Deployed via `supabase functions deploy reconcile-orders`. Verified live
+against the real Supabase project and real Kalshi API: triggered the function via `net.http_post`
+matching `reconcile-orders-cron`'s own `cron.job.command` exactly, with a 25s
+`timeout_milliseconds` — response: `{"ok":true,"checked":5,"filled":0,"partial":0,"cancelled":0,
+"unchanged":5,"errors":0}`, HTTP 200, `timed_out: false`. Ran to completion cleanly against 5 real
+resting live orders with the new guard in place.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (51st run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a real (if unproven) gap — health-check's own live-balance credential fetch had no timeout, unlike the identical call already fixed in market-data-fetcher
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 50th run's
