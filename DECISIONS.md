@@ -4,6 +4,35 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Closed both remaining `react-hooks/exhaustive-deps` warnings; one via latest-ref (not naive dep addition, would have caused refetch storms)
+
+**Decision:** (1) `MarketsPanel.tsx`'s "open market from agent chat" effect called
+`onMarketOpened?.()` without listing it as a dependency. Added a `onMarketOpenedRef` latest-ref
+updated in its own effect, and read `onMarketOpenedRef.current` in the ticker-open effect instead
+of the prop directly — the effect's dependency array (`[openMarketTicker]`) is now honest without
+changing when it fires. (2) `PortfolioChart.tsx`'s real-time-subscription effect referenced `mode`
+and `strategyFilter` directly (in the Supabase channel name) without listing them, even though its
+`[loadChartData]` dependency already re-runs the effect on any `mode`/`strategyFilter` change
+(`loadChartData` is a `useCallback` keyed on both). Added both to the deps array explicitly.
+**Options (MarketsPanel):** A) Add `onMarketOpened` to the deps array as-is — rejected: traced its
+caller, `Index.tsx:316`, which passes `onMarketOpened={() => setMarketToOpen(null)}` — a new
+function reference on every `Index.tsx` render (and that page re-renders on tab switches, mode
+toggles, and other sibling state changes unrelated to markets). Naively satisfying the linter here
+would have made the effect re-fire `fetchKalshiMarket(openMarketTicker)` on every one of those
+unrelated re-renders, not just when a market is actually opened — the RiskControlsPanel fix
+(49th run) wasn't a valid template here because that case was a *static* value; this one is a
+non-memoized callback prop. B) Latest-ref pattern — chosen: keeps the effect's fire condition tied
+only to `openMarketTicker`, calls the current callback without lying about the dependency.
+**Options (PortfolioChart):** listing `mode`/`strategyFilter` explicitly introduces no new re-run
+case (they already gate `loadChartData`'s identity) — added directly, no ref needed.
+**Why:** Same "zero live errors, sweep the lint backlog" pattern as the 48th/49th runs. This one
+required reading the caller before touching the dependency array — the naive fix would have
+silenced the linter while introducing a real refetch-storm bug on a page with several frequently-
+changing sibling state values.
+**Reversibility:** Trivial — two-file, two-component revert. No schema, no edge function, no
+trading-path code touched; both are read-side UI components (market lookup + portfolio chart).
+**Trace:** PR (this run, 50th health-check), `docs/health-log.md` 50th-run entry.
+
 ## 2026-07-28 — Confirmed the canary-gate `jq` fix on its first real run; hoisted a static object out of `RiskControlsPanel` to close a stale lint warning
 
 **Decision:** (1) Verified — not re-decided — that the 2026-07-25 canary-gate `jq` parsing fix

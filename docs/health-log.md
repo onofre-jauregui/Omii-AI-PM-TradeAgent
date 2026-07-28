@@ -2,6 +2,43 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (50th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed both remaining exhaustive-deps lint warnings (11 → 9), one via a latest-ref fix after tracing the caller showed the naive fix would cause a refetch storm
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 49th run's
+~09:07 UTC cutoff through this run's ~10:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 49th run's own push (PR #102) and every
+push since.
+
+**Minor fix (LOW, zero deploy risk, UI-only):** with zero live errors and the two real backlog
+items (migration-backlog replay, HITL gate build) still explicitly Onofre's call per their
+`DECISIONS.md` entries, continued the lint sweep the 49th run started. Two
+`react-hooks/exhaustive-deps` warnings remained:
+
+- `MarketsPanel.tsx`'s ticker-open effect called `onMarketOpened?.()` without depending on it.
+  Traced the prop to its caller, `Index.tsx:316` — `onMarketOpened={() => setMarketToOpen(null)}`,
+  a new function reference on every `Index.tsx` render, and that page re-renders on tab switches,
+  mode toggles, and other state changes unrelated to markets. Adding it to the deps array as the
+  linter suggests would have re-fired `fetchKalshiMarket(openMarketTicker)` — a real network call —
+  on every one of those unrelated re-renders. Fixed with a latest-ref (`onMarketOpenedRef`, kept
+  current via its own effect keyed on `onMarketOpened`), so the ticker-open effect still fires only
+  on `openMarketTicker` changes but no longer lies about its dependency.
+- `PortfolioChart.tsx`'s real-time-subscription effect referenced `mode`/`strategyFilter` directly
+  (in the Supabase channel name) but only listed `loadChartData` in its deps. Since `loadChartData`
+  is itself a `useCallback` keyed on `[mode, strategyFilter]`, the effect already re-runs on any
+  change to either — adding them explicitly introduces no new re-run case, just makes the
+  dependency array honest. Added directly, no ref needed.
+
+**Verified:** `npm run lint` — 11 problems → 9 (both `exhaustive-deps` warnings gone, no new
+warnings; remaining 9 are all `react-refresh/only-export-components`, a pre-existing and unrelated
+class). `npx tsc --noEmit` — clean, exit 0. `npm run build` — succeeds, same bundle shape (single
+JS/CSS chunk, no size regression). No test files exist for either component. No edge function
+touched, no deploy, no trading-path code changed — both are read-side UI: a market-lookup panel and
+a portfolio chart.
+
+**Reversibility:** trivial — two-file, two-component revert.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (49th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; confirmed the 2026-07-25 canary-gate jq fix held on its first real run; closed a stale exhaustive-deps lint warning in `RiskControlsPanel`
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 48th run's

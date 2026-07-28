@@ -110,7 +110,10 @@ export function PortfolioChart({
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [loadChartData]);
+  // mode/strategyFilter are already implied by loadChartData's own deps (it's rebuilt
+  // whenever either changes), listed explicitly here only to satisfy exhaustive-deps —
+  // no new re-run case is introduced.
+  }, [loadChartData, mode, strategyFilter]);
 
   if (loading) {
     return (
