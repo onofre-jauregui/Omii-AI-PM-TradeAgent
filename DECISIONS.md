@@ -4,6 +4,29 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded health-check's live-balance credential fetch with the same 8s timeout used in market-data-fetcher
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, user_id)` in `health-check/index.ts`'s
+live-balance loop (§10) in a `Promise.race` against an 8s timeout, identical to the pattern the
+48th run applied to `market-data-fetcher`.
+**Options:** A) Leave it — rejected: it's the same unguarded-call shape already diagnosed as a
+real stall cause elsewhere in this codebase, and a hang here is structurally worse since
+`health-check` is the alerting path — a stall would silently kill the whole hourly sweep, not
+just skip part of one check. B) Fix the shared `getKalshiCredentials()` helper so every caller
+gets the guard — rejected, same reasoning the 48th run gave: broader blast radius, and this run
+should not expand into the trading-path call sites (`execute-trade`, `trading-agent`) without
+that being a deliberate, reviewed decision. C) Scope the fix to `health-check`'s call site only —
+chosen, mirrors the existing precedent exactly and stays inside the monitoring path.
+**Why:** No live incident forced this (zero new `compliance_log` errors this run) — this is a
+preventive fix grounded in a proven failure mode already fixed once in this codebase, applied to
+the one other call site where a hang has the highest blast radius (the monitor itself going
+dark). `settle-signals`, `reconcile-orders`, and three other call sites remain unguarded — noted,
+not fixed this run; one narrow fix per run, not a sweep.
+**Reversibility:** Trivial — single-file, single-block revert, no schema or trading-path change.
+**Trace:** PR (this run, 51st health-check), `docs/health-log.md` 51st-run entry. Original
+pattern: `docs/health-log.md` 48th-run entry, this file's 2026-07-28 market-data-fetcher entry
+below.
+
 ## 2026-07-28 — Closed both remaining `react-hooks/exhaustive-deps` warnings; one via latest-ref (not naive dep addition, would have caused refetch storms)
 
 **Decision:** (1) `MarketsPanel.tsx`'s "open market from agent chat" effect called

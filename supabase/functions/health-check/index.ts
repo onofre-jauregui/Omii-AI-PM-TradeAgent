@@ -28,6 +28,7 @@ const WIN_RATE_SAMPLE = 20;
 const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not manual burst sessions
 const BLOCKED_SERIES = ["KXETH"];
 const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -472,7 +473,27 @@ serve(async (req) => {
 
     for (const { user_id } of liveKeys ?? []) {
       try {
-        const { keyId, privateKey } = await getKalshiCredentials(supabase, user_id);
+        // Bare `await` here would hang forever on a stalled query — the exact
+        // failure mode diagnosed in market-data-fetcher (2026-07-13/16: 130.6s/61.4s
+        // stalls), which a `try/catch` alone doesn't guard against since a hang never
+        // throws. health-check is the alerting path itself, so a hang here means the
+        // whole hourly sweep — not just this balance check — silently stops paging.
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        let keyId: string | null, privateKey: string | null;
+        try {
+          ({ keyId, privateKey } = await Promise.race([
+            getKalshiCredentials(supabase, user_id),
+            timeout,
+          ]));
+        } finally {
+          clearTimeout(timeoutId);
+        }
         if (!keyId || !privateKey) continue;
         // Sign against the full path (Kalshi's HMAC scheme includes it), but fetch
         // against KALSHI_BASE_URL alone — it already ends in /trade-api/v2, so
