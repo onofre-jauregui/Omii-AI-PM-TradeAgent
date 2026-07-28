@@ -4,6 +4,32 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded kalshi-ping's credential fetch with the same 8s timeout pattern
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, user.id)` in `kalshi-ping/index.ts` in a
+`Promise.race` against an 8s timeout, identical to the pattern applied to `market-data-fetcher`
+(48th run), `health-check` (51st run), `reconcile-orders` (52nd run), and `settle-signals` (54th
+run).
+**Options:** A) Leave it — rejected: same unguarded shape, and this call site is the only one of
+the backlog that's synchronous and user-facing rather than cron-driven — a stalled query here
+hangs the onboarding wizard's "verify Kalshi key" step indefinitely with no error surfaced,
+directly blocking a new user's first-run activation rather than silently degrading a background
+job. B) Fix the shared `getKalshiCredentials()` helper globally — rejected, same reasoning as
+every prior run: broader blast radius, and the remaining trading-path call sites (`execute-trade`,
+`trading-agent`, `futures-signal`, `kalshi-proxy` ×2) stay a deliberate, reviewed decision, not a
+side effect of a health-check sweep. C) Scope the fix to `kalshi-ping`'s single call site —
+chosen, mirrors existing precedent, read-only balance check, no order placement, and picked over
+the remaining backlog because a user-facing onboarding hang has direct MRR impact (activation
+friction) versus the others' background-job blast radius.
+**Why:** No live incident forced this (zero new `compliance_log` errors this run, all 14 cron jobs
+healthy) — preventive fix grounded in a proven failure mode, closing the next-highest-value
+instance from the backlog the 54th run explicitly left noted-but-unfixed. `futures-signal`,
+`kalshi-proxy` ×2, and `trading-agent` ×2 remain unguarded — one narrow fix per run, not a sweep.
+**Reversibility:** Trivial — single-file, single-block revert, no schema or trading-path change.
+**Trace:** PR (this run, 55th health-check), `docs/health-log.md` 55th-run entry. Original pattern:
+`docs/health-log.md` 48th/51st/52nd/54th-run entries, this file's market-data-fetcher/health-check/
+reconcile-orders/settle-signals entries below.
+
 ## 2026-07-28 — Guarded settle-signals' credential fetch with the same 8s timeout pattern
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `settle-signals/index.ts` in a

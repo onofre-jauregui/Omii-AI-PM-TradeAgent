@@ -3,6 +3,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+
 /**
  * kalshi-ping: Validates a user's Kalshi API key by hitting GET /portfolio/balance.
  * Used in the onboarding flow to confirm credentials work before the agent starts.
@@ -27,7 +29,31 @@ serve(async (req) => {
   if (authErr || !user) return json({ ok: false, error: "Unauthorized" }, 401);
 
   const supabase = createClient(supabaseUrl, supabaseKey);
-  const { keyId, privateKey } = await getKalshiCredentials(supabase, user.id);
+
+  // Bare `await` here would hang the whole request forever on a stalled query —
+  // same class of unguarded-credential-fetch bug fixed in market-data-fetcher,
+  // health-check, reconcile-orders, and settle-signals. This endpoint is called
+  // synchronously from the onboarding wizard, so a hang here leaves the user's
+  // "verify Kalshi key" step spinning indefinitely with no error surfaced.
+  let keyId: string | null, privateKey: string | null;
+  try {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+        CREDENTIAL_FETCH_TIMEOUT_MS
+      );
+    });
+    try {
+      ({ keyId, privateKey } = await Promise.race([getKalshiCredentials(supabase, user.id), timeout]));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("kalshi-ping: credential fetch failed or timed out:", msg);
+    return json({ ok: false, error: "Could not verify credentials right now — please try again." });
+  }
 
   if (!keyId || !privateKey) {
     return json({ ok: false, error: "No Kalshi API key found. Save your credentials in Settings first." });

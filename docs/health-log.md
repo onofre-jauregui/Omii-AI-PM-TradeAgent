@@ -2,6 +2,46 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (55th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-ping's onboarding credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 54th run's
+~14:07 UTC cutoff through this run's ~15:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 54th run's own push (run `30367218190`,
+4m31s) and no pushes since.
+
+**Fix (LOW risk, monitoring/attribution path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 54th run's log explicitly left open: `futures-signal`,
+`kalshi-ping`, `kalshi-proxy` (×2), and `trading-agent` (×2) all call `getKalshiCredentials()`
+unguarded. Fixed `kalshi-ping/index.ts:30` — the only call site in the remaining backlog that's
+synchronous and user-facing rather than cron-driven. `kalshi-ping` runs inline in the onboarding
+wizard to verify a user's Kalshi key before the agent starts; a stalled query in the bare `await`
+doesn't throw, so it would hang the whole HTTP request indefinitely — the onboarding UI's
+"verify Kalshi key" step spins with no error surfaced until the platform's own execution timeout
+eventually kills the invocation, directly blocking a new user's first-run activation rather than
+silently degrading a background job. Applied the identical `Promise.race(..., 8s)` guard used in
+`market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`, same `8_000`ms constant
+(`CREDENTIAL_FETCH_TIMEOUT_MS`), and return the existing `{ok:false, error}` JSON shape this
+endpoint already uses for every other failure path rather than throwing.
+
+**Scope check:** left `futures-signal`, `kalshi-proxy` ×2, and `trading-agent` ×2 untouched this
+run — same one-narrow-fix-per-run discipline as the 51st/52nd/54th runs, and `execute-trade`'s
+real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/kalshi-ping/index.ts` — 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(10) after this change — no new errors introduced. Deployed via `supabase functions deploy
+kalshi-ping`. Verified live against the real deployed Supabase project: `OPTIONS` preflight returns
+HTTP 200, and a no-auth `POST` returns HTTP 401 with `UNAUTHORIZED_NO_AUTH_HEADER` — confirms the
+function is live and its pre-credential-fetch auth guard still behaves correctly post-deploy. The
+credential-fetch guard's timeout branch itself is unexercised (would need a live user JWT plus
+saved Kalshi keys to reach that code path, and no test user with real Kalshi credentials was
+available this run) — flagged here rather than claimed proven, same caveat pattern as the
+53rd/54th runs' unexercised-timeout-branch notes.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (54th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — settle-signals' shadow-PnL credential fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 53rd run's
