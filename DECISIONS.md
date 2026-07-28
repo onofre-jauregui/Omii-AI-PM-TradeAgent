@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Closed the migration-runner root cause from the 2026-07-27 "staging DB unmigrated" finding (partial — backlog repair still open)
+
+**Decision:** Fixed `migrate-staging`/`migrate-production` in `.github/workflows/ci.yml` to hard-fail
+on a bad migration (removed the `|| echo WARN` swallow around `curl -sf`) and to only record a
+`schema_migrations` history row on confirmed success, plus re-keyed new inserts off the full
+filename stem to stop same-day files colliding on a date-only version.
+**Options:** A) Fix items 1–3 from the 2026-07-27 finding's proposed fix (runner correctness) without
+touching item 4 (reset staging + replay the full migration backlog) — chosen. B) Do the full repair
+in one shot — rejected: resetting/replaying ~40 migrations against shared staging infra is a bigger,
+riskier action than a single automated health-check run should take unprompted.
+**Why:** The runner bug is a closed, low-risk, root-cause fix (CI-yaml only, no data touched) that
+stops the problem from getting worse. The historical backlog (staging DB missing most tables despite
+`schema_migrations` claiming otherwise) is a separate, larger call — it needs a decision on whether to
+reset staging, and that's Onofre's to make, not something to auto-execute.
+**Reversibility:** easy — `git revert` on the CI-yaml change restores prior (silently-swallowing)
+behavior; no schema or data touched.
+**Trace:** PR #97 → `dev` (fix), `docs/health-log.md` 45th-run entry. The 2026-07-27 finding entry
+below stays open for the backlog-repair decision (its proposed-fix step 4).
+
+---
+
 ## 2026-07-28 — Removed the permanently-failing "HITL approvals component" E2E assertion; flagged (not built) the missing HITL gate on live trades
 
 **Decision:** Deleted the `"HITL approvals component is in the JS bundle"` test from

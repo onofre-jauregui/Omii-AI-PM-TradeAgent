@@ -2,6 +2,49 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (45th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; fixed the flagged 2026-07-27 migration-runner bug: `curl -sf` failures were caught and swallowed instead of failing the job
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 44th run's
+~04:07 UTC cutoff through this run's ~05:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 13 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms the 44th run's E2E fix is holding — CI stayed green through
+this run's own push.
+
+**Root cause found and fixed (MED — CI silently recording failed migrations as applied, closing
+the finding flagged-not-auto-fixed on 2026-07-27, `DECISIONS.md`):** with zero live errors and CI
+green, swept open `DECISIONS.md` findings for anything still unresolved. The 2026-07-27 entry
+("staging Supabase DB is largely unmigrated despite CI claiming success") was live: `.github/
+workflows/ci.yml`'s `migrate-staging`/`migrate-production` jobs ran each migration via `curl -sf
+... 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"`, then unconditionally
+inserted a `schema_migrations` row after, regardless of which branch fired. Verified directly
+against the Management API that a bad migration returns HTTP 400 (`curl -sf` already detects this
+correctly) — the bug was purely the shell catching that failure with `||` and continuing instead
+of propagating it. Also found the same-day filename collision the decision entry called out:
+`VERSION` was derived via `cut -d_ -f1` (date prefix only), so PR #81's two `20260727_*.sql` files
+both recorded under `version='20260727'` — the second file's actual apply was untracked.
+
+**Fix (deployed):** removed the `|| echo WARN` swallow in both `migrate-staging` and
+`migrate-production` — `bash -e` now propagates a `curl -sf` failure and hard-fails the job instead
+of silently marking a failed migration as applied. The history-row `INSERT` only runs if the apply
+`curl` succeeded (unreachable otherwise, since the step aborts first). Re-keyed new inserts off the
+full filename stem instead of the date prefix, fixing the same-day collision — while still checking
+the legacy date-only key against already-recorded rows, so this does **not** force a re-run of the
+~40-entry historical backlog described in the 2026-07-27 finding. That backlog repair (`DECISIONS.md`
+proposed step 4 — reset staging and replay from a clean slate) remains a separate, larger decision
+for Onofre; this run closes the root-cause bug class only, matching the same "flag the big one,
+fix what's safely scoped" pattern as the 2026-07-27 entry itself.
+
+**Verified against real data, not statically:** confirmed via the 44th run's live CI log
+(`gh run view --log`) that every migration file currently in the repo already has a legacy
+date-prefix row in `schema_migrations` on staging — so this fix's own `dev` push would exercise
+zero new code path (all skip as "Already applied"), not a blind push into unknown failure risk.
+PR #97 → `dev` (merged, CI green on the PR itself since migration jobs correctly `skip` on
+`pull_request` events). Then watched the resulting **push-triggered** run end-to-end
+(`30331080893`): `Apply migrations → staging DB` — all 61 lines `Already applied`, zero
+`Applying:`/new attempts — `Deploy edge functions → staging Supabase` and `E2E smoke tests →
+kalshitradeagent.live` both `success`. Full pipeline: `success`. **Reversibility:** easy — CI-yaml
+only, no schema/data touched; `git revert` restores the old (silently-swallowing) behavior.
+
 ## 2026-07-28 (44th run) — Zero new compliance errors, all 13 cron jobs healthy; found and fixed CI's E2E smoke job red on every `dev` push since the 36th run — a test asserting a `HITLApprovalsCard` component that was never built
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 43rd run's
