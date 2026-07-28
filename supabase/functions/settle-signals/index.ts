@@ -38,12 +38,16 @@ serve(async (req) => {
     // ── 1. Find unsettled signals whose markets have likely resolved ─────────
     // Use expires_at as a filter: only check signals past their expiration.
     // This avoids unnecessary Kalshi API calls for active markets.
-    const { data: unsettledSignals } = await supabase
+    const { data: unsettledSignals, error: unsettledError } = await supabase
       .from("signals")
       .select("id, ticker, direction, mid_price, expires_at, system_version")
       .is("settlement_price", null)
       .lt("expires_at", new Date().toISOString())
       .limit(200); // batch size — next run catches the rest
+
+    if (unsettledError) {
+      throw new Error(`Failed to query unsettled signals: ${unsettledError.message}`);
+    }
 
     if (!unsettledSignals || unsettledSignals.length === 0) {
       return new Response(JSON.stringify({ settled: 0, reason: "No unsettled signals past expiration" }), {

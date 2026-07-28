@@ -2,6 +2,70 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (46th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; found and fixed `settle-signals-cron` — never registered since inception, so shadow-PnL/qualifier-ROI measurement has run zero times in 2.5 months
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 45th run's
+~05:07 UTC cutoff through this run's ~06:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 13 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 45th run's own push and this run's.
+
+**Root cause found and fixed (MED — a whole feature has been silently dead since 2026-05-12,
+invisible to every prior health-check run because it was never in `cron.job` or
+`expected_cron_jobs`):** with zero live errors and CI green, swept `cron.job` against every
+function's own docstring for scheduling claims not already covered by `expected_cron_jobs`
+(the same manifest gap class the 41st/42nd runs closed for `reconcile-orders`/`paper-reconcile`).
+`settle-signals/index.ts`'s docstring says "Scheduled: every 15 minutes via pg_cron" and computes
+shadow PnL for every signal the qualifier skipped — its own comment calls this "the biggest data
+unlock in v2" for measuring qualifier ROI (`qualifier_roi_v2` view,
+`20260504_v2_validation_queries.sql`). `cron.job` had zero rows for `settle-signals-cron`, and
+`information_schema.columns` showed `signals.settlement_price` / `shadow_pnl` / `settled_at` /
+`system_version` don't exist — despite `20260504120000_v2_instrumentation_and_lock.sql` recording
+itself as **applied** in `schema_migrations` since 2026-05-04 and containing exactly those `ALTER
+TABLE` and `SELECT cron.schedule(...)` statements. This is the same swallowed-migration-failure
+bug the 45th run closed for the CI runner (`|| echo WARN` around `curl -sf`) — this migration
+predates that fix by nearly three months and was itself a casualty of it: whichever statement
+failed first, everything after it silently never applied while the runner recorded success anyway.
+Impact: `compliance_log` has zero `settle_signals_run`/`settle_signals_error` rows in its entire
+history — the function has never once executed, automatically or otherwise — and 20,936 of 21,782
+signals sit past `expires_at`, unsettled. **Compounding bug found in the function itself:**
+`settle-signals/index.ts`'s query destructured only `data` from the Postgrest response, never
+checking `error` — so once the missing `system_version` column made the query fail, the function
+silently fell into its "no unsettled signals" success branch and returned a clean `200` instead of
+surfacing the failure. Manually invoking the function pre-fix reproduced exactly this: `{"settled":
+0, "reason": "No unsettled signals past expiration"}` despite the real backlog being 20,936 rows.
+
+**Fix (deployed):** new migration (`20260728_register_settle_signals_cron.sql`) adds the five
+missing `signals` columns (`shadow_pnl`, `settlement_price`, `settled_at`, `direction_correct`,
+`profitable`, `system_version` — all additive/nullable, no data migration needed), re-registers
+`settle-signals-cron` (`*/15 * * * *`) exactly as the original migration intended, and adds it to
+`expected_cron_jobs` so a future silent drop is caught by `cron_health()` instead of requiring a
+manual audit (same closing move as `20260728_register_paper_reconcile_cron.sql`). Also fixed
+`settle-signals/index.ts` to check the Postgrest `error` and throw instead of silently treating a
+failed query as "nothing to settle." Read-only against Kalshi (`GET` market data only, uses the
+system service key) and writes only to `signals` — no trading/order-placement path touched.
+
+**Verified against real data, not statically:** applied the migration directly, confirmed all six
+columns exist and `settle-signals-cron` is live in `cron.job`. Deployed the fixed function and
+manually fired it via `net.http_post` (the same call the cron makes) — `compliance_log` now shows
+real `settle_signals_run` rows with per-ticker results, proving the query and error-handling work.
+The actual `06:15:00 UTC` pg_cron tick fired on schedule post-fix and completed normally (visible
+in `compliance_log`, not just my manual invocation) — the job is live end-to-end, not just
+registered. Confirmed directly against Kalshi's public API that **recent** markets still return
+full data (`200`, e.g. `KXHIGHAUS-26JUL27-T103` expiring today) — the fix is functionally correct
+for the live/near-term signal flow. The first processed batch (oldest-first, unordered query) hit
+100% `api_error` (`404`) on ~2.5-month-old May weather/crypto tickers — Kalshi's own archive
+retention has aged those out of the public markets endpoint, a data-availability limit outside this
+system's control, not a bug in the fix. That historical tail is now visibly logged as `api_error`
+per ticker instead of silently invisible, which is the actual goal of this fix — going forward,
+every signal settles within Kalshi's retention window since the cron runs every 15 minutes.
+**Watch item, not yet confirmed:** the settle query has no `ORDER BY`, so if Postgres returns the
+same oldest-first ~200 rows on every tick, the job could keep re-hitting the same unresolvable
+404 batch indefinitely instead of rotating toward the eligible backlog — worth confirming over the
+next few runs via `compliance_log`'s per-tick `results` breakdown rather than assuming either way.
+**Reversibility:** easy — new columns are additive/nullable, cron job can be unscheduled, function
+diff is a single `if (error) throw` addition; `git revert` restores prior (dead) state on all three.
+PR #99 → `dev` (merged, CI green), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (45th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; fixed the flagged 2026-07-27 migration-runner bug: `curl -sf` failures were caught and swallowed instead of failing the job
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 44th run's
