@@ -4,6 +4,29 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded reconcile-orders' per-user credential fetch with the same 8s timeout pattern
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, userId)` in `reconcile-orders/index.ts`'s
+per-user reconciliation loop in a `Promise.race` against an 8s timeout, identical to the pattern
+applied to `market-data-fetcher` (48th run) and `health-check` (51st run).
+**Options:** A) Leave it — rejected: same unguarded shape already diagnosed as a real stall cause
+twice in this codebase; here it's structurally worse than the single-tenant fetches already fixed,
+since a hang on one user's credential fetch would silently stall every other user's resting-order
+reconciliation for the rest of the invocation. B) Fix the shared `getKalshiCredentials()` helper
+globally — rejected, same reasoning as the 48th/51st runs: broader blast radius, and expanding into
+trading-path call sites (`execute-trade`, `trading-agent`) should be a deliberate, reviewed decision,
+not a side effect of a health-check sweep. C) Scope the fix to `reconcile-orders`' call site only —
+chosen, mirrors existing precedent, stays inside the monitoring/reconciliation path (read-only
+order-status checks, no order placement).
+**Why:** No live incident forced this (zero new `compliance_log` errors this run) — preventive fix
+grounded in a proven failure mode, applied to the next-highest-blast-radius instance the 51st run
+explicitly left noted-but-unfixed. `settle-signals` and 4 other call sites remain unguarded — one
+narrow fix per run, not a sweep.
+**Reversibility:** Trivial — single-file, single-block revert, no schema or trading-path change.
+**Trace:** PR (this run, 52nd health-check), `docs/health-log.md` 52nd-run entry. Original pattern:
+`docs/health-log.md` 48th/51st-run entries, this file's market-data-fetcher/health-check entries
+below.
+
 ## 2026-07-28 — Guarded health-check's live-balance credential fetch with the same 8s timeout used in market-data-fetcher
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, user_id)` in `health-check/index.ts`'s

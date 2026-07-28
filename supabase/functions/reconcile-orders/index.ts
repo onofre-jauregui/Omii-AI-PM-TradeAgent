@@ -41,6 +41,8 @@ interface TradeRow {
   status: string;
 }
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -83,7 +85,38 @@ serve(async (req) => {
     }
 
     for (const [userId, userOrders] of byUser) {
-      const { keyId, privateKey } = await getKalshiCredentials(supabase, userId);
+      // Bound the credential fetch: a stalled query here doesn't throw, so the
+      // outer try/catch (below) never fires — it would silently stall this
+      // entire multi-tenant loop (blocking every remaining user's reconcile,
+      // not just this one's) until the platform's own execution timeout kills
+      // the invocation. Same class of bug fixed in market-data-fetcher (48th
+      // run) and health-check (51st run); this is a resting-live-order path.
+      let keyId: string | null, privateKey: string | null;
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        try {
+          ({ keyId, privateKey } = await Promise.race([
+            getKalshiCredentials(supabase, userId),
+            timeout,
+          ]));
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`reconcile-orders: credential fetch failed or timed out for user ${userId}: ${msg}`);
+        await logCompliance(supabase, userId, null, "reconcile_order_check_failed",
+          `reconcile-orders: credential fetch failed or timed out — ${userOrders.length} resting order(s) not reconciled (${msg})`,
+          { order_ids: userOrders.map((o) => o.order_id) }, "error");
+        summary.errors += userOrders.length;
+        continue;
+      }
       if (!keyId || !privateKey) {
         console.warn(`reconcile-orders: no Kalshi key for user ${userId} — skipping ${userOrders.length} orders`);
         await logCompliance(supabase, userId, null, "reconcile_order_check_failed",
