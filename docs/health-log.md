@@ -2,6 +2,61 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (41st run) — Duplicate-positions alert traced to a 2-day-old stale-order settlement; found and fixed the real gap: `reconcile-orders` had no run-level compliance_log heartbeat, so a ~4min-late pass was invisible except by hand-reconstructing order timestamps
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 40th run's ~23:06 UTC
+cutoff through this run's ~01:10 UTC invocation (2026-07-28) — zero new rows.
+
+**Investigated (explained, no fix needed):** `health-check-hourly`'s 23:10:11 UTC pass fired a
+`duplicate_positions_detected` alert for `KXINX-26JUL27H1600-B7437` (>2 open filled rows for one
+user+ticker). Pulled every `trades` row for that ticker: 8 duplicate legs, all `strategy_id
+S-001-l-ea207ba1`, placed every 5 minutes from 2026-07-25 18:15–18:50 UTC — the exact
+"same-ticker re-stacking" failure mode the 7/26 S-001 dedup fix (see that date's entry below)
+closed by adding a cross-run `status IN (filled,open,partial)` check. These 8 legs predate that
+fix by a day, so they're historical debt, not a live recurrence. Confirmed no live bug: a query for
+any *current* (user, ticker) pair with >2 open filled rows returned zero. The alert only fired now
+because these legs were resting **live limit orders that hadn't filled on Kalshi for ~2 days**
+(status stuck `open`, invisible to the `duplicate_positions_detected` check which filters
+`status='filled'`) until `reconcile-orders-cron` finally saw them as `remaining_count=0` and
+flipped all 8 to `filled` in one pass at 23:09:50–51 UTC — which is what made them visible to both
+the duplicate-positions check (23:10:04) and `auto-settle` (which settled them at 23:10:15–16,
+right after) within the same ~30s window. Not a code bug: S-001 legs on hourly-bracket events can
+legitimately rest for the life of the event before filling or expiring.
+
+**Root cause found and fixed (LOW-MED — observability gap that turned a 10-minute root-cause into
+a much longer one): `reconcile-orders` was the one cron'd function in the system with zero
+run-level heartbeat in `compliance_log`.** Every other cron function (`auto-trade`, `auto-settle`,
+`market-data-fetcher`, `daily-digest` — the last one fixed for exactly this gap in an earlier run,
+see that entry's comment in `daily-digest/index.ts`) logs an `_run` summary row on every
+invocation. `reconcile-orders` only ever logged *per-order* rows (`order_filled`,
+`order_cancelled`, `reconcile_order_check_failed`) — there was no way to see, from `compliance_log`
+alone, that its 23:06:00 UTC scheduled dispatch didn't actually finish writing state until
+23:09:50 (a ~3m50s pass against a 5-minute cadence, close enough to risk overlapping the next
+cycle). Confirming this required cross-referencing `cron.job_run_details` dispatch times against
+scattered `order_filled` row timestamps by hand — exactly the kind of blind spot the `_run`-logging
+convention exists to prevent, and `reconcile-orders` was the one function that never got it.
+
+**Fix (deployed):** Added `startedAt`/elapsed-ms tracking and a `reconcile_orders_run`
+compliance_log summary row (`supabase/functions/reconcile-orders/index.ts`) on every code path —
+the no-op "no resting live orders" early return, the normal success path, and the existing fatal
+error path (which now also carries `elapsed_ms` in its metadata). Severity flips to `warning` if a
+pass exceeds 4 minutes, so a slow/lagging pass surfaces on its own instead of needing manual
+reconstruction. Also corrected a stale comment in the same file's header claiming auto-settle's
+pending view is "paper-only" — it covers `mode IN ('paper','live')` since the live-mode work
+landed; the wrong comment risked steering a future change toward building a redundant live-only
+settlement path.
+
+**Verified:** `deno check supabase/functions/reconcile-orders/index.ts` — 10 errors both before and
+after the change (`git stash` diff), confirming zero new type errors; the 10 are the same
+repo-wide pre-existing `SupabaseClient` generic-type / `getKalshiCredentials` `data: never`
+mismatches already documented in the 40th run's entry. Deployed via `supabase functions deploy
+reconcile-orders`. **Confirmed against real production data**, not just statically: the next
+scheduled `reconcile-orders-cron` tick (2026-07-28 01:36:04 UTC) wrote the new summary row —
+`"reconcile-orders: 2 checked, 0 filled, 0 partial, 0 cancelled, 0 errors (151ms)"` — proving the
+logging fires correctly on every path, including the common fast/nothing-to-do case. **Reversibility:**
+easy — single additive logging function plus one comment correction, no change to order-processing
+logic; git revert restores prior behavior exactly.
+
 ## 2026-07-27 (40th run) — One-off 404 traced and ruled harmless; found and fixed a real bug: `cancel_order` fired an unauthenticated, unchecked Kalshi DELETE and lied to the DB about cancellation
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 39th run's

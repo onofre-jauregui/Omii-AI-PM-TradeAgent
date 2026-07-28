@@ -14,10 +14,11 @@ import { decideReconcile, contractCount, pickAvgPrice } from "../_shared/reconci
  *
  * The order-placement path (execute-trade) only captures a fill if the order
  * fills *immediately* on POST. A live limit order that rests as `open`/`partial`
- * is otherwise never advanced to `filled`, is invisible to auto-settle (whose
- * view is paper-only), and would eventually be wrongly zeroed by the expiration
- * sweep. This cron closes that gap: for every resting live order it re-reads the
- * order from Kalshi and advances the local `trades` row.
+ * is otherwise never advanced to `filled`, so it's invisible to auto-settle
+ * (whose `agent_trades_pending_resolution` view only ever selects status=
+ * 'filled' rows, live included). This cron closes that gap: for every resting
+ * live order it re-reads the order from Kalshi and advances the local `trades`
+ * row.
  *
  * State transitions (forward-only, idempotent):
  *   Kalshi order canceled/expired        → trades.status = 'cancelled'
@@ -51,6 +52,7 @@ serve(async (req) => {
     });
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
+  const startedAt = Date.now();
 
   const summary = { checked: 0, filled: 0, partial: 0, cancelled: 0, unchanged: 0, errors: 0 };
 
@@ -67,6 +69,7 @@ serve(async (req) => {
     if (qErr) throw qErr;
     const orders = (openOrders ?? []) as TradeRow[];
     if (orders.length === 0) {
+      await logRunSummary(supabase, summary, Date.now() - startedAt);
       return json({ ok: true, ...summary, message: "no resting live orders" });
     }
 
@@ -154,6 +157,7 @@ serve(async (req) => {
       }
     }
 
+    await logRunSummary(supabase, summary, Date.now() - startedAt);
     return json({ ok: true, ...summary });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
@@ -162,11 +166,34 @@ serve(async (req) => {
       event_type: "reconcile_orders_fatal",
       severity: "error",
       message: `reconcile-orders: run aborted — ${errMsg}`,
-      metadata: summary,
+      metadata: { ...summary, elapsed_ms: Date.now() - startedAt },
     }).then(null, () => {});
     return json({ ok: false, error: errMsg, ...summary }, 500);
   }
 });
+
+// Run-level heartbeat so a slow or lagging pass is visible in compliance_log
+// instead of only reconstructable from scattered per-order rows. Every other
+// cron'd function (auto-trade, auto-settle, market-data-fetcher, daily-digest)
+// already logs a `_run` summary row on every execution — reconcile-orders was
+// the one left without it, which is why root-causing a ~4min-late pass (2026-
+// 07-27, see docs/health-log.md 41st run) required manually cross-referencing
+// order_filled timestamps against the cron schedule instead of reading one row.
+// Warns when a pass runs long enough to risk overlapping the next 5-min cycle.
+async function logRunSummary(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  summary: { checked: number; filled: number; partial: number; cancelled: number; unchanged: number; errors: number },
+  elapsedMs: number,
+) {
+  const severity = elapsedMs > 4 * 60 * 1000 ? "warning" : "info";
+  await supabase.from("compliance_log").insert({
+    event_type: "reconcile_orders_run",
+    severity,
+    message: `reconcile-orders: ${summary.checked} checked, ${summary.filled} filled, ${summary.partial} partial, ${summary.cancelled} cancelled, ${summary.errors} errors (${elapsedMs}ms)`,
+    metadata: { ...summary, elapsed_ms: elapsedMs },
+  }).then(null, () => {});
+}
 
 // ── Kalshi ────────────────────────────────────────────────────────────────
 
