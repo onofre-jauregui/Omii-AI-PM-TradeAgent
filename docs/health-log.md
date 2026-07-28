@@ -2,6 +2,56 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (42nd run) — Zero new compliance errors; found and fixed `paper-reconcile-cron` was never registered at all — same "migration syntax error silently no-ops" failure mode as the reconcile-orders 6-day gap, one day old
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 41st run's
+~01:10 UTC cutoff through this run's ~02:07 UTC invocation (2026-07-28) — zero new rows.
+
+**Root cause found and fixed (HIGH — a whole cron job silently never ran, not just a slow pass):**
+started from the same observability gap the 41st run closed for `reconcile-orders` (no run-level
+`compliance_log` heartbeat) and swept the rest of the cron'd edge functions for the same class of
+gap. `paper-reconcile` (added 2026-07-27, `supabase/functions/paper-reconcile/index.ts`, an
+explicit mirror of `reconcile-orders`) had per-item logging but no `_run` summary row on success —
+added one. While verifying the fix by watching for the next cron tick, the heartbeat never
+appeared. `cron_health()` returned zero rows for `paper-reconcile-cron` and a direct `SELECT
+jobname FROM cron.job` confirmed it: **the job was never registered.** Its migration,
+`20260727_paper_reconcile_cron.sql`, appended `) ON CONFLICT (jobname) DO UPDATE SET schedule =
+excluded.schedule;` to a bare `SELECT cron.schedule(...)` call — a SELECT has no ON CONFLICT
+semantics, so the statement threw a syntax error and the whole migration (including its own
+`expected_cron_jobs` INSERT) silently never applied. This is the *exact* bug described in
+`20260725_expected_cron_manifest.sql`'s motive comment for the original `reconcile-orders-cron`
+6-day gap — it was copy-pasted forward into the new migration along with the bug it was written to
+prevent, one day before this run. Because the manifest INSERT was inside the same failed
+transaction, `paper-reconcile-cron` was also invisible to the staleness watchdog: a job that never
+existed can't be flagged missing by a monitor that only iterates `FROM cron.job`. Confirmed real
+impact: `SELECT count(*) FROM trades WHERE mode='paper' AND status IN ('open','partial') AND
+settled_at IS NULL` → 3 rows, oldest from 2026-07-27 20:10 UTC — 6 hours stuck with no reconciliation
+path at all, growing every cycle.
+
+**Fix (deployed):** (1) Added `paper_reconcile_run` heartbeat logging to `paper-reconcile/index.ts`
+(`startedAt`/`elapsed_ms`, `warning` severity past 4 minutes, logged on the no-op early return, the
+normal success path, and the fatal-error path) — same pattern as the 41st run's `reconcile-orders`
+fix. Deployed via `supabase functions deploy paper-reconcile`. (2) Registered the job live —
+`SELECT cron.schedule('paper-reconcile-cron', '2-59/5 * * * *', ...)` with **no** ON CONFLICT
+clause (`cron.schedule` already upserts by jobname internally; that clause was both invalid and
+redundant) — and inserted it into `expected_cron_jobs` so a future silent deregistration surfaces
+in `cron_health()` instead of requiring a manual trades-table query. (3) New migration
+`20260728_register_paper_reconcile_cron.sql` captures both DB changes with full root-cause
+context. (4) Corrected the same broken `ON CONFLICT` clause in the original
+`20260727_paper_reconcile_cron.sql` (now just `cron.schedule(...);` with an explanatory note) so a
+fresh migration replay on a clean database doesn't reintroduce the failure.
+
+**Verified against real production data:** `deno check supabase/functions/paper-reconcile/index.ts`
+— zero errors before and after. After registering the cron job, polled `compliance_log` live and
+caught the very next scheduled tick: `2026-07-28 02:17:00 UTC — "paper-reconcile: 3 checked, 0
+filled, 0 partial, 0 cancelled, 0 errors (149ms)"` — confirming both fixes work end-to-end: the job
+now runs on schedule, picked up all 3 previously-stranded paper trades on its first pass, and wrote
+the new heartbeat row. Also re-confirmed via `cron_health()` that `paper-reconcile-cron` now
+returns a row (`active: true`) where it previously returned none. **Reversibility:** easy — additive
+logging function, a cron registration (idempotent — dropping it just stops the schedule, `trades`
+rows are untouched), and a manifest row; `cron.unschedule('paper-reconcile-cron')` plus a manifest
+delete fully reverts.
+
 ## 2026-07-28 (41st run) — Duplicate-positions alert traced to a 2-day-old stale-order settlement; found and fixed the real gap: `reconcile-orders` had no run-level compliance_log heartbeat, so a ~4min-late pass was invisible except by hand-reconstructing order timestamps
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 40th run's ~23:06 UTC
