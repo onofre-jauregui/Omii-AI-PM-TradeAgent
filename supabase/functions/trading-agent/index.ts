@@ -5,6 +5,17 @@ import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRe
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/kalshi-proxy
+// Bare `await fetch()` to the LLM provider had no timeout — a stalled Anthropic
+// call hangs this function's entire chat turn (this is the interactive
+// AgentPanel chat endpoint — confirmed via `cron.job`, no cron invokes
+// trading-agent directly) with no compliance_log signal, the same
+// unguarded-call class fixed 7x already in this file and
+// market-data-fetcher/health-check/reconcile-orders/settle-signals/
+// kalshi-ping/futures-signal/kalshi-proxy — just one level up the stack (the LLM
+// call itself, not the credential lookup that precedes it). 60s is generous for
+// a real completion (even a large tool-schema + long history turn) while still
+// bounding how long a user's chat session can hang on a stalled provider call.
+const LLM_FETCH_TIMEOUT_MS = 60_000;
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
@@ -485,15 +496,28 @@ async function callAnthropicNonStream(
   const body: any = { model, max_tokens: 8192, messages, temperature };
   if (system) body.system = system;
   if (tools.length > 0) body.tools = toAnthropicTools(tools);
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Anthropic API call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Anthropic error ${resp.status}: ${text}`);
@@ -1029,7 +1053,22 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       const llmCallStart = Date.now();
 
       if (effectiveProvider === "anthropic") {
-        const { result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3);
+        let anthropicResult: any, anthropicUsage: { input_tokens: number | null; output_tokens: number | null };
+        try {
+          ({ result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3));
+        } catch (llmErr) {
+          const msg = llmErr instanceof Error ? llmErr.message : String(llmErr);
+          if (supabase) {
+            await supabase.from("compliance_log").insert({
+              event_type: "trading_agent_llm_call_failed",
+              severity: "error",
+              user_id: userId ?? null,
+              message: `trading-agent: Anthropic call failed on turn ${turnIndex} — ${msg}`,
+              metadata: { model: finalModel, provider: "anthropic", turn_index: turnIndex, duration_ms: Date.now() - llmCallStart },
+            }).then(null, () => {});
+          }
+          throw llmErr;
+        }
         result = anthropicResult;
         const durationMs = Date.now() - llmCallStart;
         if (supabase && anthropicUsage.input_tokens != null) {
