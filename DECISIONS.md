@@ -4,6 +4,32 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Closed the `settle-signals` batch-rotation bug flagged as a watch item on the prior run
+
+**Decision:** Added a `settlement_status` column and changed `settle-signals` to stamp `settled_at`
+(with `settlement_status = 'unsettleable_404'`, `settlement_price`/`shadow_pnl` left null) on any
+ticker Kalshi returns a definitive 404 for, and changed the eligibility query to gate on
+`settled_at IS NULL` instead of `settlement_price IS NULL`.
+**Options:** A) Add `ORDER BY` only (e.g. by `expires_at`) — rejected: the stuck batch already *is*
+the oldest by `expires_at`, so sorting by it changes nothing; the same 200 rows would still win
+every tick since they never get updated. B) Track attempts with a retry counter and skip after N
+tries — rejected: adds a decay/backoff dimension for no benefit here, since this run confirmed all
+1000 failures in the window were a consistent 404 (not transient) — there's nothing to retry. C)
+Stamp `settled_at` on definitive 404s only, leave transient failures untouched for retry (chosen) —
+directly fixes the stuck batch, cheapest correct model of the actual failure mode observed.
+**Why:** the prior run's own fix (registering `settle-signals-cron`) exposed a second bug: with no
+`ORDER BY` and no way to mark a row "tried and permanently unsettleable," the same oldest ~200
+signals (all 2.5-month-old archived tickers, confirmed via `compliance_log` across 5 consecutive
+ticks from 06:13–07:00 UTC returning identical tickers, 1000/1000 `api_error`s all HTTP 404) were
+re-selected forever, starving the other ~20,700 backlog rows of ever being checked.
+**Reversibility:** easy — additive/nullable column, `git revert` restores the prior (spinning)
+behavior; the ~400 rows already marked `unsettleable_404` this run stay correctly excluded either
+way since they were, in fact, unsettleable.
+**Trace:** this run's PR → `dev`, `docs/health-log.md` this entry. Verified live: manual invocation
+marked 207 signals `unsettleable_404` and the batch rotated (May → July tickers); the following
+`07:15:13 UTC` pg_cron tick fired automatically and processed a third, further-rotated batch,
+confirming the fix holds under the real schedule, not just a manual call.
+
 ## 2026-07-28 — Registered the never-applied `settle-signals-cron` (2.5-month-old migration gap); fixed a swallowed-error bug in the function itself
 
 **Decision:** Applied a new migration adding the six `signals` columns
