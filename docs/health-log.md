@@ -2,6 +2,53 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (54th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — settle-signals' shadow-PnL credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 53rd run's
+~13:07 UTC cutoff through this run's ~14:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 53rd run's own push (run `30362692428`,
+4m9s) and no pushes since.
+
+**Fix (LOW risk, monitoring/attribution path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 52nd run's log explicitly left open: `settle-signals`,
+`futures-signal`, `kalshi-ping`, `kalshi-proxy` (×2), and `trading-agent` (×2) all call
+`getKalshiCredentials()` unguarded. Fixed `settle-signals/index.ts:78` — a single-tenant service
+credential fetch (`userId = null`, same shape as `market-data-fetcher`'s already-fixed call) that
+sits ahead of the function's per-ticker loop. A hang there doesn't throw, so it silently eats the
+entire 15-min settle-signals run: shadow-PnL attribution (the qualifier-ROI data pipeline —
+"the biggest data unlock in v2" per the file's own header) stops updating for every unsettled
+signal in that batch, with confidence scores degrading over time and no alert firing until the
+absence was noticed downstream. Applied the identical `Promise.race(..., 8s)` guard used in
+`market-data-fetcher`/`health-check`/`reconcile-orders`, same `8_000`ms constant
+(`CREDENTIAL_FETCH_TIMEOUT_MS`). Left the timeout to propagate into the function's existing outer
+`catch` (which already logs a `settle_signals_error` row to `compliance_log` at `error` severity
+and fires a Telegram alert) rather than duplicating `market-data-fetcher`'s per-series skip-list
+logic — `settle-signals` has one credential fetch for the whole run, not a per-series budget, so
+reusing its existing crash path is the smaller, more consistent change.
+
+**Scope check:** left `futures-signal`, `kalshi-ping`, `kalshi-proxy` ×2, and `trading-agent` ×2
+untouched this run — same one-narrow-fix-per-run discipline as the 51st/52nd runs, and
+`execute-trade`'s real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/settle-signals/index.ts` — 11 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(11) after this change — no new errors introduced (an initial explicit `string` type annotation on
+the destructured credentials did add one, caught by this same diff against baseline, and corrected
+to `string | null` to match `getKalshiCredentials`'s actual return type). Deployed via `supabase
+functions deploy settle-signals`. Verified live against the real Supabase project and real Kalshi
+API: triggered the function via `net.http_post` matching `settle-signals-cron`'s own
+`cron.job.command` exactly, with a 25s `timeout_milliseconds` — response: `{"success":true,
+"settled":0,"markets_checked":200,"results":[...]}`, HTTP 200, `timed_out: false`. Ran to
+completion cleanly against 200 real aged-out markets (all `unsettleable_404`, the expected
+archive-retention behavior per the file's existing comment) with the new guard in place; the guard
+itself wasn't exercised on its timeout branch (no hang occurred), so its *shape* is verified
+working end-to-end but the timeout branch is unexercised until the next real stall — flagged here
+rather than claimed proven, same caveat pattern as the 53rd run's CI retry fix.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (53rd run) — Zero new compliance errors, all 14 cron jobs healthy; found the 52nd run's own push had failed CI on a transient esm.sh CDN 522, confirmed via rerun, then hardened the deploy jobs against that flake class
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 52nd run's
