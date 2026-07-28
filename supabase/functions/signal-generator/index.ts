@@ -217,6 +217,26 @@ function signalStrength(score: number): ScoredSignal["signal_strength"] {
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
+// Run-level heartbeat: without this, a run that scores zero signals (empty
+// cache, all markets filtered out) or a hang leaves zero trace in
+// compliance_log — invisible to anything but hand-reconstructing timestamps.
+// Same gap class as reconcile-orders/daily-digest/paper-reconcile (see
+// health-log.md, 41st/42nd runs); signal-generator-cron had only error-path
+// logging (signal_persist_error, signal_generator_error), no success path.
+async function logRunSummary(
+  supabase: any,
+  summary: { total_scored: number; actionable: number; strong: number },
+  elapsedMs: number,
+) {
+  const severity = elapsedMs > 4 * 60 * 1000 ? "warning" : "info";
+  await supabase.from("compliance_log").insert({
+    event_type: "signal_generator_run",
+    severity,
+    message: `signal-generator: ${summary.total_scored} scored, ${summary.actionable} actionable, ${summary.strong} strong (${elapsedMs}ms)`,
+    metadata: { ...summary, elapsed_ms: elapsedMs },
+  }).then(null, () => {});
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -225,6 +245,7 @@ serve(async (req) => {
   const supabase = supabaseUrl && supabaseKey
     ? createClient(supabaseUrl, supabaseKey)
     : null;
+  const startedAt = Date.now();
 
   try {
     let body: any = {};
@@ -248,6 +269,7 @@ serve(async (req) => {
       if (cacheErr) console.error("signal-generator: cache read error:", cacheErr.message);
 
       if (!cacheRows || cacheRows.length === 0) {
+        if (supabase) await logRunSummary(supabase, { total_scored: 0, actionable: 0, strong: 0 }, Date.now() - startedAt);
         return new Response(
           JSON.stringify({ signals: [], total_scored: 0, note: "Market cache is empty — market-data-fetcher has not run yet or is failing." }),
           { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -277,6 +299,7 @@ serve(async (req) => {
     });
 
     if (rawMarkets.length === 0) {
+      if (supabase) await logRunSummary(supabase, { total_scored: 0, actionable: 0, strong: 0 }, Date.now() - startedAt);
       return new Response(
         JSON.stringify({ signals: [], total_scored: 0, note: "No liquid markets available to score." }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -414,6 +437,14 @@ serve(async (req) => {
     // ── Summary stats ─────────────────────────────────────────────────────────
     const actionable = topSignals.filter((s) => s.direction !== "skip");
     const strong = topSignals.filter((s) => s.signal_strength === "strong");
+
+    if (supabase) {
+      await logRunSummary(
+        supabase,
+        { total_scored: signals.length, actionable: actionable.length, strong: strong.length },
+        Date.now() - startedAt,
+      );
+    }
 
     return new Response(
       JSON.stringify({
