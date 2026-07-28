@@ -4,6 +4,32 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded settle-signals' credential fetch with the same 8s timeout pattern
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `settle-signals/index.ts` in a
+`Promise.race` against an 8s timeout, identical to the pattern applied to `market-data-fetcher`
+(48th run), `health-check` (51st run), and `reconcile-orders` (52nd run).
+**Options:** A) Leave it — rejected: same unguarded-call shape already diagnosed as a real stall
+cause three times in this codebase; here a hang would silently eat the entire 15-min
+`settle-signals` run since the credential fetch sits ahead of the try/catch's effective reach (a
+non-throwing hang never trips the existing `catch`), stalling shadow-PnL attribution for every
+unsettled signal in the batch with no alert until the next run's absence was noticed. B) Fix the
+shared `getKalshiCredentials()` helper globally — rejected, same reasoning as the three prior
+runs: broader blast radius, and the trading-path call sites (`execute-trade`, `trading-agent`,
+`futures-signal`, `kalshi-ping`, `kalshi-proxy` ×2) stay a deliberate, reviewed decision, not a
+side effect of a health-check sweep. C) Scope the fix to `settle-signals`' single call site —
+chosen, mirrors existing precedent, single-tenant service-credential fetch (`userId = null`, same
+shape as `market-data-fetcher`), read-only shadow-PnL computation, no order placement.
+**Why:** No live incident forced this (zero new `compliance_log` errors this run, all 14 cron jobs
+healthy) — preventive fix grounded in a proven failure mode, closing the next-highest-value
+instance from the backlog the 52nd run explicitly left noted-but-unfixed. `futures-signal`,
+`kalshi-ping`, `kalshi-proxy` ×2, and `trading-agent` ×2 remain unguarded — one narrow fix per run,
+not a sweep.
+**Reversibility:** Trivial — single-file, single-block revert, no schema or trading-path change.
+**Trace:** PR (this run, 54th health-check), `docs/health-log.md` 54th-run entry. Original pattern:
+`docs/health-log.md` 48th/51st/52nd-run entries, this file's market-data-fetcher/health-check/
+reconcile-orders entries above.
+
 ## 2026-07-28 — Retry transient esm.sh CDN failures in CI edge-function deploy jobs instead of failing the whole job
 **Decision:** Wrapped each `npx supabase functions deploy "$fn"` call in `deploy-staging-functions`
 and `deploy-production-functions` (`.github/workflows/ci.yml`) in a 3-attempt retry loop with 15s

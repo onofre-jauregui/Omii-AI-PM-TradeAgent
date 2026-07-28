@@ -18,6 +18,8 @@ import { sendTelegramAlert } from "../_shared/telegram.ts";
  * Scheduled: every 15 minutes via pg_cron.
  */
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders
+
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
 }
@@ -74,8 +76,29 @@ serve(async (req) => {
     let settledCount = 0;
     const results: { ticker: string; status: string; settlement?: string }[] = [];
 
-    // Use system service credentials for Kalshi API
-    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase, null);
+    // Use system service credentials for Kalshi API.
+    // A stalled query here doesn't throw, so the outer try/catch below never
+    // fires — it would silently eat the entire 15-min settle-signals run,
+    // stalling shadow-PnL attribution for every unsettled signal with no
+    // alert. Same class of gap the 51st/52nd runs closed in health-check and
+    // reconcile-orders; bounded to the same 8s budget.
+    let kalshiKeyId: string | null, kalshiPrivateKey: string | null;
+    {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+          CREDENTIAL_FETCH_TIMEOUT_MS
+        );
+      });
+      try {
+        const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+        kalshiKeyId = creds.keyId;
+        kalshiPrivateKey = creds.privateKey;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
 
     for (const [ticker, signals] of tickerToSignals) {
       try {
