@@ -36,7 +36,10 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
         run: |
-          # Apply any migrations not yet in the remote history table, via Management API
+          # Apply any migrations not yet in the remote history table, via Management API.
+          # Fails the job hard on the first bad migration instead of silently recording it as
+          # applied — a prior version of this loop swallowed failures with `|| echo WARN`, which
+          # let staging drift ~40 migrations behind `main` undetected (see DECISIONS.md, 2026-07-27).
           APPLIED=$(curl -sf -X POST \
             "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -44,19 +47,25 @@ jobs:
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
           for f in $(ls supabase/migrations/*.sql | sort); do
-            VERSION=$(basename "$f" .sql | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION"; then
+            # Full filename stem going forward, so same-day multi-file migrations get distinct
+            # keys. Also check the legacy date-only prefix so migrations already recorded under
+            # the old (buggy) scheme aren't re-applied wholesale by this fix.
+            VERSION=$(basename "$f" .sql)
+            LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
               echo "Already applied: $VERSION"
               continue
             fi
             echo "Applying: $VERSION"
             SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
-            RESULT=$(curl -sf -X POST \
+            curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
-            # Record in migration history
+              -d "{\"query\": $SQL}"
+            echo "OK: $VERSION"
+            # Only record history on confirmed success — `curl -sf` above already aborts the
+            # job (bash -e) on a non-2xx response, so reaching this line means it applied clean.
             curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -126,6 +135,8 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
         run: |
+          # Same fail-loud / success-only-recording / collision-safe scheme as migrate-staging
+          # above — see that job's comments and DECISIONS.md (2026-07-27) for why.
           APPLIED=$(curl -sf -X POST \
             "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -133,18 +144,20 @@ jobs:
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
           for f in $(ls supabase/migrations/*.sql | sort); do
-            VERSION=$(basename "$f" .sql | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION"; then
+            VERSION=$(basename "$f" .sql)
+            LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
               echo "Already applied: $VERSION"
               continue
             fi
             echo "Applying: $VERSION"
             SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
-            RESULT=$(curl -sf -X POST \
+            curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
+              -d "{\"query\": $SQL}"
+            echo "OK: $VERSION"
             curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
