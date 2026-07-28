@@ -2,6 +2,56 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (58th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — trading-agent's fetch_live_markets service-tenant fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 57th run's
+~17:07 UTC cutoff through this run's ~18:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 57th run's own push (run `30381897854`,
+4m28s) and no pushes since.
+
+**Fix (LOW risk, read-only market-data path, no trading logic touched):** with zero live errors,
+picked up the backlog the 57th run's log explicitly left open: `trading-agent` (×2) still calls
+`getKalshiCredentials()` unguarded. Fixed `trading-agent/index.ts:1215` — the `fetch_live_markets`
+tool's service-tenant (`userId = null`) credential fetch, used to sign the public `/markets` browse
+request the LLM calls on every `auto-trade-cron` tick (every 5 minutes) so it hits Kalshi's
+authenticated rate tier instead of the anonymous one. A stalled query doesn't throw, so the
+existing `try/catch` around this tool never engages — the whole tool call, and therefore the
+agent's turn on that cron tick, would hang instead of degrading to the unauthenticated fetch it
+already falls back to when no service credential is available. Applied the identical
+`Promise.race(..., 8s)` guard used in
+market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/
+kalshi-proxy, same `8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`, module-level per this file
+same as every other edge function — no shared module state across Deno isolates). On timeout, logs
+a `trading_agent_fetch_markets_credential_fetch_failed` `error` row to `compliance_log` (plus
+`console.error`) and falls through to the unauthenticated fetch path exactly as it already does
+when the credential legitimately doesn't exist — unlike `kalshi-proxy`'s guard, there is no
+distinct-response-to-the-caller case here, since this tool has no direct HTTP caller to report a
+503 to; degrading to the existing fallback is the correct behavior for an LLM tool call mid-turn.
+
+**Scope check:** left `trading-agent`'s other unguarded call site (`cancel_order`'s live-mode
+credential fetch, line ~1449) untouched this run — that path is on the real-money order-cancellation
+side of the trading logic, off-limits per the 48th run's original caution and the same discipline
+that has left `execute-trade` and `execute_basket`'s trading paths untouched across 51st–57th runs.
+`fetch_live_markets` is a pure read path (browses public market data) and was the correct next pick.
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every `getKalshiCredentials` call site plus two unrelated `PromiseLike.catch`
+errors, same class flagged in the 51st-run entry for `cancel_order`), same count (13) after this
+change — no new type errors introduced. Deployed via `supabase functions deploy trading-agent`.
+**Not exercised end-to-end against a live agent turn this run** — same reasoning as the 51st run's
+`cancel_order` fix: doing so requires either a fabricated chat turn forcing the LLM to pick
+`fetch_live_markets` specifically (real token spend, and the LLM has the full tool suite including
+`execute_trade` in scope for that turn, so it isn't a clean isolated test) or waiting for the live
+5-minute cron cadence to exercise it naturally, which this run's window didn't happen to catch. The
+change is isolated to the credential-fetch guard inside one tool branch and doesn't alter any
+trading decision logic, so it carries the same low regression risk as the analogous fixes in runs
+48–57.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (57th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-proxy's per-user credential fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 56th run's
