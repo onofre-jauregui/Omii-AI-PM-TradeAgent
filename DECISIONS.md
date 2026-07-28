@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Guarded trading-agent's fetch_live_markets service-tenant credential fetch with the same 8s timeout pattern
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `trading-agent/index.ts`'s
+`fetch_live_markets` tool (line 1215) in a `Promise.race` against an 8s timeout, same pattern as
+`market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`/`kalshi-ping`/
+`futures-signal`/`kalshi-proxy`. On timeout, logs a
+`trading_agent_fetch_markets_credential_fetch_failed` `error` row to `compliance_log` and falls
+through to the existing unauthenticated-fetch fallback (no distinct HTTP response needed — this is
+an LLM tool call mid-turn, not a request with its own caller to respond to).
+**Options:** A) Leave it — rejected: this tool fires on every `auto-trade-cron` tick (every 5
+minutes), so a stalled query hangs the whole agent turn instead of degrading to the fallback it
+already has. B) Fix `cancel_order`'s live-mode call site (line ~1449) instead/also — rejected: that
+branch is on the real-money order-cancellation path, off-limits per the 48th run's caution; this
+run keeps the one-narrow-fix-per-run discipline and picks the read-only path. C) Applied guard,
+degrade-on-timeout to the pre-existing fallback (**chosen**) — matches how this code already
+handles a missing credential, so timeout and absence produce the same safe behavior.
+**Why:** Matches the timeout-guard pattern proven safe across 7 prior runs; this is a read-only
+market-data path with no trading-decision impact, so the standard low-risk bar applies.
+**Reversibility:** trivial — single-block revert, no schema or trading-path change.
+**Trace:** health-check 58th run, `docs/health-log.md` this run's entry, PR to `dev`.
+
 ## 2026-07-28 — Guarded kalshi-proxy's per-user credential fetch with the same 8s timeout pattern, plus a distinct 503 on timeout
 
 **Decision:** Wrapped `getKalshiCredentials(adminClient, userId)` in `kalshi-proxy/index.ts`'s

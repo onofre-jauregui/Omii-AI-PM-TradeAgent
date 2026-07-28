@@ -4,6 +4,8 @@ import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.t
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/kalshi-proxy
+
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
 const TRADE_TOOL = {
@@ -1210,9 +1212,43 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // 429-causing bug just fixed in kalshi-proxy (2026-07-26). Sign with
             // the service-tenant credential when available; fall back to
             // unauthenticated only if it's missing, same as kalshi-proxy.
+            //
+            // A bare `await` here would hang this tool call indefinitely on a
+            // stalled query — same unguarded-credential-fetch class fixed in
+            // market-data-fetcher/health-check/reconcile-orders/settle-signals/
+            // kalshi-ping/futures-signal/kalshi-proxy. A stall doesn't throw, so
+            // the enclosing try/catch never engages; this tool is invoked by the
+            // LLM inside auto-trade-cron (every 5 min), so a hang here stalls the
+            // whole agent turn instead of degrading to the unauthenticated fetch
+            // it already falls back to when no service credential is available.
             let kalshiHeaders: Record<string, string> = {};
-            const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-              await getKalshiCredentials(supabase, null);
+            let serviceKeyId: string | null, servicePrivateKey: string | null;
+            try {
+              let timeoutId: ReturnType<typeof setTimeout> | undefined;
+              const timeout = new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(
+                  () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+                  CREDENTIAL_FETCH_TIMEOUT_MS
+                );
+              });
+              try {
+                const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+                serviceKeyId = creds.keyId;
+                servicePrivateKey = creds.privateKey;
+              } finally {
+                clearTimeout(timeoutId);
+              }
+            } catch (credError) {
+              const msg = credError instanceof Error ? credError.message : String(credError);
+              console.error(`trading-agent fetch_live_markets: service credential fetch failed or timed out: ${msg}`);
+              await supabase.from("compliance_log").insert({
+                event_type: "trading_agent_fetch_markets_credential_fetch_failed",
+                severity: "error",
+                message: `trading-agent fetch_live_markets service credential fetch failed or timed out: ${msg}`,
+              });
+              serviceKeyId = null;
+              servicePrivateKey = null;
+            }
             if (serviceKeyId && servicePrivateKey) {
               kalshiHeaders = await generateAuthHeaders(
                 serviceKeyId, servicePrivateKey, "GET", "/trade-api/v2/markets", Date.now()
