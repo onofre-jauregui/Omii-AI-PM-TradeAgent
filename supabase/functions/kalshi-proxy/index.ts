@@ -86,8 +86,44 @@ serve(async (req) => {
       // moves these calls off Kalshi's lowest anonymous rate tier onto the
       // authenticated tier. No key configured → fall back to unauthenticated,
       // same as before. Read-only endpoints only, so this never risks a trade.
-      const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-        await getKalshiCredentials(adminClient, null);
+      //
+      // Bare `await` here would hang this request indefinitely on a stalled
+      // query — same class of unguarded-credential-fetch bug fixed at the
+      // authenticated branch above and across market-data-fetcher/health-check/
+      // reconcile-orders/settle-signals/kalshi-ping/futures-signal. A prior
+      // health-check run (57th) left this call site unguarded on the reasoning
+      // that "it has its own existing unauthenticated-fallback path so a stall
+      // degrades rather than hangs" — that's incorrect: the fallback below only
+      // triggers when the query *resolves* with a falsy value, not when it never
+      // resolves at all. This is the highest-traffic remaining unguarded site —
+      // hit on every public market/events/series browse, logged in or not.
+      let serviceKeyId: string | null, servicePrivateKey: string | null;
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        try {
+          const creds = await Promise.race([getKalshiCredentials(adminClient, null), timeout]);
+          serviceKeyId = creds.keyId;
+          servicePrivateKey = creds.privateKey;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (credError) {
+        const msg = credError instanceof Error ? credError.message : String(credError);
+        console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out: ${msg}`);
+        await adminClient.from("compliance_log").insert({
+          event_type: "kalshi_proxy_service_credential_fetch_failed",
+          severity: "error",
+          message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out: ${msg} — falling back to the anonymous rate tier for this request.`,
+        });
+        serviceKeyId = null;
+        servicePrivateKey = null;
+      }
       if (serviceKeyId && servicePrivateKey) {
         const timestamp = Date.now();
         headers = await generateAuthHeaders(serviceKeyId, servicePrivateKey, req.method, apiPath, timestamp);

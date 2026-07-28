@@ -2,6 +2,57 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (59th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; corrected a prior run's mischaracterization and closed the real last unguarded-credential-fetch site — kalshi-proxy's public-endpoint service-tenant fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 58th run's
+~18:07 UTC cutoff through this run's ~19:10 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 58th run's own push (run `30386324731`,
+4m29s) and no pushes since.
+
+**Correcting the record:** the 57th run's log entry left `kalshi-proxy/index.ts`'s service-tenant
+credential fetch (public `markets`/`events`/`series` branch) unguarded, reasoning it "has its own
+existing unauthenticated-fallback path so a stall there degrades rather than hangs." Re-auditing
+the full unguarded-`getKalshiCredentials()` call-site list this run (grepped every edge function)
+turned up only three remaining unguarded sites: this one, `trading-agent`'s `cancel_order` (live
+trading path, off-limits per 48th-run caution), and `execute-trade`'s live-mode fetch (same
+off-limits class, unchanged across 51st–58th runs) — the backlog of *safe* unguarded sites was
+otherwise exhausted. Reading `getKalshiCredentials()` in `_shared/kalshi-auth.ts` confirms it has
+no internal timeout — a bare Postgres `.maybeSingle()` await. The 57th run's "degrades rather than
+hangs" reasoning was wrong: the fallback branch (`else if (!loggedMissingServiceKey)`) only fires
+when the query *resolves* with a falsy value; a stalled query never resolves at all, so the bare
+`await` at this site hangs identically to every other site already fixed in this campaign — it just
+happened to get miscategorized as already-safe instead of getting the guard.
+
+**Fix (LOW risk, public read-only market-data path, no trading logic touched):**
+`kalshi-proxy/index.ts:90` — wrapped the service-tenant credential fetch in the same
+`Promise.race(..., 8s)` guard used at every other site (`CREDENTIAL_FETCH_TIMEOUT_MS = 8_000`,
+same module-level constant already declared in this file for the authenticated branch above). This
+is the **highest-traffic** remaining unguarded site of the whole campaign — it's on the public
+proxy path hit by every markets/events/series browse from the frontend, logged in or not, not just
+a 5-minute cron tick. On timeout, logs a `kalshi_proxy_service_credential_fetch_failed` `error` row
+to `compliance_log` (plus `console.error`) and falls through to the unauthenticated Kalshi rate
+tier — the same degrade-not-fail behavior this path already took when the service key legitimately
+doesn't exist, so a stall now produces the same user-facing outcome (slower but working) instead of
+a hung request until the platform's own execution timeout kills it.
+
+**Scope check:** left `trading-agent`'s `cancel_order` (line ~1449, live trading path) and
+`execute-trade`'s live-mode fetch (line ~552) untouched — real-money order paths, off-limits per the
+48th-run's original caution, unchanged across 51st–59th runs.
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 14 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every call site, same class flagged in prior runs' entries), same count (14)
+after this change — no new type errors introduced. Deployed via `supabase functions deploy
+kalshi-proxy`. **Exercised end-to-end against the real Kalshi API this run** (unlike several prior
+entries that could only reason about coverage): called the deployed function's public `markets`
+endpoint directly (`GET .../kalshi-proxy?endpoint=markets&limit=1`) and got a live `200` with real
+Kalshi market data back through the exact modified code path, then confirmed no new `error`/
+`critical` `compliance_log` row was produced by that call.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (58th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — trading-agent's fetch_live_markets service-tenant fetch
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 57th run's
