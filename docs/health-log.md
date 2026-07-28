@@ -2,6 +2,54 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (53rd run) — Zero new compliance errors, all 14 cron jobs healthy; found the 52nd run's own push had failed CI on a transient esm.sh CDN 522, confirmed via rerun, then hardened the deploy jobs against that flake class
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 52nd run's
+~12:07 UTC cutoff through this run's ~13:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**What this run found that the 52nd run couldn't have known:** `gh run list --branch dev` showed
+the 52nd run's own push (PR #104's reconcile-orders fix, run `30357821307`) had **failed CI** —
+CI runs after a push completes, so the 52nd run's log entry ("CI still green") was accurate as of
+its own cutoff but stale by the time this run checked. The failure was in the "Deploy edge
+functions → staging Supabase" job, bundling `auto-trade`: `Import
+'https://esm.sh/@supabase/supabase-js@2' failed: 522 <unknown status code>` — a Cloudflare-origin
+transient from esm.sh's CDN, not a code defect in the reconcile-orders change. Confirmed via `gh
+run rerun 30357821307 --failed`: the identical job, same commit, passed clean in 2m6s on retry —
+proving this was the CDN blip, not the merged code (deploy-staging-functions, lint/test/build, and
+e2e-staging all green on rerun; canary-gate/deploy-production-functions/migrate-production
+correctly skipped since this is a `dev`, not `main`, push).
+
+**Fix (LOW risk, CI-infra only, no runtime/trading code touched):** rather than leave this as a
+one-off manual rerun, hardened both `deploy-staging-functions` and `deploy-production-functions`
+in `.github/workflows/ci.yml` — each function's `npx supabase functions deploy` now retries up to
+3x with a 15s backoff before failing the job. Previously a single transient esm.sh 5xx on bundling
+*any one* of the ~20 edge functions aborted the whole job under `bash -e`'s default fail-fast,
+blocking `e2e-staging` on a dev push or the entire `canary-gate` → production promotion on a main
+push — a CDN hiccup outside the codebase's control could otherwise stall a production deploy until
+someone noticed and manually reran it. Root cause is the same class as the `getKalshiCredentials()`
+hang-vs-timeout gap the 48th/51st/52nd runs closed: an external dependency with no guard against
+its own transient failure, except here the dependency is esm.sh (used at bundle time by every edge
+function's `@supabase/supabase-js` import) rather than a Supabase query. Left the rollback path's
+own `npx supabase functions deploy` call (`canary-gate` job) unretried — it already has a
+per-function `|| echo WARNING` fallback that logs and continues rather than aborting, a different
+and already-adequate failure mode for an emergency rollback path.
+
+**Verified:** `python3 -c "import yaml; yaml.safe_load(...)"` confirms `ci.yml` is still valid
+YAML after the edit. No `actionlint` available in this environment to lint the workflow syntax
+directly, so verification is via a live run: pushed this run's branch, `gh run view --json
+status,conclusion,jobs` shows the same `dev` CI run (`#87`) green end-to-end —
+`deploy-staging-functions`, `Lint + unit tests + build`, `Apply migrations → staging DB`, and
+`e2e-staging` all `success`; `canary-gate`/`deploy-production-functions`/`migrate-production`
+correctly `skipped` on a dev push. The retry path itself wasn't exercised live (this run's deploy
+didn't hit another 522), so the loop's *shape* is verified working end-to-end but its retry
+*branch* is unexercised until the next transient CDN failure — flagged here rather than claimed
+proven.
+
+**Reversibility:** trivial — single-file CI workflow change, no schema or trading-path change,
+easy single-block revert. PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md`
+this run.
+
 ## 2026-07-28 (52nd run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next instance of the unguarded-credential-fetch class — reconcile-orders' per-user loop, explicitly left untouched by the 51st run
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 51st run's

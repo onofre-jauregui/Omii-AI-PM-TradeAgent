@@ -4,6 +4,26 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Retry transient esm.sh CDN failures in CI edge-function deploy jobs instead of failing the whole job
+**Decision:** Wrapped each `npx supabase functions deploy "$fn"` call in `deploy-staging-functions`
+and `deploy-production-functions` (`.github/workflows/ci.yml`) in a 3-attempt retry loop with 15s
+backoff.
+**Options:** A) Leave as-is, rely on manual reruns — rejected: discovered via the 52nd run's own
+push failing CI on a bundling-time `esm.sh` 522 (external CDN transient, confirmed not a code
+defect by rerunning the identical commit clean); on a `main` push this class of failure would stall
+the `canary-gate` → production promotion until a human noticed and reran it. B) Retry only the
+specific function that failed, not a generic loop — rejected as unnecessary complexity; the
+per-function loop already isolates retries to the one function that hit the blip. C) Add retry
+per-function inside the existing loop, fail loud after 3 attempts — chosen; matches the "fail loud,
+never silent" standard while absorbing exactly the failure class observed.
+**Why:** The `bash -e` default means one transient failure on any single function (of ~20) aborts
+the entire deploy job; the dependency at fault (esm.sh CDN) is external and outside the codebase's
+control, so retrying is the correct guard, not a code fix to `auto-trade` or any other function.
+**Reversibility:** easy — single-file CI workflow change, single-block revert, no schema or
+trading-path impact.
+**Trace:** 53rd health-check run, PR → `dev`, `docs/health-log.md` same-date entry ("53rd run").
+Incident run: `gh run view 30357821307 --repo onofre-jauregui/Omii-AI-PM-TradeAgent`.
+
 ## 2026-07-28 — Guarded reconcile-orders' per-user credential fetch with the same 8s timeout pattern
 
 **Decision:** Wrapped `getKalshiCredentials(supabase, userId)` in `reconcile-orders/index.ts`'s
