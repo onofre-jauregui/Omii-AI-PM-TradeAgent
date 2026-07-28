@@ -4,6 +4,31 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Registered the never-applied `settle-signals-cron` (2.5-month-old migration gap); fixed a swallowed-error bug in the function itself
+
+**Decision:** Applied a new migration adding the six `signals` columns
+(`shadow_pnl`/`settlement_price`/`settled_at`/`direction_correct`/`profitable`/`system_version`)
+and the `settle-signals-cron` pg_cron job that `20260504120000_v2_instrumentation_and_lock.sql`
+was supposed to create back on 2026-05-04, plus fixed `settle-signals/index.ts` to check the
+Postgrest `error` instead of silently swallowing it.
+**Options:** A) Flag it for review like the staging-migration-backlog and HITL findings — rejected:
+unlike those, this is fully additive/nullable, touches zero trading logic, and has an exact,
+already-proven-safe precedent (`20260728_register_paper_reconcile_cron.sql`, same run's paper-
+reconcile fix). B) Register the job and fix the code bug now (chosen) — matches the established
+bar for monitoring/data-pipeline gaps: safe to fix unattended, unlike anything touching
+`execute-trade` or live order placement.
+**Why:** `settle-signals` computes shadow PnL for every signal the qualifier skipped — the
+project's own docs call it "the biggest data unlock in v2" for measuring qualifier ROI — and it had
+run zero times, ever, since being built on 2026-05-12. The root cause is the exact swallowed-
+migration-failure bug this run's earlier fix (CI's `migrate-staging`/`migrate-production`) closed
+for the future, just discovered as a live casualty on production predating that fix. 20,936 of
+21,782 signals sit unsettled; `qualifier_roi_v2` has been empty since the day it was created.
+**Reversibility:** easy — new columns are additive/nullable, the cron job can be unscheduled, the
+function diff is a single `if (error) throw`; `git revert` restores the prior (dead) state.
+**Trace:** PR #99 → `dev`, `docs/health-log.md` 46th-run entry. Watch item logged there: the settle
+query has no `ORDER BY`, so whether it naturally rotates past the unresolvable ~2.5-month-old
+404 batch toward the eligible backlog needs confirming over the next few runs, not assumed.
+
 ## 2026-07-28 — Closed the migration-runner root cause from the 2026-07-27 "staging DB unmigrated" finding (partial — backlog repair still open)
 
 **Decision:** Fixed `migrate-staging`/`migrate-production` in `.github/workflows/ci.yml` to hard-fail
