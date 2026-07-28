@@ -4,6 +4,26 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-28 — Bounded market-data-fetcher's credential fetch with a timeout (closing an 8-day-old flagged gap)
+
+**Decision:** Wrapped `getKalshiCredentials(supabase, null)` in `market-data-fetcher/index.ts` in
+a `Promise.race` against `REQUEST_TIMEOUT_MS` (8s). On timeout/error, sets `abortReason` and
+`skippedSeries = [...SERIES]`, routing through the function's existing abort-alert path instead
+of hanging.
+**Options:** A) Leave it logged-but-unfixed another run — rejected, it's the exact proposed fix
+from the 2026-07-20 `DECISIONS.md` entry and had sat open 8 days with two real incidents behind
+it. B) Add a timeout to the shared `getKalshiCredentials()` itself so every caller benefits —
+rejected for this run: broader blast radius touching `execute-trade`/`auto-trade`'s real-money
+path, more than an unattended run should change at once. C) Scope the timeout to the
+`market-data-fetcher` call site only — chosen, matches the original proposal exactly and keeps
+the change to a read-only market-data cache poller.
+**Why:** The 2026-07-13 (130.6s) and 2026-07-16 (61.4s) stalls both trace to this exact
+unguarded call, sitting before `RUN_BUDGET_MS` enforcement starts — a stall here silently ate
+the whole run with no accurate cause. The fix was already scoped and reviewed 8 days ago; shipping
+the narrow version now closes a known gap without expanding scope into the trading path.
+**Reversibility:** Easy — single-function revert, redeploy previous version.
+**Trace:** `docs/health-log.md` (48th run), `DECISIONS.md` 2026-07-20 entry (original proposal).
+
 ## 2026-07-28 — Closed the `settle-signals` batch-rotation bug flagged as a watch item on the prior run
 
 **Decision:** Added a `settlement_status` column and changed `settle-signals` to stamp `settled_at`
