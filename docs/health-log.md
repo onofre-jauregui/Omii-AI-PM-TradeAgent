@@ -2,6 +2,46 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-28 (51st run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a real (if unproven) gap — health-check's own live-balance credential fetch had no timeout, unlike the identical call already fixed in market-data-fetcher
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 50th run's
+~10:07 UTC cutoff through this run's ~11:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 50th run's own push (PR #103, 13m11s)
+and no pushes since.
+
+**Fix (LOW risk, monitoring-path only, no trading logic touched):** with zero live errors and
+lint fully swept the last two runs (remaining 9 `react-refresh/only-export-components` warnings
+are either vendored shadcn/ui primitives or an idiomatic context+hook colocation pattern — not
+worth splitting files for), looked for the same class of bug the 48th run fixed in
+`market-data-fetcher`: an unguarded `getKalshiCredentials()` call with no timeout. Found it in
+`health-check/index.ts`'s live-balance loop (§10, added 2026-07-25) — `await
+getKalshiCredentials(supabase, user_id)` inside a `try/catch`, but a hang (never-resolving query)
+doesn't throw, so the `catch` doesn't help. Unlike market-data-fetcher, this one had no prior
+incident — but `health-check` is the alerting path itself, so a hang here is worse in kind: it
+would silently kill the *entire* hourly sweep (all 11 other checks), not just skip a chunk of one
+run's series like market-data-fetcher's version did. Applied the identical `Promise.race(...,
+8s)` pattern, same `8_000`ms constant.
+**Scope check against the 48th run's own caution** (it explicitly declined a shared-level fix
+across all `getKalshiCredentials()` call sites, citing blast radius on `execute-trade`'s
+real-money path): this fix touches only `health-check`, a read-only monitoring function with no
+order-placement or fund-moving code — same risk class as market-data-fetcher, not the trading
+path. `settle-signals`, `reconcile-orders`, and the other 4 unguarded call sites are noted but
+left untouched this run — one narrow, evidence-adjacent fix per run, not a sweep.
+
+**Verified:** `deno check supabase/functions/health-check/index.ts` — same 12 pre-existing
+Supabase-generic type errors on unmodified `dev` (confirmed via `git stash`/`stash pop`), no new
+errors from this change. Deployed via `supabase functions deploy health-check`. Verified live
+against the real Supabase project: triggered the function the same way `health-check-hourly`'s
+own `pg_cron` job does (`net.http_post` to the function URL with the service-role JWT, matching
+`cron.job.command` exactly), with a 25s `timeout_milliseconds` since the default 5s undercuts the
+function's real runtime — response: `{"ok":true,"alerts_sent":[],"alerts_skipped":
+["api_error_kalshi"]}"`, HTTP 200, `timed_out: false`. Ran to completion cleanly with the new
+guard in place.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
 ## 2026-07-28 (50th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed both remaining exhaustive-deps lint warnings (11 → 9), one via a latest-ref fix after tracing the caller showed the naive fix would cause a refetch storm
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 49th run's
