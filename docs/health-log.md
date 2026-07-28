@@ -44,10 +44,14 @@ the real HITL flow or drop the dead `hitl_approvals` table.
 
 **Verified against real data:** `npm run lint` (0 errors, 12 pre-existing warnings, unchanged) and
 `npm test` (206/206 passing, all pre-existing suites) both clean before pushing. Local Playwright
-chromium install stalled on a slow browser download, so final verification was CI's own
-`E2E smoke tests → kalshitradeagent.live` job on the PR — the same `test:e2e:staging` command this
-fix targets, run against the real staging deploy — confirmed green before merging (first pass in
-this job since the 35th run).
+chromium install stalled on a slow browser download; since `migrate-staging`/`deploy-staging`/E2E
+only trigger on `push` to `dev` (not on `pull_request`), the PR itself (#96) could only show the
+lint/test/build job green. Merged to `dev`, then watched the resulting push-triggered run
+(`30328534295`) end-to-end: `Deploy edge functions → staging Supabase` succeeded (2m7s, all 13
+functions), then `E2E smoke tests → kalshitradeagent.live` — the exact job that had been red since
+at least the 36th run — passed in 54s. Full pipeline conclusion: `success` — the first fully green
+CI run on `dev` in the visible run history (`gh run list --branch dev`, 20+ prior runs all
+`failure`, aside from one unrelated promotion-merge run).
 **Reversibility:** easy — single test-file diff (one test block removed, two comments edited), no
 schema, edge function, or execute-trade change; `git revert` fully restores prior (still-failing)
 state.
