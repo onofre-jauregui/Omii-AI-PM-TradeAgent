@@ -19,6 +19,7 @@ import { sendTelegramAlert } from "../_shared/telegram.ts";
  */
 
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders
+const MARKET_FETCH_TIMEOUT_MS = 8_000; // same bound, applied to the per-ticker Kalshi market GET below
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -107,10 +108,28 @@ serve(async (req) => {
         const timestamp = Date.now();
         const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", marketPath, timestamp);
 
-        const marketResp = await fetch(`${kalshiBase}${marketPath}`, {
-          method: "GET",
-          headers: authHeaders,
-        });
+        // A stalled market GET here doesn't throw — it hangs this ticker's
+        // iteration until the platform's own execution timeout kills the
+        // whole 15-min run, stalling shadow-PnL settlement for every
+        // remaining ticker in the batch. Same class the 62nd-65th runs
+        // closed in kalshiFetch/fetchOrderbook/fetchKalshiOrder.
+        const marketController = new AbortController();
+        const marketTimeoutId = setTimeout(() => marketController.abort(), MARKET_FETCH_TIMEOUT_MS);
+        let marketResp: Response;
+        try {
+          marketResp = await fetch(`${kalshiBase}${marketPath}`, {
+            method: "GET",
+            headers: authHeaders,
+            signal: marketController.signal,
+          });
+        } catch (fetchErr) {
+          if (fetchErr instanceof Error && fetchErr.name === "AbortError") {
+            throw new Error(`Kalshi GET market ${ticker} timed out after ${MARKET_FETCH_TIMEOUT_MS}ms`);
+          }
+          throw fetchErr;
+        } finally {
+          clearTimeout(marketTimeoutId);
+        }
 
         if (!marketResp.ok) {
           await supabase.from("compliance_log").insert({
