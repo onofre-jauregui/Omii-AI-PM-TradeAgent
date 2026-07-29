@@ -26,25 +26,52 @@ const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
 const CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID")!;
 const WEBHOOK_SECRET = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
 
+// Neither fetch below had a timeout — a stalled Telegram API call or a hung
+// downstream function (invoked via /run mdf, /run trade, /health) would block
+// this webhook for as long as the platform's own execution timeout allowed,
+// leaving Telegram's own retry/backoff to paper over an admin bot that looked
+// dead. Same failure shape closed across _shared/telegram.ts and a dozen
+// other call sites in this campaign; this is the last uninstrumented fetch
+// in the operator-facing control surface.
+const TELEGRAM_REPLY_TIMEOUT_MS = 8_000;
+const INVOKE_FUNCTION_TIMEOUT_MS = 45_000; // /run trade can legitimately take up to 30s
+
 async function reply(text: string) {
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_REPLY_TIMEOUT_MS);
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: "HTML" }),
+      signal: controller.signal,
+    }).catch(() => {});
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function invokeFunction(name: string): Promise<any> {
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-  });
-  if (!res.ok) return { error: `${res.status} ${res.statusText}` };
-  return res.json().catch(() => ({ error: "non-JSON response" }));
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), INVOKE_FUNCTION_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+      signal: controller.signal,
+    });
+    if (!res.ok) return { error: `${res.status} ${res.statusText}` };
+    return res.json().catch(() => ({ error: "non-JSON response" }));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: `${name} timed out or failed to respond: ${msg}` };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 serve(async (req) => {

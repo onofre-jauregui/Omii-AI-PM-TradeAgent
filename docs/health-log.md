@@ -2,6 +2,53 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (73rd run) — Clean window, all cron healthy, CI green (72nd run's retry-budget fix confirmed working); closed the last uninstrumented fetch in the operator-facing Telegram control bot
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`cea95e3`, the 72nd run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 72nd run's ~08:07 UTC cutoff through this run's ~09:07 UTC invocation — zero rows across 382
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`.
+
+**CI confirmation:** `gh run list --workflow=ci.yml --branch dev` shows the 72nd run's own push
+(`30434418850`, 08:09:52 UTC) completed green in 4m28s — the widened 5-attempt/exponential-backoff
+retry budget added for the esm.sh outage has now been exercised by a real deploy and held. No CI
+runs since; nothing new to investigate there this run.
+
+**Fix — `telegram-webhook/index.ts` had two uninstrumented `fetch()` calls:** this function is the
+operator-facing Telegram bot (`/status`, `/health`, `/429`, `/run mdf`, `/run trade`, `/help`) —
+the same failure shape closed across `_shared/telegram.ts` and a dozen call sites in the 68th–71st
+runs, but this file predates that campaign and was missed: it has its own inline `reply()` (Telegram
+`sendMessage`) and `invokeFunction()` (invoking `health-check`/`market-data-fetcher`/`auto-trade` by
+HTTP) with no `AbortController`/timeout on either. A stalled Telegram API response or a hung
+downstream function would block this webhook indefinitely — up to the platform's own execution
+timeout — leaving the admin bot looking dead with no error surfaced, and Telegram's own webhook
+retry/backoff papering over it instead of a clear failure.
+
+**Fix applied (LOW risk, additive-only, single file):** `reply()` now uses the same
+`AbortController` + 8s timeout + swallowed-fetch-error pattern as `_shared/telegram.ts`'s
+`sendTelegramAlert()` (fire-and-forget, never blocks, never throws). `invokeFunction()` gets a 45s
+timeout — wide enough to cover `/run trade`'s own documented "may take up to 30s" — and now returns
+a clear `{error: "<name> timed out or failed to respond: ..."}` on abort instead of hanging, which
+the existing outer `catch` block already surfaces back to the operator via Telegram as `🔴 Internal
+error: ...`. No behavior change on the happy path.
+
+**Verified:** `deno check supabase/functions/telegram-webhook/index.ts` passes clean. Deployed via
+`supabase functions deploy telegram-webhook --project-ref uyfnezxmgwitpzsrnkst`. Confirmed the
+function is live and routing correctly post-deploy (platform-level JWT gateway returns 401 for an
+unauthenticated request, unchanged pre-/post-deploy — this is Supabase's own gateway layer, not
+this function's code, and is unrelated to this diff). Did not attempt to obtain the Telegram webhook
+secret to drive a full authenticated request through `/run trade`, since that would trigger a real
+auto-trade cycle — out of scope for a verification step. Same
+unexercised-until-the-next-real-stall caveat as every other timeout guard added in this campaign.
+
+**Reversibility:** trivial — single-file diff, two functions wrapped in the same
+try/finally-with-AbortController shape already proven in `_shared/telegram.ts`; revert path is
+`git revert` + redeploy.
+
 ## 2026-07-29 (72nd run) — Clean window, all cron healthy; but the 71st run's own merge broke CI on a transient esm.sh CDN outage that outlasted the existing retry guard — widened the retry budget
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
