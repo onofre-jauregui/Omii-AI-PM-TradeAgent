@@ -2,8 +2,13 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SENDER_EMAIL = "tradeagentcomm@yahoo.com";
-const SENDER_NAME  = "TradeAgent";
+const SENDER_NAME = "TradeAgent";
 const DASHBOARD_URL = "https://kalshitradeagent.com";
+
+// Neither SendGrid nor Twilio call below had a timeout — a stalled request to either
+// blocked this once-daily cron per-recipient, in a loop over every opted-in user, up to
+// the platform's own execution timeout. Same bound as the rest of the timeout-guard campaign.
+const FETCH_TIMEOUT_MS = 8_000;
 
 serve(async (_req) => {
   const supabase = createClient(
@@ -12,9 +17,9 @@ serve(async (_req) => {
   );
 
   const sendgridKey = Deno.env.get("SENDGRID_API_KEY");
-  const twilioSid   = Deno.env.get("TWILIO_ACCOUNT_SID");
-  const twilioAuth  = Deno.env.get("TWILIO_AUTH_TOKEN");
-  const twilioFrom  = Deno.env.get("TWILIO_FROM_NUMBER");
+  const twilioSid = Deno.env.get("TWILIO_ACCOUNT_SID");
+  const twilioAuth = Deno.env.get("TWILIO_AUTH_TOKEN");
+  const twilioFrom = Deno.env.get("TWILIO_FROM_NUMBER");
 
   // 1. Fetch all users opted in to daily_summary
   // NOTE: supabase.rpc(...) returns a PostgrestFilterBuilder — a thenable, not a
@@ -34,10 +39,14 @@ serve(async (_req) => {
   );
 
   // Fall back to direct table query if exec_sql isn't available
-  const userRows: Array<{ id: string; phone: string | null; notification_prefs: Record<string, unknown>; email: string }> =
-    (usersErr || !users)
-      ? await fetchUsersDirectly(supabase)
-      : users;
+  const userRows: Array<
+    {
+      id: string;
+      phone: string | null;
+      notification_prefs: Record<string, unknown>;
+      email: string;
+    }
+  > = (usersErr || !users) ? await fetchUsersDirectly(supabase) : users;
 
   if (!userRows.length) {
     console.log("daily-digest: no opted-in users, nothing to send");
@@ -46,7 +55,9 @@ serve(async (_req) => {
   }
 
   let sent = 0;
-  const nyNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const nyNow = new Date(
+    new Date().toLocaleString("en-US", { timeZone: "America/New_York" }),
+  );
   const todayStartET = new Date(nyNow);
   todayStartET.setHours(0, 0, 0, 0);
 
@@ -60,11 +71,16 @@ serve(async (_req) => {
       const prefs = user.notification_prefs ?? {};
       const channel = (prefs.channel as string) ?? "email";
 
-      if ((channel === "email" || channel === "both") && sendgridKey && user.email) {
+      if (
+        (channel === "email" || channel === "both") && sendgridKey && user.email
+      ) {
         await sendEmail(sendgridKey, user.email, stats);
       }
 
-      if ((channel === "sms" || channel === "both") && twilioSid && twilioAuth && twilioFrom && user.phone) {
+      if (
+        (channel === "sms" || channel === "both") && twilioSid && twilioAuth &&
+        twilioFrom && user.phone
+      ) {
         await sendSms(twilioSid, twilioAuth, twilioFrom, user.phone, stats);
       }
 
@@ -73,10 +89,16 @@ serve(async (_req) => {
         user_id: user.id,
         event_type: "daily_digest",
         severity: "info",
-        message: `Daily digest sent via ${channel}: ${stats.totalTrades} trade(s), net P&L ${stats.netPnl >= 0 ? "+" : ""}${stats.netPnl.toFixed(2)}`,
+        message:
+          `Daily digest sent via ${channel}: ${stats.totalTrades} trade(s), net P&L ${
+            stats.netPnl >= 0 ? "+" : ""
+          }${stats.netPnl.toFixed(2)}`,
         metadata: { channel, ...stats },
         created_at: new Date().toISOString(),
-      }).then(undefined, (e: unknown) => console.warn("compliance_log insert failed:", e));
+      }).then(
+        undefined,
+        (e: unknown) => console.warn("compliance_log insert failed:", e),
+      );
 
       sent++;
     } catch (err) {
@@ -106,7 +128,10 @@ async function logRunSummary(
     message: `daily-digest run: ${sent}/${total} digest(s) sent`,
     metadata: { sent, total },
     created_at: new Date().toISOString(),
-  }).then(undefined, (e: unknown) => console.warn("daily_digest_run log failed:", e));
+  }).then(
+    undefined,
+    (e: unknown) => console.warn("daily_digest_run log failed:", e),
+  );
 }
 
 async function fetchUsersDirectly(supabase: ReturnType<typeof createClient>) {
@@ -122,7 +147,15 @@ async function fetchUsersDirectly(supabase: ReturnType<typeof createClient>) {
 
   // Fetch emails from auth.users via the admin API
   const users = [];
-  for (const row of data as Array<{ id: string; phone: string | null; notification_prefs: Record<string, unknown> }>) {
+  for (
+    const row of data as Array<
+      {
+        id: string;
+        phone: string | null;
+        notification_prefs: Record<string, unknown>;
+      }
+    >
+  ) {
     const { data: authUser } = await supabase.auth.admin.getUserById(row.id);
     if (authUser?.user?.email) {
       users.push({ ...row, email: authUser.user.email });
@@ -152,12 +185,26 @@ async function getDayStats(
     .eq("mode", "live")
     .gte("settled_at", todayStartET.toISOString());
 
-  if (error || !data) return { totalTrades: 0, wins: 0, losses: 0, netPnl: 0, openPositions: 0, winRate: 0 };
+  if (error || !data) {
+    return {
+      totalTrades: 0,
+      wins: 0,
+      losses: 0,
+      netPnl: 0,
+      openPositions: 0,
+      winRate: 0,
+    };
+  }
 
-  const settled = data.filter((t: { settled_at: string | null }) => t.settled_at);
-  const wins    = settled.filter((t: { pnl: number }) => t.pnl > 0).length;
-  const losses  = settled.filter((t: { pnl: number }) => t.pnl <= 0).length;
-  const netPnl  = settled.reduce((sum: number, t: { pnl: number }) => sum + (t.pnl ?? 0), 0);
+  const settled = data.filter((t: { settled_at: string | null }) =>
+    t.settled_at
+  );
+  const wins = settled.filter((t: { pnl: number }) => t.pnl > 0).length;
+  const losses = settled.filter((t: { pnl: number }) => t.pnl <= 0).length;
+  const netPnl = settled.reduce(
+    (sum: number, t: { pnl: number }) => sum + (t.pnl ?? 0),
+    0,
+  );
 
   const { count: openPositions } = await supabase
     .from("trades")
@@ -177,9 +224,13 @@ async function getDayStats(
   };
 }
 
-async function sendEmail(apiKey: string, email: string, stats: DayStats): Promise<void> {
-  const sign    = stats.netPnl >= 0 ? "+" : "-";
-  const pnlAbs  = Math.abs(stats.netPnl).toFixed(2);
+async function sendEmail(
+  apiKey: string,
+  email: string,
+  stats: DayStats,
+): Promise<void> {
+  const sign = stats.netPnl >= 0 ? "+" : "-";
+  const pnlAbs = Math.abs(stats.netPnl).toFixed(2);
   const subject = `Daily summary — ${sign}$${pnlAbs} today`;
   const pnlColor = stats.netPnl >= 0 ? "#22c55e" : "#ef4444";
 
@@ -206,10 +257,16 @@ async function sendEmail(apiKey: string, email: string, stats: DayStats): Promis
     </div>
   </div>
 
-  ${stats.openPositions > 0 ? `
+  ${
+    stats.openPositions > 0
+      ? `
   <p style="color:rgba(255,255,255,0.6);font-size:14px;margin:0 0 24px;">
-    ${stats.openPositions} position${stats.openPositions > 1 ? "s" : ""} still open — settling overnight.
-  </p>` : ""}
+    ${stats.openPositions} position${
+        stats.openPositions > 1 ? "s" : ""
+      } still open — settling overnight.
+  </p>`
+      : ""
+  }
 
   <a href="${DASHBOARD_URL}" style="display:inline-block;background:#22c55e;color:#000;font-size:14px;font-weight:600;text-decoration:none;padding:12px 24px;border-radius:100px;margin-bottom:32px;">View dashboard →</a>
 
@@ -221,20 +278,31 @@ async function sendEmail(apiKey: string, email: string, stats: DayStats): Promis
 </body>
 </html>`;
 
-  const resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      personalizations: [{ to: [{ email }] }],
-      from: { email: SENDER_EMAIL, name: SENDER_NAME },
-      reply_to: { email: SENDER_EMAIL },
-      subject,
-      content: [{ type: "text/html", value: html }],
-    }),
-  });
+  const sendgridController = new AbortController();
+  const sendgridTimeoutId = setTimeout(
+    () => sendgridController.abort(),
+    FETCH_TIMEOUT_MS,
+  );
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email }] }],
+        from: { email: SENDER_EMAIL, name: SENDER_NAME },
+        reply_to: { email: SENDER_EMAIL },
+        subject,
+        content: [{ type: "text/html", value: html }],
+      }),
+      signal: sendgridController.signal,
+    });
+  } finally {
+    clearTimeout(sendgridTimeoutId);
+  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -243,23 +311,41 @@ async function sendEmail(apiKey: string, email: string, stats: DayStats): Promis
 }
 
 async function sendSms(
-  sid: string, auth: string, from: string, to: string, stats: DayStats,
+  sid: string,
+  auth: string,
+  from: string,
+  to: string,
+  stats: DayStats,
 ): Promise<void> {
   const sign = stats.netPnl >= 0 ? "+" : "-";
   const pnlAbs = Math.abs(stats.netPnl).toFixed(2);
-  const body = `TradeAgent: ${sign}$${pnlAbs} today (${stats.wins}W/${stats.losses}L${stats.openPositions > 0 ? `, ${stats.openPositions} open` : ""}). ${DASHBOARD_URL}`;
+  const body =
+    `TradeAgent: ${sign}$${pnlAbs} today (${stats.wins}W/${stats.losses}L${
+      stats.openPositions > 0 ? `, ${stats.openPositions} open` : ""
+    }). ${DASHBOARD_URL}`;
 
-  const resp = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${btoa(`${sid}:${auth}`)}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ To: to, From: from, Body: body }),
-    },
+  const twilioController = new AbortController();
+  const twilioTimeoutId = setTimeout(
+    () => twilioController.abort(),
+    FETCH_TIMEOUT_MS,
   );
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${sid}:${auth}`)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ To: to, From: from, Body: body }),
+        signal: twilioController.signal,
+      },
+    );
+  } finally {
+    clearTimeout(twilioTimeoutId);
+  }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");

@@ -28,20 +28,35 @@ import { WEATHER_LOCATIONS } from "../_shared/weather.ts";
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 90;
 
+// Neither Open-Meteo call below had a timeout — a stalled request for any one city in the
+// loop blocked this once-daily cron for every remaining city, up to the platform's own
+// execution timeout. Same bound as the rest of the timeout-guard campaign.
+const FETCH_TIMEOUT_MS = 8_000;
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !supabaseKey) {
-    return new Response(JSON.stringify({ error: "Missing Supabase credentials" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: "Missing Supabase credentials" }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
 
   const url = new URL(req.url);
-  const days = Math.min(MAX_DAYS, Math.max(7, parseInt(url.searchParams.get("days") || String(DEFAULT_DAYS), 10)));
+  const days = Math.min(
+    MAX_DAYS,
+    Math.max(
+      7,
+      parseInt(url.searchParams.get("days") || String(DEFAULT_DAYS), 10),
+    ),
+  );
 
   // Date range: [days] days ago → yesterday (exclude today — not yet settled)
   const endDate = new Date();
@@ -55,7 +70,11 @@ serve(async (req) => {
   const locationResults: any[] = [];
 
   for (const loc of WEATHER_LOCATIONS) {
-    const locResult: any = { location: loc.code, status: "pending", date_range: `${startStr} → ${endStr}` };
+    const locResult: any = {
+      location: loc.code,
+      status: "pending",
+      date_range: `${startStr} → ${endStr}`,
+    };
 
     try {
       // ── 1. Actual observed highs (ERA5-based reanalysis) ──────────────────
@@ -68,18 +87,38 @@ serve(async (req) => {
         temperature_unit: "fahrenheit",
         timezone: loc.timezone,
       });
-      const archiveResp = await fetch(
-        `https://archive-api.open-meteo.com/v1/archive?${archiveParams}`,
-        { headers: { "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)" } },
+      const archiveController = new AbortController();
+      const archiveTimeoutId = setTimeout(
+        () => archiveController.abort(),
+        FETCH_TIMEOUT_MS,
       );
-      if (!archiveResp.ok) throw new Error(`Archive API ${archiveResp.status} for ${loc.code}`);
+      let archiveResp: Response;
+      try {
+        archiveResp = await fetch(
+          `https://archive-api.open-meteo.com/v1/archive?${archiveParams}`,
+          {
+            headers: {
+              "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)",
+            },
+            signal: archiveController.signal,
+          },
+        );
+      } finally {
+        clearTimeout(archiveTimeoutId);
+      }
+      if (!archiveResp.ok) {
+        throw new Error(`Archive API ${archiveResp.status} for ${loc.code}`);
+      }
 
       const archiveData = await archiveResp.json();
       const actualByDate: Record<string, number> = {};
       const archiveDates: string[] = archiveData.daily?.time || [];
-      const archiveTemps: (number | null)[] = archiveData.daily?.temperature_2m_max || [];
+      const archiveTemps: (number | null)[] =
+        archiveData.daily?.temperature_2m_max || [];
       for (let i = 0; i < archiveDates.length; i++) {
-        if (archiveTemps[i] != null) actualByDate[archiveDates[i]] = archiveTemps[i]!;
+        if (archiveTemps[i] != null) {
+          actualByDate[archiveDates[i]] = archiveTemps[i]!;
+        }
       }
 
       // ── 2. GFS ensemble hindcast ──────────────────────────────────────────
@@ -93,17 +132,38 @@ serve(async (req) => {
         temperature_unit: "fahrenheit",
         timezone: loc.timezone,
       });
-      const ensResp = await fetch(
-        `https://ensemble-api.open-meteo.com/v1/ensemble?${ensParams}`,
-        { headers: { "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)" } },
+      const ensController = new AbortController();
+      const ensTimeoutId = setTimeout(
+        () => ensController.abort(),
+        FETCH_TIMEOUT_MS,
       );
-      if (!ensResp.ok) throw new Error(`Ensemble API ${ensResp.status} for ${loc.code}`);
+      let ensResp: Response;
+      try {
+        ensResp = await fetch(
+          `https://ensemble-api.open-meteo.com/v1/ensemble?${ensParams}`,
+          {
+            headers: {
+              "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)",
+            },
+            signal: ensController.signal,
+          },
+        );
+      } finally {
+        clearTimeout(ensTimeoutId);
+      }
+      if (!ensResp.ok) {
+        throw new Error(`Ensemble API ${ensResp.status} for ${loc.code}`);
+      }
 
       const ensData = await ensResp.json();
       const gfsMeanByDate: Record<string, number> = {};
       const ensDates: string[] = ensData.daily?.time || [];
-      const memberKeys = Object.keys(ensData.daily || {}).filter(k => k.startsWith("temperature_2m_max_member"));
-      console.log(`[${loc.code}] GFS ensemble dates: ${ensDates.length}, members: ${memberKeys.length}`);
+      const memberKeys = Object.keys(ensData.daily || {}).filter((k) =>
+        k.startsWith("temperature_2m_max_member")
+      );
+      console.log(
+        `[${loc.code}] GFS ensemble dates: ${ensDates.length}, members: ${memberKeys.length}`,
+      );
 
       for (let i = 0; i < ensDates.length; i++) {
         const date = ensDates[i];
@@ -113,11 +173,15 @@ serve(async (req) => {
           if (val != null && !isNaN(val)) memberVals.push(val);
         }
         // Fallback: some historical responses return only temperature_2m_max (mean)
-        if (memberVals.length === 0 && ensData.daily?.temperature_2m_max?.[i] != null) {
+        if (
+          memberVals.length === 0 &&
+          ensData.daily?.temperature_2m_max?.[i] != null
+        ) {
           memberVals.push(ensData.daily.temperature_2m_max[i]);
         }
         if (memberVals.length > 0) {
-          gfsMeanByDate[date] = memberVals.reduce((a, b) => a + b, 0) / memberVals.length;
+          gfsMeanByDate[date] = memberVals.reduce((a, b) => a + b, 0) /
+            memberVals.length;
         }
       }
 
@@ -142,7 +206,12 @@ serve(async (req) => {
 
       // ── 4. Compute errors ─────────────────────────────────────────────────
       const errors: number[] = [];
-      const dailyErrors: { date: string; gfs: number; actual: number; error: number }[] = [];
+      const dailyErrors: {
+        date: string;
+        gfs: number;
+        actual: number;
+        error: number;
+      }[] = [];
 
       for (const date of Object.keys(actualByDate).sort()) {
         const gfs = forecastByDate[date];
@@ -150,7 +219,12 @@ serve(async (req) => {
         if (gfs != null && actual != null) {
           const err = gfs - actual; // positive = GFS warmer than reality
           errors.push(err);
-          dailyErrors.push({ date, gfs: Math.round(gfs * 10) / 10, actual: Math.round(actual * 10) / 10, error: Math.round(err * 10) / 10 });
+          dailyErrors.push({
+            date,
+            gfs: Math.round(gfs * 10) / 10,
+            actual: Math.round(actual * 10) / 10,
+            error: Math.round(err * 10) / 10,
+          });
         }
       }
 
@@ -163,7 +237,9 @@ serve(async (req) => {
       }
 
       const bias = errors.reduce((a, b) => a + b, 0) / errors.length;
-      const rmse = Math.sqrt(errors.reduce((s, e) => s + e * e, 0) / errors.length);
+      const rmse = Math.sqrt(
+        errors.reduce((s, e) => s + e * e, 0) / errors.length,
+      );
       const sorted = [...errors.map(Math.abs)].sort((a, b) => a - b);
       const mad = sorted[Math.floor(sorted.length / 2)]; // median absolute deviation
 
@@ -176,20 +252,38 @@ serve(async (req) => {
         sample_count: errors.length,
         date_range_start: startStr,
         date_range_end: endStr,
-        model_source: (storedForecasts?.length ?? 0) > 0 ? "gfs_ensemble_mixed_live" : "gfs_ensemble_hindcast",
+        model_source: (storedForecasts?.length ?? 0) > 0
+          ? "gfs_ensemble_mixed_live"
+          : "gfs_ensemble_hindcast",
         last_backtest_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }, { onConflict: "location" });
 
       // ── 6. Write a memory so the agent learns from this ───────────────────
       if (Math.abs(bias) >= 1.0) {
-        const direction = bias > 0 ? "warm (forecasts too high)" : "cold (forecasts too low)";
+        const direction = bias > 0
+          ? "warm (forecasts too high)"
+          : "cold (forecasts too low)";
         await supabase.from("agent_memory").insert({
           memory_type: "market_condition",
-          title: `GFS bias for ${loc.name}: ${bias > 0 ? "+" : ""}${bias.toFixed(1)}°F`,
-          content: `GFS ensemble runs ${direction} for ${loc.name} by ${Math.abs(bias).toFixed(1)}°F on average (RMSE: ${rmse.toFixed(1)}°F, MAD: ${mad.toFixed(1)}°F, n=${errors.length} days). Apply bias correction: subtract ${bias.toFixed(1)}°F from forecast before computing edge.`,
+          title: `GFS bias for ${loc.name}: ${bias > 0 ? "+" : ""}${
+            bias.toFixed(1)
+          }°F`,
+          content: `GFS ensemble runs ${direction} for ${loc.name} by ${
+            Math.abs(bias).toFixed(1)
+          }°F on average (RMSE: ${rmse.toFixed(1)}°F, MAD: ${
+            mad.toFixed(1)
+          }°F, n=${errors.length} days). Apply bias correction: subtract ${
+            bias.toFixed(1)
+          }°F from forecast before computing edge.`,
           source_type: "backtest",
-          tags: [loc.code.toLowerCase(), "weather", "gfs", "calibration", "bias"],
+          tags: [
+            loc.code.toLowerCase(),
+            "weather",
+            "gfs",
+            "calibration",
+            "bias",
+          ],
           confidence: Math.min(0.9, errors.length / 30),
           strategy_id: "S-005",
         });
@@ -202,12 +296,15 @@ serve(async (req) => {
       locResult.mad_fahrenheit = Math.round(mad * 10) / 10;
       locResult.live_forecasts_used = storedForecasts?.length ?? 0;
       locResult.interpretation = bias > 1
-        ? `GFS runs warm — calibration will lower threshold by ${Math.abs(bias).toFixed(1)}°F`
+        ? `GFS runs warm — calibration will lower threshold by ${
+          Math.abs(bias).toFixed(1)
+        }°F`
         : bias < -1
-        ? `GFS runs cold — calibration will raise threshold by ${Math.abs(bias).toFixed(1)}°F`
+        ? `GFS runs cold — calibration will raise threshold by ${
+          Math.abs(bias).toFixed(1)
+        }°F`
         : "GFS well-calibrated for this city (bias < 1°F)";
       locResult.daily_errors = dailyErrors.slice(-7); // last 7 days for inspection
-
     } catch (e) {
       locResult.status = "error";
       locResult.error = e instanceof Error ? e.message : String(e);
@@ -220,11 +317,24 @@ serve(async (req) => {
   await supabase.from("compliance_log").insert({
     event_type: "weather_backtest_run",
     severity: "info",
-    message: `backtest-weather: ${locationResults.filter(r => r.status === "completed").length}/${locationResults.length} cities calibrated over ${days} days`,
-    metadata: { date_range: `${startStr} → ${endStr}`, results: locationResults },
+    message: `backtest-weather: ${
+      locationResults.filter((r) => r.status === "completed").length
+    }/${locationResults.length} cities calibrated over ${days} days`,
+    metadata: {
+      date_range: `${startStr} → ${endStr}`,
+      results: locationResults,
+    },
   });
 
-  return new Response(JSON.stringify({ success: true, days, date_range: `${startStr} → ${endStr}`, locations: locationResults }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({
+      success: true,
+      days,
+      date_range: `${startStr} → ${endStr}`,
+      locations: locationResults,
+    }),
+    {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    },
+  );
 });
