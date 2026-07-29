@@ -2,6 +2,63 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (77th run) — Clean window, zero error/critical events, cron healthy; the 76th run's own merge broke CI a second time on the same esm.sh class — fixed the root cause instead of widening the retry budget again
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` had a stale branch
+(`health-check/run-20260729-121017`, the 76th run's own branch, already merged as PR #131) —
+`git fetch && git reset --hard origin/dev`, fresh branch from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 76th run's ~12:10 UTC cutoff through this run's ~13:07 UTC invocation — zero rows across 114
+events in the window (107 info, 7 warning). `cron_health()` showed all 14 registered jobs
+`active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**Active issue found (the actual work this run):** `gh run list --workflow=ci.yml --branch dev`
+showed the 76th run's own push (`30450872671`, 12:15:55 UTC) had **failed** — a fact the 76th
+run's log entry never surfaced, since its own verification stopped at the manual `supabase
+functions deploy` it ran directly, without checking whether its *merge* had gone green in CI.
+`gh run view --log-failed` showed `Deploy edge functions → staging Supabase` died on
+`futures-signal` after all 5 retry attempts (~7min, 12:38–12:45 UTC): `Import
+'https://esm.sh/@supabase/supabase-js@2' failed: 522 <unknown status code>`, over and over. This
+blocked staging deploy, production deploy, the canary gate, and e2e smoke tests entirely for that
+push — not just a slow function, the whole downstream pipeline.
+
+**Root cause: this is the same failure class the 72nd run already hit and "fixed" by widening the
+retry budget (3→5 attempts, exponential backoff, ~3.75min).** That budget held for four runs
+(73rd–76th) and then broke anyway — esm.sh had an outage longer than the widened window could
+absorb. Per the fail-twice rule, retrying around an unreliable upstream CDN is not a fix, it's a
+larger stopgap that was always going to run out eventually. The actual root cause: all 34 import
+sites (33 function entry points + `_shared/notifications.ts`'s type-only reference) bundle
+`supabase-js` from `https://esm.sh/@supabase/supabase-js@2` at deploy time, making every CI deploy
+and every manual `supabase functions deploy` depend on esm.sh's uptime.
+
+**Fix applied (LOW risk, mechanical, no behavior change):** replaced the import specifier at all
+34 sites with `npm:@supabase/supabase-js@2` — Deno's native npm-registry resolution, which does
+not touch esm.sh at all. Same package, same version, same API; only the resolution source
+changed. Also updated two stale doc comments (`_shared/limits.ts`, `_shared/limits-math.ts`) that
+referenced the old esm.sh URL, and the CI workflow's comment to document the root-cause fix while
+keeping the retry loop itself as defense-in-depth against any other transient deploy hiccup (not
+as the primary fix anymore).
+
+**Verified:** confirmed locally with `deno run` that `npm:@supabase/supabase-js@2` resolves and
+`createClient` works. `deno check` on 17 sampled entry points — including Tier-1 `auto-trade`,
+`auto-settle`, `execute-trade` — showed **identical error counts before/after** via `git stash`
+comparison (17/6/20 match the documented pre-existing baselines exactly; zero new errors anywhere
+sampled). `npm run lint`: 0 errors, only the pre-existing fast-refresh warnings. `npm run test`:
+206/206 unit tests pass unchanged. Opened PR #132, watched its CI (lint/test job passed; deploy
+jobs correctly skip on a PR event since they're gated to `dev` pushes), merged, then watched the
+resulting `dev` push's own CI run (`30454993657`) — `Deploy edge functions → staging Supabase`
+completed in 2m26s with zero retries needed, the first clean run through that job since the class
+of failure first appeared. Deployed all 31 affected functions to production
+(`uyfnezxmgwitpzsrnkst`) directly via `supabase functions deploy`. Post-deploy, polled
+`cron_health()` and `compliance_log`: `futures-signal-cron` (13:19), `surface-scanner-cron`
+(13:18), `market-data-fetcher-cron` (13:16) all ran clean post-redeploy, zero new error/critical
+rows in the 5 minutes following deploy.
+
+**Reversibility:** trivial — single mechanical string substitution across known files, `git
+revert` restores the esm.sh imports if `npm:` resolution ever proves less reliable (it shouldn't:
+npm's registry has materially higher uptime than esm.sh's CDN re-bundling layer).
+
 ## 2026-07-29 (76th run) — Clean window, zero error/critical events, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 75th run's backlog — `_shared/notifications.ts`'s SendGrid/Twilio `send()` calls
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
