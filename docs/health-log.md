@@ -2,6 +2,63 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (69th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `kalshi-ping`'s own balance fetch had no timeout guard, one line below its already-guarded credential fetch
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`4046b45`, the 68th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 68th run's ~04:07 UTC cutoff through this run's ~05:07 UTC invocation — zero rows across 921
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 68th
+run's own push (run `30421596096`, 11m17s) and no pushes since.
+
+**New instance of the recurring class:** re-swept every `await fetch(` call site in
+`supabase/functions/` for a missing `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`, `auto-settle`,
+`weather-signal`, `health-check`, `trading-agent`'s LLM call). Found `kalshi-ping/index.ts`'s own
+Kalshi API call (line ~67): the 55th run guarded this file's `getKalshiCredentials()` lookup with
+the standard `Promise.race`/timeout pattern, but the very next block — `await
+fetch(\`https://api.elections.kalshi.com${path}\`, { headers })` against `/portfolio/balance` —
+was left bare, no `AbortController`, no signal. Same failure shape as every prior instance, but
+this one is the most user-visible yet: `kalshi-ping` runs synchronously inline in the onboarding
+wizard's "verify Kalshi key" step, so a stalled Kalshi response here leaves a brand-new user's
+first-run activation spinning indefinitely with no error ever surfaced — worse than a cron-hang
+because it directly blocks signup rather than silently degrading a background job.
+
+**Scope check:** public, per-user read-only balance GET used only to confirm a freshly-saved key
+works before the agent starts — not the order placement/cancellation path, which stays untouched
+per the campaign's standing boundary. (Also checked `save-kalshi-key/index.ts`'s similar Kalshi
+`fetch()` at line 110 — left untouched this run: it's fired without `await` in a `.catch()`-only
+background call after the response already returned, so a hang there has no user-facing or
+cron-facing blast radius, unlike `kalshi-ping`'s synchronous, response-blocking call.)
+
+**Fix (LOW risk, read-only per-user endpoint, no schema or order-path change):** added
+`BALANCE_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` already in
+this file and every other function in this campaign) and wrapped the single `fetch()` call with a
+scoped `AbortController` + `setTimeout`, `signal` threaded into the call, `clearTimeout` in a
+`finally`. Added an explicit `AbortError` branch in the existing outer `catch` so a timeout returns
+the friendly `{"ok":false,"error":"Kalshi didn't respond in time — please try again."}` instead of
+the raw `DOMException` message — matching this same file's existing friendly-message convention
+for the credential-fetch timeout just above it, rather than leaking an internal error string to a
+new user mid-onboarding.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 10 pre-existing type errors and
+3 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `kalshi-ping` via
+`supabase functions deploy`. Verified live against the real deployed Supabase project: `OPTIONS`
+preflight returns HTTP 200, a no-auth `POST` returns HTTP 401 `UNAUTHORIZED_NO_AUTH_HEADER`, and a
+malformed-JWT `POST` returns HTTP 401 `UNAUTHORIZED_INVALID_JWT_FORMAT` — confirms the function is
+live and its pre-existing auth guards still behave correctly post-deploy. The new balance-fetch
+timeout branch itself is unexercised this run (would need a live user JWT plus a saved real Kalshi
+key to reach that code path, and no such test account was available) — flagged here rather than
+claimed proven, same caveat pattern as the 55th run's credential-fetch-timeout note for this same
+file.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-29 (68th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `health-check` itself had an unguarded Kalshi balance fetch inside its live-account low-balance sweep
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
