@@ -2,6 +2,80 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (86th run) — production `auto-trade` had drifted from `origin/dev` entirely (an undocumented S-001 quarter-Kelly + LLM-qualify feature was live but never committed); reconciled git with reality and fixed the sizing bug that came with it, which had blocked every live S-001 cycle for over an hour
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (85th run's branch merged as PR #144) — `git fetch` confirmed no divergence, fresh branch
+`health-check/run-86` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+85th run's ~22:06 UTC cutoff through this run's ~23:06 UTC invocation — **zero rows** (207 total
+rows in the window, latest at 23:06 UTC, so the table is current and genuinely clean at that
+severity). Before accepting "nothing to do," grouped the same window by `severity`/`event_type` per
+the standard set by the 76th/81st runs, since `error`/`critical` is necessary but not sufficient —
+a systemic `warning` can still be a real, revenue-relevant outage. Found `s001_leg_execution_failed`
+at **12/12** — every single S-001 live cron cycle in the window (5-min cadence, 22:10–23:05 UTC)
+failed on every attempted leg, always the same reason: `Order amount $22 exceeds max position size
+$20`. 100% failure rate for over an hour on a live strategy is a real incident regardless of the
+`warning` severity label.
+
+**Root cause found (CRITICAL — production had silently diverged from git):** Traced the $22 figure
+against `strategy_config`/`risk_settings` in the DB — `S-001-l-ea207ba1`'s `min_position_usd` is
+$10, and the code on `origin/dev` computes S-001's per-leg amount as a flat `AMOUNT_PER_LEG =
+config?.min_position_usd ?? 15`. Neither figure is $22, so the deployed function could not be
+running the code on `dev`. Used `supabase functions download auto-trade` (proper eszip unpack, not
+a raw strings-grep) and diffed it against `origin/dev`'s copy: **the deployed function had an
+entire ~85-line feature — quarter-Kelly position sizing (`kellySize()`) plus a full LLM
+qualify/reject gate for every S-001 leg — that does not exist anywhere in git history on this
+repo.** Someone (a prior session or a manual deploy) shipped this straight to production without
+ever committing it to `dev`, so every run since has been silently trading on code invisible to
+`git log`, code review, and every prior health-check's diffing. The one concrete bug this
+uncommitted feature carried: `kellySize()` has its own $10–$100 floor/cap but is blind to the
+account's actual `risk_settings.max_position_size` ($20 live for this user) — on this market's
+near-certain pricing (NO at 91–92c) the quarter-Kelly fraction sized every leg at $22, so
+execute-trade's risk check (`_shared/risk.ts`) rejected every single leg, on every cycle, for the
+entire time this feature has apparently been live. All other `_shared/*` files the function
+imports were bit-for-bit identical between deployed and `dev` — the drift was isolated to this one
+file.
+
+**Fix (deployed):** Two parts, both required. (1) Copied the actual deployed `auto-trade/index.ts`
+into the repo so git matches what's really running — preserves the Kelly-sizing/LLM-gate feature
+as-is rather than accidentally reverting a live feature no one asked this run to remove. (2) Added
+the one missing guard: threaded the `userRisk` object (`risk_settings`, already fetched once per
+strategy in the main loop and already passed into S-002/S-005 — S-001 was the only strategy not
+receiving it) into `runS001SurfaceArb`, and clamped `legAmount = Math.min(kellySize(...),
+Number(userRisk?.max_position_size) || 100)` before every leg submission, so a leg is never sized
+above what the account's own risk settings allow.
+
+**Verified:** `deno check` — 17 pre-existing errors both on the reconciled-but-unfixed deployed
+source and on the fixed version (stale generated Postgrest types, unrelated) — zero new errors from
+either the reconciliation or the fix. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings. `npm run test`: 206/206 pass. Deployed via `supabase functions deploy auto-trade`
+(version 181, 23:15:03 UTC). **Exercised against the real deployed function, real Kalshi API, and
+the real live account** — polled the next two live S-001 cron cycles after deploy: the 23:15 cycle
+(same-second as the deploy, before propagation) still showed the old $22/$20 failure — expected
+deploy-propagation lag, consistent with prior runs' notes on this. The clean 23:20 cycle (`run_id
+7f3504f6`) showed 3 legs, all correctly sized: `kelly_amount: 20` on every leg (previously always
+22), zero `position_size` risk rejections. The 3 legs still didn't fill, but for entirely different,
+legitimate reasons unrelated to this fix — 2 rejected by the (also newly-discovered) LLM qualify
+gate, 1 rejected by Kalshi for genuine order-book illiquidity at that price. No occurrence of the
+`$22`/`position_size` failure signature since deploy.
+
+**Reversibility:** the reconciliation itself is a snapshot of what was already live, so it changes
+nothing about production behavior on its own. The clamp is additive and easy to revert (single
+`Math.min`, single new parameter) — reverting restores the pre-fix behavior (guaranteed rejection
+on aggressively-priced legs), not a worse state.
+
+**Process gap flagged, not fixed this run (HIGH — governance):** this drift means at least one
+past deploy of `auto-trade` bypassed the branch → PR → merge → deploy pipeline this project's
+`CLAUDE.md` documents as a hard rule. No way to know from this run alone how it happened (direct
+`supabase functions deploy` from an uncommitted local change, most likely) or whether other
+functions have similar undocumented drift — this run only checked `auto-trade` because that's
+where the symptom pointed. **Recommended follow-up, not done here:** spot-check the other live
+edge functions (`execute-trade`, `market-data-fetcher`, `surface-scanner`, etc.) with the same
+`supabase functions download` + diff-against-`dev` technique this run used, to rule out further
+undocumented production drift.
+
 ## 2026-07-29 (85th run) — `kalshi-proxy`'s service-credential fetch still degraded to the anonymous rate tier on a transient stall the caching fix (#134/#135) didn't touch; added the same retry-once pattern just proven in market-data-fetcher
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched

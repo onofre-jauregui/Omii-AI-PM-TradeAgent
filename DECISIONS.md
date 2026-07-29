@@ -4,6 +4,24 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-29 — Reconciled git with a production `auto-trade` that had silently drifted (undocumented S-001 Kelly-sizing + LLM gate), then fixed the sizing bug it carried (86th health-check run)
+
+**Decision:** Committed the actual deployed `auto-trade/index.ts` (quarter-Kelly S-001 sizing +
+per-leg LLM qualify gate — ~85 lines with no prior git history) into `dev`, rather than reverting
+production to match the stale `dev` branch. Added a `userRisk`-clamp on the Kelly-sized leg amount
+as a bundled fix.
+**Options:** A) Redeploy from `dev` as-is — rejected, would have silently deleted a live feature
+(Kelly sizing + LLM gate) production has apparently been running, with no record of who added it or
+why. B) Leave production as the unrecorded source of truth, patch nothing in git — rejected, leaves
+the drift permanent and unreviewable, and the sizing bug keeps blocking every live S-001 cycle.
+C) Reconcile git to match production, then fix the bug on top — chosen.
+**Why:** The safest path when git and production disagree is to make git tell the truth first, then
+change behavior deliberately and reviewably — not to let an autonomous run guess which side was
+"right" and discard the other.
+**Reversibility:** easy — single-file, single-parameter clamp; reverting restores pre-fix behavior
+(same drift-reconciled feature set), not a worse state.
+**Trace:** `docs/health-log.md` 86th-run entry; PR to follow.
+
 ## 2026-07-29 — Guarded the shared Telegram alert helper's own fetch with a timeout, redeployed all 12 callers (71st health-check run)
 
 **Decision:** Wrapped `sendTelegramAlert()`'s `fetch()` (`_shared/telegram.ts`) in an
