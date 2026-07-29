@@ -14,6 +14,12 @@
  *  - GFS seamless ensemble has 31 members, daily temperature_2m_max per member [verified]
  */
 
+// Both forecast fetchers below had no timeout — a stalled Open-Meteo/NWS call blocked
+// the S-005 weather strategy and the daily backtest cron up to the platform's own
+// execution timeout, with the GFS-primary/NWS-fallback hierarchy above never getting a
+// chance to fail over. Same bound as the rest of the timeout-guard campaign.
+const FORECAST_FETCH_TIMEOUT_MS = 8_000;
+
 // ─── Locations Kalshi runs daily weather markets for ──────────────────────────
 
 export interface WeatherLocation {
@@ -119,7 +125,8 @@ function erf(x: number): number {
   const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
   const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
   const t = 1.0 / (1.0 + p * ax);
-  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
+  const y = 1.0 -
+    (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-ax * ax);
   return sign * y;
 }
 
@@ -133,7 +140,10 @@ export function bucketProbability(
   mean: number,
   stdDev: number,
 ): number {
-  return Math.max(0, Math.min(1, normalCdf(high, mean, stdDev) - normalCdf(low, mean, stdDev)));
+  return Math.max(
+    0,
+    Math.min(1, normalCdf(high, mean, stdDev) - normalCdf(low, mean, stdDev)),
+  );
 }
 
 // ─── Bucket probability computation for a set of Kalshi markets ──────────────
@@ -153,7 +163,15 @@ export function computeBucketProbabilities(
 ): Map<string, number> {
   const out = new Map<string, number>();
   for (const m of markets) {
-    out.set(m.ticker, bucketProbability(m.bucket_low, m.bucket_high, forecast.expectedHigh, forecast.stdDev));
+    out.set(
+      m.ticker,
+      bucketProbability(
+        m.bucket_low,
+        m.bucket_high,
+        forecast.expectedHigh,
+        forecast.stdDev,
+      ),
+    );
   }
   return out;
 }
@@ -167,7 +185,10 @@ export interface EdgeResult {
   edgeCents: number;
 }
 
-export function computeEdge(market: KalshiWeatherMarket, trueProb: number): EdgeResult {
+export function computeEdge(
+  market: KalshiWeatherMarket,
+  trueProb: number,
+): EdgeResult {
   const yesAsk = market.yes_ask;
   const yesBid = market.yes_bid;
 
@@ -185,7 +206,12 @@ export function computeEdge(market: KalshiWeatherMarket, trueProb: number): Edge
   const buyNoEdge = (yesBid ?? mid) - trueProbCents;
 
   if (buyYesEdge >= buyNoEdge && buyYesEdge > 0) {
-    return { direction: "buy_yes", trueProb, impliedProb, edgeCents: buyYesEdge };
+    return {
+      direction: "buy_yes",
+      trueProb,
+      impliedProb,
+      edgeCents: buyYesEdge,
+    };
   }
   if (buyNoEdge > 0) {
     return { direction: "buy_no", trueProb, impliedProb, edgeCents: buyNoEdge };
@@ -218,12 +244,25 @@ export async function fetchGfsEnsembleForecast(
   });
 
   const url = `https://ensemble-api.open-meteo.com/v1/ensemble?${params}`;
-  const resp = await fetch(url, {
-    headers: { "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)" },
-  });
+  const gfsController = new AbortController();
+  const gfsTimeoutId = setTimeout(
+    () => gfsController.abort(),
+    FORECAST_FETCH_TIMEOUT_MS,
+  );
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      headers: { "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)" },
+      signal: gfsController.signal,
+    });
+  } finally {
+    clearTimeout(gfsTimeoutId);
+  }
 
   if (!resp.ok) {
-    throw new Error(`Open-Meteo GFS ensemble failed for ${location.code}: ${resp.status} ${resp.statusText}`);
+    throw new Error(
+      `Open-Meteo GFS ensemble failed for ${location.code}: ${resp.status} ${resp.statusText}`,
+    );
   }
 
   const data = await resp.json();
@@ -231,9 +270,15 @@ export async function fetchGfsEnsembleForecast(
   if (!daily) throw new Error(`Open-Meteo: no daily data for ${location.code}`);
 
   // today's date in the station's local timezone
-  const forecastDate = new Date().toLocaleDateString("en-CA", { timeZone: location.timezone });
+  const forecastDate = new Date().toLocaleDateString("en-CA", {
+    timeZone: location.timezone,
+  });
   const dateIndex = (daily.time as string[]).indexOf(forecastDate);
-  if (dateIndex === -1) throw new Error(`Open-Meteo: today (${forecastDate}) not found in response for ${location.code}`);
+  if (dateIndex === -1) {
+    throw new Error(
+      `Open-Meteo: today (${forecastDate}) not found in response for ${location.code}`,
+    );
+  }
 
   // Collect the daily max from each ensemble member for today
   const memberMaxes: number[] = [];
@@ -244,18 +289,26 @@ export async function fetchGfsEnsembleForecast(
   }
 
   if (memberMaxes.length === 0) {
-    throw new Error(`Open-Meteo: no ensemble member values for ${location.code} on ${forecastDate}`);
+    throw new Error(
+      `Open-Meteo: no ensemble member values for ${location.code} on ${forecastDate}`,
+    );
   }
 
   const mean = memberMaxes.reduce((a, b) => a + b, 0) / memberMaxes.length;
-  const variance = memberMaxes.reduce((sum, t) => sum + (t - mean) ** 2, 0) / memberMaxes.length;
+  const variance = memberMaxes.reduce((sum, t) => sum + (t - mean) ** 2, 0) /
+    memberMaxes.length;
   // Use population std dev from the ensemble spread — this is the genuine uncertainty.
   // Clamp to plausible range: ensemble spread is typically 1-5°F for 1-day forecast.
   const stdDev = Math.max(1.5, Math.min(6, Math.sqrt(variance)));
 
   const distribution: Record<string, number> = {};
   for (let lo = Math.floor(mean) - 20; lo <= Math.floor(mean) + 20; lo += 5) {
-    distribution[`${lo}-${lo + 5}`] = bucketProbability(lo, lo + 5, mean, stdDev);
+    distribution[`${lo}-${lo + 5}`] = bucketProbability(
+      lo,
+      lo + 5,
+      mean,
+      stdDev,
+    );
   }
 
   return {
@@ -278,34 +331,63 @@ export async function fetchGfsEnsembleForecast(
 export async function fetchNwsForecast(
   location: WeatherLocation,
 ): Promise<WeatherForecast> {
-  const url = `https://api.weather.gov/gridpoints/${location.nwsGridpoint}/forecast/hourly`;
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)",
-      Accept: "application/geo+json",
-    },
-  });
+  const url =
+    `https://api.weather.gov/gridpoints/${location.nwsGridpoint}/forecast/hourly`;
+  const nwsController = new AbortController();
+  const nwsTimeoutId = setTimeout(
+    () => nwsController.abort(),
+    FORECAST_FETCH_TIMEOUT_MS,
+  );
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        "User-Agent": "omii-ai-pm-tradeagent (operator@omii.ai)",
+        Accept: "application/geo+json",
+      },
+      signal: nwsController.signal,
+    });
+  } finally {
+    clearTimeout(nwsTimeoutId);
+  }
 
   if (!response.ok) {
-    throw new Error(`NWS fetch failed for ${location.code}: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `NWS fetch failed for ${location.code}: ${response.status} ${response.statusText}`,
+    );
   }
 
   const data = await response.json();
   const periods = data?.properties?.periods || [];
-  if (periods.length === 0) throw new Error(`NWS: no forecast periods for ${location.code}`);
+  if (periods.length === 0) {
+    throw new Error(`NWS: no forecast periods for ${location.code}`);
+  }
 
   const next24 = periods.slice(0, 24);
-  const temps = next24.map((p: any) => p.temperature).filter((t: any) => typeof t === "number");
-  if (temps.length === 0) throw new Error(`NWS: no numeric temperatures for ${location.code}`);
+  const temps = next24.map((p: any) => p.temperature).filter((t: any) =>
+    typeof t === "number"
+  );
+  if (temps.length === 0) {
+    throw new Error(`NWS: no numeric temperatures for ${location.code}`);
+  }
 
   const max = Math.max(...temps);
-  const variance = temps.reduce((sum: number, t: number) => sum + (t - max) ** 2, 0) / temps.length;
+  const variance =
+    temps.reduce((sum: number, t: number) => sum + (t - max) ** 2, 0) /
+    temps.length;
   const stdDev = Math.max(2, Math.min(8, Math.sqrt(variance) / 2));
 
-  const forecastDate = new Date().toLocaleDateString("en-CA", { timeZone: location.timezone });
+  const forecastDate = new Date().toLocaleDateString("en-CA", {
+    timeZone: location.timezone,
+  });
   const distribution: Record<string, number> = {};
   for (let lo = Math.floor(max) - 15; lo <= Math.floor(max) + 15; lo += 5) {
-    distribution[`${lo}-${lo + 5}`] = bucketProbability(lo, lo + 5, max, stdDev);
+    distribution[`${lo}-${lo + 5}`] = bucketProbability(
+      lo,
+      lo + 5,
+      max,
+      stdDev,
+    );
   }
 
   return {
@@ -322,11 +404,17 @@ export async function fetchNwsForecast(
  * Main entry point: tries GFS ensemble first, falls back to NWS hourly.
  * Callers should always use this rather than calling the individual fetchers.
  */
-export async function fetchForecast(location: WeatherLocation): Promise<WeatherForecast> {
+export async function fetchForecast(
+  location: WeatherLocation,
+): Promise<WeatherForecast> {
   try {
     return await fetchGfsEnsembleForecast(location);
   } catch (gfsErr) {
-    console.warn(`GFS ensemble failed for ${location.code} (${gfsErr instanceof Error ? gfsErr.message : gfsErr}), falling back to NWS`);
+    console.warn(
+      `GFS ensemble failed for ${location.code} (${
+        gfsErr instanceof Error ? gfsErr.message : gfsErr
+      }), falling back to NWS`,
+    );
     return await fetchNwsForecast(location);
   }
 }

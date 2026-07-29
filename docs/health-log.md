@@ -2,6 +2,82 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (81st run) — One isolated `kalshi-proxy` credential-timeout blip, self-healed and already deduped by the alerting cooldown (not a new bug); closed out the 76th run's Tier-2 unguarded-fetch backlog — all 11 remaining sites across 6 files
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (80th run's branch merged as PR #136) — `git fetch && git reset --hard origin/dev`,
+fresh branch `health-check/run-20260729-1650` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+80th run's ~16:07 UTC cutoff through this run's ~18:04 UTC invocation — exactly **one** row:
+`kalshi_proxy_service_credential_fetch_failed` at 16:33:43 UTC ("credential fetch exceeded
+8000ms"). Investigated before treating it as new work (per the reproduce-before-trusting-a-
+diagnosis standard): pulled the full `compliance_log` window 16:25–16:45 UTC — no concurrent burst,
+no other function affected, nothing else running that would contend for the same DB connection.
+This is the tail of the exact issue the 78th run (cache) and 79th run (in-flight coalescing) already
+fixed, now down to **1** occurrence in ~8.5h (was 5 in 3h pre-fix, 2 in ~90s after the cache-only
+fix) — consistent with irreducible cold-start/DB-latency jitter on a single request, not a
+recurrence of the thundering-herd bug the 79th run closed. Confirmed it never reached Onofre:
+`health_check_run` logged "4 condition(s) active but suppressed (deduped)" at 17:10 UTC — the
+`system_errors` alert's 2h cooldown/fingerprint (from the 16:10 alert) already absorbed it, so no
+new Telegram noise was generated. `cron_health()`: all 14 jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`, confirmed again after this run's deploy. No code change made for this —
+it isn't a new root cause, and forcing a "fix" onto a single self-healing, already-deduped blip
+would be solving a non-problem.
+
+**Fix applied (LOW risk, additive-only, six files, 11 call sites — closes Tier 2):** with the
+compliance_log scan turning up nothing actionable, picked up the 76th run's own explicitly-left-open
+Tier-2 backlog (scheduled-cron fetch sites, no live-trading blast radius) instead of inventing new
+scope — same pattern as the 80th run closing Tier 5. All 11 sites confirmed still unguarded via
+`grep` before touching anything:
+- `auto-reflect/index.ts:531` (lesson-writing LLM call) and `:796` (forwards to compact-memory) —
+  a hang in either stalled this cron's entire 15-minute cycle.
+- `compact-memory/index.ts:79` (summarize) and `:226` (merge) — hourly-cron LLM calls, one inside a
+  cluster-merge loop.
+- `_shared/weather.ts:221` (GFS ensemble, primary) and `:282` (NWS, fallback) — no timeout meant a
+  hang on the *primary* call never gave the fallback a chance to run, defeating the documented
+  primary/fallback hierarchy. Shared by `weather-signal`, `backtest`, and `backtest-weather`.
+- `daily-digest/index.ts:224` (SendGrid) and `:252` (Twilio) — once-daily cron, looped per opted-in
+  recipient; one stuck recipient blocked every remaining one.
+- `waitlist-signup/index.ts:42` (SendGrid) — the odd one out: this call is `await`ed *before* the
+  HTTP response returns to the signup form, so a stall hung the user-facing request itself, directly
+  contradicting the file's own comment calling it "non-blocking."
+- `backtest-weather/index.ts:71`/`:96` (Open-Meteo archive + ensemble) — inside a per-city loop; one
+  stuck city blocked every remaining city in the once-daily run.
+
+All 11 wrapped in the same `AbortController` + `setTimeout(() => controller.abort(), 8_000)` +
+`finally { clearTimeout(...) }` pattern already proven at 30+ sites across this campaign (Tiers 3
+and 5). No behavior change on the happy path — only bounds how long a stalled request can block its
+caller. `waitlist-signup` and `daily-digest`'s SendGrid/Twilio sends were **not** invoked live
+(would fire real emails/SMS to real recipients) — same restraint as always for anything
+user-facing.
+
+**Verified:** `deno check` on all six files, before (`git stash`) vs. after — identical error counts
+in every file (auto-reflect 1, daily-digest 3, the rest 0 — all pre-existing, confirmed via diff of
+the actual error text, not just counts) — this change adds zero new type errors anywhere. `npm run
+lint`: 0 errors, only the pre-existing fast-refresh warnings. `npm run test`: 206/206 pass unchanged,
+including `weather.test.ts`'s 19 pure-function tests. Deployed all 7 affected functions
+(`auto-reflect`, `compact-memory`, `daily-digest`, `waitlist-signup`, `backtest-weather`, plus
+`weather-signal` and `backtest` — both import the modified `_shared/weather.ts` and needed
+redeploying too, found via `grep -rl "_shared/weather"`). **Verified in prod against real data:**
+invoked `compact-memory` directly → `200, {"success":true,"summarized":0,"merged":0}`; invoked
+`auto-reflect` directly → `200`, ran cleanly (compaction correctly skipped, 30-min cooldown still
+active from the manual compact-memory call seconds earlier); invoked `weather-signal` directly →
+`200`, real GFS forecasts returned (NYC 82.9°F, MIA 91.5°F, LAX 78.8°F), 9 signals written across 3
+locations. Minutes later the natural hourly cron fired independently and re-exercised the same
+modified code paths for real — 5 real `compact-memory` merge LLM calls with real token usage, a
+clean `auto_reflect_run` completion, and a second `weather_signal_run` (3/5 locations OK) — zero new
+error/critical rows from any of it. `cron_health()` re-checked post-deploy: all 14 jobs still
+`active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**Tier-2 fire-and-forget/no-timeout campaign: closed.** Remaining backlog from the 76th run's audit,
+unchanged: Tier 1 (7 sites, live trading — still explicitly off-limits to an autonomous pass), Tier
+4 (10 sites, `trading-agent` chat loop).
+
+**Reversibility:** trivial — every diff is additive-only (one new module/file-local timeout
+constant, one `AbortController` wrap per call site, no logic changes); `git revert` per file plus a
+redeploy of the affected function restores pre-guard behavior with no other change.
+
 ## 2026-07-29 (80th run) — Clean window, all cron healthy; closed out the 76th run's Tier-5 fire-and-forget timeout-guard backlog — the last 3 unguarded sites (`_shared/langfuse.ts`, `auto-settle`'s auto-reflect trigger, `save-kalshi-key`'s username backfill)
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
