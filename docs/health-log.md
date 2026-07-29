@@ -2,6 +2,57 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (66th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `settle-signals`'s per-ticker market-status GET had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP,
+stashes untouched) — `git fetch && git reset --hard origin/dev` landed on `2f04781` (the 65th
+run's own merge). Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 65th run's ~01:07 UTC cutoff through this run's ~02:08 UTC invocation — zero rows across 923
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 65th
+run's own push (run `30413579019`, 6m48s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()`/
+`fetchWithRetry()` calls without an `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`). Found the bare `await fetch()` in
+`settle-signals/index.ts`'s per-ticker loop (line 110) — no `AbortController` anywhere in the
+file outside the existing credential-fetch guard. `settle-signals-cron` runs every 15 minutes,
+grouping every unsettled signal past `expires_at` into up to 200 tickers per batch and calling
+Kalshi's market-status GET once per ticker to check for `closed`/`settled`. Same failure shape as
+every prior fix: a stalled Kalshi response doesn't fail one ticker's check, it hangs the entire
+cron invocation — every remaining ticker in that batch — until the platform's own execution
+timeout kills it, invisible to `compliance_log` because the existing per-ticker `try/catch` (line
+197) only catches thrown errors, never a hang.
+
+**Scope check:** this is a public, read-only market-status GET used to decide whether a signal's
+market has resolved yet, for shadow-PnL settlement — not the order placement/cancellation path,
+which stays untouched per the campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`MARKET_FETCH_TIMEOUT_MS = 8_000` (same convention as this file's own
+`CREDENTIAL_FETCH_TIMEOUT_MS` and every other function in this campaign) and wrapped the single
+`fetch()` call with a scoped `AbortController` + `setTimeout`, `signal` threaded into the call,
+`clearTimeout` in a `finally`. On `AbortError`, converts to a clear `Kalshi GET market <ticker>
+timed out after 8000ms` message and re-throws — the existing per-ticker `catch` picks it up
+unchanged, same "no new fields, no new error-handling plumbing" pattern as every prior run in this
+campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 11 pre-existing type errors and
+2 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `settle-signals` via
+`supabase functions deploy`. Invoked the deployed function directly (first via `net.http_post`
+matching `settle-signals-cron`'s own `cron.job.command`, which timed out client-side at pg_net's
+default 5000ms request budget while the function kept running in the background and completed
+successfully per `compliance_log`; then via a direct HTTPS call with a 40s client timeout to
+confirm the response body) — both returned `{"success":true,"settled":0,"markets_checked":200,
+...}`, confirmed by two `settle_signals_run` rows in `compliance_log` ("0 signals settled from 200
+markets checked"), exercising the new guard against 200 real tickers with zero errors.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-29 (65th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `reconcile-orders`'s per-trade Kalshi order-status GET had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was present but not guaranteed
