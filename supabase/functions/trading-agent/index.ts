@@ -17,6 +17,15 @@ const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/
 // bounding how long a user's chat session can hang on a stalled provider call.
 const LLM_FETCH_TIMEOUT_MS = 60_000;
 
+// Remaining Tier-4 sites from the 76th run's audit (trading-agent/index.ts, 10 unguarded
+// fetch() calls in the chat tool-calling loop — a hang in any of them freezes the chat
+// response). Excludes the two Tier-1 sites (execute_trade submit/cancel, real money —
+// off-limits per the 48th run's standing caution).
+const KALSHI_FETCH_TIMEOUT_MS = 8_000; // matches auto-trade's convention — public market-data GET, not an LLM call
+const INTERNAL_FUNCTION_TIMEOUT_MS = 45_000; // forwards to execute-basket/signal-generator/surface-scanner — generous enough to clear execute-basket's own 30s BASKET_TIMEOUT_MS plus network/cold-start overhead
+const STRATEGY_RUN_TIMEOUT_MS = 60_000; // trigger_strategy_run invokes auto-trade manually, which may run multiple 15s LLM qualify calls sequentially across candidate markets
+const EXTERNAL_SEARCH_TIMEOUT_MS = 10_000; // Tavily web search — third-party API with no execution budget of its own to inherit
+
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
 const TRADE_TOOL = {
@@ -538,15 +547,28 @@ async function streamAnthropicAsSSE(
   const { system, messages } = toAnthropicMessages(msgs);
   const body: any = { model, max_tokens: 8192, messages, temperature, stream: true };
   if (system) body.system = system;
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Anthropic stream API call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Anthropic stream error ${resp.status}: ${text}`);
@@ -1092,20 +1114,33 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         const cfg = getOpenAICompatConfig(effectiveProvider, keys);
         if (!cfg) throw new Error(`No API key for provider: ${effectiveProvider}`);
 
-        const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${cfg.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: finalModel,
-            messages: aiMessages,
-            tools: allTools,
-            temperature: temperature ?? 0.3,
-            stream: false,
-          }),
-        });
+        const compatController = new AbortController();
+        const compatTimeoutId = setTimeout(() => compatController.abort(), LLM_FETCH_TIMEOUT_MS);
+        let resp: Response;
+        try {
+          resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${cfg.apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: finalModel,
+              messages: aiMessages,
+              tools: allTools,
+              temperature: temperature ?? 0.3,
+              stream: false,
+            }),
+            signal: compatController.signal,
+          });
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") {
+            throw new Error(`AI provider call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+          }
+          throw err;
+        } finally {
+          clearTimeout(compatTimeoutId);
+        }
 
         if (!resp.ok) {
           const status = resp.status;
@@ -1294,17 +1329,27 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               );
             }
 
+            // A bare fetch() here would hang this tool call indefinitely on a stalled
+            // Kalshi response — same unguarded-fetch class fixed 7x already in this file.
+            // These are public read-only market-data GETs, so a timeout is a safe abort:
+            // it just returns fewer/no results, it never leaves an order in flight.
+            const fetchKalshi = (u: string) => {
+              const c = new AbortController();
+              const t = setTimeout(() => c.abort(), KALSHI_FETCH_TIMEOUT_MS);
+              return fetch(u, { headers: kalshiHeaders, signal: c.signal }).finally(() => clearTimeout(t));
+            };
+
             if (args.keyword) {
               // Free-text keyword search across all Kalshi markets
               const encoded = encodeURIComponent(args.keyword);
               const url = `${kalshiBase}/markets?limit=50&status=open&search=${encoded}`;
-              const res = await fetch(url, { headers: kalshiHeaders });
+              const res = await fetchKalshi(url);
               const data = await res.json();
               allMarkets = (data.markets || []).map(parseMarket);
             } else if (args.category) {
               // Series ticker fetch
               const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 60)}&status=open&series_ticker=${args.category}`;
-              const res = await fetch(url, { headers: kalshiHeaders });
+              const res = await fetchKalshi(url);
               const data = await res.json();
               allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
@@ -1321,7 +1366,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               ];
 
               const fetches = series.map(s =>
-                fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`, { headers: kalshiHeaders })
+                fetchKalshi(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
                   .then(r => r.json()).catch(() => ({ markets: [] }))
               );
 
@@ -1773,23 +1818,36 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "execute_basket") {
           try {
             const basketUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-basket`;
-            const basketResp = await fetch(basketUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                strategy_id: args.strategyId || null,
-                strategy_name: args.strategy || null,
-                alert_id: args.alert_id || null,
-                legs: args.legs,
-                mode,
-                user_id: userId,
-                expected_edge_cents: args.expected_edge_cents || 0,
-                reasoning: args.reasoning || "",
-              }),
-            });
+            const basketController = new AbortController();
+            const basketTimeoutId = setTimeout(() => basketController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let basketResp: Response;
+            try {
+              basketResp = await fetch(basketUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  strategy_id: args.strategyId || null,
+                  strategy_name: args.strategy || null,
+                  alert_id: args.alert_id || null,
+                  legs: args.legs,
+                  mode,
+                  user_id: userId,
+                  expected_edge_cents: args.expected_edge_cents || 0,
+                  reasoning: args.reasoning || "",
+                }),
+                signal: basketController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`execute-basket call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(basketTimeoutId);
+            }
             const basketResult = await basketResp.json();
             toolResult = JSON.stringify({
               ...basketResult,
@@ -1806,17 +1864,30 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "fetch_signals") {
           try {
             const sigUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/signal-generator`;
-            const sigResp = await fetch(sigUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                limit: args.limit || 20,
-                category: args.category || undefined,
-              }),
-            });
+            const sigController = new AbortController();
+            const sigTimeoutId = setTimeout(() => sigController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let sigResp: Response;
+            try {
+              sigResp = await fetch(sigUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  limit: args.limit || 20,
+                  category: args.category || undefined,
+                }),
+                signal: sigController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`signal-generator call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(sigTimeoutId);
+            }
             if (!sigResp.ok) {
               const errText = await sigResp.text();
               toolResult = JSON.stringify({ error: `signal-generator error: ${errText}` });
@@ -1836,16 +1907,29 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "scan_surface") {
           try {
             const scanUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/surface-scanner`;
-            const scanResp = await fetch(scanUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                min_edge_cents: args.min_edge_cents || 3,
-              }),
-            });
+            const scanController = new AbortController();
+            const scanTimeoutId = setTimeout(() => scanController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let scanResp: Response;
+            try {
+              scanResp = await fetch(scanUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  min_edge_cents: args.min_edge_cents || 3,
+                }),
+                signal: scanController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`surface-scanner call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(scanTimeoutId);
+            }
             if (!scanResp.ok) {
               const errText = await scanResp.text();
               toolResult = JSON.stringify({ error: `surface-scanner error: ${errText}` });
@@ -1868,17 +1952,30 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             if (!tavilyKey) {
               toolResult = JSON.stringify({ error: "Web search not configured — add TAVILY_API_KEY secret" });
             } else {
-              const resp = await fetch("https://api.tavily.com/search", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  api_key: tavilyKey,
-                  query: args.query,
-                  search_depth: "basic",
-                  max_results: 5,
-                  ...(args.focus ? { topic: args.focus } : {}),
-                }),
-              });
+              const tavilyController = new AbortController();
+              const tavilyTimeoutId = setTimeout(() => tavilyController.abort(), EXTERNAL_SEARCH_TIMEOUT_MS);
+              let resp: Response;
+              try {
+                resp = await fetch("https://api.tavily.com/search", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    api_key: tavilyKey,
+                    query: args.query,
+                    search_depth: "basic",
+                    max_results: 5,
+                    ...(args.focus ? { topic: args.focus } : {}),
+                  }),
+                  signal: tavilyController.signal,
+                });
+              } catch (err) {
+                if (err instanceof Error && err.name === "AbortError") {
+                  throw new Error(`Tavily search exceeded ${EXTERNAL_SEARCH_TIMEOUT_MS}ms`);
+                }
+                throw err;
+              } finally {
+                clearTimeout(tavilyTimeoutId);
+              }
               if (!resp.ok) {
                 toolResult = JSON.stringify({ error: `Tavily error: ${resp.status}` });
               } else {
@@ -1926,14 +2023,27 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "trigger_strategy_run") {
           try {
             const autoTradeUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/auto-trade`;
-            const resp = await fetch(autoTradeUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ strategy_id: args.strategy_id, run_mode: "manual" }),
-            });
+            const runController = new AbortController();
+            const runTimeoutId = setTimeout(() => runController.abort(), STRATEGY_RUN_TIMEOUT_MS);
+            let resp: Response;
+            try {
+              resp = await fetch(autoTradeUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ strategy_id: args.strategy_id, run_mode: "manual" }),
+                signal: runController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`auto-trade run exceeded ${STRATEGY_RUN_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(runTimeoutId);
+            }
             const runData = await resp.json();
             toolResult = JSON.stringify({
               success: resp.ok,

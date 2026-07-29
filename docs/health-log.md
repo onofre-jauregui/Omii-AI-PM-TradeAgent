@@ -2,6 +2,70 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (82nd run) — Clean window, all cron healthy; closed out the 76th run's Tier-4 backlog — all 10 unguarded `trading-agent/index.ts` chat-tool-loop sites
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (81st run's branch merged as PR #137) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-1814` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+81st run's ~18:04 UTC cutoff through this run's ~18:13 UTC invocation — zero rows. `cron_health()`
+shows all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`. No new
+error class this run.
+
+**Fix applied (LOW risk, additive-only, single file, 10 call sites — closes Tier 4):** with
+`compliance_log` genuinely clean, picked up the 76th run's own explicitly-left-open Tier-4 backlog
+instead of inventing new scope — same pattern as the 80th run closing Tier 5 and the 81st run
+closing Tier 2. All 10 sites confirmed still unguarded via `grep` before touching anything, in
+`trading-agent/index.ts` — the interactive AgentPanel chat endpoint's tool-calling loop, where a
+hang in any tool call freezes the user's chat turn with no `compliance_log` signal:
+- `streamAnthropicAsSSE()` (`:541`, streaming Anthropic call) — the non-stream twin
+  (`callAnthropicNonStream`, `:503`) was already guarded by an earlier run; the streaming path was
+  missed.
+- The OpenAI-compatible completions call (`:1095`, non-Anthropic providers via `cfg.baseUrl`).
+- `fetch_live_markets`'s three Kalshi market-data GETs (`:1301` keyword search, `:1307` category
+  fetch, `:1324` the 16-series parallel `Promise.all` fetch) — public read-only endpoints, so a
+  timeout is a safe abort (returns fewer/no results, never leaves an order in flight). Factored into
+  one local `fetchKalshi()` helper since all three shared the identical unguarded pattern.
+- Four forwards to other edge functions: `execute_basket` (`:1776`), `fetch_signals` (`:1809`),
+  `scan_surface` (`:1839`), `trigger_strategy_run` (`:1929`).
+- `search_web`'s Tavily call (`:1871`).
+
+All wrapped in the same `AbortController` + `setTimeout` + `finally { clearTimeout(...) }` pattern
+used across 30+ sites in this campaign, each `AbortError` converted to a clear message naming the
+call and the bound. Timeouts sized to what each call actually needs, not copy-pasted: `LLM_FETCH_
+TIMEOUT_MS` (60s, existing constant) for both LLM paths; new `KALSHI_FETCH_TIMEOUT_MS` (8s, matches
+the identical constant already established in `auto-trade/index.ts`) for the three Kalshi GETs; new
+`INTERNAL_FUNCTION_TIMEOUT_MS` (45s) for the three same-latency-class forwards — sized above
+`execute-basket`'s own internal `BASKET_TIMEOUT_MS` (30s) so the outer guard doesn't fire before the
+inner one legitimately would; new `STRATEGY_RUN_TIMEOUT_MS` (60s) for `trigger_strategy_run`, since
+`auto-trade`'s manual run can chain multiple 15s LLM-qualify calls sequentially across candidate
+markets; new `EXTERNAL_SEARCH_TIMEOUT_MS` (10s) for Tavily, a third-party API with no internal
+budget of its own to inherit. **Explicitly did not touch** the two Tier-1 sites in the same file
+(`:1487` order submit, `:1533` order cancel — real money, off-limits per the 48th run's standing
+caution) or the two Tier-1-adjacent basket execute/flatten sites inside `execute-basket/index.ts`
+itself (untouched, per the same boundary).
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (same generic
+Supabase-client type-mismatch class flagged in every prior run touching this file), identical count
+(13) after this change — no new type errors. `npm run lint`: 0 errors, only the pre-existing 9
+fast-refresh warnings. `npm run test`: 206/206 pass unchanged. Deployed `trading-agent`.
+**Exercised against the real deployed function this run:** a direct unauthenticated POST to the live
+endpoint returned a real `401 UNAUTHORIZED_NO_AUTH_HEADER` from Supabase's auth layer post-deploy,
+confirming the function booted cleanly with no import/syntax failure — same verification style as
+the prior runs that touched this file, for the same reason (a full authenticated chat turn needs a
+real user JWT and spends real Anthropic tokens, out of scope for an autonomous health-check pass).
+
+**Tier-4 backlog: closed.** Remaining backlog from the 76th run's original audit, unchanged: Tier 1
+(7 sites, live trading — still explicitly off-limits to an autonomous pass). All other tiers (2, 3,
+5) closed across the 78th–81st runs.
+
+**Reversibility:** trivial — every diff is additive-only (new module-level timeout constants, one
+`AbortController` wrap per call site or one shared helper for the three identical Kalshi sites, no
+logic changes); `git revert` on the single file plus a redeploy restores pre-guard behavior with no
+other change.
+
 ## 2026-07-29 (81st run) — One isolated `kalshi-proxy` credential-timeout blip, self-healed and already deduped by the alerting cooldown (not a new bug); closed out the 76th run's Tier-2 unguarded-fetch backlog — all 11 remaining sites across 6 files
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
