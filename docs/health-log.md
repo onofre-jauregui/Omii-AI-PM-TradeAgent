@@ -5,7 +5,7 @@ Findings from automated health-check runs. Newest first.
 ## 2026-07-29 (80th run) — Clean window, all cron healthy; closed out the 76th run's Tier-5 fire-and-forget timeout-guard backlog — the last 3 unguarded sites (`_shared/langfuse.ts`, `auto-settle`'s auto-reflect trigger, `save-kalshi-key`'s username backfill)
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
-`origin/dev` exactly (79th run's branch merged as PR #136) — `git fetch && git reset --hard
+`origin/dev` exactly (79th run's branch merged as PR #135) — `git fetch && git reset --hard
 origin/dev`, fresh branch `health-check/run-20260729-1550` from there.
 
 **Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
