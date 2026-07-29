@@ -30,6 +30,7 @@ const BLOCKED_SERIES = ["KXETH"];
 const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
 const BALANCE_FETCH_TIMEOUT_MS = 8_000; // same convention — Kalshi portfolio/balance GET
+const TELEGRAM_FETCH_TIMEOUT_MS = 8_000; // same convention as _shared/telegram.ts's sendTelegramAlert()
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -38,14 +39,32 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function sendTelegram(token: string, chatId: string, text: string) {
+// health-check keeps its own sendTelegram (rather than _shared/telegram.ts's
+// sendTelegramAlert) because callers need the delivered/not-delivered boolean
+// to drive unclaimAlert() below — sendTelegramAlert returns void and swallows
+// its own fetch errors. This helper previously had no AbortController at all,
+// so a stalled Telegram API call would hang health-check itself — the one
+// function whose entire job is catching silent hangs elsewhere — up to the
+// platform's own execution timeout, indistinguishable from any other silent
+// stall. Same failure shape closed across _shared/telegram.ts and a dozen
+// call sites in the 68th-73rd runs; this file's own copy was missed.
+async function sendTelegram(token: string, chatId: string, text: string): Promise<boolean> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
-  });
-  return resp.ok;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+      signal: controller.signal,
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Atomically checks-and-claims a dedup slot via the same advisory-lock-guarded
