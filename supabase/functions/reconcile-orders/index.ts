@@ -42,6 +42,7 @@ interface TradeRow {
 }
 
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+const ORDER_STATUS_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
@@ -234,7 +235,24 @@ async function fetchKalshiOrder(keyId: string, privateKey: string, orderId: stri
   const path = `/trade-api/v2/portfolio/orders/${orderId}`;
   const ts = Date.now();
   const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, ts);
-  const res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${orderId}`, { method: "GET", headers });
+  // Per-request hard timeout — a hung Kalshi connection won't stall the whole reconcile loop
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ORDER_STATUS_FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${orderId}`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(`Kalshi GET order ${orderId} timed out after ${ORDER_STATUS_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!res.ok) {
     console.warn(`reconcile-orders: Kalshi GET order ${orderId} → ${res.status}`);
     return null;
