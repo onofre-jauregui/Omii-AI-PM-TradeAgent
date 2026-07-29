@@ -2,6 +2,60 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (75th run) — Clean window, one benign transient credential-fetch timeout, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 74th run's audit — Sentry's `send()`
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was stale from the 74th run
+(branch `health-check/run-20260729-060652`, already merged as PR #129) but matched `origin/dev`
+exactly — `git fetch && git reset --hard origin/dev`, fresh branch from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+74th run's ~10:07 UTC cutoff through this run's ~11:07 UTC invocation — 126 total events in the
+window, exactly **one** at error/critical: `kalshi_proxy_service_credential_fetch_failed` at
+11:04:02 UTC (`kalshi-proxy` public-endpoint service-tenant credential fetch exceeded its 8000ms
+guard, fell back to the anonymous rate tier for that one request). Checked 7-day frequency for
+this `event_type` — this is the only occurrence; not a recurring pattern. This is the guard added
+in an earlier run of the same campaign working exactly as designed: bounded, logged, degraded
+gracefully (rate-tier fallback) instead of hanging. No code change warranted for this one — a
+single transient network blip is not a bug. `cron_health()` shows all 14 registered jobs `active:
+true`, `is_stale: false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev`
+shows the 74th run's own push (`30443070092`, 10:17:10 UTC) green in 4m27s; nothing since.
+
+**Fix applied this run (LOW risk, additive-only, single file):** picked up the 74th run's own
+audit backlog — Tier 5 (fire-and-forget, 8 sites) is the lowest-risk remaining tier since none of
+those call sites are awaited by their caller's control flow. Re-verified the audit against this
+run's fresh checkout before trusting it (per standing practice: reproduce, don't inherit a prior
+diagnosis) — confirmed `_shared/sentry.ts:122`, `_shared/notifications.ts:127`/`:153`, and
+`_shared/langfuse.ts:19` are all still unguarded. Fixed `_shared/sentry.ts`'s `send()`: a bare
+`await fetch()` with zero `AbortController`/timeout, called from `captureException`/
+`captureMessage`, both fire-and-forget (`send(...).catch(() => {})`, never awaited by callers).
+Not a caller-facing hang risk, but under Fluid Compute's reused instances a stalled Sentry
+endpoint leaves a dangling open connection per unreported error, accumulating across warm
+invocations with zero timeout to ever close it. Wrapped in the same `AbortController` + 8s
+timeout pattern proven in `_shared/telegram.ts`/`kalshi-proxy`/`health-check`,
+`SENTRY_FETCH_TIMEOUT_MS = 8_000` matching this codebase's established convention. `send()` stays
+fire-and-forget — the fix only bounds how long the dangling connection can live, it does not
+change what any caller awaits, so `execute-trade`'s/`auto-trade`'s/`auto-settle`'s order-submission
+control flow (the reason those files are Tier 1/1-adjacent and off-limits to autonomous edits) is
+untouched by this diff.
+
+**Verified:** `deno check supabase/functions/_shared/sentry.ts` clean. `deno check` on all three
+importers (`auto-trade`, `auto-settle`, `execute-trade`) shows the same pre-existing error counts
+(17/6/20) present on a clean `origin/dev` checkout via `git stash` before/after — this diff adds
+zero new errors. Deployed all three via `supabase functions deploy <fn> --project-ref
+uyfnezxmgwitpzsrnkst` (they each bundle `_shared/sentry.ts`). Post-deploy, `auto-trade-cron` fired
+within the verification window and logged clean `auto_trade_run`/`auto_trade_strategy_run` rows
+in `compliance_log` with no new error/critical entries — confirms the redeploy didn't regress the
+live trading path. The timeout branch itself is unexercised until Sentry actually stalls, same
+caveat as every other guard added in this campaign.
+
+**Remaining backlog (unchanged from 74th run's audit, for the next run):** Tier 1 (7 sites, live
+trading — still explicitly off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron),
+Tier 4 (10 sites, `trading-agent` chat loop), Tier 5 remainder (5 sites: `_shared/notifications.ts`
+×2, `_shared/langfuse.ts`, `auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`).
+
+**Reversibility:** trivial — single-file diff, one function wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy of the three importing functions.
+
 ## 2026-07-29 (74th run) — Clean window, all cron healthy, CI green; the 73rd run's "last uninstrumented fetch" claim was false — audit found 39 remaining unguarded fetch sites — closed health-check's own Telegram-alerting blind spot, the most ironic one
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
