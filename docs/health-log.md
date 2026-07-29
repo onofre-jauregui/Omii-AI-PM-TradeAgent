@@ -2,6 +2,53 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (67th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `auto-settle`'s per-ticker Kalshi market-status fetch had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+— `git fetch && git reset --hard origin/dev` landed on `6ac9b57` (the 66th run's own merge).
+Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 66th run's ~02:08 UTC cutoff through this run's ~03:03 UTC invocation — zero rows across
+21,801 events in the window. `cron_health()` confirms all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through
+the 66th run's own push (run `30416231797`, 4m4s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()`/
+`fetchWithRetry()` calls without an `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`). Found `fetchKalshiMarket()`
+in `auto-settle/index.ts` (line 38) — called once per pending `(ticker, user_id)` pair inside
+`auto-settle-cron`'s 10-minute loop, doing a bare `await fetch()` on the public
+`/markets/{ticker}` endpoint to check for settlement, with no `signal` at all. Same failure shape
+as every prior fix: a stalled Kalshi response doesn't fail one ticker's check, it hangs the
+entire cron invocation — every remaining pending ticker across every user — until the platform's
+own execution timeout kills it, invisible to `compliance_log` because the existing `try/catch`
+(line 39) only catches thrown errors, never a hang.
+
+**Scope check:** public, read-only market-status GET used to decide whether a market has settled
+for P&L realization — not the order placement/cancellation path, which stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`MARKET_FETCH_TIMEOUT_MS = 8_000` (same convention as every other function in this campaign) and
+wrapped the single `fetch()` call with a scoped `AbortController` + `setTimeout`, `signal`
+threaded into the call, `clearTimeout` in a `finally`. On `AbortError`, logs a clear
+`Kalshi GET market {ticker} timed out after 8000ms` message and returns `null` — the existing
+caller treats `null` as `fetch_failed` and moves to the next ticker unchanged, same "no new
+fields, no new error-handling plumbing" pattern as every prior run in this campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 6 pre-existing type errors and
+8 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `auto-settle` via
+`supabase functions deploy`. Invoked the deployed function directly against real Kalshi data →
+`{"success":true,"pending_tickers_checked":10,"trades_settled":0,"trades_still_pending":10}`, all
+10 live tickers fetched with `status: "active"`, zero errors, exercising the new guard with no
+regression on the happy path. Confirmed via `compliance_log` `auto_settle_run` row: "0 trades
+settled across 0 tickers, 10 still pending".
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-29 (66th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `settle-signals`'s per-ticker market-status GET had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP,
