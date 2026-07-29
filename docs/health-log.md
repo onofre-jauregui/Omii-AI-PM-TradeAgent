@@ -2,6 +2,81 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (74th run) — Clean window, all cron healthy, CI green; the 73rd run's "last uninstrumented fetch" claim was false — audit found 39 remaining unguarded fetch sites — closed health-check's own Telegram-alerting blind spot, the most ironic one
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`830e825`, the 73rd run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 73rd run's ~09:07 UTC cutoff through this run's ~10:07 UTC invocation — zero rows across 150
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the 73rd run's
+own push (`30438574515`, 09:10:58 UTC) completed green in 4m37s; nothing since.
+
+**Correction — the 73rd run's "last uninstrumented fetch" claim does not hold:** that entry
+described `telegram-webhook/index.ts` as closing the timeout-guard campaign begun in the 68th run.
+A full-codebase audit this run (`grep` for every `fetch(`/`fetchWithRetry(` call site under
+`supabase/functions/`, read for an existing `AbortController`/`signal`) found **39 remaining
+unguarded call sites across 16 files** — the campaign was never close to done; each prior run had
+only been checking the one file it fixed, not re-sweeping the whole tree. Tiered by blast radius:
+
+- **Tier 1 — live trading, real money (7 sites):** `execute-trade/index.ts:747` (the Kalshi
+  order-submission POST itself) and `:655` (pre-order balance check); `auto-trade/index.ts:991`
+  (forwards every auto-trade decision to execute-trade); `trading-agent/index.ts:1442`/`:1495`
+  (chat-agent order submit/cancel); `execute-basket/index.ts:165`/`:337` (each basket leg's
+  execute/flatten call, inside a loop). **Not touched this run** — a hang-vs-timeout distinction on
+  the order-submission path changes what "did this order actually fill" means, and getting that
+  wrong risks a double-submit or a stuck basket leg. This needs a dedicated, carefully-reviewed
+  session, not an autonomous health-check pass.
+- **Tier 2 — scheduled cron jobs (11 sites):** `auto-reflect/index.ts:531`/`:796`,
+  `compact-memory/index.ts:79`/`:226`, `_shared/weather.ts:221`/`:282` (core forecast fetchers for
+  `weather-signal`), `daily-digest/index.ts:224`/`:252`, `waitlist-signup/index.ts:42`,
+  `backtest-weather/index.ts:71`/`:96`.
+- **Tier 3 — this run's fix:** `health-check/index.ts`'s own `sendTelegram()` (see below).
+- **Tier 4 — `trading-agent/index.ts` (10 sites):** the user-facing chat-agent tool-calling loop;
+  a hang here freezes the chat response. Only one call site (line 503) was already guarded.
+- **Tier 5 — fire-and-forget (8 sites):** don't block their caller's response, but still an
+  unguarded dangling connection: `_shared/sentry.ts:122`, `_shared/notifications.ts:127`/`:153`,
+  `_shared/langfuse.ts:19`, `auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`,
+  `auto-trade/index.ts:341` (this one IS awaited — circuit-breaker-trip alert).
+- **Dead code:** `polymarket-proxy/index.ts:44` — bare `fetch()`, no options. Per this repo's
+  `CLAUDE.md`, Polymarket is unreferenced pending a deletion decision; not worth guarding.
+
+Full findings with descriptions are in this run's research-agent output; Tiers 1, 2, and 4 are
+real backlog, not resolved by this entry.
+
+**Fix applied this run (LOW risk, additive-only, single file):** `health-check/index.ts`'s
+`sendTelegram()` had zero timeout guard — no `AbortController`, no `signal`. This is the exact
+same failure shape closed across `_shared/telegram.ts` and a dozen call sites in the 68th–71st
+runs, except this one is health-check's *own* copy (kept separate from the shared
+`sendTelegramAlert()` because callers need the delivered/not-delivered boolean to drive
+`unclaimAlert()`, which the shared helper's void return can't support). It's awaited at two call
+sites: the main alert-delivery loop (`:584`) and the crash-recovery handler (`:646`). A stalled
+Telegram API call here would hang health-check itself — the one function whose entire job is
+catching silent hangs elsewhere — up to the platform's own execution timeout, with zero diagnostic
+signal about why the watchdog went dark. Wrapped in the same `AbortController` + 8s timeout
+pattern already proven in `_shared/telegram.ts`, `TELEGRAM_FETCH_TIMEOUT_MS = 8_000` matching this
+file's own existing `CREDENTIAL_FETCH_TIMEOUT_MS`/`BALANCE_FETCH_TIMEOUT_MS` convention. Returns
+`false` on abort/network failure (same as before) rather than throwing, preserving the
+`delivered`/`unclaimAlert()` contract at both call sites.
+
+**Verified:** `deno check supabase/functions/health-check/index.ts` shows the same 12 pre-existing
+type errors present on a clean `origin/dev` checkout (Supabase client generic-type drift in
+`encryption.ts`/`kalshi-auth.ts`/`tenant.ts`, unrelated to this diff, confirmed via `git stash`
+before/after) — this change adds zero new errors. Deployed via `supabase functions deploy
+health-check --project-ref uyfnezxmgwitpzsrnkst`. Invoked the live function directly
+(`POST /functions/v1/health-check` with the service-role key) post-deploy: returned `200 {"ok":
+true, "alerts_sent":["api_error_kalshi"], ...}` — a real pending alert (`settle-signals` hitting
+Kalshi 404s on expired KXBTC tickers, `warning` severity, pre-existing and unrelated to this fix)
+delivered successfully through the newly-guarded path, confirmed by the `health_check_run`
+compliance_log row ("1 alert(s) sent") with no `telegram_delivery_failed` row. Exercises the real
+Telegram API on the happy path; the timeout branch itself is unexercised until a real stall, same
+caveat as every other guard added in this campaign.
+
+**Reversibility:** trivial — single-file diff, one function wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy.
+
 ## 2026-07-29 (73rd run) — Clean window, all cron healthy, CI green (72nd run's retry-budget fix confirmed working); closed the last uninstrumented fetch in the operator-facing Telegram control bot
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
