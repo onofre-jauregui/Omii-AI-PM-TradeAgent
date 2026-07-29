@@ -2,6 +2,64 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (64th run) — Clean window, all cron healthy, CI green; closed the campaign's next hot-path instance — the shared `fetchOrderbook()` helper had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
+`origin/dev` (`ab60fa7`, the 63rd run's own merge) — no fetch/reset needed. Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 63rd run's
+~23:07 UTC cutoff through this run's ~00:07 UTC invocation — zero rows across 2,043 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 63rd
+run's own push (run `30407184360`, 7m52s) and no pushes since.
+
+**New instance of the recurring class:** re-surveyed every edge function for `fetch()` calls
+without an `AbortController`/timeout guard nearby, since the 62nd/63rd runs closed both known
+instances in `auto-trade`. Found the shared `fetchOrderbook()` helper in
+`_shared/kalshi-market-data.ts` — called by `paper-reconcile` (the **5-minute paper-reconcile-cron**,
+the hottest-cadence cron job in the system, looped once per open ticker group every tick to
+re-simulate resting paper fills against the live orderbook) and by `execute-trade` (a pre-order
+price check before submitting a real order) — had zero timeout guard, a bare `await fetch(...)`.
+Same failure shape as every prior fix in this campaign: a stalled Kalshi response doesn't fail one
+ticker's check, it hangs the entire cron invocation (every ticker in that tick) until the
+platform's own execution timeout kills it, and the existing per-call `try/catch` around each
+caller only catches a thrown error — never a hang, so it's invisible to it.
+
+**Scope check:** this is a public, read-only orderbook GET used to decide *whether* a resting
+paper order now fills, or to price-check before a real order is submitted — not the order
+placement/cancellation itself, which stays untouched (`execute-trade`'s own order-submission fetch
+and `execute-basket`/`cancel_order` remain off-limits per this campaign's standing boundary).
+Because `fetchOrderbook` is shared, the guard applies to both call sites uniformly — this is the
+same "fix the shared wrapper once" pattern as the 62nd run's `kalshiFetch()` fix, and it only bounds
+worst-case latency; it changes no error-handling behavior since both existing callers already treat
+any `fetchOrderbook` failure as transient/retry-next-cycle.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`ORDERBOOK_FETCH_TIMEOUT_MS = 8_000` (matching the `CREDENTIAL_FETCH_TIMEOUT_MS`/
+`KALSHI_FETCH_TIMEOUT_MS` convention already used across market-data-fetcher/auto-trade/
+settle-signals/kalshi-proxy/etc for simple metadata/market-data GETs) and wrapped the single
+`fetch()` call in a scoped `AbortController` + `setTimeout`, with `clearTimeout` in a `finally`. On
+abort, converts the generic `AbortError` into a clear `Orderbook request timed out after 8000ms:
+<ticker>` message on the existing `error` field of `FetchOrderbookResult` — no new fields, no new
+error-handling plumbing, both callers' existing "unchanged, retry next cycle" paths pick it up
+automatically.
+
+**Verified:** `deno check` on the modified file plus both callers (`paper-reconcile/index.ts`,
+`execute-trade/index.ts`) — `execute-trade` has 20 pre-existing errors, confirmed identical on
+unmodified `dev` via `git stash`/`deno check`/`git stash pop`; no new type errors anywhere. `deno
+lint` across the same three files — 23 pre-existing problems, confirmed identical via the same
+stash comparison — no new lint issues. Deployed both `paper-reconcile` and `execute-trade` via
+`supabase functions deploy` (both import the shared file). Invoked the deployed `paper-reconcile`
+directly via `net.http_post` matching `paper-reconcile-cron`'s own `cron.job.command` exactly —
+response `HTTP 200`, `{"checked":3,"filled":0,"partial":0,"cancelled":0,"errors":0}`; confirmed in
+`compliance_log` (`paper_reconcile_run`: "3 checked, 0 filled, 0 partial, 0 cancelled, 0 errors
+(141ms)"). In the same post-deploy window, `execute-trade` fired for real via a live S-001 basket
+(3 legs filled, orders submitted, no errors) — confirms the shared helper's new guard didn't
+disturb the real order path either, exercising both call sites with real data in one pass.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-28 (63rd run) — Clean window, all cron healthy, CI green; fixed the 62nd run's flagged leftover — `runS005WeatherEdge`'s profit-lock price fetch had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
