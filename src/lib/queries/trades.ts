@@ -69,7 +69,9 @@ export function useSettledTrades() {
 export function useOpenPositions(mode?: "paper" | "live") {
   return useQuery({
     queryKey: tradesKeys.open(mode),
-    placeholderData: keepPreviousData,
+    // No keepPreviousData: each mode has its own cache slot, so carrying the
+    // prior key's data over here would render the other mode's positions as
+    // current (isLoading stays false during the placeholder window).
     queryFn: async () => {
       const userId = await currentUserId();
       let q = supabase
@@ -94,7 +96,7 @@ export function useOpenPositions(mode?: "paper" | "live") {
 export function useRecentTrades(mode?: "paper" | "live") {
   return useQuery({
     queryKey: tradesKeys.recent(mode),
-    placeholderData: keepPreviousData,
+    // See useOpenPositions above — same cross-mode staleness risk.
     queryFn: async () => {
       const userId = await currentUserId();
       let q = supabase
