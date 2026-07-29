@@ -24,6 +24,11 @@ export type FetchOrderbookResult =
   | { ok: true; orderbook: Orderbook }
   | { ok: false; tickerGone: boolean; status: number | null; error?: string };
 
+// Same 8s bound as the CREDENTIAL_FETCH_TIMEOUT_MS/KALSHI_FETCH_TIMEOUT_MS
+// convention used across market-data-fetcher/auto-trade/settle-signals/etc —
+// a public market-data GET, not an LLM call.
+const ORDERBOOK_FETCH_TIMEOUT_MS = 8_000;
+
 /**
  * Real-time public orderbook read for a single ticker. 404/410 mean the
  * market doesn't exist or was delisted (e.g. a bracket rolled out of the
@@ -35,8 +40,12 @@ export async function fetchOrderbook(
   kalshiBase: string,
   ticker: string
 ): Promise<FetchOrderbookResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ORDERBOOK_FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(`${kalshiBase}/markets/${ticker}/orderbook`);
+    const response = await fetch(`${kalshiBase}/markets/${ticker}/orderbook`, {
+      signal: controller.signal,
+    });
     if (!response.ok) {
       return {
         ok: false,
@@ -47,11 +56,18 @@ export async function fetchOrderbook(
     const orderbook = (await response.json()) as Orderbook;
     return { ok: true, orderbook };
   } catch (err) {
+    const isTimeout = err instanceof Error && err.name === "AbortError";
     return {
       ok: false,
       tickerGone: false,
       status: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: isTimeout
+        ? `Orderbook request timed out after ${ORDERBOOK_FETCH_TIMEOUT_MS}ms: ${ticker}`
+        : err instanceof Error
+        ? err.message
+        : String(err),
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
