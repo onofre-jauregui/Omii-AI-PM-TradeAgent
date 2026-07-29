@@ -2,6 +2,82 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (83rd run) — `execute-trade`'s 401-rejection logger has crashed on every unauthenticated/misconfigured call since 2026-06-20, masking the real 401 behind a 500
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (82nd run's branch merged as PR #138) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-20260729-1915` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+82nd run's ~18:13 UTC cutoff through this run's ~19:13 UTC invocation — 3 rows. One
+`kalshi_proxy_service_credential_fetch_failed` (19:01:25 UTC) — checked the full day's history (10
+occurrences spread across 8 hours, none clustered, each immediately followed by a
+`kalshi_proxy_unauthenticated_fallback` warning and self-heals) — same intermittent,
+non-fatal credential-fetch-latency pattern already characterized and accepted in the 81st run, not
+a new regression. One `auth_rejected` (18:25:36) — a legitimate security rejection of a
+misconfigured/mismatched bearer, not a bug. The third is the real find.
+
+**Root cause found and fixed (HIGH — silent since 2026-06-20, ~5 weeks):** `system_event` row at
+18:23:51 UTC: `Trade execution error: supabase.from(...).insert(...).catch is not a function`.
+Same failure signature as two already-fixed incidents in this exact codebase (`auto-trade`,
+2026-07-06; `daily-digest`, 2026-07-26) — Supabase's query builder is a thenable, not a real
+`Promise`, so `.catch()` doesn't exist on it and throws a `TypeError` synchronously, before the
+insert's network request is ever dispatched. Traced to `execute-trade/index.ts:212`, in the
+401-rejection compliance logger added by commit `12764cf` (2026-06-20, "log 401 rejections from
+execute-trade to compliance_log") — `await supabase.from("compliance_log").insert({...}).catch(()
+=> {})`. `git log -S` confirms this exact line hasn't changed since that commit; `grep`-audited
+every `.catch(` call site across all 20+ edge functions in the repo (`supabase.from`/`.rpc` chains
+only — fetch/sendTelegramAlert/sendUserNotification calls return real Promises and are unaffected)
+and confirmed this is the **only** remaining site with the bare-`.catch()`-on-a-builder
+anti-pattern; everywhere else already uses `.then().catch()` or the two-arg `.then(ok, err)` form.
+Empirically reproduced against the live `npm:@supabase/supabase-js@2` resolution (v2.111.0) used by
+this project: `typeof builder.catch === "undefined"`, and calling it throws `builder.catch is not
+a function` — the same message shape (rendered with the call-site source text since there's no
+intermediate variable) as the compliance_log row. **Effect:** any unauthenticated or
+misconfigured-bearer call to `execute-trade` (e.g. `auto-trade` calling in with a stale/rotated
+`SUPABASE_SERVICE_ROLE_KEY`) throws inside the intended-to-be-safe logging line, falls through to
+the function's outer catch block, and returns a generic `500 Trade execution failed` instead of
+the correct `401 Unauthorized` — and the audit-trail row this code exists to write has never once
+been successfully persisted in the five weeks since it was added.
+
+**Fix (deployed):** replaced `.catch(() => {})` with `.then(undefined, () => {})` on the single
+call site, matching the established fix pattern from both prior incidents. Additive, one line,
+same file, same risk class as the daily-digest fix.
+
+**Verified:** `deno check supabase/functions/execute-trade/index.ts` — baseline (unmodified `dev`)
+has 20 pre-existing errors (confirmed via `git stash`); after the fix, 19 — one fewer, because
+`deno check` was independently flagging the missing `.catch` as a type error too, and it's now
+gone. No new errors introduced. `npm run lint`: 0 errors, same pre-existing 9 fast-refresh
+warnings. `npm run test`: 206/206 pass unchanged. Deployed `execute-trade`
+(`supabase functions deploy`). **Exercised against the real deployed function:** confirmed
+Supabase's platform-level `verify_jwt` gate (enabled for this function) rejects requests with no
+or malformed `Authorization` header before the function's own code ever runs (`401
+UNAUTHORIZED_NO_AUTH_HEADER` / `401 UNAUTHORIZED_INVALID_JWT_FORMAT`) — reaching the app-level
+`isServiceRoleBearer` branch this fix touches requires a syntactically valid Supabase JWT with a
+mismatched role, which is what `auto-trade`'s own internal calls produce when misconfigured; did
+not fabricate one against the live money-adjacent endpoint beyond what's shown above, per the
+same boundary every prior run touching this file has held to. Reversibility: trivial single-line
+revert + redeploy.
+
+**Anomaly noted, not chased:** the `auth_rejected` row (18:25:36 UTC) has full realistic metadata
+(a real ticker, `service_key_configured: true`, a real `user_id_in_body`) implying its insert
+*did* succeed, which seems to conflict with the "always throws" finding above. Function version
+history (`GET /v1/projects/.../functions`) shows only the version this run just deployed (96,
+timestamped to this run); there's no visibility into what was live at 18:25 without inspecting
+the interactive checkout, which this task is explicitly barred from touching. Left unresolved —
+doesn't change the fix, which is independently verified via static analysis, live empirical
+reproduction, and the matching precedent from two prior incidents.
+
+**Also observed, explicitly out of scope this run:** a `warning`-severity
+`strategy_suspended_drawdown` row for "Weather Edge" citing a **1695.7%** max drawdown — outside
+this run's `error`/`critical` query scope, and almost certainly its own calculation bug (a
+drawdown percentage that large is not a real trading outcome), but investigating the drawdown
+math is a different subsystem than this run's finding. Flagged here for a future run rather than
+scope-crept into this one.
+
+**Reversibility:** trivial — one-line diff, single file, `git revert` + redeploy restores the
+prior (broken) behavior with no other change.
+
 ## 2026-07-29 (82nd run) — Clean window, all cron healthy; closed out the 76th run's Tier-4 backlog — all 10 unguarded `trading-agent/index.ts` chat-tool-loop sites
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
