@@ -13,6 +13,7 @@
 const SENDER_EMAIL = "tradeagentcomm@yahoo.com";
 const SENDER_NAME  = "TradeAgent";
 const DASHBOARD_URL = "https://kalshitradeagent.com";
+const NOTIFICATION_FETCH_TIMEOUT_MS = 8_000;
 
 export type NotifEventType =
   | "trade_executed"
@@ -124,17 +125,25 @@ async function sendEmail(
   subject: string,
   html: string,
 ): Promise<void> {
-  const resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      personalizations: [{ to: [{ email: to }] }],
-      from: { email: SENDER_EMAIL, name: SENDER_NAME },
-      reply_to: { email: SENDER_EMAIL },
-      subject,
-      content: [{ type: "text/html", value: html }],
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NOTIFICATION_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: SENDER_EMAIL, name: SENDER_NAME },
+        reply_to: { email: SENDER_EMAIL },
+        subject,
+        content: [{ type: "text/html", value: html }],
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     throw new Error(`SendGrid ${resp.status}: ${body.slice(0, 200)}`);
@@ -150,17 +159,25 @@ async function sendSms(
   to: string,
   body: string,
 ): Promise<void> {
-  const resp = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${btoa(`${sid}:${auth}`)}`,
-        "Content-Type": "application/x-www-form-urlencoded",
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NOTIFICATION_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${sid}:${auth}`)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ To: to, From: from, Body: body }),
+        signal: controller.signal,
       },
-      body: new URLSearchParams({ To: to, From: from, Body: body }),
-    },
-  );
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`Twilio ${resp.status}: ${text.slice(0, 200)}`);
