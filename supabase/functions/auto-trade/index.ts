@@ -785,7 +785,7 @@ serve(async (req) => {
         const templateId = (strategy as any).template_id ?? strategy.id;
 
         if (templateId === "S-001") {
-          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, kalshiCircuit);
+          result = await runS001SurfaceArb(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, kalshiCircuit, userRisk);
         } else if (templateId === "S-002") {
           result = await runS002LongshotBias(supabase, strategy, config, aiConfig, supabaseUrl, supabaseKey, runId, userRisk, winStreak);
         } else if (templateId === "S-005") {
@@ -1027,10 +1027,18 @@ async function runS001SurfaceArb(
   supabaseKey: string,
   runId?: string,
   kalshiCircuit: { failures: number; open: boolean } = { failures: 0, open: false },
+  userRisk?: any,
 ): Promise<StrategyResult> {
   const mode = strategy.mode || "paper";
   const AMOUNT_PER_LEG = config?.min_position_usd ?? 15; // small per-leg since we take multiple
   const MAX_LEGS_PER_EVENT = 3;
+  // Account's configured per-order ceiling (risk_settings.max_position_size, mode-scoped —
+  // e.g. $20 live vs $100 paper for this user). kellySize() below has its own $10/$100
+  // floor/cap but knows nothing about this account-level limit, so an aggressive Kelly
+  // fraction on a near-certain bracket leg can size a leg the account can never place —
+  // execute-trade's risk check (_shared/risk.ts) rejects it every time, burning the whole
+  // cron cycle on a guaranteed-fail round trip. Clamp before submission instead.
+  const MAX_LEG_USD = Number(userRisk?.max_position_size) || 100;
 
   // Staleness guard: 10 min instead of 30 min.
   // Real bracket-sum violations on KXINX are visible to all bots watching the same feed.
@@ -1141,6 +1149,27 @@ async function runS001SurfaceArb(
   // replenish mid-run, so every alert processed after that point is skipped
   // without spending a live Kalshi round trip on a doomed order.
   let accountDepleted = false;
+
+  // S-001 had no review step at all before this — a pure mechanical bracket-sum
+  // check with no LLM gate, no memory check, nothing. Fetch memory/lessons once
+  // per cron cycle (shared across every leg below), mirroring S-002's pattern
+  // (auto-trade/index.ts ~1573-1589) exactly rather than inventing a new one.
+  const { data: s001Memories } = await supabase
+    .from("agent_memory")
+    .select("id, title, content, confidence, exposed_confidence")
+    .eq("strategy_id", strategy.id)
+    .eq("is_active", true)
+    .is("quarantined_at", null)
+    .is("merged_into", null)
+    .order("confidence", { ascending: false })
+    .limit(5);
+  const s001MemBlock = (s001Memories ?? [])
+    .map((m: any) => {
+      const bay = m.exposed_confidence != null ? ` / bayesian ${Number(m.exposed_confidence).toFixed(2)}` : "";
+      return `[conf ${Number(m.confidence).toFixed(2)}${bay}] ${m.title}: ${m.content}`;
+    })
+    .join("\n");
+  const s001Lessons = await fetchStrategyLessons(supabase, strategy.id);
 
   for (const alert of alerts) {
     if (accountDepleted) break;
@@ -1326,8 +1355,13 @@ async function runS001SurfaceArb(
       }
     }
 
-    // 5. Execute NO buys on the top overpriced markets — no LLM gate needed.
-    //    The arb is structural: bracket must sum to 100c, market says it sums to >100c.
+    // 5. Execute NO buys on the top overpriced markets.
+    //    The arb is structural: bracket must sum to 100c, market says it sums to >100c —
+    //    but structural doesn't mean risk-free (a stale signal, or a specific lesson
+    //    already learned about this pattern, can still make a given leg a bad idea).
+    //    Every leg now gets an LLM qualify/reject pass against agent_memory and past
+    //    lessons before submission — deliberately no auto-qualify bypass (unlike S-002/
+    //    S-005), since every entry should be reviewed while stakes are still small.
     //    time_in_force="day" ensures unfilled live limit orders auto-cancel at market close
     //    instead of sitting open indefinitely. Paper mode fills immediately.
     //    Legs are submitted sequentially, not via Promise.all: execute-trade's balance
@@ -1348,6 +1382,51 @@ async function runS001SurfaceArb(
 
       const feeHurdle = feeHurdleCentsAt(leg.noPrice);
       const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
+      // Quarter-Kelly sizing instead of a flat AMOUNT_PER_LEG for every signal
+      // regardless of edge strength. marketP is the price we're actually paying;
+      // trueP is our own fair-value estimate for this leg — marketP plus the
+      // per-leg edge this same filter already computed above (the bracket-sum
+      // violation converted to cents of mispricing). Reuses kellySize(), which
+      // already existed in this file (quarter-Kelly, floor $10/cap $100) but was
+      // never called anywhere before this.
+      const marketP = leg.noPrice / 100;
+      const trueP = Math.min(0.99, marketP + perLegEdge / 100);
+      // Clamped to MAX_LEG_USD (account's risk_settings.max_position_size) — kellySize's
+      // own $10/$100 band is blind to the account's configured per-order ceiling.
+      const legAmount = Math.min(kellySize(trueP, marketP, Number(strategy.starting_balance) || 100), MAX_LEG_USD);
+
+      // LLM review gate — reuses S-002's exact qualifySetup/buildQualifyPrompt/
+      // parseQualifyResponse pattern (auto-trade/index.ts ~1621-1642), fail-closed:
+      // any error/timeout skips just this leg, not the whole cycle. No auto-qualify
+      // bypass, unlike S-002/S-005 — every leg gets reviewed.
+      const s001QualifyPrompt = buildQualifyPrompt("S-001 Surface Arbitrage", {
+        ticker: leg.ticker,
+        market_question: leg.title,
+        direction: "buy_no",
+        bracket_sum_cents: askSideSumCents,
+        yes_ask: leg.yesAsk,
+        no_price: leg.noPrice,
+        per_leg_edge_cents: perLegEdge,
+        fee_hurdle_cents: feeHurdle,
+        kelly_sized_amount: legAmount,
+        ...(s001Lessons.length > 0 ? { past_lessons: s001Lessons.join("\n") } : {}),
+        ...(s001MemBlock ? { strategy_memory: s001MemBlock } : {}),
+        note: `S-001 Surface Arbitrage: structural bracket-sum arb — ${eventTicker} ask-side sum is ${askSideSumCents}c (should be ~100c), buying NO on the most overpriced bracket at ${leg.noPrice}c. QUALIFY unless a specific exception applies: (1) a past_lessons or strategy_memory entry directly warns against this exact ticker/pattern; (2) the signal looks stale relative to current book conditions; (3) the market question implies a near-certain outcome the mechanical bracket-sum check can't see. Do NOT reject for generic reasons (price looks high, market efficiency) — the edge here is structural, not a probability judgment call.`,
+      });
+      const { qualified: s001Qualified, reason: s001QualifyReason } =
+        await qualifySetup(aiConfig, s001QualifyPrompt, mode, runId, strategy.id, supabase);
+
+      if (!s001Qualified) {
+        await supabase.from("compliance_log").insert({
+          event_type: "s001_qualify_rejected",
+          severity: "info",
+          message: `S-001: LLM rejected ${leg.ticker} — ${s001QualifyReason}`,
+          metadata: { ticker: leg.ticker, event_ticker: eventTicker, no_price: leg.noPrice, kelly_amount: legAmount, run_id: runId },
+        }).then(null, () => {});
+        legResults.push({ ticker: leg.ticker, success: false, price: leg.noPrice });
+        continue;
+      }
+
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
           ticker: leg.ticker,
           marketId: leg.ticker,
@@ -1355,13 +1434,13 @@ async function runS001SurfaceArb(
           side: "no",
           action: "buy",
           price: leg.noPrice,
-          amount: AMOUNT_PER_LEG,
+          amount: legAmount,
           strategy: strategy.name,
           strategyId: strategy.id,
           orderType: "limit",
           time_in_force: "day",
           mode,
-          notes: `S-001 Surface Arb: ${eventTicker} ask-side sum ${askSideSumCents}c. YES overpriced at ${leg.yesAsk}c, buying NO @ ${leg.noPrice}c. Per-leg edge ${perLegEdge.toFixed(1)}c vs fee hurdle ${feeHurdle.toFixed(1)}c.`,
+          notes: `S-001 Surface Arb: ${eventTicker} ask-side sum ${askSideSumCents}c. YES overpriced at ${leg.yesAsk}c, buying NO @ ${leg.noPrice}c for $${legAmount} (quarter-Kelly). Per-leg edge ${perLegEdge.toFixed(1)}c vs fee hurdle ${feeHurdle.toFixed(1)}c.`,
           expectedOutcome: `NO wins if S&P does NOT land in this bracket. Structural arb, not directional.`,
           confidenceLevel: alert.confidence,
           user_id: strategy.user_id || null,
