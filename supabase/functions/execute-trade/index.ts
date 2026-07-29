@@ -209,7 +209,10 @@ serve(async (req) => {
             user_id_in_body: parsedBody?.user_id ?? null,
           },
           user_id: null,
-        }).catch(() => {}); // never block the rejection on a log failure
+        }).then(undefined, () => {}); // never block the rejection on a log failure — supabase's
+        // query builder is a thenable, not a real Promise, so .catch() doesn't exist on it and
+        // throws a TypeError before the insert even resolves (same failure class as the
+        // 2026-07-06 auto-trade and 2026-07-26 daily-digest incidents)
         return new Response(
           JSON.stringify({ error: "Unauthorized" }),
           { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
