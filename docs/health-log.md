@@ -2,6 +2,49 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (72nd run) — Clean window, all cron healthy; but the 71st run's own merge broke CI on a transient esm.sh CDN outage that outlasted the existing retry guard — widened the retry budget
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`56e361f`, the 71st run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 71st run's ~07:07 UTC cutoff through this run's ~08:07 UTC invocation — zero rows across 921
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`.
+
+**Found instead — CI failure on the merge commit itself:** `gh run list --workflow=ci.yml` showed
+the push-to-dev run for `56e361f` (run `30431158450`, 07:18 UTC) had failed, the only failure in
+the last 20 runs — everything before and since is green. The PR's own pre-merge check on the same
+commit (run `30430996801`, 07:15 UTC) had passed, so this wasn't the code diff (a single-file
+change to `_shared/telegram.ts`, unrelated to the function that failed) — it pointed at
+infrastructure flakiness reproducing on the identical commit three minutes apart.
+
+**Root cause:** `deploy-staging-functions`'s bundling step imports `supabase-js` from `esm.sh` at
+deploy time. The 68th run (2026-07-28, run `30357821307`) had already hit this once and added a
+3-attempt/flat-15s-backoff retry loop (`.github/workflows/ci.yml`) — a ~45s total retry budget.
+This run's outage on `manage-billing` held esm.sh unreachable for over 2 minutes straight
+(07:28:55 → 07:30:47 UTC, three consecutive `522` failures), longer than the existing budget could
+absorb, even though every other function in the same job recovered on its first retry. The guard
+was real but under-provisioned for a longer-than-average blip in the same external dependency it
+was already built to tolerate.
+
+**Fix (LOW risk, additive-only, CI workflow config only — no application code touched):** widened
+the retry loop in `.github/workflows/ci.yml` from 3 fixed-15s attempts to 5 attempts with
+exponential backoff (15/30/60/120s, ~3.75min total budget). Still fails loud with a clear message
+after attempt 5 — this raises the ceiling for tolerable outage length, it doesn't suppress a
+persistent failure.
+
+**Verified:** `python3 -c "import yaml; yaml.safe_load(...)"` confirms the edited workflow file is
+still valid YAML. `gh run list --workflow=ci.yml --limit 20` confirms this was an isolated,
+one-off failure (not a recurring pattern needing a different fix) before making the change. The
+next natural push to `dev` (this PR's own merge) will exercise the new retry path under real CI
+conditions — no live esm.sh outage was available to force during this run, same
+unexercised-until-the-next-real-incident caveat as every other guard added in this campaign.
+
+**Reversibility:** trivial — single-file, workflow-only diff; revert path is `git revert`, no
+redeploy required since this changes CI config, not deployed function code.
+
 ## 2026-07-29 (71st run) — Clean window, all cron healthy, CI green; closed the shared Telegram alert helper's own timeout gap — the one call site whose docstring falsely promised "never blocks", fanning out to 12 caller functions
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)

@@ -91,20 +91,29 @@ jobs:
           # Bundling imports supabase-js from esm.sh at deploy time; a transient CDN 5xx there
           # (observed 2026-07-28, run 30357821307: "Import ... failed: 522") aborts the whole
           # job under `bash -e` and blocks staging/e2e for every function, not just the one
-          # that hit the blip. Retry each function's deploy up to 3x with backoff before
-          # failing loud, so a single CDN hiccup doesn't require a manual rerun.
+          # that hit the blip. Retry each function's deploy with backoff before failing loud,
+          # so a single CDN hiccup doesn't require a manual rerun.
+          #
+          # 2026-07-29 (72nd health check, run 30431158450): the original 3-attempt/flat-15s
+          # budget (~45s) was exhausted by manage-billing while esm.sh stayed unreachable for
+          # over 2 minutes straight (07:28:55-07:30:47), even though every other function
+          # recovered on its first retry. Widened to 5 attempts with exponential backoff
+          # (15/30/60/120s, ~3.75min budget) to absorb longer CDN outages without masking a
+          # real, persistent failure (still fails loud after attempt 5).
           for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
-            for attempt in 1 2 3; do
+            delay=15
+            for attempt in 1 2 3 4 5; do
               if npx supabase functions deploy "$fn" \
                 --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}; then
                 break
               fi
-              if [ "$attempt" = 3 ]; then
-                echo "Deploy failed for $fn after 3 attempts"
+              if [ "$attempt" = 5 ]; then
+                echo "Deploy failed for $fn after 5 attempts"
                 exit 1
               fi
-              echo "Deploy attempt $attempt failed for $fn, retrying in 15s..."
-              sleep 15
+              echo "Deploy attempt $attempt failed for $fn, retrying in ${delay}s..."
+              sleep "$delay"
+              delay=$((delay * 2))
             done
           done
 
