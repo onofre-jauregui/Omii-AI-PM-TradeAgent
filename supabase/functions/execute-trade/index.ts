@@ -64,6 +64,7 @@ interface LiquidityCheck {
   adjustedPrice?: number;
   fallbackAction?: string;
   tickerGone?: boolean;
+  availableContracts?: number;
 }
 
 async function checkLiquidity(
@@ -101,6 +102,7 @@ async function checkLiquidity(
         sufficient: false,
         fallbackAction: "limit_order_at_price",
         adjustedPrice: price,
+        availableContracts: 0,
       };
     }
 
@@ -128,6 +130,7 @@ async function checkLiquidity(
         sufficient: false,
         fallbackAction: "partial_fill_then_limit",
         adjustedPrice: price,
+        availableContracts,
       };
     }
 
@@ -572,11 +575,51 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
+    // checkLiquidity used to only flip resolvedOrderType below — the depth it found
+    // never actually changed what got submitted, so an order requesting more size
+    // than the book could support still went out in full at the original price.
+    // Zero real depth on our side of the book means submitting is doomed; skip it
+    // the same way a delisted ticker is skipped above, instead of wasting a round
+    // trip (and, on a resting limit order, capital that then sits unmatched).
+    if (liquidityCheck.availableContracts === 0) {
+      const { data: failedTrade } = await supabase.from("trades").insert({
+        user_id: userId,
+        ticker: resolvedTicker,
+        market_id: resolvedTicker,
+        market_question: marketQuestion || resolvedTicker,
+        side, action, price, amount,
+        strategy: strategy || null,
+        strategy_id: strategyId || null,
+        mode: tradeMode,
+        status: "failed",
+        exchange: "kalshi",
+        expiration_time: expirationTime || null,
+        notes: `Skipped: no liquidity on ${side} ${action} side at ${price}c for ${resolvedTicker}`,
+      }).select().single();
+
+      await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_no_liquidity", "warning",
+        `Skipped ${resolvedTicker}: zero depth on ${side} ${action} side at ${price}c`,
+        { ticker: resolvedTicker, trace_id: traceId }
+      );
+
+      return new Response(JSON.stringify({
+        success: false,
+        error: `No liquidity for ${resolvedTicker} at ${price}c.`,
+        trade: failedTrade,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const resolvedOrderType = liquidityCheck.sufficient ? (orderType || "limit") : "limit";
 
-    // Calculate contract count: amount in dollars / price per contract
+    // Calculate contract count: amount in dollars / price per contract.
+    // When the book has real but insufficient depth (availableContracts set and
+    // below what we asked for), size down to what can actually be matched instead
+    // of submitting the full request at an unchanged size against a thinner book.
     const pricePerContract = price / 100; // cents to dollars
-    const contractCount = Math.max(1, Math.floor(amount / pricePerContract));
+    const requestedContractCount = Math.max(1, Math.floor(amount / pricePerContract));
+    const contractCount = liquidityCheck.availableContracts != null
+      ? Math.max(1, Math.min(requestedContractCount, liquidityCheck.availableContracts))
+      : requestedContractCount;
 
     // ── Kalshi V2 order schema (legacy /portfolio/orders is deprecated) ──
     // V2 quotes every order from the YES-book bid/ask perspective — there is no
@@ -731,7 +774,12 @@ serve(async (req) => {
     if (!kalshiResponse.ok) {
       // Log full Kalshi error internally — never expose raw API responses to the client
       const rawKalshiError = kalshiResult.message || kalshiResult.error || kalshiResult;
-      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : JSON.stringify(rawKalshiError);
+      // JSON.stringify(undefined) returns the literal value undefined, not a string —
+      // when Kalshi's rejection body is empty, rawKalshiError resolves to undefined and
+      // kalshiErrorDetail.slice() below crashed the whole handler unhandled. String()
+      // guarantees a string for every input (matches the idiom used elsewhere in this
+      // file, e.g. the outer catch's `e instanceof Error ? e.message : String(e)`).
+      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : String(rawKalshiError);
       console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
         ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
       });

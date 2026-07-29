@@ -169,22 +169,47 @@ serve(async (req) => {
     const activeStrategies = (strategies || []).filter((s: any) => s.active);
 
     for (const strat of activeStrategies) {
-      // Fetch last 30 settled trades, oldest first for cumulative calculations
-      const { data: rawTrades } = await supabase
+      // Fetch last 30 settled trades, oldest first for cumulative calculations.
+      // "settled" is the status auto-settle stamps once a trade has a final pnl —
+      // "filled" means still open/unresolved and never carries settled_at. This query
+      // used to filter on status="filled", an impossible combination with
+      // settled_at IS NOT NULL, so it silently matched zero rows for every strategy —
+      // Strategy Health v2's Sharpe/drawdown/hit-rate/loss-streak suspension logic has
+      // never actually evaluated a single trade since it shipped. Confirmed via a direct
+      // count: 488 trades with status="settled" all carry settled_at; 13 with
+      // status="filled" carry none.
+      // strategy=eq.${strat.name} is a fallback for legacy rows with no strategy_id
+      // (162 such settled "Surface Arbitrage" rows exist). Without also scoping by
+      // mode, that fallback cross-contaminates: paper and live strategy rows share
+      // the same name, so the live strategy's rolling window pulled in hundreds of
+      // paper trades (and vice versa) — this is what produced an impossible ~596%
+      // "drawdown" and force-suspended live trading the first time this query ever
+      // ran real data (see status="settled" fix above). mode is on every trade row,
+      // so scoping the fallback by it keeps legacy-row coverage without mixing modes.
+      // order-then-limit bug: "settled_at ascending + limit 30" returns the OLDEST 30
+      // settled trades ever, not a rolling recent window — for S-001/S-005 (paper,
+      // trading since May) this permanently evaluated health against trades from
+      // 2026-05-19, frozen at strategy launch, never actually "rolling." Fetch the
+      // most recent 30 (descending) then reverse in-memory so the cumulative
+      // peak/drawdown math below still walks oldest-to-newest within that window.
+      const { data: rawTradesDesc } = await supabase
         .from("trades")
         .select("pnl, settled_at, status")
-        .eq("status", "filled")
+        .eq("status", "settled")
         .not("settled_at", "is", null)
+        .eq("mode", strat.mode)
         .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
-        .order("settled_at", { ascending: true })
+        .order("settled_at", { ascending: false })
         .limit(30);
+      const rawTrades = rawTradesDesc ? [...rawTradesDesc].reverse() : rawTradesDesc;
 
       if (!rawTrades || rawTrades.length === 0) {
         // Also check for any trades (not yet settled)
         const { data: anyTrades } = await supabase
           .from("trades")
           .select("id")
-          .eq("status", "filled")
+          .in("status", ["filled", "settled"])
+          .eq("mode", strat.mode)
           .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
           .limit(1);
 
@@ -319,10 +344,12 @@ serve(async (req) => {
     };
 
     // ── 3. Unreflected Trade Count ───────────────────────────────
+    // A trade only has something to reflect on once it's settled (final pnl known) —
+    // same status="filled" vs "settled" mismatch as Strategy Health v2 above.
     const { data: allFilled } = await supabase
       .from("trades")
       .select("id")
-      .eq("status", "filled");
+      .eq("status", "settled");
 
     const filledIds = (allFilled || []).map((t: any) => t.id);
 
@@ -409,7 +436,12 @@ serve(async (req) => {
       if (!lessonKeys["openai"]) lessonKeys["openai"] = Deno.env.get("OPENAI_API_KEY") || "";
       const lessonAiKey = lessonKeys["openrouter"] || lessonKeys["openai"];
       const lessonAiBaseUrl = lessonKeys["openrouter"] ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
-      const lessonAiModel = lessonKeys["openrouter"] ? "openai/gpt-4o-mini" : "gpt-4o-mini";
+      // Claude Sonnet 5 via the same already-wired OpenRouter key — GPT-4o-mini was
+      // producing thin, near-duplicate boilerplate lessons ("executed before the
+      // market could reprice") instead of distinct causal analysis. Falls back to
+      // gpt-4o-mini only when no OpenRouter key is configured (direct OpenAI key
+      // only) — Claude isn't reachable through OpenAI's own API.
+      const lessonAiModel = lessonKeys["openrouter"] ? "anthropic/claude-sonnet-5" : "gpt-4o-mini";
 
       const windowAgo = new Date(Date.now() - LESSON_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
       const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();

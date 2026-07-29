@@ -102,19 +102,38 @@ serve(async (req) => {
             continue;
           }
 
+          // V2 GetOrder returns fixed-point-string fields (`remaining_count_fp`,
+          // e.g. "0.00"), not the plain numeric `remaining_count` this used to read —
+          // confirmed against a live order response. That mismatch meant `remaining`
+          // was always -1, so a fully-executed order (status "executed", not in the
+          // canceled/expired set) never satisfied `remainingCount === 0` and reconcile
+          // silently left real fills sitting as "open" forever. `remaining_count` is
+          // kept as a fallback in case a different endpoint/response shape supplies it.
           const kStatus = String(kalshiOrder.status ?? "");
-          const remaining = Number(kalshiOrder.remaining_count ?? -1);
+          const remaining = Number(kalshiOrder.remaining_count_fp ?? kalshiOrder.remaining_count ?? -1);
           const initialCount = contractCount(trade.amount, trade.price);
-          const avgPriceCents = pickAvgPrice(kalshiOrder);
-          const decision = decideReconcile(kStatus, remaining, initialCount);
+          const avgPriceCents = pickAvgPrice(kalshiOrder, trade.side);
+
+          // Only spend a second API call checking the market when the order itself
+          // still looks resting — a fill/partial/explicit-cancel never needs it.
+          let marketStatus: string | undefined;
+          if (remaining > 0 && remaining === initialCount && trade.ticker) {
+            marketStatus = await fetchMarketStatus(trade.ticker);
+          }
+
+          const decision = decideReconcile(kStatus, remaining, initialCount, marketStatus);
 
           if (decision === "cancel") {
+            const viaMarketFinalized = !TERMINAL_CANCELLED_LOWER.has(kStatus.toLowerCase());
             await updateTrade(supabase, trade.id, {
               status: "cancelled",
               cancelled_at: new Date().toISOString(),
             });
             await logCompliance(supabase, userId, trade.id, "order_cancelled",
-              `Live order ${trade.order_id} ${kStatus.toLowerCase()} on Kalshi`, { order_id: trade.order_id });
+              viaMarketFinalized
+                ? `Live order ${trade.order_id} never matched — market ${trade.ticker} settled (${marketStatus}) before it could fill`
+                : `Live order ${trade.order_id} ${kStatus.toLowerCase()} on Kalshi`,
+              { order_id: trade.order_id, market_status: marketStatus });
             summary.cancelled++;
           } else if (decision === "fill") {
             await updateTrade(supabase, trade.id, {
@@ -163,6 +182,10 @@ serve(async (req) => {
 
 // ── Kalshi ────────────────────────────────────────────────────────────────
 
+// Mirrors reconcile-logic.ts's TERMINAL_CANCELLED — used here only to decide the
+// compliance_log message wording (Kalshi-side cancel vs market-finalized cancel).
+const TERMINAL_CANCELLED_LOWER = new Set(["canceled", "cancelled", "expired"]);
+
 async function fetchKalshiOrder(keyId: string, privateKey: string, orderId: string): Promise<any | null> {
   const path = `/trade-api/v2/portfolio/orders/${orderId}`;
   const ts = Date.now();
@@ -174,6 +197,20 @@ async function fetchKalshiOrder(keyId: string, privateKey: string, orderId: stri
   }
   const body = await res.json();
   return body?.order ?? body ?? null;
+}
+
+// Public endpoint, no auth required. Used only as a fallback when an order still
+// looks fully resting — see decideReconcile's market-finalized branch.
+async function fetchMarketStatus(ticker: string): Promise<string | undefined> {
+  try {
+    const res = await fetchWithRetry(`${KALSHI_BASE_URL}/markets/${ticker}`, { method: "GET" });
+    if (!res.ok) return undefined;
+    const body = await res.json();
+    return body?.market?.status;
+  } catch (e) {
+    console.warn(`reconcile-orders: market status check failed for ${ticker}:`, e instanceof Error ? e.message : e);
+    return undefined;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
