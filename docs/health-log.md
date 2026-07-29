@@ -2,6 +2,67 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (84th run) — `market-data-fetcher`'s credential-fetch timeout guard (48th run) still let one slow query nuke a whole 5-minute cycle; added a single retry
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched
+`origin/dev` exactly (83rd run's branch merged as PR #142) — `git fetch` confirmed no
+divergence, fresh branch `health-check/run-20260729-2106` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 83rd run's ~19:13 UTC cutoff through this run's ~21:06 UTC invocation — 3 rows. Two
+`kalshi_proxy_service_credential_fetch_failed` (20:39:29, 21:03:50 UTC) — the same intermittent,
+non-fatal, self-healing credential-fetch-latency pattern already characterized and accepted in
+the 81st run (falls back to the anonymous rate tier per-request, no user impact). The third is
+the real find.
+
+**Root cause found and fixed (MED — recurring critical alert, 4 occurrences over 16 days, most
+recent inside this run's own scan window):** `market_data_fetcher_aborted` critical row at
+20:46:12 UTC — `abort_reason: "credential fetch failed or timed out (credential fetch exceeded
+8000ms)"`, 0 series failed, all 18 skipped. Queried `compliance_log` for every historical
+`market_data_fetcher_aborted` row: 2026-07-13, 2026-07-16, 2026-07-23, and this run's 2026-07-29 —
+same cause each time. The 48th run (2026-07-28) had already fixed the *diagnosis* half of this:
+before that fix, a stalled credential query silently ate the full 50s `RUN_BUDGET_MS` with no
+accurate cause (2026-07-13: 130.6s, 2026-07-16: 61.4s); after it, the same stall is bounded to 8s
+and reported accurately. But the fix's own docstring reveals it never addressed the *abort*
+itself — a single slow `getKalshiCredentials()` call still takes down the entire run, skipping
+all 18 series and leaving surface-scanner/signal-generation on stale data for a full 5-minute
+cycle. Two more occurrences (07-23, and today) since that fix landed confirm the underlying
+slowness is transient rather than a permanent misconfiguration: the `kalshi_proxy_*` credential
+fetch (same underlying DB query, different caller) hit the identical symptom twice in this run's
+own 2-hour scan window and self-healed via per-request fallback both times, with no lasting
+outage. A single retry gives `market-data-fetcher` the same resilience to that transient blip
+that `kalshi-proxy` already has, without touching the correct-and-unchanged behavior for a
+genuinely broken credential path (retry still times out and aborts, just ~8s later, with the
+message now saying "after retry" for clarity).
+
+**Fix (deployed):** `supabase/functions/market-data-fetcher/index.ts` — extracted the existing
+`Promise.race(getKalshiCredentials(...), timeout)` call into a `fetchCredsOnce()` helper and wrapped
+the call site in a try/catch that retries once (a second full `fetchCredsOnce()` call with a fresh
+8s window) before setting `abortReason`. Worst case (both attempts time out) now costs ~16s against
+the 50s run budget — still leaves >30s of headroom for the 18-series loop that follows, so this
+can't cause a *new* class of run-budget abort. No change to `getKalshiCredentials()` itself or any
+other caller (`execute-trade`, `auto-trade`, `settle-signals`, `reconcile-orders`, `kalshi-ping`,
+`futures-signal`, `health-check`, `trading-agent`) — scoped to this one call site in this one
+read-only market-data-cache poller, same blast-radius discipline as the 48th run's fix.
+
+**Verified:** `deno check supabase/functions/market-data-fetcher/index.ts` — 11 pre-existing
+errors both before (`git stash`) and after, no new errors. `npm run lint`: 0 errors, same 9
+pre-existing fast-refresh warnings. `npm run test`: 206/206 pass unchanged. Deployed via
+`supabase functions deploy market-data-fetcher`. **Exercised against the real deployed function
+and real Kalshi API:** direct `POST .../functions/v1/market-data-fetcher` returned
+`{"success":true,"series_fetched":18,"series_failed":[],"series_skipped":[],"abort_reason":null,
+"total_markets_cached":838,"elapsed_ms":4105}` — happy path unregressed, confirmed by the matching
+`market_data_fetch` info row in `compliance_log` (21:09:08 UTC, "18/18 series OK, 838 markets
+cached"). **Not verified end-to-end:** the retry branch itself, since the credential fetch
+succeeded on the first attempt in this live invocation and a real multi-second DB stall isn't
+reproducible on demand without fault injection — same limitation the 48th run noted for the
+original timeout branch. Code-reviewed instead: the retry reuses the exact same `fetchCredsOnce()`
+path already proven correct on both the happy path (just verified above) and the timeout path
+(proven by the pre-existing `abortReason` handling this run left untouched).
+
+**Reversibility:** trivial — single-file, single-call-site revert to the pre-retry version +
+redeploy restores the 48th run's exact prior behavior with no other change.
+
 ## 2026-07-29 (83rd run) — `execute-trade`'s 401-rejection logger has crashed on every unauthenticated/misconfigured call since 2026-06-20, masking the real 401 behind a 500
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`

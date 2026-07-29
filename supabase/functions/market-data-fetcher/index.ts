@@ -68,7 +68,15 @@ serve(async (_req) => {
   // entire run and skipped all series with no accurate cause. Bound it to the same
   // REQUEST_TIMEOUT_MS used per-series so a hang fails fast with a real reason
   // instead of a generic "run budget exceeded".
-  try {
+  //
+  // The 8s bound alone (2026-07-28 fix) still let one slow query nuke a whole 5-min
+  // cycle: 2026-07-23 and 2026-07-29 both hit it again, each skipping all 18 series
+  // for a transient timeout, while the same underlying credential lookup succeeds
+  // moments later elsewhere (kalshi-proxy's per-request calls fall back and self-heal
+  // within the same window — see compliance_log `kalshi_proxy_service_credential_fetch_failed`
+  // rows bracketing both incidents). One retry absorbs that transient blip; a run
+  // budget of 50s comfortably covers two 8s attempts plus the series loop.
+  const fetchCredsOnce = () => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(
@@ -76,17 +84,27 @@ serve(async (_req) => {
         REQUEST_TIMEOUT_MS
       );
     });
+    return Promise.race([getKalshiCredentials(supabase, null), timeout]).finally(() =>
+      clearTimeout(timeoutId)
+    );
+  };
+
+  try {
     try {
-      const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+      const creds = await fetchCredsOnce();
       keyId = creds.keyId;
       privateKey = creds.privateKey;
-    } finally {
-      clearTimeout(timeoutId);
+    } catch (firstErr) {
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.error(`market-data-fetcher: credential fetch failed or timed out, retrying once: ${firstMsg}`);
+      const creds = await fetchCredsOnce();
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`market-data-fetcher: credential fetch failed or timed out: ${msg}`);
-    abortReason = `credential fetch failed or timed out (${msg})`;
+    console.error(`market-data-fetcher: credential fetch failed or timed out after retry: ${msg}`);
+    abortReason = `credential fetch failed or timed out after retry (${msg})`;
     skippedSeries = [...SERIES];
   }
 
