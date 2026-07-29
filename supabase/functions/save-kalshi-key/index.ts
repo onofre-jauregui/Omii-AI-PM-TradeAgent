@@ -4,6 +4,12 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { importMasterKey, encryptSecret } from "../_shared/encryption.ts";
 import { generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 
+// Same 8s bound as the CREDENTIAL_FETCH_TIMEOUT_MS convention used across
+// market-data-fetcher/auto-trade/settle-signals/etc — applied to the
+// non-blocking username backfill below (last Tier-5 unguarded fetch,
+// health-check 76th run's audit backlog).
+const KALSHI_USERNAME_FETCH_TIMEOUT_MS = 8_000;
+
 /**
  * save-kalshi-key: Securely saves a user's Kalshi API credentials.
  *
@@ -107,7 +113,14 @@ async function fetchAndStoreKalshiUsername(
   const path = "/trade-api/v2/portfolio/members/me";
   const timestamp = Date.now();
   const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, timestamp);
-  const resp = await fetch(`https://api.elections.kalshi.com${path}`, { headers });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), KALSHI_USERNAME_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch(`https://api.elections.kalshi.com${path}`, { headers, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     console.warn(`kalshi username fetch returned ${resp.status} — skipping`);
     return;

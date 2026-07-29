@@ -1,6 +1,7 @@
 const LANGFUSE_HOST = Deno.env.get("LANGFUSE_HOST") ?? Deno.env.get("LANGFUSE_BASE_URL") ?? "https://cloud.langfuse.com";
 const PUBLIC_KEY = Deno.env.get("LANGFUSE_PUBLIC_KEY") ?? "";
 const SECRET_KEY = Deno.env.get("LANGFUSE_SECRET_KEY") ?? "";
+const LANGFUSE_FETCH_TIMEOUT_MS = 8_000;
 
 function authHeader(): string {
   return "Basic " + btoa(`${PUBLIC_KEY}:${SECRET_KEY}`);
@@ -16,6 +17,8 @@ function normalizeModel(model: string): string {
 export function langfuseIngest(events: object[]): void {
   if (!PUBLIC_KEY || !SECRET_KEY) return;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LANGFUSE_FETCH_TIMEOUT_MS);
   fetch(`${LANGFUSE_HOST}/api/public/ingestion`, {
     method: "POST",
     headers: {
@@ -23,7 +26,8 @@ export function langfuseIngest(events: object[]): void {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ batch: events }),
-  }).catch(() => {});
+    signal: controller.signal,
+  }).catch(() => {}).finally(() => clearTimeout(timeoutId));
 }
 
 // userId is promoted to a top-level field in the Langfuse trace body so the
