@@ -2,6 +2,59 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (78th run) — New error class since the 77th run: `kalshi-proxy` public-endpoint credential fetch timing out under concurrent load — cached the service-tenant credential instead of widening the timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (77th run's branch merged as PR #132/#133) — fresh branch
+`health-check/run-20260729-bc175f` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+77th run's ~13:07 UTC cutoff — 4 rows, all `kalshi_proxy_service_credential_fetch_failed` (13:47,
+13:48, 13:51, 14:03). Widening the window to the full day surfaced a 5th at 11:04 UTC — this error
+class **only started today**, 5 occurrences in 3 hours, all on the same code path. `cron_health()`:
+all 14 jobs `active: true`, `is_stale: false`, `last_run_failed: false`. Every other function in the
+same window (market-data-fetcher, reconcile-orders, surface-scan, auto-trade, futures-signal, …) ran
+in the tens-to-low-thousands of ms — this was not a general platform/DB slowdown.
+
+**Root cause:** `kalshi-proxy`'s public-endpoint branch (`supabase/functions/kalshi-proxy/index.ts`)
+re-fetches and re-decrypts the same static service-tenant `api_keys` row on **every single
+request** via `getKalshiCredentials(adminClient, null)`, guarded by an 8s timeout. This is the
+highest-traffic path in the app — every public market/events/series browse, with the frontend's own
+concurrency cap (`src/lib/kalshiApi.ts`) allowing up to 6 simultaneous in-flight requests per page
+load (category tabs + background pre-warm + per-series trending fan-out). `api_keys` has only 5 rows
+and no plan-level slowness — the timeouts were concurrent redundant round trips to fetch and decrypt
+**identical data** stacking up under that fan-out, not a slow query in isolation. Confirmed this
+wasn't a systemic Supabase issue: no other function (cron-driven, so never more than 1 concurrent
+invocation) saw anything similar.
+
+**Fix applied (LOW risk, additive-only, single file):** added a module-level, 5-minute-TTL cache for
+the decrypted service-tenant credential in `kalshi-proxy/index.ts`. Public-endpoint requests now
+check the cache first and skip the DB round trip entirely on a hit; only a cache miss (cold instance
+or expired TTL) does the guarded fetch, and a successful fetch populates the cache for subsequent
+requests on that warm instance. Per-user credentials (the authenticated branch) are untouched — no
+change to that path, since caching one user's key across other users on the same warm instance would
+be a different trust boundary; the service-tenant key is a fixed, singleton, read-only credential
+already treated as static for an instance's lifetime (mirrors the existing `loggedMissingServiceKey`
+module-level pattern in the same file). A 5-minute TTL means a live key rotation is still picked up
+without a redeploy. This is the actual fix, not a wider timeout — a bigger `CREDENTIAL_FETCH_TIMEOUT_MS`
+would only have deferred the next round of concurrent-request contention (the same anti-pattern this
+log flagged and reversed in the 77th run for the esm.sh retry budget).
+
+**Verified:** `deno check` on `kalshi-proxy/index.ts` — 14 errors, identical before/after via `git
+stash` comparison (pre-existing baseline, none introduced). `npm run lint`: 0 errors, only the
+pre-existing fast-refresh warnings. `npm run test`: 206/206 unit tests pass unchanged. Deployed
+`kalshi-proxy` to production (`uyfnezxmgwitpzsrnkst`) via `supabase functions deploy`. **Verified in
+prod against the real Kalshi API:** fetched the project's live `anon` key via the Supabase
+Management API, hit the deployed public endpoint 3× in a row (`?endpoint=series`) — all 3 returned
+HTTP 200 with real Kalshi series data, and `compliance_log` in the following minutes shows **zero**
+new `kalshi_proxy_service_credential_fetch_failed` or `kalshi_proxy_unauthenticated_fallback` rows
+(both were previously appearing on every timeout). The pre-existing `health_check_alert` for the
+4 errors from before this fix landed fired once at 14:10 UTC as expected — a stale alert about
+already-fixed errors, not a new issue.
+
+**Reversibility:** trivial — single additive module-level cache, `git revert` removes it and the
+public-endpoint branch reverts to its prior always-fetch behavior with no other change.
+
 ## 2026-07-29 (77th run) — Clean window, zero error/critical events, cron healthy; the 76th run's own merge broke CI a second time on the same esm.sh class — fixed the root cause instead of widening the retry budget again
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` had a stale branch
