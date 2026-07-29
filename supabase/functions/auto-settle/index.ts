@@ -27,6 +27,11 @@ import { computePnl, resolveKalshiMarketAction } from "../_shared/trading-logic.
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
+// Same 8s bound as the CREDENTIAL_FETCH_TIMEOUT_MS/KALSHI_FETCH_TIMEOUT_MS
+// convention used across market-data-fetcher/auto-trade/settle-signals/etc —
+// a public market-status GET, not an LLM call.
+const MARKET_FETCH_TIMEOUT_MS = 8_000;
+
 interface KalshiMarket {
   ticker: string;
   status: string; // 'active' | 'settled' | 'closed' | ...
@@ -36,8 +41,10 @@ interface KalshiMarket {
 }
 
 async function fetchKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MARKET_FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch(`${KALSHI_BASE}/markets/${ticker}`);
+    const resp = await fetch(`${KALSHI_BASE}/markets/${ticker}`, { signal: controller.signal });
     if (!resp.ok) {
       console.warn(`Kalshi market ${ticker} fetch failed: ${resp.status}`);
       return null;
@@ -45,8 +52,16 @@ async function fetchKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
     const data = await resp.json();
     return data?.market || null;
   } catch (e) {
-    console.error(`Kalshi fetch error for ${ticker}:`, e instanceof Error ? e.message : e);
+    const isTimeout = e instanceof Error && e.name === "AbortError";
+    console.error(
+      isTimeout
+        ? `Kalshi GET market ${ticker} timed out after ${MARKET_FETCH_TIMEOUT_MS}ms`
+        : `Kalshi fetch error for ${ticker}:`,
+      isTimeout ? "" : e instanceof Error ? e.message : e
+    );
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
