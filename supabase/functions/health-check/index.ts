@@ -29,6 +29,7 @@ const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not m
 const BLOCKED_SERIES = ["KXETH"];
 const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+const BALANCE_FETCH_TIMEOUT_MS = 8_000; // same convention — Kalshi portfolio/balance GET
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -503,7 +504,22 @@ serve(async (req) => {
         // live account sitting at $1.66 (floor $15) for hours.
         const path = "/trade-api/v2/portfolio/balance";
         const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
-        const resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, { headers });
+        // Bare `await fetch()` here had no timeout — same failure shape as every
+        // other instance in this campaign: a stalled Kalshi response doesn't throw,
+        // it hangs this iteration (and every remaining user + check #11's own
+        // liveKeys loop after it) until the platform kills the whole invocation,
+        // invisible to compliance_log since the catch below only catches throws.
+        const balanceController = new AbortController();
+        const balanceTimeoutId = setTimeout(() => balanceController.abort(), BALANCE_FETCH_TIMEOUT_MS);
+        let resp: Response;
+        try {
+          resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, {
+            headers,
+            signal: balanceController.signal,
+          });
+        } finally {
+          clearTimeout(balanceTimeoutId);
+        }
         if (!resp.ok) continue; // don't let a transient Kalshi/auth hiccup page anyone
         const data = await resp.json();
         const balanceUsd = (data?.balance ?? 0) / 100;

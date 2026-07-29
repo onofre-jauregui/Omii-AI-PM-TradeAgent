@@ -2,6 +2,57 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (68th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `health-check` itself had an unguarded Kalshi balance fetch inside its live-account low-balance sweep
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+— `git fetch && git reset --hard origin/dev` landed on `c883e4f` (the 67th run's own merge).
+Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 67th run's ~03:03 UTC cutoff through this run's ~04:07 UTC invocation — zero rows across 922
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 67th
+run's own push (run `30418622202`, 4m9s) and no pushes since.
+
+**New instance of the recurring class — this time inside the health-check function itself:**
+re-swept `supabase/functions/` for `fetch()` calls without an `AbortController`/timeout guard,
+checking each hit against files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`,
+`reconcile-orders`, `futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`,
+`auto-settle`, `weather-signal`). Found `health-check/index.ts`'s own live-balance check (§10,
+line ~506): inside a `for (const { user_id } of liveKeys ?? [])` loop, the credential fetch already
+got a `Promise.race`/timeout guard (added for the exact same failure class), but the very next line
+— `await fetch(\`${KALSHI_BASE_URL}/portfolio/balance\`, { headers })` — was bare, no
+`AbortController`, no signal. Worse than the prior instances: this loop lives inside `health-check`,
+the alerting path itself, and a hang here doesn't just stall this user's balance check — it stalls
+every remaining user in this loop *and* check #11's separate `liveKeys` loop that runs after it,
+silently stopping the whole hourly sweep from paging anything, invisible to `compliance_log` since
+the surrounding `catch { /* monitoring-path failure only */ }` only catches thrown errors, never a hang.
+
+**Scope check:** public read/auth GET (`portfolio/balance`) used only to decide whether to fire a
+low-balance alert — not the order placement/cancellation path, which stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only monitoring endpoint, no schema or order-path change):** added
+`BALANCE_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` right above it
+and every other function in this campaign) and wrapped the single `fetch()` call with a scoped
+`AbortController` + `setTimeout`, `signal` threaded into the call, `clearTimeout` in a `finally`.
+On abort, the existing `if (!resp.ok) continue` path is unreachable (fetch throws on abort instead
+of resolving), so the surrounding `catch` — already present, already labeled "monitoring-path
+failure only" — absorbs it and the loop moves to the next user, same "no new fields, no new
+error-handling plumbing" pattern as every prior run in this campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 12 pre-existing type errors and
+18 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `health-check` via
+`supabase functions deploy`. Invoked the deployed function directly against real data →
+`{"ok":true,"alerts_sent":[],"alerts_skipped":["api_error_kalshi"]}` — the one skipped alert is an
+unrelated, pre-existing dedup (api-error-rate check, already on cooldown), not a new issue.
+Confirmed via `compliance_log`: a fresh `health_check_run` row logged immediately after
+("1 condition(s) active but suppressed (deduped)"), exercising the new guard on the real live-balance
+loop with no regression on the happy path and no hang.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-29 (67th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `auto-settle`'s per-ticker Kalshi market-status fetch had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
