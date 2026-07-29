@@ -25,6 +25,14 @@ interface SentryContext {
 
 type SentryLevel = "fatal" | "error" | "warning" | "info" | "debug";
 
+// send() is fire-and-forget (callers never await it) but the bare `await
+// fetch()` inside still held its own connection open indefinitely on a
+// stalled Sentry endpoint — same failure shape closed across
+// telegram.ts/kalshi-proxy/health-check etc. Under Fluid Compute's reused
+// instances, an unresolved fetch here is a dangling connection per
+// unreported error until the isolate recycles, not a caller-facing hang.
+const SENTRY_FETCH_TIMEOUT_MS = 8_000;
+
 function parseDsn(dsn: string): { host: string; key: string; projectId: string } | null {
   try {
     const url = new URL(dsn);
@@ -118,6 +126,8 @@ async function send(dsn: string, envelope: string): Promise<void> {
 
   const url = `${parsed.host}/api/${parsed.projectId}/envelope/`;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SENTRY_FETCH_TIMEOUT_MS);
   try {
     await fetch(url, {
       method: "POST",
@@ -126,9 +136,12 @@ async function send(dsn: string, envelope: string): Promise<void> {
         "X-Sentry-Auth": `Sentry sentry_version=7, sentry_key=${parsed.key}, sentry_client=custom-deno/1.0`,
       },
       body: envelope,
+      signal: controller.signal,
     });
   } catch {
     // Never block on observability
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
