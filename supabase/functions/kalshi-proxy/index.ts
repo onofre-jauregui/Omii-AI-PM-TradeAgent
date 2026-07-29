@@ -24,6 +24,53 @@ const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/
 const SERVICE_CREDENTIAL_CACHE_TTL_MS = 5 * 60_000;
 let cachedServiceCredential: { keyId: string; privateKey: string; expiresAt: number } | null = null;
 
+// A cache HIT removes the DB round trip, but a cache MISS (cold start, or the
+// instant the TTL lapses) is not itself coalesced — concurrent requests that
+// land in that same miss window (the same up-to-6-concurrent frontend burst
+// this cache exists to absorb) each independently checked the cache, each saw
+// it empty, and each raced their own DB fetch, reproducing the exact
+// contention the cache was meant to remove. Confirmed 2026-07-29: the timeout
+// recurred twice (14:37, 14:38 UTC) roughly 30min after this cache's own
+// deploy — long enough that the TTL lapsing (not just cold start) reopened
+// the same thundering-herd window. Sharing one in-flight fetch across every
+// concurrent request that observes a miss removes that window entirely.
+let inFlightServiceCredentialFetch: Promise<{ keyId: string | null; privateKey: string | null }> | null = null;
+
+async function fetchServiceCredential(
+  adminClient: ReturnType<typeof createClient>
+): Promise<{ keyId: string | null; privateKey: string | null }> {
+  try {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+        CREDENTIAL_FETCH_TIMEOUT_MS
+      );
+    });
+    let keyId: string | null, privateKey: string | null;
+    try {
+      const creds = await Promise.race([getKalshiCredentials(adminClient, null), timeout]);
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (keyId && privateKey) {
+      cachedServiceCredential = { keyId, privateKey, expiresAt: Date.now() + SERVICE_CREDENTIAL_CACHE_TTL_MS };
+    }
+    return { keyId, privateKey };
+  } catch (credError) {
+    const msg = credError instanceof Error ? credError.message : String(credError);
+    console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out: ${msg}`);
+    await adminClient.from("compliance_log").insert({
+      event_type: "kalshi_proxy_service_credential_fetch_failed",
+      severity: "error",
+      message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out: ${msg} — falling back to the anonymous rate tier for this request.`,
+    });
+    return { keyId: null, privateKey: null };
+  }
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight(req, "extended");
 
@@ -115,39 +162,17 @@ serve(async (req) => {
         serviceKeyId = cachedServiceCredential.keyId;
         servicePrivateKey = cachedServiceCredential.privateKey;
       } else {
-        try {
-          let timeoutId: ReturnType<typeof setTimeout> | undefined;
-          const timeout = new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(
-              () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
-              CREDENTIAL_FETCH_TIMEOUT_MS
-            );
+        // Every request that observes a miss awaits the SAME in-flight fetch
+        // instead of starting its own — a concurrent burst during a miss costs
+        // one DB round trip total, not one per request.
+        if (!inFlightServiceCredentialFetch) {
+          inFlightServiceCredentialFetch = fetchServiceCredential(adminClient).finally(() => {
+            inFlightServiceCredentialFetch = null;
           });
-          try {
-            const creds = await Promise.race([getKalshiCredentials(adminClient, null), timeout]);
-            serviceKeyId = creds.keyId;
-            servicePrivateKey = creds.privateKey;
-          } finally {
-            clearTimeout(timeoutId);
-          }
-          if (serviceKeyId && servicePrivateKey) {
-            cachedServiceCredential = {
-              keyId: serviceKeyId,
-              privateKey: servicePrivateKey,
-              expiresAt: Date.now() + SERVICE_CREDENTIAL_CACHE_TTL_MS,
-            };
-          }
-        } catch (credError) {
-          const msg = credError instanceof Error ? credError.message : String(credError);
-          console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out: ${msg}`);
-          await adminClient.from("compliance_log").insert({
-            event_type: "kalshi_proxy_service_credential_fetch_failed",
-            severity: "error",
-            message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out: ${msg} — falling back to the anonymous rate tier for this request.`,
-          });
-          serviceKeyId = null;
-          servicePrivateKey = null;
         }
+        const creds = await inFlightServiceCredentialFetch;
+        serviceKeyId = creds.keyId;
+        servicePrivateKey = creds.privateKey;
       }
       if (serviceKeyId && servicePrivateKey) {
         const timestamp = Date.now();

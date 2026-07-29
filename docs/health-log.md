@@ -2,6 +2,63 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (79th run) — The 78th run's own fix didn't hold: `kalshi-proxy` timeout recurred twice after the credential cache deployed — the cache had no protection against a thundering herd on a miss
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (78th run's branch merged as PR #134) — `git fetch && git reset --hard origin/dev`,
+fresh branch `health-check/run-20260729-150344` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+78th run's ~14:03 UTC cutoff — 3 rows, all `kalshi_proxy_service_credential_fetch_failed`. One
+(14:03:57) was already accounted for in the 78th run's own log (one of its original 4). The other
+two (14:37:29, 14:38:36) are **new** — they landed roughly 30 minutes *after* the 78th run's cache
+fix was deployed and verified clean. `cron_health()`: all 14 jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. Pulled the full `compliance_log` window 14:00–14:50 UTC to confirm no
+other function saw anything similar in that period — isolated to `kalshi-proxy` again.
+
+**Root cause: the 78th run's fix reduced the failure rate but didn't remove the failure mode it
+was trying to fix.** Per the fail-twice rule (already invoked once this log, for the esm.sh retry
+budget in the 77th run) — a fix that recurs isn't a fix, it's a smaller version of the same gap.
+The module-level TTL cache added in #134 removes the DB round trip on a cache *hit*, but a cache
+*miss* (cold instance start, or the instant the 5-minute TTL lapses) is not itself coalesced:
+every concurrent request that observes the same miss independently re-checks the cache, sees it
+empty, and starts its own DB fetch + decrypt racing its own 8s timeout — reproducing the exact
+contention the cache exists to remove, just gated to the miss window instead of every request.
+This codebase's own frontend allows up to 6 concurrent in-flight requests per page load
+(`src/lib/kalshiApi.ts`), so any page load that happens to land inside a miss window reopens the
+original bug. The 14:37/14:38 timestamps are consistent with this: ~30 minutes past deploy is long
+enough for either a fresh cold instance or one TTL lapse to hit a burst.
+
+**Fix applied (LOW risk, additive-only, single file, `supabase/functions/kalshi-proxy/index.ts`):**
+added in-flight request coalescing around the existing cache. A new module-level
+`inFlightServiceCredentialFetch` promise is set by the first request that observes a miss; every
+other concurrent request awaits that same promise instead of starting its own, so a burst during a
+miss costs exactly one DB round trip total, not one per concurrent request. The fetch-plus-timeout
+logic was extracted into `fetchServiceCredential()` (previously inlined in the request handler) so
+it can be shared as the single in-flight promise; behavior is otherwise identical — same 8s
+timeout, same cache population on success, same `compliance_log` entry on failure (now written
+once per coalesced batch instead of once per failing request, which also cuts log noise). The
+per-user authenticated-credential branch is untouched.
+
+**Verified:** `deno check` on `kalshi-proxy/index.ts` — 15 errors vs. 14 on the pre-change baseline
+(`git stash` comparison); the one additional error is the same pre-existing
+`SupabaseClient<any,"public",...>` generic-mismatch class already present at every other call site
+in this file (`resolveTenant`, `getKalshiCredentials`, `.insert(...)`), not a new error class — my
+new `fetchServiceCredential(adminClient)` call site inherits it. `npm run lint`: 0 errors, only the
+pre-existing fast-refresh warnings. `npm run test`: 206/206 unit tests pass unchanged. Deployed via
+`supabase functions deploy kalshi-proxy`. **Verified in prod against the real Kalshi API under the
+exact failure condition:** fired 8 concurrent requests at the freshly-deployed function (cache
+necessarily empty — first traffic since deploy) via `?endpoint=series` using the project's live
+`anon` key. All 8 returned HTTP 200 with identical, real Kalshi series payloads (16,007,466 bytes
+each). Queried `compliance_log` for the 15 minutes following — **zero** new
+`kalshi_proxy_service_credential_fetch_failed` or `kalshi_proxy_unauthenticated_fallback` rows. This
+is the first time this exact test (concurrent burst against a cold, empty cache) has been run
+against this code path — it would have failed against the 78th run's version.
+
+**Reversibility:** trivial — single additive change (one new module-level variable, one extracted
+function, one call-site simplification), `git revert` restores the 78th run's cache-without-
+coalescing behavior with no other change.
+
 ## 2026-07-29 (78th run) — New error class since the 77th run: `kalshi-proxy` public-endpoint credential fetch timing out under concurrent load — cached the service-tenant credential instead of widening the timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
