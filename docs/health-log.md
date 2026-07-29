@@ -2,6 +2,55 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (76th run) — Clean window, zero error/critical events, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 75th run's backlog — `_shared/notifications.ts`'s SendGrid/Twilio `send()` calls
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (75th run's branch had merged as PR #130) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-121017` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+75th run's ~11:07 UTC cutoff through this run's ~12:10 UTC invocation — 136 total events in the
+window, **zero** at error/critical. `cron_health()` shows all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the
+75th run's own push (`30446613476`, 11:11:42 UTC) green in 4m12s; nothing since.
+
+**Fix applied this run (LOW risk, additive-only, single file):** picked up the 75th run's own
+audit backlog — the remaining Tier 5 sites include `_shared/notifications.ts` ×2. Re-verified
+against this run's fresh checkout before trusting it (reproduce, don't inherit a prior diagnosis)
+— confirmed `sendEmail()` (SendGrid, line 127) and `sendSms()` (Twilio, line 153) both still made a
+bare `await fetch()` with zero `AbortController`/timeout. Both are called fire-and-forget from
+`sendUserNotification` (`.catch((e) => console.warn(...))`, never awaited by its caller), so a
+stalled SendGrid or Twilio endpoint would leave a dangling open connection per notification,
+accumulating across warm Fluid Compute instances with no timeout to ever close it — same failure
+shape as the `telegram.ts`/`sentry.ts` sites already fixed in prior runs. Wrapped both in the same
+`AbortController` + 8s timeout pattern, `NOTIFICATION_FETCH_TIMEOUT_MS = 8_000` matching this
+codebase's established convention. Fire-and-forget contract unchanged — the diff only bounds how
+long the dangling connection can live, it does not change what any caller awaits, so
+`auto-trade`'s/`auto-settle`'s/`execute-trade`'s order-submission control flow (the reason those
+files are Tier 1/1-adjacent and off-limits to autonomous edits) is untouched.
+
+**Verified:** `deno check supabase/functions/_shared/notifications.ts` shows 3 pre-existing errors
+(unrelated `never`-type narrowing on `profile?.notification_prefs`/`profile?.phone`), confirmed
+identical via `git stash` before/after — this diff adds zero new errors. `deno check` on all three
+importers (`auto-trade`, `auto-settle`, `execute-trade`) shows the same pre-existing error counts
+recorded in the 75th run's log (17/6/20) — unchanged. Deployed all three via `supabase functions
+deploy <fn> --project-ref uyfnezxmgwitpzsrnkst` (they each bundle `_shared/notifications.ts`).
+Post-deploy, polled `compliance_log` until each importer's own cron fired: `auto_settle_run` at
+12:12:00 UTC and `auto_trade_run`/`auto_trade_strategy_run` at 12:15:03 UTC, all clean with no new
+error/critical entries — confirms the redeploy didn't regress the live trading path.
+`execute-trade` is request-triggered (not cron) so its next real exercise will be the next actual
+trade execution; its `deno check` baseline match is the verification available this run. The
+timeout branch itself is unexercised until SendGrid/Twilio actually stalls, same caveat as every
+other guard added in this campaign.
+
+**Remaining backlog (unchanged from 75th run's audit, for the next run):** Tier 1 (7 sites, live
+trading — still explicitly off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron),
+Tier 4 (10 sites, `trading-agent` chat loop), Tier 5 remainder (3 sites: `_shared/langfuse.ts`,
+`auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`).
+
+**Reversibility:** trivial — single-file diff, two call sites wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy of the three importing functions.
+
 ## 2026-07-29 (75th run) — Clean window, one benign transient credential-fetch timeout, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 74th run's audit — Sentry's `send()`
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was stale from the 74th run
