@@ -2,6 +2,59 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (65th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `reconcile-orders`'s per-trade Kalshi order-status GET had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was present but not guaranteed
+current — `git fetch && git reset --hard origin/dev` before starting, landing on `1fbd993` (the
+64th run's own merge). Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 64th run's
+~00:07 UTC cutoff through this run's ~01:07 UTC invocation — zero rows across 946 events in the
+window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 64th run's own
+push (run `30411023650`, 4m22s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()` calls
+without an `AbortController`/timeout guard, excluding the order-submission/cancellation paths that
+stay off-limits (`execute-trade`'s order POST, `execute-basket`, `cancel_order` — the last of
+those already fixed for an unrelated unsigned-DELETE bug on 2026-07-28). Found `fetchKalshiOrder()`
+in `reconcile-orders/index.ts` — called once per resting live order, every user, inside
+`reconcile-orders-cron`'s 5-minute loop — doing a bare `await fetchWithRetry(...)` GET on
+`/portfolio/orders/{orderId}` to re-read order status (fill/cancel/partial), with no `signal`
+passed through at all. Same failure shape as every prior fix: a stalled Kalshi response doesn't
+fail one order's check, it hangs the entire cron invocation (every remaining order, every
+remaining user) until the platform's own execution timeout kills it, invisible to
+`compliance_log` because the existing per-trade `try/catch` only catches thrown errors, never a
+hang.
+
+**Scope check:** this is a public-account, read-only order-status GET used to decide whether a
+resting order should advance to `filled`/`partial`/`cancelled` locally — not the order
+placement/cancellation itself. `kalshi-proxy/index.ts`'s `fetchWithRetry` call was checked and
+excluded: it's a generic pass-through also carrying live order POST/DELETE traffic from
+`src/lib/kalshiApi.ts`, so it's entangled with the order path and stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`ORDER_STATUS_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` already
+in this file and `REQUEST_TIMEOUT_MS` in market-data-fetcher) and wrapped the single
+`fetchWithRetry()` call in `fetchKalshiOrder()` with a scoped `AbortController` + `setTimeout`,
+`signal` threaded into the call, `clearTimeout` in a `finally`. On `AbortError`, converts to a
+clear `Kalshi GET order <id> timed out after 8000ms` message and re-throws — the existing
+per-trade `catch` (line ~180, already logs `reconcile_order_check_failed` with `e.message`) picks
+it up unchanged, same "no new fields, no new error-handling plumbing" pattern as the 64th run's
+`fetchOrderbook()` fix.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 10 pre-existing type errors and
+6 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `reconcile-orders` via
+`supabase functions deploy`. Invoked the deployed function directly via `net.http_post` matching
+`reconcile-orders-cron`'s own `cron.job.command` exactly — response `HTTP 200`,
+`{"ok":true,"checked":8,"filled":0,"partial":0,"cancelled":0,"unchanged":8,"errors":0}`; confirmed
+in `compliance_log` (`reconcile_orders_run`: "8 checked, 0 filled, 0 partial, 0 cancelled, 0
+errors (366ms)"), exercising the new guard against 8 real resting orders with zero errors.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
 ## 2026-07-29 (64th run) — Clean window, all cron healthy, CI green; closed the campaign's next hot-path instance — the shared `fetchOrderbook()` helper had no timeout
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
