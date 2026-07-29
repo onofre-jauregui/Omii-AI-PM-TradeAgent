@@ -32,6 +32,11 @@ const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 // a public market-status GET, not an LLM call.
 const MARKET_FETCH_TIMEOUT_MS = 8_000;
 
+// Same bound, applied to the fire-and-forget auto-reflect trigger below —
+// closes the last Tier-5 unguarded fetch in this file (health-check 76th
+// run's audit backlog).
+const AUTO_REFLECT_TRIGGER_TIMEOUT_MS = 8_000;
+
 interface KalshiMarket {
   ticker: string;
   status: string; // 'active' | 'settled' | 'closed' | ...
@@ -455,11 +460,16 @@ serve(async (req) => {
     //    Moved outside the ticker loop to prevent concurrent duplicate runs
     //    when multiple tickers settle in the same batch.
     if (totalSettled > 0) {
+      const reflectController = new AbortController();
+      const reflectTimeoutId = setTimeout(() => reflectController.abort(), AUTO_REFLECT_TRIGGER_TIMEOUT_MS);
       fetch(`${supabaseUrl}/functions/v1/auto-reflect`, {
         method: "POST",
         headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
         body: "{}",
-      }).catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e));
+        signal: reflectController.signal,
+      })
+        .catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e))
+        .finally(() => clearTimeout(reflectTimeoutId));
     }
 
     // 8. Run-level rollup compliance entry

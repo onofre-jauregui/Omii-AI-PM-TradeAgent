@@ -2,6 +2,65 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (80th run) — Clean window, all cron healthy; closed out the 76th run's Tier-5 fire-and-forget timeout-guard backlog — the last 3 unguarded sites (`_shared/langfuse.ts`, `auto-settle`'s auto-reflect trigger, `save-kalshi-key`'s username backfill)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (79th run's branch merged as PR #135) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-1550` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+79th run's ~14:50 UTC cutoff through this run's ~16:07 UTC invocation — zero rows. `cron_health()`
+shows all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`. The only
+non-info activity in the window was 22 `api_error` warnings, all `settle-signals: Kalshi 404
+fetching <ticker>` on short-duration hourly BTC markets — read the code
+(`settle-signals/index.ts:134-158`) before treating this as new: a 404 there is the already-handled
+"aged out of Kalshi's archive retention" case, stamped `settled_at`/`settlement_status:
+unsettleable_404` so the ticker stops consuming a batch slot, exactly the behavior documented in the
+46th/47th-run watch item — not a regression. One `risk_check_failed` row
+(`max_open_positions (10) reached — currently 11 open`) is the risk guard correctly skipping a
+strategy, also expected behavior. No new error class this run.
+
+**Fix applied (LOW risk, additive-only, three files):** with the compliance_log genuinely clean,
+picked up the 76th run's own explicitly-left-open backlog instead of inventing new scope — three
+Tier-5 (fire-and-forget, non-trading) unguarded `fetch()` sites, the last ones in that campaign:
+- `_shared/langfuse.ts`'s `langfuseIngest()` — bare fire-and-forget POST to Langfuse's ingestion API
+  on every qualify/trade decision, no timeout. Wrapped in `AbortController` + new
+  `LANGFUSE_FETCH_TIMEOUT_MS = 8_000`, `finally` clears the timer so it can't leak past the
+  fetch's own resolution.
+- `auto-settle/index.ts`'s post-settlement auto-reflect trigger (~line 458) — same bare
+  fire-and-forget pattern, wrapped with a new `AUTO_REFLECT_TRIGGER_TIMEOUT_MS = 8_000` local to
+  that file (matches the existing `MARKET_FETCH_TIMEOUT_MS` convention already in the file).
+- `save-kalshi-key/index.ts`'s `fetchAndStoreKalshiUsername()` — the only one of the three that
+  isn't strictly fire-and-forget syntax (it's `await`ed inside a detached, uncaught-by-caller async
+  function called without `await` from the request handler), but was still a bare `fetch()` with no
+  bound: a stalled Kalshi portfolio-members endpoint would hang that detached call indefinitely.
+  Added `KALSHI_USERNAME_FETCH_TIMEOUT_MS = 8_000` via the standard `AbortController`/`finally`
+  pattern used everywhere else in this campaign. All three: fire-and-forget contract unchanged, no
+  new fields, no new error-handling plumbing — the diff only bounds how long each dangling
+  connection can live.
+
+**Verified:** `deno check` on all three files, before (`git stash`) vs. after — 0 errors both times
+on all three (no pre-existing errors in these particular files, unlike some prior campaign sites).
+`npm run lint`: 0 errors, only the pre-existing fast-refresh warnings unrelated to this change.
+`npm run test`: 206/206 unit tests pass unchanged. `langfuse.ts` is imported by two functions
+(`auto-settle`, `auto-trade` — confirmed via `grep -rl`), both redeployed; `save-kalshi-key`
+redeployed separately. **Verified in prod against real data:** polled `compliance_log` post-deploy
+(16:10–16:17 UTC) — `auto_trade_run` fired twice (16:10, 16:15) and `auto_settle_run` once (16:12),
+all clean, zero new error/critical rows, confirming the redeploy didn't regress the live trading or
+settlement path. `cron_health()` re-checked post-deploy: all 14 jobs still `active: true`,
+`is_stale: false`, `last_run_failed: false`. The timeout branches themselves remain unexercised
+until Langfuse/the internal auto-reflect endpoint/Kalshi's username endpoint actually stalls — same
+caveat as every other guard added in this campaign.
+
+**Tier-5 fire-and-forget campaign: closed.** No remaining sites in Tier 5 as of this run. Remaining
+backlog from the 76th run's audit, unchanged: Tier 1 (7 sites, live trading — still explicitly
+off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron), Tier 4 (10 sites,
+`trading-agent` chat loop).
+
+**Reversibility:** trivial — three single-file, additive-only diffs (one new module/file-local
+constant and one `AbortController` wrap per site); `git revert` + redeploy of the three affected
+functions restores the pre-guard behavior with no other change.
+
 ## 2026-07-29 (79th run) — The 78th run's own fix didn't hold: `kalshi-proxy` timeout recurred twice after the credential cache deployed — the cache had no protection against a thundering herd on a miss
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
