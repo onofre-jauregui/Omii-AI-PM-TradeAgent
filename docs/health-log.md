@@ -2,6 +2,60 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (70th run) — Clean window, all cron healthy, CI green; extended the unguarded-fetch campaign off Kalshi onto the Stripe checkout/billing-portal path — same failure shape, on the monetization flow instead of onboarding
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`ef02c0d`, the 69th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 69th run's ~05:07 UTC cutoff through this run's ~06:10 UTC invocation — zero rows across 922
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 69th
+run's own push (run `30424395686`, 4m22s) and no pushes since.
+
+**New instance of the recurring class, different surface:** the last several runs closed every
+bare `await fetch()` on the Kalshi API call path (`kalshi-ping`, `health-check`, `auto-settle`,
+`settle-signals`, `reconcile-orders`, `market-data-fetcher`). Re-swept `supabase/functions/` for
+the same shape but widened the search past Kalshi to any synchronous, response-blocking external
+call — `supabase/functions/create-checkout/index.ts` and `manage-billing/index.ts` (both live,
+routed at `/billing` via `BillingPage.tsx`, despite this repo's `CLAUDE.md` build-status notes
+still saying "no billing UI" — that note is stale, same class of doc drift already flagged for
+`TASKS.md`, which is dated 2026-04-27). Both files make bare `await fetch()` calls straight to
+Stripe (`/v1/customers`, `/v1/checkout/sessions`, `/v1/billing_portal/sessions`) with no
+`AbortController`, no signal, no timeout — three call sites total, two in `create-checkout`
+(customer lookup/create, then session create) and one in `manage-billing` (portal session create).
+
+**Why this is higher-stakes than the Kalshi instances closed so far:** every prior fix in this
+campaign guarded a cron job or an onboarding step. These three guard the actual "Upgrade" and
+"Manage billing" buttons on `/billing` — the only revenue-collecting code paths in this repo. A
+stalled Stripe response (Stripe has had real multi-minute API incidents) would leave a
+paying-intent user's checkout button spinning indefinitely with no error ever surfaced — lost
+conversion on the one flow in this project that turns into MRR, not just a delayed cron cycle.
+
+**Fix (LOW risk, additive-only, no change to Stripe request bodies or business logic):** added
+`STRIPE_FETCH_TIMEOUT_MS = 8_000` (same convention and same bound as `kalshi-ping`'s
+`BALANCE_FETCH_TIMEOUT_MS`) to both files, wrapped each of the three Stripe `fetch()` calls with
+its own `AbortController` + `setTimeout`/`clearTimeout` in a `finally`, and added an `AbortError`
+branch returning `{"error":"Stripe didn't respond in time — please try again."}` (504) instead of
+an unhandled throw — matching `kalshi-ping`'s friendly-timeout-message convention for a
+user-facing endpoint.
+
+**Verified:** `deno check` and `deno lint` on both modified files — 2 pre-existing lint problems
+(`no-import-prefix` on the two `https:`-specifier imports every function in this repo carries), 0
+type errors, confirmed identical to unmodified `dev` via `git stash`/`deno check`/`deno
+lint`/`git stash pop` on each file — no new issues introduced. Deployed both `create-checkout` and
+`manage-billing` via `supabase functions deploy`. Verified live against the real deployed Supabase
+project: both functions' `OPTIONS` preflight returns HTTP 200, and an unauthenticated `POST` to
+each returns `401 UNAUTHORIZED_NO_AUTH_HEADER` — confirms both are live and their pre-existing auth
+gates still behave correctly post-deploy. The new timeout branches themselves are unexercised this
+run (would need a live user JWT, a saved Stripe customer, and a stalled real Stripe response to
+reach that code path, none available in this environment) — flagged here rather than claimed
+proven, same caveat pattern as every prior run's timeout-guard note in this campaign.
+
+**Reversibility:** trivial — two files, additive-only diff (existing request bodies, headers, and
+response handling all unchanged), no schema or trading-path change.
+
 ## 2026-07-29 (69th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `kalshi-ping`'s own balance fetch had no timeout guard, one line below its already-guarded credential fetch
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
