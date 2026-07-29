@@ -2,6 +2,77 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (85th run) — `kalshi-proxy`'s service-credential fetch still degraded to the anonymous rate tier on a transient stall the caching fix (#134/#135) didn't touch; added the same retry-once pattern just proven in market-data-fetcher
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched
+`origin/dev` exactly (84th run's branch merged as PR #143) — `git fetch && git reset --hard
+origin/dev` confirmed no divergence, fresh branch `health-check/run-20260729-2213` off
+`origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 84th run's ~21:06 UTC cutoff through this run's ~22:06 UTC invocation — 3 rows, all
+`kalshi_proxy_service_credential_fetch_failed` (21:10:36, 21:33:42, 21:43:32 UTC). No new
+event type and no `market_data_fetcher_aborted` — the 84th run's retry fix has held with zero
+aborts since deploy. This pattern has been characterized and accepted as self-healing since the
+81st run, but the frequency in this run's own window (3 in ~33min) is tighter than the day's
+earlier spacing (hours apart), so before re-accepting it I checked whether the underlying cause
+had actually changed.
+
+**Root cause found and fixed (MED — 15 occurrences today, recurring hours after a targeted fix
+already landed for this exact signature):** Pulled the full day's history of this event type —
+15 rows since 11:04 UTC, clustering tighter as the day went on (5 in the final 64 minutes:
+20:39, 21:03, 21:10, 21:33, 21:43). The `kalshi-proxy/index.ts` comments (added in #134/#135,
+merged earlier today) already diagnosed this as DB-query contention under concurrent bursts and
+fixed it with a per-instance cache + in-flight-fetch coalescing — but the timeouts kept
+recurring for hours after that deploy (the comments themselves note a recurrence 30min post-
+deploy at 14:37/14:38, and the pattern was still firing at 21:43, seven hours later). That gap
+between "fixed the diagnosed cause" and "still happening" meant the diagnosis was incomplete.
+Ran `EXPLAIN ANALYZE` directly against the underlying query
+(`select key_id, secret_ciphertext, secret_iv, encrypted_secret from api_keys where provider =
+'kalshi_live' and user_id is null`): **0.095ms execution time**, sequential scan over 4 rows.
+Cross-checked `pg_stat_activity` for lock contention or connection-pool exhaustion (initially
+suspected given 21 of 22 connections showed a non-null `wait_event_type`) — all were ordinary
+`ClientRead`/background-worker idle waits, no blocking queries, no contention. Conclusion: the DB
+query was never the bottleneck (consistent with #134/#135's own caching fix not resolving it) —
+these are transient round-trip stalls (network/infra jitter between the edge function and
+PostgREST), the same class of blip the 84th run diagnosed for `market-data-fetcher`'s identical
+`getKalshiCredentials()` call. The actual gap: `fetchServiceCredential()` gave up after one
+attempt and immediately logged the error + fell back to the anonymous, 429-prone rate tier —
+even though a same-instant retry of an instant query is very likely to clear a transient stall,
+exactly as `kalshi-proxy`'s own code comments already noted this pattern "self-heals" elsewhere.
+
+**Fix (deployed):** `supabase/functions/kalshi-proxy/index.ts` — extracted the existing
+`Promise.race(getKalshiCredentials(...), timeout)` call into a `fetchCredsOnce()` helper
+(identical shape to the 84th run's `market-data-fetcher` fix) and wrapped the service-tenant
+credential call site in a try/catch that retries once before logging
+`kalshi_proxy_service_credential_fetch_failed` and degrading to the anonymous tier. Scoped to
+the public-endpoint service-credential path only — the per-user authenticated path
+(`kalshi_proxy_credential_fetch_failed`, line ~114) showed zero occurrences in today's scan and
+was left untouched, same blast-radius discipline as prior runs. Confirmed no client-side
+`AbortController`/fetch-timeout wraps this endpoint in the frontend, so a worst-case doubled
+wait (~16s if both attempts genuinely stall, vs. the already-accepted 8s wait before this fix)
+introduces no new failure mode — it only replaces "always degrade after one stall" with "retry
+once, degrade only if both stall."
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 15 pre-existing errors
+both before (`git stash`) and after (stale generated Postgrest types, unrelated to this change),
+no new errors. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run
+test`: 206/206 pass unchanged. Deployed via `supabase functions deploy kalshi-proxy`.
+**Exercised against the real deployed function and real Kalshi API:** `GET
+.../functions/v1/kalshi-proxy?endpoint=markets&limit=2` (with the service role key, since the
+stored anon key predates this project's JWT-signing-key migration and 401s independently of this
+change) returned `200` with real live market data (ticker
+`KXMVESPORTSMULTIGAMEEXTENDED-...`) — happy path unregressed. `compliance_log` scanned for
+`error`/`critical` rows after the 21:50 UTC deploy: zero. **Not verified end-to-end:** the retry
+branch itself — the credential fetch succeeded within the cache on this live check, and a real
+multi-second network stall isn't reproducible on demand without fault injection, same limitation
+the 84th run noted for its identical fix shape. Code-reviewed instead: the retry reuses the exact
+`fetchCredsOnce()` path just proven correct on the happy path above, and mirrors the 84th run's
+already-verified timeout-handling branch line for line.
+
+**Reversibility:** trivial — single-file, single-call-site revert to the pre-retry version +
+redeploy restores the #134/#135 caching-only behavior with no other change.
+
 ## 2026-07-29 (84th run) — `market-data-fetcher`'s credential-fetch timeout guard (48th run) still let one slow query nuke a whole 5-minute cycle; added a single retry
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched

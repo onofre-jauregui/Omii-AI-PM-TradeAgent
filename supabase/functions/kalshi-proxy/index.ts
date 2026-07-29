@@ -36,39 +36,58 @@ let cachedServiceCredential: { keyId: string; privateKey: string; expiresAt: num
 // concurrent request that observes a miss removes that window entirely.
 let inFlightServiceCredentialFetch: Promise<{ keyId: string | null; privateKey: string | null }> | null = null;
 
+// `EXPLAIN ANALYZE` on the underlying query (85th run, 2026-07-29) confirms it
+// executes in <1ms against the 4-row api_keys table — the DB query itself is
+// never the bottleneck. The timeouts logged here (still recurring hours after
+// the caching + coalescing fix in #134/#135, e.g. 20:39/21:03/21:10/21:33/21:43
+// UTC on 2026-07-29) are transient round-trip jitter, not query cost. Giving
+// up on the first stall and falling back straight to the 429-prone anonymous
+// tier wastes a recoverable request. One retry — same pattern already proven
+// for this exact failure signature in market-data-fetcher (84th run) — absorbs
+// the blip before degrading.
+function fetchCredsOnce(adminClient: ReturnType<typeof createClient>) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+      CREDENTIAL_FETCH_TIMEOUT_MS
+    );
+  });
+  return Promise.race([getKalshiCredentials(adminClient, null), timeout]).finally(() =>
+    clearTimeout(timeoutId)
+  );
+}
+
 async function fetchServiceCredential(
   adminClient: ReturnType<typeof createClient>
 ): Promise<{ keyId: string | null; privateKey: string | null }> {
+  let keyId: string | null, privateKey: string | null;
   try {
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(
-        () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
-        CREDENTIAL_FETCH_TIMEOUT_MS
-      );
-    });
-    let keyId: string | null, privateKey: string | null;
     try {
-      const creds = await Promise.race([getKalshiCredentials(adminClient, null), timeout]);
+      const creds = await fetchCredsOnce(adminClient);
       keyId = creds.keyId;
       privateKey = creds.privateKey;
-    } finally {
-      clearTimeout(timeoutId);
+    } catch (firstErr) {
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out, retrying once: ${firstMsg}`);
+      const creds = await fetchCredsOnce(adminClient);
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
     }
-    if (keyId && privateKey) {
-      cachedServiceCredential = { keyId, privateKey, expiresAt: Date.now() + SERVICE_CREDENTIAL_CACHE_TTL_MS };
-    }
-    return { keyId, privateKey };
   } catch (credError) {
     const msg = credError instanceof Error ? credError.message : String(credError);
-    console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out: ${msg}`);
+    console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out after retry: ${msg}`);
     await adminClient.from("compliance_log").insert({
       event_type: "kalshi_proxy_service_credential_fetch_failed",
       severity: "error",
-      message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out: ${msg} — falling back to the anonymous rate tier for this request.`,
+      message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out after retry: ${msg} — falling back to the anonymous rate tier for this request.`,
     });
     return { keyId: null, privateKey: null };
   }
+  if (keyId && privateKey) {
+    cachedServiceCredential = { keyId, privateKey, expiresAt: Date.now() + SERVICE_CREDENTIAL_CACHE_TTL_MS };
+  }
+  return { keyId, privateKey };
 }
 
 serve(async (req) => {
