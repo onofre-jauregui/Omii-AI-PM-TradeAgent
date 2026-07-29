@@ -88,18 +88,26 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          # Bundling imports supabase-js from esm.sh at deploy time; a transient CDN 5xx there
-          # (observed 2026-07-28, run 30357821307: "Import ... failed: 522") aborts the whole
-          # job under `bash -e` and blocks staging/e2e for every function, not just the one
-          # that hit the blip. Retry each function's deploy with backoff before failing loud,
-          # so a single CDN hiccup doesn't require a manual rerun.
+          # Retry each function's deploy with backoff before failing loud, so a single
+          # transient deploy hiccup doesn't require a manual rerun.
           #
-          # 2026-07-29 (72nd health check, run 30431158450): the original 3-attempt/flat-15s
-          # budget (~45s) was exhausted by manage-billing while esm.sh stayed unreachable for
-          # over 2 minutes straight (07:28:55-07:30:47), even though every other function
-          # recovered on its first retry. Widened to 5 attempts with exponential backoff
-          # (15/30/60/120s, ~3.75min budget) to absorb longer CDN outages without masking a
-          # real, persistent failure (still fails loud after attempt 5).
+          # 2026-07-29 (72nd health check, run 30431158450): bundling used to import
+          # supabase-js from esm.sh at deploy time; a transient CDN 5xx there (observed
+          # 2026-07-28, run 30357821307: "Import ... failed: 522") aborted the whole job
+          # under `bash -e` and blocked staging/e2e for every function, not just the one
+          # that hit the blip. The original 3-attempt/flat-15s budget (~45s) was exhausted
+          # by manage-billing while esm.sh stayed unreachable for over 2 minutes straight
+          # (07:28:55-07:30:47). Widened to 5 attempts with exponential backoff
+          # (15/30/60/120s, ~3.75min budget) as a stopgap.
+          #
+          # 2026-07-29 (77th health check, run 30450872671): the widened budget was
+          # exhausted again — futures-signal failed after all 5 attempts (~7min) while
+          # esm.sh 522'd repeatedly. Root cause fixed at the source instead of widening
+          # further: every function now imports supabase-js via the `npm:` specifier
+          # (Deno's native npm-registry resolution) instead of esm.sh's CDN, so this CI
+          # step no longer depends on esm.sh's availability at all. This retry loop stays
+          # as defense-in-depth against any other transient deploy hiccup (npm registry,
+          # Supabase API), not as the primary fix.
           for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
             delay=15
             for attempt in 1 2 3 4 5; do

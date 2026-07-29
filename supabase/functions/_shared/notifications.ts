@@ -31,7 +31,7 @@ export interface NotifOpts {
 }
 
 export async function sendUserNotification(
-  supabase: ReturnType<typeof import("https://esm.sh/@supabase/supabase-js@2").createClient>,
+  supabase: ReturnType<typeof import("npm:@supabase/supabase-js@2").createClient>,
   opts: NotifOpts,
 ): Promise<void> {
   try {
