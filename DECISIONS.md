@@ -4,6 +4,52 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-29 — Guarded the shared Telegram alert helper's own fetch with a timeout, redeployed all 12 callers (71st health-check run)
+
+**Decision:** Wrapped `sendTelegramAlert()`'s `fetch()` (`_shared/telegram.ts`) in an
+`AbortController` bound to a new `TELEGRAM_FETCH_TIMEOUT_MS = 8_000` constant. Redeployed all 12
+functions that import this shared module (`auto-reflect`, `auto-settle`, `auto-trade`,
+`compact-memory`, `execute-trade`, `futures-signal`, `health-check`, `market-data-fetcher`,
+`settle-signals`, `signal-generator`, `surface-scanner`, `weather-signal`) since Supabase edge
+functions bundle `_shared/*` per-function at deploy time.
+**Options:** A) Leave unguarded — rejected, the file's own docstring promises "never blocks" and
+the implementation broke that promise; a stalled Telegram response would silently hang any of the
+12 callers, including `health-check` itself, the function this whole alerting campaign exists to
+feed. B) Guard only `health-check`'s call site — rejected, the same unguarded helper is shared
+code; fixing one caller and leaving 11 others on the broken version is a partial fix that
+contradicts the "shared helper" premise. C) Guard the shared helper once, redeploy every importer —
+chosen.
+**Why:** Matches the established `AbortController` + 8s-timeout convention used across every prior
+run in this campaign; the existing `.catch(() => {})` already swallows failures by design (a
+Telegram outage should never take down a trading/cron function), so this only bounds the wait, it
+doesn't change failure behavior.
+**Reversibility:** easy in principle (single-file revert) but the blast radius (12 redeploys) is
+wider than a typical single-function fix in this campaign — rollback requires the same 12-function
+redeploy loop, not just a git revert.
+**Trace:** `docs/health-log.md` 71st-run entry.
+
+## 2026-07-29 — Reverted an in-flight fix to `polymarket-proxy` after discovering a standing repo-level exclusion (71st health-check run, process correction)
+
+**Decision:** This run initially added an `AbortController` timeout guard to
+`polymarket-proxy/index.ts` and deployed it, following the same pattern as every prior campaign
+fix. On re-reading this repo's `CLAUDE.md` (loaded mid-run, not at the start), found an explicit
+standing instruction: Polymarket code is unreferenced dead code pending a deletion decision, and
+"do not add new Polymarket features, fix Polymarket bugs, or write tests against Polymarket code
+paths." Reverted the file via `git checkout --` and redeployed the original unmodified version to
+undo the live change, confirmed `git diff` clean against `dev` before proceeding to a different
+target.
+**Options:** A) Keep the fix since it's a harmless additive timeout guard — rejected, the
+instruction is unambiguous ("do not fix Polymarket bugs") and doesn't carve out an exception for
+low-risk changes; overriding an explicit repo instruction on a judgment call isn't this campaign's
+call to make. B) Revert and pick a different target — chosen.
+**Why:** A project's `CLAUDE.md` is a higher authority than this campaign's own running scope notes
+in `docs/health-log.md`/`DECISIONS.md` — those only document what past runs chose to touch, not an
+exhaustive exclusion list. Should have been checked before picking a target, not after deploying.
+**Reversibility:** trivial — one file, one revert, already completed this run.
+**Trace:** `docs/health-log.md` 71st-run entry.
+
+---
+
 ## 2026-07-28 — Guarded auto-trade's own `kalshiFetch()` wrapper with a fetch timeout (62nd health-check run)
 
 **Decision:** Wrapped the `fetch(url, options)` call inside `kalshiFetch()`'s `attempt()` closure

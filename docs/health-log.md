@@ -2,6 +2,65 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-29 (71st run) — Clean window, all cron healthy, CI green; closed the shared Telegram alert helper's own timeout gap — the one call site whose docstring falsely promised "never blocks", fanning out to 12 caller functions
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`8f41266`, the 70th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 70th run's ~06:10 UTC cutoff through this run's ~07:07 UTC invocation — zero rows across 908
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 70th
+run's own push (run `30427432001`, 3m2s) and no pushes since.
+
+**First candidate rejected — Polymarket is explicitly out of scope:** initially found and fixed
+`polymarket-proxy/index.ts`'s completely bare `await fetch(apiUrl)` (zero guard at all, not even a
+prior partial fix) and deployed it, then re-read this repo's `CLAUDE.md` and found a standing
+instruction added independently of this campaign: "Polymarket code: do not extend... unreferenced
+from the rest of the codebase... Do not add new Polymarket features, fix Polymarket bugs..."
+Reverted the file (`git checkout --`) and redeployed the original unmodified version to undo the
+live change before it compounded — confirmed `git diff` clean against `dev` afterward. Recorded
+here as a process note: this run's own campaign precedent (`docs/health-log.md`,
+`DECISIONS.md`) doesn't cover every exclusion in the repo: a project's `CLAUDE.md` is the higher
+authority and must be re-checked, not just the log's running scope notes, before picking a target.
+
+**Actual fix — `_shared/telegram.ts`'s `sendTelegramAlert()`:** this file's own docstring states
+"sendTelegramAlert — fire-and-forget, never throws, never blocks," but the implementation was a
+bare `await fetch()` with no `AbortController`/timeout — the same failure shape closed at every
+other call site in this campaign, except here it directly contradicts the contract the file
+promises its callers. `grep`-confirmed 12 non-test call sites: `auto-reflect`, `auto-settle`,
+`auto-trade`, `compact-memory`, `execute-trade` (alert-only call after a trade decision, not the
+order placement/cancellation path itself — that stays off-limits per the 48th run's standing
+boundary, untouched this run), `futures-signal`, `health-check` (the function this whole alerting
+campaign exists to feed), `market-data-fetcher`, `settle-signals`, `signal-generator`,
+`surface-scanner`, `weather-signal`. A stalled Telegram API response would have quietly blocked
+every one of those 12 cron/user-facing functions for as long as the platform's own execution
+timeout allowed — invisible, since the outer `.catch(() => {})` swallows the eventual result either
+way; the cost was pure wall-clock, not a crash.
+
+**Fix (LOW risk, additive-only, no change to alert content/behavior on the happy path):** added
+`TELEGRAM_FETCH_TIMEOUT_MS = 8_000` (same convention/bound as every other fix in this campaign),
+wrapped the single `fetch()` call in an `AbortController` + `setTimeout`, `clearTimeout` in a
+`finally`. The existing `.catch(() => {})` still swallows both network errors and the new
+`AbortError` identically — this fix bounds the wait, it doesn't change what happens on failure
+(already silent by design, since a Telegram outage should never take down the caller).
+
+**Verified:** `deno check supabase/functions/_shared/telegram.ts` — 0 type errors. `deno lint` — 1
+pre-existing `no-explicit-any` problem (the `supabase: any` param on `alertOnce`, unrelated to this
+change), confirmed identical on unmodified `dev` via `git stash`/`deno lint`/`git stash pop` — no
+new issues. Deployed all 12 caller functions individually (Supabase edge functions bundle
+`_shared/*` per-function at deploy time, so the fix has no effect until every importer is
+redeployed) via `supabase functions deploy`. Waited for the next natural cron tick on each and
+re-queried `cron_health()`: all 9 cron-driven callers among the 12 (`execute-trade` and
+`compact-memory` are not directly cron-scheduled) show `last_status: succeeded`,
+`last_run_failed: false` post-deploy. Re-queried `compliance_log` for the post-deploy window — 16
+new events, 0 `error`/`critical`. The timeout branch itself is unexercised this run (would need a
+live Telegram outage to reach), same caveat pattern as every prior timeout-guard entry.
+
+**Reversibility:** trivial — single-file diff, but the deploy footprint (12 functions) is wider
+than typical for this campaign; revert path is `git revert` + the same 12-function redeploy loop.
+
 ## 2026-07-29 (70th run) — Clean window, all cron healthy, CI green; extended the unguarded-fetch campaign off Kalshi onto the Stripe checkout/billing-portal path — same failure shape, on the monetization flow instead of onboarding
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
