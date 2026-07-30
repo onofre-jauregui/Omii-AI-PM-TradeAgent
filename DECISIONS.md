@@ -4,6 +4,31 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-30 — Non-blocking CI guard for schedule-triggered workflows not live on main (91st health-check run)
+
+**Decision:** Added a `schedule-workflow-drift` job to `ci.yml` (runs on every push/PR to `main`/`dev`)
+that scans `.github/workflows/*.yml` for any file using `on: schedule:`, and emits a GitHub Actions
+`::error` annotation (visible, non-blocking — always exits 0) if that file doesn't exist byte-identical
+on `origin/main`.
+**Root cause found:** the 90th run's `function-drift-check.yml` (`schedule: every 6h`) was merged to
+`dev` only. GitHub Actions **only ever evaluates `schedule:` triggers from the repository's default
+branch** — confirmed empirically: `gh workflow list --all` doesn't even list it. It has been completely
+inert since merge; the "automated drift detection" the 90th run believed it shipped never ran once.
+**Options:** A) Promote `dev` → `main` now to make it live — rejected, that promotion is a Hard Stop
+requiring Onofre's explicit "ship to production," not available to an unattended run. B) Rebuild drift
+detection as a Supabase pg_cron edge function instead (matches this codebase's existing periodic-job
+pattern) — rejected for this run: needs a new GitHub PAT secret in Supabase (a new credential/dependency,
+itself a critical decision) and meaningfully more surface for a single unattended run to ship correctly.
+C) Non-blocking CI guard that makes the gap loud on every future PR — chosen.
+**Why:** The actual fix (main promotion) is outside this task's authority. The guard fixes the *system*
+that allowed this specific mistake — "assume a schedule-triggered workflow works once it's merged
+anywhere" — for this workflow and any future one, without silently blocking unrelated health-check PRs
+into `dev` on a pre-existing gap they didn't create.
+**Reversibility:** Trivial — additive CI job, no behavior change to any deploy path.
+**Trace:** `.github/workflows/ci.yml` job `schedule-workflow-drift`, this run's branch `health-check/run-91`.
+**Open item:** `function-drift-check.yml` stays dead until `dev` is promoted to `main` — flagged to
+Onofre via Telegram this run.
+
 ## 2026-07-30 — Built a scheduled CI drift-detection gate for edge functions (90th health-check run)
 
 **Decision:** Added `.github/workflows/function-drift-check.yml` — a GitHub Actions workflow
