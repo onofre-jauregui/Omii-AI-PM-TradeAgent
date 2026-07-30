@@ -2,6 +2,28 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (102nd run) — zero error/critical rows, zero new deployed-function drift, zero cron/manifest drift; `npm audit fix` resolved a newly-surfaced critical `brace-expansion` DoS advisory (6→2 vulnerabilities)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev` exactly (101st run's branch merged as PR #161) — `git fetch && git reset --hard origin/dev`, fresh branch `health-check/run-102` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 101st run's ~16:14 UTC cutoff through this run's ~17:08 UTC invocation — 129 total rows, **zero** at error/critical. The 13 warning rows were all `unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from the 46th/92nd/93rd/96th–101st runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download --use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop pending Onofre's call on the production billing/tenant redeploy, and the unwired `_shared/tool-gateway.ts`.
+
+**Test/lint/build sweep:** `npm run test` — 206/206 passing across 15 files, no regressions (re-verified after the dependency fix below). `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every prior run. `npm run build` — succeeds (27.56s), same pre-existing >500kB chunk-size warning, not a regression.
+
+**Cron/manifest audit:** `cron.job` — 15 live, all active, zero stale/failed/inactive. Cross-checked against `expected_cron_jobs`: 15 expected, 15 live, zero rows in either direction not matched by the other — no drift (the 101st run's log cited 14; not re-investigated here since both sides of this run's comparison match exactly).
+
+**Fix (the one concrete improvement made this run):** `npm audit --production` surfaced a **new** critical-path advisory not present in the 101st run: `brace-expansion` (high, DoS via unbounded expansion causing OOM) pulled in transitively by `eslint`'s `minimatch@3.1.5` and by `sucrase` (via `tailwindcss` → `postcss-load-config`), plus the same downstream `minimatch`/`glob`/`sucrase` chain flagged as high. Confirmed via `npm ls` that every affected path is dev-tooling only (`eslint`, `tailwindcss`, `typescript-eslint`, `vite-plugin-pwa`) — none touch the Deno edge-function runtime. Ran `npm audit fix` (no `--force`): resolved `brace-expansion`/`glob`/`minimatch`/`sucrase` (`eslint` 9.32.0→9.39.5, `typescript-eslint` 8.38.0→8.65.0, `sucrase` 3.35.0→3.35.1, all transitive-safe bumps), dropping vulnerability count **6 → 2**. The 2 remaining (`react-router`/`react-router-dom`, moderate open-redirect + SSR-hydration advisories) still require a major-version bump — a breaking change, correctly left for the same future scoped dependency-upgrade task noted in the 101st run. `package.json` untouched; only `package-lock.json` changed. Re-ran the full test/lint/build sweep above to confirm zero regressions before committing.
+
+**Verified:** `npm ls brace-expansion glob minimatch sucrase` confirms the fixed versions resolved and all paths remain dev-tooling-only; `npm audit --production` re-run after the fix shows 2 remaining (down from 6), both `react-router`-family requiring `--force`; `git diff --stat package.json` is empty (lockfile-only change); `npm run test` (206/206), `npm run lint` (0 errors), and `npm run build` all re-verified green post-fix.
+
+**Reversibility:** easy — `package-lock.json` change is `git revert`-able (re-resolves to the pre-fix transitive versions). No production code, secrets, or edge-function deploys touched; no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the 95th run — not re-investigated this run since nothing changed. Also unchanged: `_shared/tool-gateway.ts` remains written but unwired into `trading-agent`; the `react-router` major-version bump (2 remaining npm vulnerabilities, moderate severity, breaking change) is still a low-priority item for a future scoped dependency-upgrade run.
+
+---
+
 ## 2026-07-30 (101st run) — zero error/critical rows, zero new deployed-function drift, zero cron/manifest drift; `npm audit fix` resolved 20 vulnerabilities (1 critical), corrected a stale `TASKS.md` billing-status entry
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev` exactly (100th run's branch merged as PR #159) — `git fetch && git reset --hard origin/dev`, fresh branch `health-check/run-101` off `origin/dev`.
