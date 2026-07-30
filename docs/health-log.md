@@ -2,6 +2,57 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (96th run) — zero error/critical rows, zero new deployed-function drift; closed the 95th run's open item by deleting the confirmed-dead `trade-auditor` function from production and git
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (95th run's branch merged as PR #155) — fresh branch `health-check/run-96` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows in the last 6 hours (covers well past
+the 95th run's ~08:0x UTC cutoff through this run's ~09:0x UTC invocation) — **zero** error/critical
+rows across 635 info-level rows. 40 `warning` rows: 5 `unsettleable_404` + 29 `api_error` (both
+`settle-signals` Kalshi-404 messages) + 2 `health_check_run` + 2 `health_check_alert` + 2
+`liquidity_fallback`. The 29 `api_error`-labeled 404s are pre-93rd-run-fix residue, not a new bug —
+confirmed via the deployed function's `updated_at` (2026-07-30 06:08:39 UTC) landing squarely between
+the batch's 05:00–06:00 UTC timestamps and the 93rd run's merge commit (06:16:31 UTC): this window
+predates that run's redeploy, so it's the exact stale-classification the 93rd run already fixed, not
+a recurrence. One real consequence traced to this residue: the `api_error_kalshi` Telegram alert that
+fired at 05:10:11 UTC — that page went out *before* the fix deployed and was already resolved by the
+93rd run within the hour; nothing new to act on. Current `settle-signals` source (downloaded via
+`supabase functions download --use-api`) diffs byte-identical against `dev`, as do all five of its
+`_shared/*.ts` imports — no drift remains on this function today.
+
+**Full drift sweep:** downloaded all 34 deployed edge functions and diffed every one against `dev`.
+Zero new drift — every function's deployed source matches `dev` exactly except the already-known,
+already-flagged `_shared/billing.ts`/`tenant.ts` gap from the 95th run (untouched this run — still an
+unconditional Hard Stop, still needs Onofre's call). No previously-undocumented live code found this
+time; the two the 95th run captured (`switch-trading-mode`, `trade-auditor`) accounted for the full
+34-vs-32 gap, and both now have git history.
+
+**Fix (the one concrete improvement made this run):** closed the 95th run's other open item —
+whether `trade-auditor` is genuinely dead. Re-verified independently on all three reachability paths:
+zero references in `src/` or any other function's source, zero `cron.job` rows naming or calling it,
+and `auto-settle` (the function its own docstring claims invokes it) has no reference to it or to
+`trade_lessons` at all — that table's writes are fully owned by `auto-reflect` v2 today. Deleted it
+from production (`supabase functions delete trade-auditor`) and from git (`git rm -r
+supabase/functions/trade-auditor`) — the 95th run's commit remains in history as the exact rollback
+point if ever needed. See DECISIONS.md for full reasoning.
+
+**Verified:** `supabase functions` list post-delete confirms 33 functions remain, `trade-auditor`
+absent. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings as every prior run
+(unrelated to this change — no lint rules touch edge functions). No other file in the repo referenced
+`trade-auditor` outside this log and DECISIONS.md, so no dangling imports from the deletion.
+
+**Reversibility:** fully reversible — the 95th run's commit has the exact source that was live;
+`supabase functions deploy trade-auditor` restores it if a caller is ever found. Not a money/billing
+action, not user data, no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not re-investigated
+this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+
+---
+
 ## 2026-07-30 (95th run) — zero error/critical rows, 5 expected benign warnings; found production is running billing/tenant code from before the tier-enforcement fix, plus two live edge functions with no git history anywhere
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
