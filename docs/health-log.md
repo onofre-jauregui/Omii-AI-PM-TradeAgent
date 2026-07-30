@@ -2,6 +2,69 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (94th run) — zero error/critical/warning rows, zero deployed-function drift; found and fixed a silently-fabricated observability metric — `auto-reflect`'s "unreflected trades" count was reporting 787 when the true number was 27
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (93rd run's branch merged as PR #152) — fresh branch `health-check/94th-run` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 93rd run's ~06:07 UTC
+cutoff through this run's ~07:07 UTC invocation — **zero** error/critical rows, and (unlike the
+93rd run's window) **zero warning rows either** — 101 info-level rows, no `settle-signals` 404s
+fired in this window so the 93rd run's `unsettleable_404` reclassification went unexercised, but
+nothing regressed. No `event_type` values matching the previously-alerting `api_error` family
+appeared.
+
+**Manual drift sweep:** downloaded all 33 deployed edge functions via `supabase functions download
+--use-api` and diffed against `dev` — zero differences. No undocumented production deploy this run
+(the pattern behind the 86th–89th runs' findings).
+
+**Root cause found (a real bug, not just noise):** `auto-reflect`'s hourly summary log has read
+`787 unreflected` on every run for as long as the log has recorded it — a number that never moved,
+which is itself the tell. Traced `unreflectedCount`'s computation in
+`supabase/functions/auto-reflect/index.ts`: it fetches all settled trade ids (787 of them), then
+queries `trade_reflections.select("trade_id").in("trade_id", filledIds)` to find which are already
+reflected. That `.in()` call serializes to a ~29KB query string over supabase-js's GET-based REST
+transport. Reproduced directly against the project's REST endpoint
+(`trade_reflections?trade_id=in.(<787 uuids>)`): the gateway in front of PostgREST rejects it
+outright with a plain-text `400 Bad Request` — not a JSON PostgREST error. The destructured
+`const { data: reflected } = await supabase...` silently drops that error; `reflected` falls back
+to `undefined` → `[]`, so `reflectedIds` is always an empty Set and **every** settled trade reads
+as unreflected regardless of truth. Direct SQL against `compliance_log`'s sibling tables confirmed
+the real number: 787 settled trades, 839 `trade_reflections` rows (they're seeded at trade-open
+time in `execute-trade`/`trading-agent`, not just at reflection time), only **27** settled trades
+genuinely lack a reflection row. This is a metrics-only bug — no trading, settlement, or lesson-
+writing logic reads `unreflectedCount`, so no live behavior was affected — but it's exactly the
+silently-wrong-number failure mode this log has flagged repeatedly (88th run's `remaining_count_fp`
+bug, the order-then-limit bug), and a false "787 backlog" is the kind of number that would
+misdirect a future run or Onofre into chasing a debt that's 29x smaller than reported.
+
+**Fix:** replaced the oversized `.in()` lookup with a full-table `select("trade_id")` over
+`trade_reflections` (839 rows — small, safe, no filter needed) built into a Set, then diffed
+against `filledIds` in memory — the exact pattern the same file already uses two blocks below for
+`learnedTradeIds`/`trade_lessons`. No behavior change to what counts as "reflected," only how the
+existing rows are fetched. Deployed via
+`supabase functions deploy auto-reflect --project-ref uyfnezxmgwitpzsrnkst` — succeeded first
+attempt.
+
+**Verified:** `deno check` on the edited file: identical single pre-existing type error
+(`mem.updated_at` on an inferred type, unrelated to this change) before and after, confirmed via
+`git stash`/`git stash pop` diff. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. **Verified in prod against real data:** rather than wait ~53 minutes
+for the next `auto-reflect-hourly` cron tick, invoked the deployed function directly via its
+documented manual-POST entry point (service-role auth) — returned `"unreflected_trades": 27`,
+exactly matching the direct-SQL ground truth computed before the fix. Re-checked `compliance_log`
+for the 5 minutes surrounding the manual invocation: zero new error/critical rows, no regression in
+Bayesian memory updates (22 checked, 0 updated — consistent with recent history) or strategy health
+(1 active strategy, `sharpe -0.07`, `healthy`, matches steady state).
+
+**Reversibility:** easy — a single-file diff swapping one filtered query for one unfiltered query
+plus an in-memory Set diff already used elsewhere in the file; `git revert` + redeploy restores the
+(broken) prior behavior with no data or schema impact either way.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th
+run) stays completely inert until `dev` is promoted to `main` — unchanged since the 91st run
+flagged this; not re-flagging as new, just noting it's still open.
+
 ## 2026-07-30 (93rd run) — zero error/critical rows; found and fixed a false-positive Telegram alert: expected/handled `settle-signals` 404s were paging as real Kalshi API errors
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`

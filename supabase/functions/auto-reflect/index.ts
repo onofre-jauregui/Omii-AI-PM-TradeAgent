@@ -439,6 +439,17 @@ serve(async (req) => {
     // ── 3. Unreflected Trade Count ───────────────────────────────
     // A trade only has something to reflect on once it's settled (final pnl known) —
     // same status="filled" vs "settled" mismatch as Strategy Health v2 above.
+    //
+    // Was previously `.in("trade_id", filledIds)` — with 787 settled trades that
+    // built a ~29KB query string, which the REST gateway rejects outright with a
+    // plain-text 400 (not a PostgREST JSON error). supabase-js's destructured
+    // `{ data }` silently dropped the error, so `reflected` fell back to `[]` and
+    // every settled trade was reported unreflected regardless of truth — this
+    // metric read "787 unreflected" when only 27 trades actually lacked a
+    // trade_reflections row. Fetching the full (small, ~1:1-with-trades)
+    // trade_reflections table into a Set — the same pattern already used for
+    // learnedTradeIds below — avoids the oversized IN-list entirely and scales
+    // correctly as the trade count grows.
     const { data: allFilled } = await supabase
       .from("trades")
       .select("id")
@@ -448,13 +459,12 @@ serve(async (req) => {
 
     let unreflectedCount = 0;
     if (filledIds.length > 0) {
-      const { data: reflected } = await supabase
+      const { data: allReflected } = await supabase
         .from("trade_reflections")
-        .select("trade_id")
-        .in("trade_id", filledIds);
+        .select("trade_id");
 
       const reflectedIds = new Set(
-        (reflected || []).map((r: any) => r.trade_id),
+        (allReflected || []).map((r: any) => r.trade_id),
       );
       unreflectedCount = filledIds.filter((id: string) =>
         !reflectedIds.has(id)
