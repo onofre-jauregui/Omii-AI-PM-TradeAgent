@@ -2,6 +2,60 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (97th run) — zero error/critical rows, zero new deployed-function drift; corrected a stale-looking open item in DECISIONS.md that was actually resolved two runs ago
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (96th run's branch merged as PR #155) — fresh branch `health-check/run-97` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 96th run's ~09:10 UTC
+cutoff (confirmed via that run's own `health_check_run` row) through this run's ~10:07 UTC
+invocation — **zero** error/critical rows across 89 info-level rows. Only 2 `warning` rows, both
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th runs. Widened the window to 6 hours for a sanity check: the only other
+warnings in that broader window (29 `api_error` rows, all timestamped 06:00:07 UTC, all
+`settle-signals` 404 messages) predate the 96th run's cutoff and are the same pre-93rd-run-fix
+residue that run already traced and ruled benign — not a recurrence.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy. Local function-directory count
+(33, excluding the non-function `tests/` dir) matches the deployed count exactly — no repeat of the
+34-vs-32 mismatch the 95th/96th runs found and closed.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Fix (the one concrete improvement made this run):** `DECISIONS.md`'s 2026-07-20 entry
+("Flagged market-data-fetcher credential-fetch timeout gap, not auto-fixed") still read as an open
+item requiring Onofre's review. It isn't — PR #101 (`28a87d2`, 2026-07-28) shipped the exact
+`Promise.race` + 8s timeout wrapper the entry proposed, and PR #143 (`d051d32`, 2026-07-29) added a
+retry on top after the bound alone still let one slow lookup consume a full 5-min cycle (recurred
+2026-07-23 and 2026-07-29). Both fixes are live on `dev` today (`market-data-fetcher/index.ts:79-109`)
+and documented under separate 2026-07-28 entries elsewhere in this same file (the sibling
+credential-timeout fixes for kalshi-proxy/trading-agent/futures-signal/kalshi-ping/settle-signals
+all cross-reference this pattern) — but the original flagging entry was never marked resolved in
+place. Left as-is, a future run (human or agent) reading DECISIONS.md top-to-bottom could mistake it
+for a live gap and re-flag or re-propose work that already shipped. Added a `RESOLVED` note directly
+under the original entry with commit hashes and file/line trace. Docs-only change, no code touched,
+no deploy needed.
+
+**Verified:** `git log --oneline -- supabase/functions/market-data-fetcher/index.ts` confirms both
+commits on `dev`'s history; `grep -n "getKalshiCredentials\|AbortController" market-data-fetcher/index.ts`
+confirms the timeout-plus-retry wrapper is present in the current source, not just in a past commit
+that could have been reverted.
+
+**Reversibility:** trivial — single-entry doc edit, `git revert` restores the prior text exactly.
+Not a money/billing action, not user data, no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+
+---
+
 ## 2026-07-30 (96th run) — zero error/critical rows, zero new deployed-function drift; closed the 95th run's open item by deleting the confirmed-dead `trade-auditor` function from production and git
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
