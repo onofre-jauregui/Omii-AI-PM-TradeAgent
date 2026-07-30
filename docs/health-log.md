@@ -2,6 +2,56 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (92nd run) — zero error/critical rows; found and closed a real observability gap in settle-signals' no-op path (an 8h silent stretch that looked identical to a crash until traced through cron.job_run_details)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (91st run's branch merged as PR #150) — fresh branch `health-check/run-92` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+91st run's ~04:06 UTC cutoff through this run's ~05:07 UTC invocation — **zero** error/critical rows.
+Also checked `warning` (a new check this run, since it's a real severity level in the same table):
+19 rows, all `settle-signals: Kalshi 404 fetching <ticker>` — worth investigating since no prior run
+had surfaced a `warning` before.
+
+**Investigation (no new bug, but a real gap found):** the 404s are already handled correctly by the
+46th run's `unsettleable_404` fix — confirmed via `compliance_log` trend over the last 3 days:
+~800 404-warnings/hour from 2026-07-28 06:00 through 2026-07-29 08:00 (a pre-existing backlog of
+signals on tickers that had aged out of Kalshi's archive retention), draining to single/low-double
+digits per hour once each ticker got its one-time 404 and was marked `settled_at` so it stops
+re-entering future batches — working exactly as designed. But the same query showed an unexplained
+**8-hour stretch (2026-07-29 21:00–2026-07-30 05:00) with zero `compliance_log` rows at all** from
+settle-signals — no info, no warning. Traced it via `cron.job_run_details` (jobid 24,
+`*/15 * * * *`): every single tick in that window fired and returned `succeeded`. The function was
+never down. Root cause: `supabase/functions/settle-signals/index.ts`'s early-return path (no
+unsettled signals past expiration) returns its JSON response without ever writing to
+`compliance_log` — only the end-of-run and crash paths log. That means a silent crash *before* the
+try block (e.g. missing Supabase credentials, hitting the 500 at the top of the handler) would leave
+an identical footprint to a legitimately idle tick — indistinguishable without cross-referencing
+`cron.job_run_details`, a table health-check has no standing reason to check unless something already
+looks wrong.
+
+**Fix (this run):** added a non-blocking `compliance_log` insert (`total_signals_checked: 0`) on the
+no-op early-return path, matching the existing fire-and-forget pattern already used elsewhere in the
+same file (`.then(undefined, () => {})`). Deployed via
+`supabase functions deploy settle-signals --project-ref uyfnezxmgwitpzsrnkst` (first attempt hit a
+transient Cloudflare 502 marked `retryable`, backed off 60s per its own guidance, retry succeeded).
+
+**Verified:** `deno check` on the edited file shows the same 11 pre-existing type errors as the
+unmodified file (confirmed via `git stash`/`git stash pop` diff — none introduced by this change).
+`npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings as every prior run. Live
+verification against real data: at deploy time, `select count(*) from signals where settled_at is
+null and expires_at < now()` returned 0, so the very next cron tick (05:15 UTC) was guaranteed to hit
+the exact no-op path just changed — confirmed the row landed:
+`{"created_at":"2026-07-30 05:15:03","message":"Settle signals: 0 signals settled from 0 markets
+checked (no unsettled signals past expiration)","metadata":{"total_signals_checked":0}}`.
+
+**Reversibility:** easy — additive logging only inside an already-non-blocking insert, no behavior
+change to settlement logic. Revert is a one-line deletion.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th run)
+is still completely inert until `dev` is promoted to `main` — unchanged since the 91st run flagged
+this; not re-flagging as new, just noting it's still open.
+
 ## 2026-07-30 (91st run) — the CI drift-detection gate the 90th run built has never fired: GitHub Actions `schedule:` only reads the default branch, and the workflow only lives on `dev`; added a non-blocking guard so this class of mistake can't recur silently
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was on a leftover branch
