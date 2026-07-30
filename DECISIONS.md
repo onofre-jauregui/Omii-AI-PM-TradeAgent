@@ -4,6 +4,37 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-30 — Captured two undocumented production edge functions into git; did NOT deploy the pending billing-enforcement fix (95th health-check run)
+
+**Decision:** Committed `supabase/functions/switch-trading-mode/index.ts` and
+`supabase/functions/trade-auditor/index.ts` as-is from the live deployed source — both existed in
+production with **zero git history on any branch** (confirmed via `git log --all` and `git ls-tree`
+on every branch). Left `_shared/billing.ts` and `_shared/tenant.ts` untouched (reverted the
+downloaded/deployed versions back to `dev`'s committed versions) despite confirming production runs
+an **older, pre-enforcement version** of both — production's `checkEntitlement` has all four tiers'
+`maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` set to `999999` (unlimited) and is missing the
+live-strategy-suffix-id fix (`4a4f8df`), while `dev` has both fixes merged (`7c5231a`, `4a4f8df`).
+**Options:** A) Redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`,
+`execute-basket`, `switch-trading-mode` now to push dev's billing/tenant fixes live — rejected: this
+is a billing-enforcement change, an unconditional Hard Stop ("anything involving money, billing")
+per `~/.claude/CLAUDE.md`, not available to an unattended run regardless of the fix already being
+reviewed/merged. B) Capture the two orphaned functions into git but leave billing/tenant deployment
+to Onofre — chosen: closes the unversioned-production-code gap (a real rollback-path failure) without
+touching money logic. C) Leave everything undeployed and uncaptured, just log it — rejected, misses
+the "make one concrete improvement" bar and leaves live production code with no backup.
+**Why:** Reversibility and blast radius differ sharply between the two fixes. Capturing existing
+(unreviewed but already-live) source into version control is purely additive — it changes nothing
+about what's running, only creates a rollback point. Redeploying billing/tenant changes what
+`checkEntitlement` actually allows in production — squarely inside the money/billing Hard Stop, and
+CLAUDE.md's own build-status section still lists "no subscription enforcement in edge functions" as
+current state, meaning `dev`'s enforcement work may itself need a fresh look from Onofre before it
+ships, not just a mechanical redeploy.
+**Reversibility:** capture = easy, pure addition, `git rm` fully undoes it. Billing/tenant deploy
+(not taken) would have been easy to roll back technically but is gated on approval, not mechanics.
+**Trace:** `health-check/run-95` branch, PR to `dev`, `docs/health-log.md` 95th-run entry.
+
+---
+
 ## 2026-07-30 — Non-blocking CI guard for schedule-triggered workflows not live on main (91st health-check run)
 
 **Decision:** Added a `schedule-workflow-drift` job to `ci.yml` (runs on every push/PR to `main`/`dev`)
