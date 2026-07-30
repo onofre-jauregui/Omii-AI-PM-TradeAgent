@@ -2,6 +2,63 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (89th run) — fourth undocumented production deploy found via the full sweep the 88th run recommended, this time cosmetic-only (no behavior change); redeployed `origin/dev` to close the drift
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (88th run's branch merged as PR #147) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-89` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+88th run's ~01:06 UTC invocation (confirmed via the *internal* product `health_check_run` timeline,
+not this task's own cadence — the last error-severity row, `kalshi_proxy_service_credential_fetch_failed`
+at 01:03:50 UTC, was already the exact row the 88th run analyzed and dismissed; excluding it, the
+window from 01:06 UTC through this run's ~02:06 UTC invocation is **zero** error/critical rows across
+~140 info-level rows). No new error signature to chase this run.
+
+**Root cause found (drift, not a bug — fourth deploy outside the branch → PR → merge → deploy
+pipeline, now four-for-four across the 86th/87th/88th/89th runs):** per the 88th run's explicit
+recommendation to re-run the full download-and-diff sweep since any function could drift again,
+downloaded all 17 actively-invoked functions (the 14 with live `cron.job` entries —
+`auto-reflect`, `auto-settle`, `auto-trade`, `backtest-weather`, `daily-digest`, `futures-signal`,
+`health-check`, `market-data-fetcher`, `paper-reconcile`, `reconcile-orders`, `settle-signals`,
+`signal-generator`, `surface-scanner` — plus `execute-trade`/`kalshi-proxy` invoked by `auto-trade`,
+and `weather-signal`) via `supabase functions download --use-api` and diffed each against
+`origin/dev`. 16 of 17 matched exactly. **`daily-digest` did not**: the deployed `index.ts` had two
+template-literal/`.then()` call expressions collapsed onto single lines versus the repo's
+Prettier-wrapped multi-line formatting — same logic, same tokens, whitespace-only. Not a behavior
+bug like the 86th/87th/88th runs' finds; someone (or some tool) redeployed this function from a
+differently-formatted local copy at some point, bypassing review same as the prior three, but this
+time with no functional consequence.
+
+**Fix (deployed):** `supabase functions deploy daily-digest` from the current `origin/dev`
+checkout — no code change needed, since the repo's version was already correct; the fix is
+production catching up to git, not git catching up to production. Confirmed via a second
+download-and-diff pass: `daily-digest` now byte-matches `origin/dev` exactly.
+
+**Verified:** `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run test`:
+206/206 pass — no test changes needed since no logic changed. `deno check` on `daily-digest/index.ts`:
+3 pre-existing errors (stale generated Postgrest types, same class flagged by the 87th/88th runs),
+zero new. **Exercised against real deployed state:** `select * from cron_health()` — all 14
+registered cron jobs `active: true`, `is_stale: false`, `last_run_failed: false`, including
+`daily-digest-cron` itself (`last_status: succeeded`, ran cleanly at 22:00 UTC prior to this
+redeploy — the function's next real invocation is tonight at 22:00 UTC and will exercise the
+redeployed code end-to-end). Zero new error/critical `compliance_log` rows after deploy.
+
+**Reversibility:** trivial — the deployed function is now identical to a file already in `git log`;
+a plain revert of this PR changes nothing about what's running (the drifted version had identical
+behavior), so there's no meaningful "roll back" scenario here.
+
+**Process gap (still open, fourth confirmation):** the download-and-diff sweep keeps finding real
+drift every time it's run — two behavior bugs (86th, 87th), one set of legitimate unreviewed fixes
+(88th), and now one cosmetic-only mismatch (89th). Nothing in the pipeline stops direct
+`supabase functions deploy` from bypassing PR review, and this run's zero-error compliance log
+means the drift-detection value is coming entirely from the sweep, not from error monitoring —
+error-severity logs would never have caught a cosmetic diff. **Recommended for the next run:**
+keep running the full sweep every time (detection technique, not a one-time fix); if a fifth
+consecutive run finds drift, that's a strong signal to build an actual gate (e.g., a scheduled CI
+job that runs the same download-and-diff check and fails loud) rather than relying on this task to
+catch it manually forever.
+
 ## 2026-07-30 (88th run) — a third undocumented production deploy found, this time genuine unreviewed bug fixes (not a regression): `reconcile-orders`/`auto-reflect` had drifted from `origin/dev` with real fixes for a V2-API field-name bug and a Strategy Health status/mode/ordering bug; reconciled git with reality
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
