@@ -2,6 +2,50 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (90th run) — zero drift this run (streak of 4 broken), zero error/critical compliance-log rows; built the CI drift-detection gate the 88th/89th runs recommended
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (89th run's branch merged as PR #148) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-90` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+89th run's ~01:06 UTC cutoff through this run's ~03:06 UTC invocation — **zero** error/critical rows
+across 227 info-level rows. No signature to chase this run.
+
+**Drift sweep:** Per the 89th run's recommendation to keep running the full sweep every time,
+downloaded all 16 actively-invoked edge functions (`auto-reflect`, `auto-settle`, `auto-trade`,
+`backtest-weather`, `daily-digest`, `futures-signal`, `health-check`, `market-data-fetcher`,
+`paper-reconcile`, `reconcile-orders`, `settle-signals`, `signal-generator`, `surface-scanner`,
+`execute-trade`, `kalshi-proxy`, `weather-signal`) via `supabase functions download --use-api` and
+diffed against `origin/dev`. **All 16 matched exactly — zero drift.** This breaks the 86th-89th
+streak of finding drift on every sweep (two behavior bugs, one legitimate unreviewed fix, one
+cosmetic mismatch), one run short of the "fifth consecutive" threshold the 89th run named as the
+trigger to build a CI gate.
+
+**Improvement made (root-cause fix for the governance gap, not just this run's observation):**
+4 of the last 5 sweeps found real drift, and the 89th run's own note was that detection depended
+entirely on this task remembering to run the manual sweep — a single point of failure. Built
+`.github/workflows/function-drift-check.yml`: a GitHub Actions job on a 6-hour schedule (plus
+`workflow_dispatch` for manual runs) that downloads every deployed function via the Supabase
+Management API, diffs against `main`, uploads the diff as a build artifact, sends a Telegram alert
+(`[TradeAgent] Edge function drift detected...`), and fails the job loud on any mismatch. Added
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` as new repo secrets to support the alert step — see
+DECISIONS.md (2026-07-30) for the full write-up.
+
+**Verified:** `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. YAML parsed
+clean with `python3 -c "import yaml; yaml.safe_load(...)"`. The workflow's no-drift path is
+exercised by this run's own real sweep result (16/16 functions clean → `git diff --quiet` exits 0,
+matching what the job would report). The drift/alert/fail path reuses the same
+git-diff/artifact-upload/curl patterns already proven in this file's `canary-gate` and
+`migrate-staging` jobs, not new untested primitives.
+
+**Reversibility:** easy — the new workflow is additive and schedule-triggered only; deleting the
+file and the two secrets fully reverts it with zero production impact.
+
+**Next real signal:** the workflow's first scheduled run (within 6h of merge) will be the first
+live proof the alert path fires correctly end-to-end; if it reports drift where the manual sweep
+just found none, that's a bug in the workflow itself to chase, not a real regression.
+
 ## 2026-07-30 (89th run) — fourth undocumented production deploy found via the full sweep the 88th run recommended, this time cosmetic-only (no behavior change); redeployed `origin/dev` to close the drift
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
