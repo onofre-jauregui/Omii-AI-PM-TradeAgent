@@ -790,6 +790,13 @@ rows starting 2026-07-25 15:03 UTC. Tests: `supabase/functions/tests/kalshi-sign
 **Reversibility:** N/A — no code changed yet.
 **Trace:** `compliance_log` event_type=`market_data_fetcher_aborted`, 2026-07-13T12:43:11Z and 2026-07-16T22:47:02Z.
 
+**RESOLVED — 2026-07-28/29.** PR #101 (`28a87d2`) wrapped `getKalshiCredentials()` in the
+proposed `Promise.race` + 8s timeout, closing this gap directly; PR #143 (`d051d32`) added one
+retry before aborting the run, since the 8s bound alone still let one slow lookup nuke a whole
+5-min cycle (recurred 2026-07-23, 2026-07-29). Confirmed live in `market-data-fetcher/index.ts:79-109`
+on `dev` as of the 97th health-check run (2026-07-30) — this entry was left open in appearance
+after the fix shipped elsewhere in this file; closing it now so it doesn't read as a live gap.
+
 ## 2026-07-10 — Deferred HITL gate (two-phase) for live trades
 
 **Decision:** HITL gate lives in execute-trade, uses a deferred 202 pattern instead of inline polling.
