@@ -2,6 +2,59 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (93rd run) — zero error/critical rows; found and fixed a false-positive Telegram alert: expected/handled `settle-signals` 404s were paging as real Kalshi API errors
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (92nd run's branch merged as PR #151) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/93rd-run` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+92nd run's ~05:07 UTC cutoff through this run's ~06:07 UTC invocation — **zero** error/critical rows
+across 112 info-level rows. 14 `warning` rows, all `settle-signals: Kalshi 404 fetching <ticker>` —
+the same already-understood-as-benign 404 pattern the 46th and 92nd runs documented.
+
+**Root cause found (a real bug, not just noise):** among this run's warning rows was a new signature
+never seen before: `Alert sent: api_error_kalshi` (`fingerprint: "api_error_kalshi:404"`) — a real
+Telegram 🔴 push, not just a log line. Traced it to `health-check/index.ts`'s structured API-error
+sweep (`API_ERROR_TYPES = ["api_error", "llm_rate_limit", "api_timeout", "kalshi_circuit_open"]`,
+added by an earlier run to catch genuine upstream provider failures): it pages on *any* `api_error`
+event_type, with no distinction for context. `settle-signals/index.ts` logs `event_type: "api_error"`
+unconditionally on every non-2xx Kalshi response — including the 404 branch it *already* treats as a
+definitive, expected, permanently-handled outcome (ticker aged out of Kalshi's archive retention,
+stamped `settled_at`/`unsettleable_404`, never retried — the 46th run's fix). Net effect: every batch
+of benign, working-as-designed 404s pages Onofre with a red-circle "Kalshi API error" alert
+indistinguishable from a real outage or circuit-breaker trip. This is the alert-fatigue failure mode —
+a false 🔴 trains the reader to discount the next one, which might be real.
+
+**Fix:** `settle-signals/index.ts` now logs `event_type: "unsettleable_404"` (not `"api_error"`) on the
+already-expected 404 path, keeping `"api_error"` reserved for the genuinely transient/unexpected
+non-404 branch (5xx/timeout) that should keep paging. Severity stays `"warning"` so the row is still
+visible in `compliance_log` for observability — only the alert-worthy classification changed. Also
+added `"unsettleable_404"` to `ObservabilityPage.tsx`'s `operationalEventTypes` exclusion list so this
+new event_type doesn't leak into the dashboard's generic "errors" feed the same way `"api_error"`
+already didn't (that list already documents this exact pattern for `surface_scan_complete` etc.).
+Deployed via `supabase functions deploy settle-signals --project-ref uyfnezxmgwitpzsrnkst` — succeeded
+first attempt.
+
+**Verified:** `deno check` on the edited file: same 11 pre-existing type errors as the unmodified
+baseline (unrelated Supabase client generic-type issues, confirmed via `git stash`/`git stash pop`
+diff — none introduced by this change). `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. Live: confirmed the deployed function ran clean on the next cron tick
+(06:15 UTC, jobid 24) with no exceptions. Could not directly observe the 404 branch fire post-deploy
+within this run's window — `select count(*) from signals where settled_at is null and expires_at <
+now() + interval '20 minutes'` returned 0, so no ticker is due to hit that path in the near term (the
+last backlog already drained). The change itself is a scoped conditional swap of a string literal in
+an already-fire-and-forget insert (`.then(undefined, () => {})`) with no change to the settlement
+logic, retry logic, or DB writes on either branch — reviewed the diff directly rather than relying on
+a live 404 to prove it.
+
+**Reversibility:** easy — a one-line event_type string change plus a one-line dashboard exclusion-list
+addition; reverting either is a single-line diff with zero data or behavior impact.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th run)
+is still completely inert until `dev` is promoted to `main` — unchanged since the 91st run flagged
+this; not re-flagging as new, just noting it's still open.
+
 ## 2026-07-30 (92nd run) — zero error/critical rows; found and closed a real observability gap in settle-signals' no-op path (an 8h silent stretch that looked identical to a crash until traced through cron.job_run_details)
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`

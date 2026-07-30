@@ -856,6 +856,7 @@ export default function ObservabilityPage() {
     "auto_reflect_run",
     "cache_stale",
     "api_error",
+    "unsettleable_404",  // settle-signals' expected/handled aged-out-ticker 404 — not a real error
     "market_data_fetch",
     "system_event",
     "futures_signal_run",

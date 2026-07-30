@@ -144,14 +144,22 @@ serve(async (req) => {
         }
 
         if (!marketResp.ok) {
+          const is404 = marketResp.status === 404;
+          // A 404 here is a definitive, already-handled outcome (see below), not an upstream
+          // failure — event_type must NOT be "api_error" or health-check's structured API-error
+          // sweep (API_ERROR_TYPES) pages Onofre with a 🔴 Telegram alert for expected, benign
+          // aged-out tickers every time a batch of them settles. Found 93rd run: an
+          // "api_error_kalshi:404" alert fired for exactly this. Non-404 failures (5xx/timeout)
+          // are genuinely transient/unexpected and keep the real "api_error" type so they still
+          // page.
           await supabase.from("compliance_log").insert({
-            event_type: "api_error",
+            event_type: is404 ? "unsettleable_404" : "api_error",
             severity: "warning",
             message: `settle-signals: Kalshi ${marketResp.status} fetching ${ticker}`,
             metadata: { provider: "kalshi", status: marketResp.status, endpoint: ticker },
           }).then(undefined, () => {});
 
-          if (marketResp.status === 404) {
+          if (is404) {
             // Definitive "this ticker doesn't exist" — Kalshi's archive
             // retention has aged it out, it will never return non-404.
             // Stamp settled_at (settlement_price/shadow_pnl stay null, so
