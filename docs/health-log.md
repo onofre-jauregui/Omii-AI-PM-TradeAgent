@@ -2,6 +2,84 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (95th run) — zero error/critical rows, 5 expected benign warnings; found production is running billing/tenant code from before the tier-enforcement fix, plus two live edge functions with no git history anywhere
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (94th run's branch merged as PR #154) — fresh branch `health-check/run-95` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 94th run's ~07:07 UTC
+cutoff through this run's ~08:0x UTC invocation — **zero** error/critical rows across 101 info-level
+rows. 5 `warning` rows, all `unsettleable_404` (`settle-signals: Kalshi 404 fetching KXHIGHLAX-...`)
+— the same already-documented-as-benign pattern from the 46th/92nd/93rd runs, nothing new. The
+94th run's `auto-reflect` fix confirmed working in the wild: its 07:14 UTC cron tick logged
+`27 unreflected` (down from every prior run's fabricated `787`), matching the direct-SQL ground
+truth from that run's verification.
+
+**Drift sweep (the finding):** downloaded all 33 deployed edge functions via `supabase functions
+download --use-api` and diffed against `dev`. Two categories of drift, opposite of each other:
+
+1. **A merged fix sitting undeployed.** `_shared/billing.ts` and `_shared/tenant.ts` differ between
+   what's deployed and what's on `dev`. Production's `checkEntitlement` has all four subscription
+   tiers' `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` hardcoded to `999999` (effectively
+   unlimited) and is missing the `maxPositionUsd` enforcement block entirely — this is the
+   pre-`7c5231a` ("enforce billing tier limits server-side instead of display-only") code. It's also
+   missing `4a4f8df`'s live-strategy-suffix-id fix, so a live-mode trade using a per-user suffixed
+   strategy id (`S-001-l-<uuid>`) would still be wrongly rejected as "not available on your tier" in
+   production today, even though `dev` fixed this five commits ago. `tenant.ts` is similarly behind:
+   missing the mode-scoped `risk_settings` fix (a `.eq("mode", ...)` filter preventing a
+   multi-row-error on `.maybeSingle()`), missing loud-error logging on that query, and missing
+   `setRiskHalt` entirely. Root cause: this repo's edge functions deploy one-at-a-time
+   (`supabase functions deploy <name>`), and nothing redeploys every function that imports a
+   changed `_shared/*.ts` file when only some of its dependents get redeployed for an unrelated fix
+   — a shared-file change can merge to `dev` and never actually reach production unless someone
+   remembers to redeploy every consumer. **Did not redeploy** — this is a billing/entitlement change,
+   an unconditional Hard Stop ("anything involving money, billing") per `~/.claude/CLAUDE.md`,
+   regardless of the fix already being reviewed and merged. Flagging for Onofre; see DECISIONS.md.
+
+2. **Two live functions with no git history at all.** `switch-trading-mode` and `trade-auditor` are
+   deployed and running in production but `git log --all -- <path>` and `git ls-tree -r <branch>`
+   come back empty on every branch — this code was never committed anywhere. `switch-trading-mode`
+   (158 lines) is the real, currently-reachable live/paper mode toggle — it imports the same stale
+   `billing.ts`/`tenant.ts`, so it's exposed to finding #1 above. `trade-auditor` (317 lines,
+   self-labeled "v1" in its own docstring) is a post-settlement LLM lesson-extraction loop; cross-
+   checking `pg_cron`'s `cron.job` table and every deployed function's source for a call to either
+   function by name found **zero invocations of `trade-auditor`** anywhere (not from `auto-settle`,
+   not from cron) — its docstring says `auto-settle` should call it, but the current `auto-settle`
+   doesn't, and `auto-reflect` v2 (the fixed function from the 94th run) already owns
+   `trade_lessons` writes. `trade-auditor` reads as dead code superseded by `auto-reflect` v2, live
+   in production but unreachable. Neither function appeared in `pg_cron.cron.job` (expected for
+   `switch-trading-mode`, which is presumably invoked from the frontend, not cron).
+
+**Fix (the one concrete improvement made this run):** committed both functions' current deployed
+source into `dev` as-is — a pure capture, zero behavior change, closes the "unversioned live
+production code" gap (a real rollback-path failure per the repo's own change-safety bar). Left
+`_shared/billing.ts`/`tenant.ts` exactly as `dev` already has them (reverted the downloaded versions
+back after diffing) rather than deploying dev's fix to production — see DECISIONS.md for the
+full reasoning on why capture-only was the correct call here and redeploying the billing fix wasn't.
+
+**Verified:** `deno check` on both newly-captured files reproduces the same
+`SupabaseClient<any,...>` generic-mismatch errors seen when running `deno check` against
+already-committed functions like `auto-settle/index.ts` — confirmed this is a pre-existing,
+repo-wide `deno check` limitation with this Supabase client version, not something introduced by
+capturing these two files verbatim. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. No secrets found in either captured file (env vars pulled via
+`Deno.env.get`, no hardcoded keys/tokens).
+
+**Reversibility:** the capture is a pure addition — `git rm` fully undoes it with zero production
+impact either way, since it changes nothing about what's deployed. The billing/tenant fix was not
+deployed, so there is nothing to roll back on that front; it remains exactly as risky/safe to deploy
+as it was before this run.
+
+**Open item — needs Onofre:** decide whether/when to redeploy `execute-trade`, `auto-trade`,
+`stripe-webhook`, `kalshi-proxy`, `execute-basket`, and `switch-trading-mode` to bring production's
+billing/tenant enforcement in line with `dev` — this project's `CLAUDE.md` build-status section
+still lists "no subscription enforcement in edge functions" as current state, so this may need a
+fresh look rather than a mechanical redeploy. Separately: confirm `trade-auditor` is genuinely dead
+(superseded by `auto-reflect` v2) so it can be deleted from production, or identify what's supposed
+to invoke it if it's meant to still be live. Not re-flagging the `function-drift-check.yml`-inert-
+until-main-promotion item — unchanged since the 91st/94th runs, still needs `dev`→`main`, not a
+scheduled run.
+
 ## 2026-07-30 (94th run) — zero error/critical/warning rows, zero deployed-function drift; found and fixed a silently-fabricated observability metric — `auto-reflect`'s "unreflected trades" count was reporting 787 when the true number was 27
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
