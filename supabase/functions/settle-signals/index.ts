@@ -60,6 +60,18 @@ serve(async (req) => {
     }
 
     if (!unsettledSignals || unsettledSignals.length === 0) {
+      // Log even the no-op path: without this, an 8h+ stretch of zero
+      // compliance_log rows from this function is ambiguous between
+      // "legitimately no signals expired" and "silently broken before the
+      // try block" — health-check has to cross-reference cron.job_run_details
+      // to tell them apart (see the 2026-07-30 92nd-run health-check entry).
+      await supabase.from("compliance_log").insert({
+        event_type: "settle_signals_run",
+        severity: "info",
+        message: "Settle signals: 0 signals settled from 0 markets checked (no unsettled signals past expiration)",
+        metadata: { total_signals_checked: 0 },
+      }).then(undefined, () => {});
+
       return new Response(JSON.stringify({ settled: 0, reason: "No unsettled signals past expiration" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
