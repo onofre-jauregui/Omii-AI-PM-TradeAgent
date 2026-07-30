@@ -2,6 +2,69 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (98th run) — zero error/critical rows, zero new deployed-function drift; captured the `compliance-log-retention-daily` cron job (live since 2026-07-07, never in git) into a migration
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (97th run's branch merged as PR #156) — fresh branch `health-check/run-98` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 97th run's 10:10:07 UTC
+cutoff (confirmed via that run's own `health_check_run` row) through this run's ~11:07 UTC
+invocation — **zero** error/critical rows across 87 info-level rows. Only 2 `warning` rows, both
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th/97th runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Cron/manifest audit:** ran `cron_health()` against all 14 live jobs — zero stale, zero failed.
+Cross-checked `cron.job` against `expected_cron_jobs`: all 14 live jobs are represented, zero
+missing. Then cross-checked the other direction — which jobs are captured in *migration files* vs.
+only ever applied live — since that's exactly the blind spot the 42nd/46th runs found and fixed for
+`paper-reconcile-cron`/`settle-signals-cron` (job existed live, was never in a committed migration,
+so a from-scratch rebuild would silently drop it). `compliance-log-retention-daily` — the prune job
+from the very first health-check run (2026-07-07, `.claude/improvement-log.md`), applied directly via
+the Management API — was never captured into a migration file. Confirmed via
+`grep -rl prune_compliance_log supabase/migrations/`: zero matches.
+
+**Fix (the one concrete improvement made this run):** added
+`supabase/migrations/20260730_register_compliance_log_retention_cron.sql`, capturing the live
+`prune_compliance_log()` function definition (pulled via `pg_get_functiondef`) and the
+`cron.schedule('compliance-log-retention-daily', '17 3 * * *', ...)` call, plus registering it in
+`expected_cron_jobs` (idempotent `ON CONFLICT DO NOTHING` — the manifest row already existed from a
+past run's live insert, so this was a no-op there; the migration file itself was the actual gap).
+Same fix class, same reasoning as the two prior register-cron migrations this run cross-referenced.
+
+**Verified:** applied the migration via the Management API (`cron.schedule` upserts by name — safe
+against the job already existing; returned a new jobid as expected for a re-schedule, not an error).
+Re-queried `cron.job` — `compliance-log-retention-daily` still `active=true`, same schedule, same
+command. Re-ran `cron_health()` scoped to this job — `is_stale=false`, `last_run_failed=false`. No
+functional change to the live schedule; this is a git-drift fix, not a behavior fix — the job ran
+correctly every day since 2026-07-07 regardless.
+
+**Reversibility:** easy — the migration is additive (`CREATE OR REPLACE FUNCTION`, idempotent
+`cron.schedule`/`ON CONFLICT DO NOTHING` insert); reverting the file doesn't unschedule the live job
+(would need an explicit `cron.unschedule` to actually remove it, which nobody wants). Not a
+money/billing action, no live-trading path touched (`compliance_log` is telemetry only).
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+Also unchanged: `_shared/tool-gateway.ts` (2026-07-10 decision) remains written but never wired into
+`trading-agent`'s 7+ tool-call sites — confirmed still zero references in the codebase this run
+(`grep -rl tool-gateway supabase/functions` → no hits beyond the file itself). Not auto-wired: this
+touches the live LLM tool-calling path inside a 2,159-line file and is too large/risky to do blind on
+an unattended run; needs Onofre's review to scope before either wiring it or deciding it's stale
+enough to remove.
+
+---
+
 ## 2026-07-30 (97th run) — zero error/critical rows, zero new deployed-function drift; corrected a stale-looking open item in DECISIONS.md that was actually resolved two runs ago
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
