@@ -4,6 +4,34 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-30 — Deleted dead `trade-auditor` edge function from production and git (96th health-check run)
+
+**Decision:** Ran `supabase functions delete trade-auditor` against production and `git rm -r
+supabase/functions/trade-auditor`, closing the open item the 95th run left for Onofre.
+**Options:** A) Leave it live and re-flag as an open item again — rejected, this is the third
+run in a row to see it (implicitly, since the 95th run already did the confirmation work) and
+just re-flagging without deciding fails the "make one concrete improvement" bar. B) Delete from
+production only, keep the source in git as a rollback reference — considered, but the whole
+point of the 95th run's capture was to have a byte-exact rollback point in git history (this
+commit's parent), so keeping a copy in the working tree too is pure duplication. C) Delete from
+both production and git — chosen.
+**Why:** Re-verified all three ways a live function can be reachable and confirmed zero on each:
+(1) `grep -rn "trade-auditor"` across `src/`, `supabase/functions/*` (excluding its own dir) —
+no hits outside `docs/health-log.md` and this file; (2) `select jobname from cron.job` — 14 active
+jobs, none named or referencing `trade-auditor`; (3) `auto-settle/index.ts` (the function its own
+docstring claims calls it) has zero references to `trade-auditor` or `trade_lessons`. Its stated
+purpose — writing post-settlement lessons to `trade_lessons` — is fully owned by `auto-reflect` v2
+(`grep -n "trade_lessons" supabase/functions/auto-reflect/index.ts` — 4+ read/write call sites).
+Unreferenced live production code is a real gap (attack surface, config confusion, the same class
+of finding as the billing/tenant drift in finding #1 of the 95th run) — this one has zero blast
+radius to close.
+**Reversibility:** easy — `git show <95th-run-commit>:supabase/functions/trade-auditor/index.ts`
+recovers the exact source that was live, `supabase functions deploy trade-auditor` restores it.
+Not money/billing, not a HITL-gated action, not deleting user data — a dead code path.
+**Trace:** `health-check/run-96` branch, PR to `dev`, `docs/health-log.md` 96th-run entry.
+
+---
+
 ## 2026-07-30 — Captured two undocumented production edge functions into git; did NOT deploy the pending billing-enforcement fix (95th health-check run)
 
 **Decision:** Committed `supabase/functions/switch-trading-mode/index.ts` and
