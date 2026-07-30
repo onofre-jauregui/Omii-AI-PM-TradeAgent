@@ -20,6 +20,37 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # ─── Job 1b: Guard — schedule-triggered workflows must be live on main ────
+  # GitHub Actions only ever evaluates a `schedule:` trigger from the repo's
+  # *default* branch (`main` here) — a scheduled workflow merged to `dev` is
+  # never registered, never runs, and doesn't even show up in
+  # `gh workflow list`. The 90th health check built
+  # `function-drift-check.yml` believing "merged to dev" was enough; it sat
+  # completely inert. Non-blocking by design: a health-check PR into `dev`
+  # can't fix an existing gap that requires promoting `dev` → `main` (a Hard
+  # Stop only Onofre can trigger), so this only needs to make the gap loud,
+  # not fail unrelated PRs. See DECISIONS.md (2026-07-30, 91st run).
+  schedule-workflow-drift:
+    name: Guard — schedule-triggered workflows live on main?
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check every schedule-triggered workflow exists and matches on origin/main
+        run: |
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            if grep -qE '^\s*schedule:' "$f"; then
+              if ! git show "origin/main:$f" > /tmp/main_version.yml 2>/dev/null; then
+                echo "::error file=$f::Uses 'schedule:' but does not exist on origin/main. GitHub Actions only evaluates scheduled triggers on the default branch — this workflow will NEVER fire until it's promoted to main (or it stays dead weight if intentionally dev-only)."
+              elif ! diff -q "$f" /tmp/main_version.yml > /dev/null 2>&1; then
+                echo "::warning file=$f::Differs from the version on origin/main. The copy actually running on schedule is main's, not this branch's."
+              fi
+            fi
+          done
+          exit 0
+
   # ─── Job 2: Apply migrations → staging DB (dev push only) ─────────────────
   migrate-staging:
     name: Apply migrations → staging DB

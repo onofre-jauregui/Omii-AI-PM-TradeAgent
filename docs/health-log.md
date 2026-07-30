@@ -2,6 +2,50 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (91st run) — the CI drift-detection gate the 90th run built has never fired: GitHub Actions `schedule:` only reads the default branch, and the workflow only lives on `dev`; added a non-blocking guard so this class of mistake can't recur silently
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was on a leftover branch
+(`health-check/run-90`, already merged as PR #149, zero diff vs. `origin/dev`) rather than being reset
+after the last run — `git fetch`, fresh branch `health-check/run-91` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+90th run's ~03:06 UTC cutoff through this run's ~04:06 UTC invocation — **zero** error/critical rows
+across 111 info-level rows. No signature to chase this run.
+
+**Root cause found (the previous "fix" doesn't work):** the 90th run added
+`.github/workflows/function-drift-check.yml` with `on: schedule: cron: "0 */6 * * *"`, merged to `dev`
+via PR #149, and logged it as a working automated gate. It isn't one. GitHub Actions only ever
+evaluates a `schedule:` trigger from the repository's **default branch** — this repo's default branch
+is `main` (`gh repo view --json defaultBranchRef` confirms), and the workflow file has never existed
+on `main`. Confirmed empirically two ways: `git show origin/main:.github/workflows/function-drift-check.yml`
+finds nothing, and `gh workflow list --all` shows only `CI` — the drift-check workflow isn't even
+*registered* with GitHub Actions, let alone scheduled. It has silently done nothing since merge; the
+90th run's "first scheduled run within 6h will be the first live proof" never happened and never could.
+
+**Fix (this run, within scope):** the actual fix — promoting `dev` → `main` so the workflow file lands
+on the default branch — is a Hard Stop requiring Onofre's explicit "ship to production," not available
+to an unattended scheduled run. Considered rebuilding the check as a Supabase pg_cron edge function
+instead (this codebase's normal pattern for periodic jobs, and immune to the default-branch trap), but
+that needs a new GitHub PAT as a Supabase function secret — a new credential/dependency that's its own
+critical decision, too much surface to ship correctly unattended this run. Chose the scoped, real fix:
+added a `schedule-workflow-drift` job to `ci.yml` that runs on every push/PR to `main`/`dev`, scans every
+`.github/workflows/*.yml` for `schedule:` triggers, and emits a loud (but non-blocking — never fails the
+job) GitHub Actions annotation if that file isn't byte-identical on `origin/main`. This guards the actual
+system-level gap — "assume a schedule-triggered workflow works once merged anywhere" — for this workflow
+and any future one, without blocking unrelated health-check PRs on a pre-existing gap they didn't create.
+Full options/why in DECISIONS.md (2026-07-30, 91st run).
+
+**Verified:** YAML parsed clean (`python3 -c "import yaml; yaml.safe_load(...)"`). Ran the guard's exact
+bash logic locally against this checkout — correctly flags `function-drift-check.yml` as
+`MISSING-ON-MAIN`, the real current state. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run — this change didn't touch application code.
+
+**Reversibility:** easy — additive CI job only, no deploy path touched; deleting the job fully reverts it.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` stays completely
+inert until `dev` is promoted to `main`. Until then, the 86th–89th runs' manual download-and-diff sweep
+is still the only thing actually catching edge-function drift — sent as this run's Telegram flag.
+
 ## 2026-07-30 (90th run) — zero drift this run (streak of 4 broken), zero error/critical compliance-log rows; built the CI drift-detection gate the 88th/89th runs recommended
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
