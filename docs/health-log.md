@@ -2,6 +2,87 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (88th run) — a third undocumented production deploy found, this time genuine unreviewed bug fixes (not a regression): `reconcile-orders`/`auto-reflect` had drifted from `origin/dev` with real fixes for a V2-API field-name bug and a Strategy Health status/mode/ordering bug; reconciled git with reality
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (87th run's branch merged as PR #146) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-88` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+87th run's ~00:06 UTC cutoff through this run's ~01:06 UTC invocation — 129 total rows, exactly
+**one** at error/critical: `kalshi_proxy_service_credential_fetch_failed` at 01:03:50 UTC
+("credential fetch exceeded 8000ms — falling back to the anonymous rate tier for this request"),
+paired with the expected `kalshi_proxy_unauthenticated_fallback` warning immediately after. This is
+the 85th run's retry-once guard working exactly as designed (retried, still timed out, degraded
+gracefully) — matches the "single transient occurrence, not a recurring pattern, no code change
+warranted" precedent set by the 75th/78th/82nd runs. Also confirmed the last two
+`order_skipped_no_liquidity`/`liquidity_fallback` pairs (00:10:09 UTC) predate the 87th run's own
+fix deploy (~00:15 UTC) — stale residue from before that fix took effect, not a new recurrence.
+
+**Root cause found (real fixes, unlike the 86th/87th runs' regressions — third instance of the
+same governance hole):** per the 87th run's explicit recommendation to spot-check the remaining
+live functions for undocumented drift, downloaded and diffed all ten functions it named plus
+`reconcile-orders`/`signal-generator`/`futures-signal`/`auto-reflect`/`compact-memory` against
+`origin/dev`. `kalshi-proxy`, `market-data-fetcher`, `surface-scanner`, `auto-settle`,
+`paper-reconcile`, `signal-generator`, `futures-signal`, `compact-memory` all matched `dev`
+exactly. Two did not: **`reconcile-orders`** (plus the shared `_shared/reconcile-logic.ts` it
+imports) and **`auto-reflect`** — both carrying real, well-reasoned fixes never committed:
+- `reconcile-logic.ts`/`reconcile-orders`: Kalshi's V2 `GetOrder` response returns
+  `remaining_count_fp` (a fixed-point string), not the plain-numeric `remaining_count` the old code
+  read — so `remaining` was always `-1` and a fully-executed order could never satisfy
+  `remainingCount === 0`, leaving real fills stuck "open" in the DB forever. Also fixes
+  `pickAvgPrice`, which read `avg_price`/`average_fill_price` fields that don't exist at all in V2
+  (it only has `yes_price_dollars`/`no_price_dollars`, the resting price — correct as the fill price
+  for a maker-only limit order), and adds a market-finalized fallback so an order still resting
+  after its market settles is correctly marked cancelled instead of stuck open indefinitely.
+- `auto-reflect`: three stacked bugs in the Strategy Health v2 query — (1) filtered on
+  `status="filled"` when settled trades are stamped `status="settled"` (confirmed via direct count:
+  488 `settled` rows all carry `settled_at`, 13 `filled` rows carry none) — Strategy Health's
+  Sharpe/drawdown/hit-rate/loss-streak suspension logic had never evaluated a single real trade
+  since it shipped; (2) the legacy-strategy-name fallback query wasn't scoped by `mode`, so paper
+  and live rows sharing a strategy name cross-contaminated each other's rolling window (produced an
+  impossible ~596% "drawdown" that force-suspended live trading the first time this query ran real
+  data); (3) `order by settled_at ascending limit 30` returned the oldest 30 settled trades ever,
+  not a rolling window — permanently frozen at strategy-launch data instead of "recent." Also swaps
+  the lesson-writing model from `gpt-4o-mini` to `anthropic/claude-sonnet-5` via the same
+  already-wired OpenRouter key (gpt-4o-mini was producing thin, near-duplicate lessons).
+
+None of this is in `git log`, `DECISIONS.md`, or any prior health-log entry — a third deploy that
+bypassed the branch → PR → merge → deploy pipeline, this time carrying correct fixes for real bugs
+rather than a regression.
+
+**Fix (deployed):** copied the actual deployed `reconcile-orders/index.ts`, `auto-reflect/index.ts`,
+and `_shared/reconcile-logic.ts` into the repo as-is so git matches what's genuinely running —
+these are already-live, already-correct fixes; reverting them would reintroduce the stuck-open-fill
+bug and the never-evaluates-a-trade Strategy Health bug, so reconciliation (not a revert) is the
+right move, same call the 86th/87th runs made for their own drift.
+
+**Verified:** `deno check` on all three files — 11 pre-existing errors both on a clean `origin/dev`
+checkout (via `git stash`/`git stash pop`) and on the reconciled version — stale generated Postgrest
+types, zero new. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run
+test`: 206/206 pass, including all 17 `reconcile-logic.test.ts` cases against the widened
+`decideReconcile`/`pickAvgPrice` signatures (both new params are optional, so existing call sites
+and tests are unaffected). Deployed `reconcile-orders` and `auto-reflect` via `supabase functions
+deploy`. **Exercised against the real deployed functions and real data:** polled `compliance_log`
+after deploy — the 01:10:01 UTC `auto_trade_run` cycle and 01:11:05 UTC `reconcile_orders_run`
+("0 checked, 0 filled, 0 partial, 0 cancelled, 0 errors") both completed clean with zero new
+error/critical rows; `market-data-fetcher` ran normally immediately after (`18/18 series OK`).
+`select * from cron_health()` shows all 14 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the 87th run's own
+push green in 4m21s; nothing since until this run's own push.
+
+**Reversibility:** the reconciliation is a snapshot of already-live behavior, so it changes nothing
+about production on its own — a plain revert would restore the pre-fix (buggy) behavior, not a
+safer one, so revert is not recommended without a reason.
+
+**Process gap (recurring, now three-for-three across the 86th/87th/88th runs):** every function
+checked with the download-and-diff technique so far has either matched `dev` exactly or drifted —
+never a false alarm. Confirms this class of drift is real and ongoing, not a one-off. Full-repo
+coverage is now current as of this run (all functions checked at least once); **recommended for the
+next run:** re-run the same download-and-diff sweep across all functions again, since any of them
+could drift again between now and then — this is a detection technique, not a one-time fix, and
+nothing in the pipeline stops a future direct deploy from happening again.
+
 ## 2026-07-30 (87th run) — a second undocumented production deploy (in `execute-trade`, separate from the 86th run's `auto-trade` drift) had silently halted ALL live order submissions platform-wide for over 30 hours; found and fixed
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
