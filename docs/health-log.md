@@ -2,6 +2,80 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (87th run) — a second undocumented production deploy (in `execute-trade`, separate from the 86th run's `auto-trade` drift) had silently halted ALL live order submissions platform-wide for over 30 hours; found and fixed
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (86th run's branch merged as PR #145) — `git fetch` confirmed no divergence, fresh branch
+`health-check/run-87` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+86th run's ~23:06 UTC cutoff through this run's ~00:06 UTC invocation — zero rows (192 total rows
+in the window). Grouped the same window by `severity`/`event_type` per the standard set by the
+76th/81st/86th runs, since `error`/`critical` is necessary but not sufficient. Found
+`s001_leg_execution_failed` at 8 occurrences — the 86th run's Kelly-sizing clamp had visibly worked
+(no `$22 exceeds max position size $20` failures after 23:15 UTC, consistent with that run's own
+propagation-lag note), but every failure from 23:20 UTC onward was a *new* signature: `No liquidity
+for <ticker> at 91c/92c`. Six occurrences in 45 minutes on the same `KXBTC-26JUL3017` event, all
+paired with a `liquidity_fallback` log claiming "Placing limit order instead" immediately followed
+by an `order_skipped_no_liquidity` log that skipped it anyway — two compliance rows contradicting
+each other in the same request, which doesn't happen in code that only logs and returns once.
+
+**Root cause found (CRITICAL — second unreviewed production deploy, platform-wide outage):**
+`order_skipped_no_liquidity` does not exist anywhere in `git grep` across the repo. Downloaded the
+deployed `execute-trade` function (`supabase functions download`) and diffed against `origin/dev`:
+the deployed function had an uncommitted block added after `checkLiquidity` — if the orderbook
+showed zero contracts available *at or better than* the requested price, it hard-skipped the order
+and returned early, plus a second change that downsized `contractCount` to whatever depth was
+currently visible. Both changes are wrong for this codebase: every strategy (S-001/S-002/S-005,
+confirmed via `grep -n "orderType\|time_in_force" auto-trade/index.ts`) submits
+`orderType: "limit", time_in_force: "day"` — a GTC-style resting order that Kalshi accepts and
+rests in the book precisely when there's no immediate counter-side match. "Zero depth at-or-better
+than my price" is the *normal*, *expected* state for any correctly-priced passive limit order (you
+bid below the ask; if nothing is offered that low, you become the new best bid) — it is not "doomed
+to fail," it's the entire mechanism by which a resting limit order works. The deployed code
+mistook "no immediate fill" for "cannot submit," which blocks essentially all live order
+submissions that aren't already marketable. Checked the actual blast radius: **zero
+`order_submitted` events anywhere in `compliance_log` since 2026-07-28 18:20 UTC** (over 30 hours)
+against 108 `order_skipped_no_liquidity` skips in the same window — this was not an S-001-only
+issue, it was a total live-trading halt across every strategy, silently running for more than a day
+because, like the 86th run's `auto-trade` drift, it was never committed and so never showed up in
+any diff, PR, or code review.
+
+**Fix (deployed):** `supabase/functions/execute-trade/index.ts` — removed the added zero-depth
+hard-skip block and the depth-based `contractCount` downsizing, and removed the now-unused
+`availableContracts` field threaded through `LiquidityCheck`/`checkLiquidity`, restoring
+`checkLiquidity` and order submission to exactly what's on `origin/dev` (verified via `diff` against
+`git show HEAD:...` — zero remaining differences in that logic). Preserved the one other
+change the same deploy carried that *is* correct and unrelated: `kalshiErrorDetail` now uses
+`String(rawKalshiError)` instead of `JSON.stringify(rawKalshiError)`, because `JSON.stringify(undefined)`
+returns the bare value `undefined` (not a string), which crashed the handler on Kalshi rejection
+bodies that come back empty. Final diff against `origin/dev` is exactly that one line.
+
+**Verified:** `deno check` — 19 pre-existing errors both before and after (confirmed via `git
+stash`/`git stash pop`; stale generated Postgrest types, unrelated), zero new. `npm run lint`: 0
+errors, same 9 pre-existing fast-refresh warnings. `npm run test`: 206/206 pass. Deployed via
+`supabase functions deploy execute-trade`. **Exercised against the real deployed function, real
+Kalshi API, and the real live account:** polled `compliance_log` every 30s after deploy; the 00:15
+UTC S-001 cron cycle produced a real `order_submitted` row — Kalshi accepted a 21-contract buy-NO
+limit order on `KXBTC-26JUL3017-B63625` @ 91c with **zero pre-existing book depth at that price**
+(order id `9436f09a-6554-4d1d-b429-841cfb345484`, status `resting`) — exactly the scenario the
+buggy code was blocking, now working. Zero `order_skipped_no_liquidity` or contradictory
+liquidity-fallback pairs since deploy.
+
+**Reversibility:** trivial — single-file diff (one line vs. `origin/dev`), a plain revert restores
+current behavior; the removed block can be reintroduced later if a real reason for it is found and
+goes through actual review this time.
+
+**Process gap (recurring — same governance hole the 86th run flagged, now confirmed to have hit a
+second function):** two independent, uncommitted production deploys have now been found in
+back-to-back health-check runs (`auto-trade` on the 86th, `execute-trade` on this one), both
+bypassing the branch → PR → merge → deploy pipeline `CLAUDE.md` documents as a hard rule, both
+invisible to git history until a symptom forced a `supabase functions download` diff. This run
+did not have time to spot-check the remaining live functions (`kalshi-proxy`, `market-data-fetcher`,
+`surface-scanner`, `auto-settle`, `paper-reconcile`, etc.) the same way — **recommended for the next
+run:** download and diff every deployed function against `origin/dev` in one pass, not just the one
+the day's symptom points at, since two out of the handful checked so far have drifted.
+
 ## 2026-07-29 (86th run) — production `auto-trade` had drifted from `origin/dev` entirely (an undocumented S-001 quarter-Kelly + LLM-qualify feature was live but never committed); reconciled git with reality and fixed the sizing bug that came with it, which had blocked every live S-001 cycle for over an hour
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
