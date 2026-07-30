@@ -3,6 +3,8 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant, tenantInsertFields, getRiskSettings } from "../_shared/tenant.ts";
 import { evaluateCapitalCap } from "../_shared/risk.ts";
+import { sendTelegramAlert } from "../_shared/telegram.ts";
+import { determineBasketStatus, resolveFlattenOutcome } from "../_shared/basket-logic.ts";
 
 /**
  * execute-basket: Multi-leg ordered trade execution with stateful lifecycle.
@@ -222,21 +224,18 @@ serve(async (req) => {
     }
 
     // ── Determine final basket status ─────────────────────────────────────────
-    const allFilled = legResults.filter(l => l.success).length === legs.length;
-    const anyFilled = filledTradeIds.length > 0;
-
-    let finalStatus: string;
-    if (allFilled) {
-      finalStatus = "completed";
-    } else if (abortReason && anyFilled) {
-      finalStatus = "partially_filled";
-    } else if (abortReason) {
-      finalStatus = abortReason.includes("timed out") ? "timed_out" : "aborted";
-    } else {
-      finalStatus = "aborted";
-    }
+    let finalStatus = determineBasketStatus(legResults, legs.length, filledTradeIds.length, abortReason);
 
     // ── Flatten partially filled legs if basket didn't complete ───────────────
+    // A basket is only "flattened" if every filled leg's closing order actually
+    // succeeded — previously `finalStatus` flipped to "flattened" whenever
+    // flattenResults was non-empty, which included entries for FAILED flatten
+    // attempts (execute-trade returning success:false, or the fetch throwing).
+    // That meant a basket left with real naked live exposure could be reported
+    // as safely resolved. resolveFlattenOutcome only claims "flattened" when
+    // the fill count matches; otherwise the original (honest) status is kept
+    // and this alerts loudly, because that's the one state that needs a human
+    // to manually close the position.
     let flattenResults: any[] = [];
     if (finalStatus !== "completed" && filledTradeIds.length > 0) {
       flattenResults = await flattenFilledLegs(
@@ -250,7 +249,22 @@ serve(async (req) => {
         strategy_name,
         mode
       );
-      if (flattenResults.length > 0) finalStatus = "flattened";
+      const outcome = resolveFlattenOutcome(flattenResults, filledTradeIds.length);
+      if (outcome === "flattened") {
+        finalStatus = "flattened";
+      } else if (outcome === "flatten_failed") {
+        const flattenedCount = flattenResults.filter(r => r.success).length;
+        const failedCount = flattenResults.length - flattenedCount;
+        const alertMsg = `🔴 BASKET FLATTEN FAILED — basket ${basketId} (${mode}): ${failedCount}/${flattenResults.length} flatten attempt(s) failed. ${filledTradeIds.length} filled leg(s) may still hold naked exposure. Manual review required.`;
+        console.error(alertMsg);
+        await supabase.from("compliance_log").insert({
+          event_type: "basket_flatten_failed",
+          severity: "critical",
+          message: alertMsg,
+          metadata: { basket_id: basketId, mode, filled_legs: filledTradeIds.length, flatten_attempted: flattenResults.length, flatten_succeeded: flattenedCount },
+        });
+        if (mode === "live") await sendTelegramAlert(alertMsg);
+      }
     }
 
     // ── Update basket to final state ──────────────────────────────────────────
@@ -358,7 +372,7 @@ async function flattenFilledLegs(
       });
 
       const flatResult = await flatResp.json();
-      flattenResults.push({ leg_index: i, flatten_action: flattenAction, ...flatResult });
+      flattenResults.push({ leg_index: i, flatten_action: flattenAction, ...flatResult, success: Boolean(flatResp.ok && flatResult.success) });
 
       if (flatResult.trade?.id) {
         await supabase.from("trades").update({ basket_id: basketId }).eq("id", flatResult.trade.id);
@@ -368,6 +382,7 @@ async function flattenFilledLegs(
         leg_index: i,
         flatten_action: flattenAction,
         error: err instanceof Error ? err.message : "flatten failed",
+        success: false,
       });
     }
   }

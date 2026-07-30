@@ -41,10 +41,13 @@ export function TradeModal({ market, open, onClose, mode, initialSide }: TradeMo
   }, [market, side]);
 
   useEffect(() => {
-    supabase.from("strategies").select("id, name").eq("active", true).then(({ data }) => {
+    // Previously unscoped by mode — a paper trade's strategy dropdown could
+    // list (and get tagged with) a live-mode strategy and vice versa.
+    supabase.from("strategies").select("id, name").eq("active", true).eq("mode", mode).then(({ data }) => {
       setStrategies(data ?? []);
+      setStrategyId("");
     });
-  }, []);
+  }, [mode]);
 
   async function handleSubmit() {
     if (!market) return;

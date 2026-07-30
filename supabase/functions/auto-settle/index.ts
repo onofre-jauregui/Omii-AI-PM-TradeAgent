@@ -160,6 +160,12 @@ serve(async (req) => {
             settled_at: new Date().toISOString(),
             resolution: "voided",
             pnl: 0,
+            // net_pnl was previously left unset on this path (only pnl was
+            // written), so a voided trade's fee-adjusted P&L stayed stale/null
+            // forever instead of reflecting the true zero-cost refund — any
+            // aggregate reading net_pnl (dashboard, performance page) undercounted
+            // or miscounted these trades. Refund-at-cost means no fees either.
+            net_pnl: 0,
           }).in("id", voidedTrades.map((t: any) => t.id));
           await supabase.from("compliance_log").insert({
             event_type: "trade_settled",
