@@ -2,6 +2,75 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-07-30 (99th run) — zero error/critical rows (one transient `credential_fetch_failed`, matches established benign pattern), zero new deployed-function drift, zero cron/manifest drift; corrected a stale `CLAUDE.md` build-status claim that subscription enforcement doesn't exist
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (98th run's branch merged as PR #157) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-99` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 98th run's ~11:07 UTC
+cutoff through this run's ~12:10 UTC invocation — 146 total rows, exactly **one** at error/critical:
+`kalshi_proxy_service_credential_fetch_failed` at 11:48:46 UTC ("credential fetch exceeded 8000ms
+after retry — falling back to the anonymous rate tier"), paired with the expected
+`kalshi_proxy_unauthenticated_fallback` warning five seconds later. This matches the "single
+transient occurrence, not a recurring pattern, no code change warranted" precedent set by the
+75th/78th/82nd/88th/94th runs — the 85th run's retry-once guard working exactly as designed
+(retried, still timed out, degraded gracefully). The other 12 warning rows were all
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th/97th/98th runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy (see this run's doc fix below for
+what's actually in that gap).
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Cron/manifest audit:** ran `cron_health()` against all 14 live jobs — zero stale, zero failed,
+zero inactive. Cross-checked both directions against `expected_cron_jobs`: 14 expected, 14 live,
+zero rows in either direction not matched by the other — the 98th run's migration fix for
+`compliance-log-retention-daily` closed the last gap; re-confirmed all 14 jobs now have at least one
+migration file referencing them (`grep -rl <jobname> supabase/migrations/`).
+
+**Fix (the one concrete improvement made this run):** `CLAUDE.md`'s "Build status" section stated
+flatly "no subscription enforcement in edge functions" — false as of the 95th run (2026-07-30),
+which merged real per-tier `checkEntitlement()` limits (`maxTradesPerDay`/`maxOpenPositions`/
+`maxPositionUsd`, not the old display-only `999999` stub) into `_shared/billing.ts`. Verified this
+is genuinely wired, not dead code: `grep -rn checkEntitlement supabase/functions` shows real call
+sites in `auto-trade/index.ts:641`, `execute-trade/index.ts:252`, and
+`switch-trading-mode/index.ts:68`, and `git log` confirms both commits (`7c5231a`, `4a4f8df`) are on
+`dev`. What's actually true is narrower and different from what the doc claimed: enforcement is
+built, tested, and live on `dev`; it is **not deployed to production** (blocked on Onofre's approval
+per the money/billing Hard Stop, same gap the 95th run's `_shared/billing.ts`/`tenant.ts` diff still
+shows today). Left as written, a future run or a human skimming `CLAUDE.md` could believe billing
+enforcement hasn't been built at all and re-propose work that's already done, or conversely could
+miss that production is still running the unlimited-tier version. Rewrote the "In progress /
+partially done" and "Priority order" entries to state both halves precisely.
+
+**Verified:** `grep -rn checkEntitlement supabase/functions --include="*.ts"` (excluding
+`_shared/billing.ts` itself and test files) confirms three live call sites; `git log --oneline --
+supabase/functions/_shared/billing.ts` confirms `7c5231a`/`4a4f8df` are on `dev`'s history; this
+run's own drift sweep (above) independently confirms production's deployed `billing.ts` still
+differs from `dev`'s — the doc now accurately reflects that split instead of erasing it.
+
+**Reversibility:** trivial — two-entry doc edit in `CLAUDE.md`, `git revert` restores the prior
+(less accurate) text exactly. Not a money/billing action, no code or production behavior touched, no
+HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard
+Stop. Also unchanged: `_shared/tool-gateway.ts` (2026-07-10 decision) remains written but never
+wired into `trading-agent`'s 7+ tool-call sites — confirmed still zero references in the codebase
+this run. Not auto-wired for the same reason the 98th run gave: touches the live LLM tool-calling
+path inside a 2,159-line file, too large/risky to scope blind on an unattended run.
+
+---
+
 ## 2026-07-30 (98th run) — zero error/critical rows, zero new deployed-function drift; captured the `compliance-log-retention-daily` cron job (live since 2026-07-07, never in git) into a migration
 
 **Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
