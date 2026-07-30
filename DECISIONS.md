@@ -4,6 +4,27 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-30 — Built a scheduled CI drift-detection gate for edge functions (90th health-check run)
+
+**Decision:** Added `.github/workflows/function-drift-check.yml` — a GitHub Actions workflow
+(`schedule: every 6h` + `workflow_dispatch`) that downloads every deployed edge function via the
+Supabase Management API, diffs against `main`, uploads the diff as an artifact, sends a Telegram
+alert, and fails the job loud if anything differs. Added `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` as
+new repo secrets to support the alert step.
+**Options:** A) Keep relying on this task's manual download-and-diff sweep — rejected, the 89th
+run's own note flagged that detection was "coming entirely from the sweep, not from error
+monitoring," i.e. a single point of failure tied to this task actually remembering to run it.
+B) Build the CI gate now — chosen, since 4 of the last 5 runs (86th-90th) found real drift when the
+sweep was run, a strong enough pattern to justify automating detection rather than waiting for a
+"fifth consecutive" trigger that this run's own clean sweep just missed by one.
+**Why:** Nothing in the existing pipeline stops a direct `supabase functions deploy` from bypassing
+PR review — the CI workflow only deploys on `main`/`dev` push, but a manual deploy from a local
+checkout is invisible to it. A scheduled diff closes the detection gap without requiring anyone to
+remember to run the sweep by hand.
+**Reversibility:** easy — delete the workflow file and the two secrets; no production behavior
+changes, this only adds observability.
+**Trace:** PR to `dev`, branch `health-check/run-90`.
+
 ## 2026-07-29 — Reconciled git with a production `auto-trade` that had silently drifted (undocumented S-001 Kelly-sizing + LLM gate), then fixed the sizing bug it carried (86th health-check run)
 
 **Decision:** Committed the actual deployed `auto-trade/index.ts` (quarter-Kelly S-001 sizing +
