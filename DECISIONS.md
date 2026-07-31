@@ -4,6 +4,22 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-31 — Added baskets.user_id via migration; deployed straight to production
+
+**Decision:** Applied `20260731_baskets_multi_tenancy.sql` directly via the management API, adding `user_id`, an index, and an RLS policy to `baskets` — the same pattern every other multi-tenant table already has.
+**Options:** A) File it as a finding and wait — rejected, `execute-basket` was returning a 500 on literally every call for every real user; there's no safer intermediate state, the function is either broken or fixed. B) Add the column without RLS, relying on service-role-only access — rejected, inconsistent with every other table and leaves a real gap if anything ever reads `baskets` with a user JWT. C) Full parity fix (column + index + policy) — chosen.
+**Why:** A live integration test (the first one this function has ever had) surfaced `"Could not find the 'user_id' column of 'baskets' in the schema cache"` — `baskets` was never included in the original multi-tenancy migration. `execute-basket`'s only live caller is `trading-agent`'s manual-basket tool, so this had likely been silently broken since tenant-scoping was added, invisible because nothing exercised that path end-to-end before now.
+**Reversibility:** easy — additive column/index/policy, `ALTER TABLE baskets DROP COLUMN user_id` reverts cleanly (no data has depended on it existing).
+**Trace:** `supabase/migrations/20260731_baskets_multi_tenancy.sql`, DESIGN-REPORT.md §6 finding #20, PR #167.
+
+## 2026-07-31 — Fixed orderbook parsing (paper fills were always simulating against an empty book)
+
+**Decision:** Added `parseKalshiOrderbook()` to `_shared/kalshi-market-data.ts` and deployed it to every function that imports it (`execute-trade`, `execute-basket`, `paper-reconcile`) directly to production.
+**Options:** A) File it as a finding, defer the fix — rejected given explicit standing direction this session to fix bugs found, not just report them, and this is the single highest-stakes correctness gap in the whole system (paper-trading fidelity is the track-record artifact CLAUDE.md names as the family-capital unlock). B) Patch `fetchOrderbook`'s type only, leave the mapping implicit — rejected, the real fix requires an explicit transformation layer since the raw and internal shapes are structurally different, not just mis-typed. C) Add a proper parsing function, verified against a live captured response and Kalshi's own docs before writing it — chosen.
+**Why:** Verified independently (not assumed) that Kalshi's real orderbook API has no top-level `yes`/`no` keys — everything lives under `orderbook_fp.{yes,no}_dollars` — so `orderbook.yes`/`.no` were `undefined` for every real request since this code was written. Confirmed via a fresh live request, re-reading the actual source files, checking no `KALSHI_BASE_URL` override exists in production, and checking Kalshi's docs for `count_fp`'s units before writing the fix.
+**Reversibility:** easy — the fix is additive parsing logic; reverting restores the prior (broken) behavior, not a data-loss risk.
+**Trace:** `supabase/functions/_shared/kalshi-market-data.ts`, DESIGN-REPORT.md §6 finding #18, PR #167.
+
 ## 2026-07-30 — Re-registered weather-signal-cron; expanded expected_cron_jobs manifest
 
 **Decision:** Applied migration `20260730_reregister_weather_signal_cron.sql` directly to production via the management API — re-scheduled `weather-signal-cron` on its intended staggered cadence (`4,14,24,34,44,54 * * * *`) and added it, `paper-reconcile-cron`, and `settle-signals-cron` to `expected_cron_jobs`.
