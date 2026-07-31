@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant } from "../_shared/tenant.ts";
+import { isAllowedProxyRequest } from "../_shared/kalshi-proxy-logic.ts";
 
 // Module-level, so it resets on cold start but doesn't spam compliance_log on
 // every warm-instance request — one warning per instance lifetime is enough
@@ -103,6 +104,18 @@ serve(async (req) => {
   try {
     const url = new URL(req.url);
     const endpoint = url.searchParams.get("endpoint") || "markets";
+
+    if (!isAllowedProxyRequest(req.method, endpoint)) {
+      await adminClient.from("compliance_log").insert({
+        event_type: "kalshi_proxy_endpoint_blocked",
+        severity: "warning",
+        message: `kalshi-proxy blocked disallowed ${req.method} ${endpoint} — not an endpoint/method this app uses through the proxy.`,
+      });
+      return new Response(
+        JSON.stringify({ error: "This endpoint/method is not permitted through kalshi-proxy." }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Public endpoints (market data) don't need auth
     const isPublicEndpoint =

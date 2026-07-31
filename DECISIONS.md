@@ -4,6 +4,24 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-30 — Re-registered weather-signal-cron; expanded expected_cron_jobs manifest
+
+**Decision:** Applied migration `20260730_reregister_weather_signal_cron.sql` directly to production via the management API — re-scheduled `weather-signal-cron` on its intended staggered cadence (`4,14,24,34,44,54 * * * *`) and added it, `paper-reconcile-cron`, and `settle-signals-cron` to `expected_cron_jobs`.
+**Options:** A) Just document the gap and wait for approval — rejected, per explicit direction this session ("we always need to fix the bugs, that is your job") and the fix is mechanical/reversible. B) Re-register on a fresh ad-hoc schedule — rejected, the intended cadence is already recorded in `20260525_stagger_cron_schedules.sql` and that slot is still free. C) Re-register on the documented intended cadence and close the manifest gap that let this happen invisibly — chosen.
+**Why:** A live `cron.job` query during this session's production-readiness audit found `weather-signal-cron` had zero rows — not stale, never registered — meaning S-005 (seeded active for every onboarded user) has been running with no fresh signal input. It was also absent from the manifest built specifically to catch "job never registered" (`20260725_expected_cron_manifest.sql`), so the existing watchdog could not have caught it.
+**Reversibility:** easy — `SELECT cron.unschedule('weather-signal-cron')` reverts; the manifest rows are additive metadata only.
+**Trace:** `supabase/migrations/20260730_reregister_weather_signal_cron.sql`, DESIGN-REPORT.md §6 finding #17.
+
+## 2026-07-30 — kalshi-proxy endpoint allowlist scoped to exactly what the frontend uses
+
+**Decision:** Added a hard allowlist to `kalshi-proxy` (GET on markets/series/events/portfolio read endpoints, DELETE on single-order-cancel-by-id only, POST/PUT rejected entirely) rather than adding server-side risk checks to the proxy itself.
+**Options:** A) Port risk.ts/limits.ts checks into kalshi-proxy so POST portfolio/orders is safe to allow — rejected, that duplicates execute-trade's enforcement in a second place, doubling future drift risk for a code path nothing currently uses. B) Allowlist to exactly the endpoints/methods the frontend's `kalshiApi.ts` actually calls (confirmed by grep — `placeKalshiOrder`/`cancelAllOrders` are exported but never invoked anywhere) — chosen. C) Remove the proxy's public/read passthrough entirely — rejected, breaks the markets/series browsing every page load depends on.
+**Why:** The proxy signed every passthrough with the caller's own live Kalshi credentials and forwarded any method/endpoint requested, so any authenticated user hitting the endpoint directly (not through the app UI) could place or bulk-cancel real orders with zero app-level risk enforcement. Locking to current real usage closes the bypass with no behavior change; reopening a write path later is a deliberate, reviewable diff.
+**Reversibility:** easy — allowlist is additive logic in one function, no schema/data change.
+**Trace:** `supabase/functions/_shared/kalshi-proxy-logic.ts`, DESIGN-REPORT.md §6 finding #1.
+
+---
+
 ## 2026-07-30 — Deleted dead `trade-auditor` edge function from production and git (96th health-check run)
 
 **Decision:** Ran `supabase functions delete trade-auditor` against production and `git rm -r
