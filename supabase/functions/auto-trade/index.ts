@@ -6,7 +6,7 @@ import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
-import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
+import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 import {
@@ -1063,6 +1063,29 @@ async function runS001SurfaceArb(
   const KALSHI_FEE_RATE = 0.07;        // 7% of winnings
   const MIN_NET_EDGE_PER_LEG_CENTS = 8; // minimum per-leg edge after 7% fee; 8¢ ≈ break-even at mid-to-ask slippage
 
+  // Maximum entry price for a NO leg.
+  //
+  // Buying NO at P cents risks P to win (100-P), so the break-even win rate is
+  // ≈ P% before fees. The edge is therefore not uniform across the price curve —
+  // it is entirely a function of how far the realised win rate sits above the
+  // entry price. Measured over 508 settled S-001 trades:
+  //
+  //   entry band   n    actual WR   break-even WR   margin
+  //   <75¢       113      74.3%         54.9%       +19.4  <- real edge
+  //   75-79¢     131      94.7%         75.8%       +18.9  <- real edge
+  //   80-84¢      76      86.8%         81.3%        +5.5  <- thin; live lost $1.62 over 15
+  //   85-89¢      75      86.7%         87.9%        -1.2  <- negative
+  //   90¢+       113      91.2%         91.0%        +0.2  <- erased by the 7% fee
+  //
+  // All 23 settled LIVE trades landed at 80¢+, which is why live realised
+  // -$1.42 at an 87% win rate: avg win $2.01 against avg loss $13.84 needs
+  // 87.3% just to break even, and the strategy delivers 87.0%.
+  //
+  // A high win rate is not evidence of edge when the payout geometry is this
+  // asymmetric. Capping entry price is the one filter that follows directly from
+  // the arithmetic of the payoff rather than from curve-fitting the outcomes.
+  const MAX_ENTRY_PRICE_CENTS = 80;
+
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
   // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
   // is direction-agnostic. KXETH excluded (confirmed money-loser). Sports/weather excluded.
@@ -1278,6 +1301,10 @@ async function runS001SurfaceArb(
         const ask = yesAskCents(m);
         const noPrice = 100 - ask;
         if (ask < 5 || ask > 92) return false;    // original price band: floor ensures payout; ceiling ensures commission coverage
+        // Break-even win rate for a NO leg is ≈ its entry price, so legs bought
+        // above MAX_ENTRY_PRICE_CENTS need a win rate the strategy has never
+        // actually delivered. See the constant's definition for the per-band data.
+        if (noPrice > MAX_ENTRY_PRICE_CENTS) return false;
         if (openTickers.has(m.ticker)) return false;
         // Per-leg fee check: distribute the alert's total expected edge evenly across legs.
         // Rejects arbs where total excess (e.g. 3c across a 3-leg basket) is eaten by fees.
@@ -2526,9 +2553,27 @@ function kellySize(trueP: number, marketP: number, bankroll: number, fraction = 
  * Performance-aware gating belongs in the Phase 2 Sharpe regime layer,
  * not in a consecutive-day counter that creates loss-aversion bias.
  */
+/**
+ * Per-field length caps for the qualify context.
+ *
+ * A single flat 300-char cap silently truncated the multi-record fields. Measured
+ * on live S-001 data: strategy_memory renders ~900 chars for the 5 selected
+ * memories, so only ~2 ever reached the model; the `note` field is 587 chars, and
+ * the half that got cut was the "Do NOT reject for generic reasons … the edge here
+ * is structural" clause — i.e. S-001's qualify gate never saw its own
+ * anti-over-rejection instruction. Scalar market fields keep the 300 default.
+ */
+const QUALIFY_FIELD_MAX_LEN: Record<string, number> = {
+  strategy_memory: 2000,
+  past_lessons: 2000,
+  note: 800,
+};
+
 function buildQualifyPrompt(strategyName: string, context: Record<string, any>, lessons: string[] = []): string {
   const ctx = Object.entries(context)
-    .map(([k, v]) => `<field name="${k}">${sanitizeMarketData(v)}</field>`)
+    .map(([k, v]) =>
+      `<field name="${k}">${sanitizeMarketData(v, QUALIFY_FIELD_MAX_LEN[k] ?? DEFAULT_FIELD_MAX_LEN)}</field>`
+    )
     .join("\n");
 
   const lessonsSection = lessons.length > 0
