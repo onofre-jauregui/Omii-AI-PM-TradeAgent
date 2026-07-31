@@ -120,13 +120,22 @@ export async function getRiskSettings(
  */
 export async function getRiskStateToday(
   supabase: ReturnType<typeof createClient>,
-  userId: string | null
+  userId: string | null,
+  mode: "paper" | "live"
 ): Promise<any | null> {
+  // Mode is REQUIRED: risk_state is one row per (user_id, date, mode). A
+  // user_id+date-only query matches both rows and .maybeSingle() errors on the
+  // multi-row result — the same swallowed-error shape that hid the
+  // getRiskSettings live-rejection bug. Paper P&L must never trip live halts.
   const today = new Date().toISOString().split("T")[0];
-  const query = supabase.from("risk_state").select("*").eq("date", today);
-  const { data } = userId
+  const query = supabase.from("risk_state").select("*").eq("date", today).eq("mode", mode);
+  const { data, error } = userId
     ? await query.eq("user_id", userId).maybeSingle()
     : await query.is("user_id", null).maybeSingle();
+  if (error) {
+    console.error(`getRiskStateToday failed (user=${userId ?? "null"}, mode=${mode}): ${error.message}`);
+    return null;
+  }
   return data || null;
 }
 
@@ -143,7 +152,8 @@ export async function setRiskHalt(
   supabase: ReturnType<typeof createClient>,
   userId: string,
   halted: boolean,
-  reason: string | null
+  reason: string | null,
+  mode: "paper" | "live"
 ): Promise<{ error: any }> {
   const today = new Date().toISOString().split("T")[0];
   const payload = {
@@ -156,6 +166,7 @@ export async function setRiskHalt(
     .select("id")
     .eq("user_id", userId)
     .eq("date", today)
+    .eq("mode", mode)
     .maybeSingle();
   if (existing) {
     const { error } = await supabase
