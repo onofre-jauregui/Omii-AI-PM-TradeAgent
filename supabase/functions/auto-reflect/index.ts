@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
+import { computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
 
 /**
  * auto-reflect v2: Automated learning loop — Bayesian memory, Sharpe-based
@@ -260,18 +261,11 @@ serve(async (req) => {
       const std = Math.sqrt(variance);
       const sharpe = std > 0 ? mean / std : 0;
 
-      // Max drawdown on cumulative PnL
-      let peak = 0;
-      let running = 0;
-      let maxDdPct = 0;
-      for (const p of pnls) {
-        running += p;
-        peak = Math.max(peak, running);
-        if (peak > 0) {
-          const dd = (peak - running) / peak;
-          maxDdPct = Math.max(maxDdPct, dd);
-        }
-      }
+      // Max drawdown, measured against the strategy's actual equity base
+      // (starting balance + cumulative P&L) — see strategy-health.ts for why
+      // raw cumulative-P&L-peak was producing >100% "drawdown" readings.
+      const startingBalance = Number(strat.starting_balance) || 1000;
+      const maxDdPct = computeMaxDrawdownPct(pnls, startingBalance);
 
       // Hit rate
       const wins = pnls.filter((p: number) => p > 0).length;
