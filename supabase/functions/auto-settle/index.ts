@@ -354,6 +354,7 @@ serve(async (req) => {
               .select("daily_pnl")
               .eq("user_id", t.user_id)
               .eq("date", today)
+              .eq("mode", t.mode)
               .maybeSingle();
 
             const dailyPnl = Number(stateRow?.daily_pnl ?? 0) + pnl;
@@ -364,11 +365,12 @@ serve(async (req) => {
                 {
                   user_id: t.user_id,
                   date: today,
+                  mode: t.mode,
                   is_trading_halted: true,
                   halt_reason: `Daily loss limit reached: $${Math.abs(dailyPnl).toFixed(2)} lost (limit: $${riskRow.max_daily_loss})`,
                   updated_at: new Date().toISOString(),
                 },
-                { onConflict: "user_id,date" }
+                { onConflict: "user_id,date,mode" }
               );
               await supabase.from("compliance_log").insert({
                 event_type: "auto_stop_loss_triggered",

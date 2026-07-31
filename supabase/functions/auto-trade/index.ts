@@ -39,7 +39,22 @@ import {
  * Scheduled: every 5 minutes via pg_cron.
  */
 
-const LOCK_STALE_MS = 5 * 60 * 1000; // 5 min — auto-release stuck locks (longest strategy loop is ~90s)
+// Lock staleness MUST exceed the cron period (5 min) by a real margin, and a
+// live run must renew the lock so it can never LOOK stale while executing.
+// The old value equalled the cron period exactly: the moment total loop time
+// crossed 5 minutes, the next invocation deleted the "stale" lock and ran
+// CONCURRENTLY with the still-live holder — per-strategy dedup is SELECT-then-
+// act, so that means duplicate live orders. The "longest loop is ~90s" note it
+// shipped with was calibrated for 3 users on 3 templates; the loop grows
+// linearly with strategies. Defense is three-layered now:
+//   1. LOCK_STALE_MS (15 min) > cron period — a healthy run can't be usurped.
+//   2. Heartbeat: acquired_at is re-stamped after each strategy, so staleness
+//      measures time since last PROGRESS, not since run start — a genuinely
+//      crashed run still gets cleaned up 15 min after its last heartbeat.
+//   3. STRATEGY_LOOP_BUDGET_MS stops the loop cleanly before overlap;
+//      remaining strategies run next tick (cron cadence makes this cheap).
+const LOCK_STALE_MS = 15 * 60 * 1000;
+const STRATEGY_LOOP_BUDGET_MS = 4 * 60 * 1000; // stop before the next cron tick lands
 const QUALIFY_TIMEOUT_MS = 15_000; // max 15s for LLM qualify/reject call
 const KALSHI_RETRY_DELAY_MS = 500; // single retry delay for Kalshi API calls
 const KALSHI_FETCH_TIMEOUT_MS = 8_000; // matches CREDENTIAL_FETCH_TIMEOUT_MS convention — public market-data GET, not an LLM call
@@ -208,6 +223,59 @@ async function fetchUserRiskSettings(supabase: any, userId: string, mode: "paper
   const settings = data ?? DEFAULT_RISK_SETTINGS;
   riskSettingsCache.set(cacheKey, settings);
   return settings;
+}
+
+/**
+ * Per-(signal, strategy) consumption — replaces filtering on the GLOBAL
+ * signals.was_acted_on boolean. That flag is on tenant-shared rows, so the
+ * first strategy to fill a signal consumed it for every other user forever;
+ * with strategies iterated in id order, the alphabetically-first user won
+ * every cycle. Claims scope consumption to the strategy instance: no
+ * per-strategy re-entry across cycles, but each user's strategy gets its own
+ * shot at the shared signal pool. was_acted_on is still WRITTEN (analytics)
+ * — it is just no longer a trading-path filter.
+ */
+async function fetchClaimedSignalIds(
+  supabase: any,
+  strategyId: string,
+  windowHours = 48,
+): Promise<Set<string>> {
+  const since = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("signal_claims")
+    .select("signal_id")
+    .eq("strategy_id", strategyId)
+    .gte("claimed_at", since);
+  if (error) {
+    // Fail loud but safe: treating "couldn't read claims" as "nothing claimed"
+    // would re-trade signals after any transient error. Throw so the strategy
+    // run errors visibly instead of silently double-entering.
+    throw new Error(`signal_claims read failed for ${strategyId}: ${error.message}`);
+  }
+  return new Set((data ?? []).map((r: any) => r.signal_id));
+}
+
+async function claimSignals(
+  supabase: any,
+  signalIds: string[],
+  strategyId: string,
+  userId: string | null,
+): Promise<void> {
+  if (signalIds.length === 0) return;
+  const rows = signalIds.map((id) => ({ signal_id: id, strategy_id: strategyId, user_id: userId }));
+  const { error } = await supabase
+    .from("signal_claims")
+    .upsert(rows, { onConflict: "signal_id,strategy_id", ignoreDuplicates: true });
+  if (error) {
+    // A failed claim write means this strategy could re-trade the same signal
+    // next cycle — log loudly rather than swallowing.
+    await supabase.from("compliance_log").insert({
+      event_type: "signal_claim_write_failed",
+      severity: "error",
+      message: `signal_claims write failed for ${strategyId}: ${error.message}`,
+      metadata: { strategy_id: strategyId, signal_ids: signalIds },
+    }).then(null, () => {});
+  }
 }
 
 async function countOpenPositions(
@@ -432,20 +500,55 @@ serve(async (req) => {
           if (!retryError) lockAcquired = true;
         }
       } else if (insertError.message?.includes("Could not find") || insertError.message?.includes("does not exist")) {
+        // Table genuinely missing (migration ordering on a fresh env) is the
+        // ONE tolerated unlocked case — and it must be loud, not a console line.
         console.warn("auto_trade_locks table not found — running without lock. Apply v2 migration to enable.");
+        await supabase.from("compliance_log").insert({
+          event_type: "auto_trade_lock_missing",
+          severity: "error",
+          message: "auto_trade_locks table not found — run proceeding WITHOUT concurrency protection",
+          metadata: { run_id: runId },
+        }).then(null, () => {});
       } else {
-        console.warn("auto_trade_locks insert error:", insertError.message);
+        // Unknown lock failure → FAIL CLOSED. This path used to fall through
+        // and trade unlocked — fail-open on the exact guard that prevents two
+        // runs placing duplicate live orders. Skipping one 5-min tick is
+        // cheap; a double-executed live basket is not.
+        await supabase.from("compliance_log").insert({
+          event_type: "auto_trade_skipped",
+          severity: "error",
+          message: `Auto-trade skipped: lock acquisition failed (${insertError.message}) — failing closed rather than running unlocked`,
+          metadata: { run_id: runId },
+        }).then(null, () => {});
+        return new Response(JSON.stringify({ skipped: true, reason: "lock acquisition failed — failed closed" }), {
+          status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
     } catch (lockErr) {
-      console.warn("auto_trade_locks error — running without lock:", lockErr instanceof Error ? lockErr.message : String(lockErr));
+      // Same fail-closed rule for thrown errors (network to the DB, etc.).
+      const msg = lockErr instanceof Error ? lockErr.message : String(lockErr);
+      await supabase.from("compliance_log").insert({
+        event_type: "auto_trade_skipped",
+        severity: "error",
+        message: `Auto-trade skipped: lock check threw (${msg}) — failing closed rather than running unlocked`,
+        metadata: { run_id: runId },
+      }).then(null, () => {});
+      return new Response(JSON.stringify({ skipped: true, reason: "lock check failed — failed closed" }), {
+        status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     // ── Check global risk state ──────────────────────────────────────────────
     const today = new Date().toISOString().split("T")[0];
+    // Legacy/system-tenant halt row only (user_id NULL). Per-user, per-mode
+    // halts are enforced inside the strategy loop; without the NULL filter this
+    // maybeSingle() multi-row-errors as soon as a second user has a row today,
+    // silently disabling the global pre-check.
     const { data: riskState } = await supabase
       .from("risk_state")
       .select("is_trading_halted, halt_reason, daily_pnl, daily_trades")
       .eq("date", today)
+      .is("user_id", null)
       .maybeSingle();
 
     if (riskState?.is_trading_halted) {
@@ -643,7 +746,33 @@ serve(async (req) => {
       return exists;
     }
 
+    const loopStartedAtMs = Date.now();
+    let loopBudgetExhausted = false;
+
     for (const strategy of strategies) {
+      // Wall-clock budget: stop cleanly before the next cron tick can overlap.
+      // Skipped strategies simply run next tick — at a 5-min cadence that is
+      // strictly better than two invocations racing the same dedup queries.
+      if (Date.now() - loopStartedAtMs > STRATEGY_LOOP_BUDGET_MS) {
+        loopBudgetExhausted = true;
+        await supabase.from("compliance_log").insert({
+          event_type: "auto_trade_loop_budget_exhausted",
+          severity: "warning",
+          message: `auto-trade stopped after ${((Date.now() - loopStartedAtMs) / 1000).toFixed(0)}s — remaining strategies deferred to next tick`,
+          metadata: { run_id: runId, completed: strategyResults.length, total: strategies.length },
+        }).then(null, () => {});
+        break;
+      }
+
+      // Heartbeat: re-stamp the lock so staleness measures time since last
+      // progress. Best-effort — a failed heartbeat must not kill the run.
+      if (lockAcquired) {
+        await supabase.from("auto_trade_locks")
+          .update({ acquired_at: new Date().toISOString() })
+          .eq("lock_name", "auto_trade").eq("run_id", runId)
+          .then(null, () => {});
+      }
+
       const config = configMap.get(strategy.id);
       const stratStart = Date.now();
 
@@ -781,6 +910,7 @@ serve(async (req) => {
             .select("is_trading_halted, halt_reason, daily_pnl, daily_trades, open_position_count, peak_portfolio_value")
             .eq("user_id", strategy.user_id)
             .eq("date", today)
+            .eq("mode", strategy.mode)
             .maybeSingle();
 
           const riskCheck = evaluateRisk(0, strategy.mode as "paper" | "live", userRisk, userRiskState ?? null);
@@ -789,10 +919,11 @@ serve(async (req) => {
               await supabase.from("risk_state").upsert({
                 user_id: strategy.user_id,
                 date: today,
+                mode: strategy.mode,
                 is_trading_halted: true,
                 halt_reason: riskCheck.newHaltReason,
                 updated_at: new Date().toISOString(),
-              }, { onConflict: "user_id,date" });
+              }, { onConflict: "user_id,date,mode" });
             }
             await supabase.from("compliance_log").insert({
               event_type: "risk_check_failed",
@@ -945,12 +1076,15 @@ serve(async (req) => {
     await supabase.from("compliance_log").insert({
       event_type: "auto_trade_run",
       severity: errCount > 0 ? "warning" : "info",
-      message: `Auto-trade complete: ${ranCount} ran, ${tradedCount} traded, ${errCount} errors, ${haltedCount} halted. Daily P&L: $${(riskState?.daily_pnl || 0).toFixed(2)}, trades: ${riskState?.daily_trades || 0}`,
+      message: `Auto-trade complete: ${ranCount} ran, ${tradedCount} traded, ${errCount} errors, ${haltedCount} halted.${
+        loopBudgetExhausted ? ` LOOP BUDGET HIT — ${strategies.length - strategyResults.length} strategies deferred.` : ""
+      } Daily P&L: $${(riskState?.daily_pnl || 0).toFixed(2)}, trades: ${riskState?.daily_trades || 0}`,
       metadata: {
         run_id: runId,
         trace_id: runId,
         started_at: runStartedAt,
         completed_at: new Date().toISOString(),
+        loop_budget_exhausted: loopBudgetExhausted,
         strategies: strategyResults,
       },
     });
@@ -1675,11 +1809,16 @@ async function runS002LongshotBias(
       .lte("days_to_close", 30)
       .gte("created_at", twoHoursAgo)
       .not("direction", "is", null)
-      .eq("was_acted_on", false)
+      // NOTE: no was_acted_on filter — consumption is per-strategy via
+      // signal_claims (see fetchClaimedSignalIds). The global boolean let the
+      // first strategy to act consume the shared signal for every tenant.
       .order("days_to_close", { ascending: true }) // prefer shorter-duration: stronger bias signal
       .limit(20),
     strategy.user_id
   );
+
+  // Per-strategy consumption: drop signals this strategy has already claimed.
+  const s002Claimed = await fetchClaimedSignalIds(supabase, strategy.id);
 
   // Hard block: no ETH, no sports, no weather (S-005 owns weather with a real GFS model;
   // S-002 has no weather-specific edge and will trade against S-005's positions)
@@ -1690,6 +1829,7 @@ async function runS002LongshotBias(
   // generator kept emitting fresh signals with stale days_to_close after market close.
   const fifteenMinFromNow = Date.now() + 15 * 60 * 1000;
   const signals = (rawSignals || []).filter((s: any) => {
+    if (s002Claimed.has(s.id)) return false;
     if (blockedPrefixes.some(p => (s.ticker || "").toUpperCase().startsWith(p))) return false;
     // Reject only if market is already closed or closing within 15 min — not enough
     // time for a limit order to fill. Short-duration trades (1-2h left) are valid
@@ -1896,6 +2036,9 @@ async function runS002LongshotBias(
   if (filled.length > 0) {
     const filledIds = filled.map(r => r.sig.id).filter(Boolean);
     if (filledIds.length > 0) {
+      // Claim first (the trading-path consumption record), then stamp the
+      // legacy analytics flag. was_acted_on is no longer a filter anywhere.
+      await claimSignals(supabase, filledIds, strategy.id, strategy.user_id ?? null);
       await supabase.from("signals")
         .update({ was_acted_on: true, acted_on_at: new Date().toISOString() })
         .in("id", filledIds)
@@ -2081,11 +2224,16 @@ async function runS005WeatherEdge(
       .gte("created_at", twentyFourHoursAgo)
       .gte("edge_cents", minEdge)
       .not("direction", "is", null)
-      .eq("was_acted_on", false)
+      // NOTE: no was_acted_on filter — per-strategy consumption via
+      // signal_claims (same rationale as S-002; the global boolean starved
+      // every tenant after the first).
       .order("edge_cents", { ascending: false })
       .limit(MAX_PARALLEL_SIGNALS + excludedCities.length), // fetch extra, filter below
     null // signals are system-generated — no user_id column on signals table
   );
+
+  // Per-strategy consumption: drop signals this strategy has already claimed.
+  const s005Claimed = await fetchClaimedSignalIds(supabase, strategy.id);
 
   // Filter out cities where S-005 has persistent forecast_bias losses, drop signals
   // whose settlement date has already passed, enforce forecast horizon cap, apply
@@ -2093,6 +2241,7 @@ async function runS005WeatherEdge(
   // may be outside its calibrated regime.
   const nowMs = Date.now();
   const signals = (rawSignals || [])
+    .filter((s: any) => !s005Claimed.has(s.id))
     .filter((s: any) => {
       const expiry = parseSettlementDate(s.ticker);
       if (expiry && expiry.getTime() <= nowMs) return false;
@@ -2537,6 +2686,9 @@ async function runS005WeatherEdge(
   if (filled.length > 0) {
     const filledIds = filled.map(r => r.sig.id).filter(Boolean);
     if (filledIds.length > 0) {
+      // Claim first (the trading-path consumption record), then stamp the
+      // legacy analytics flag. was_acted_on is no longer a filter anywhere.
+      await claimSignals(supabase, filledIds, strategy.id, strategy.user_id ?? null);
       await supabase.from("signals")
         .update({ was_acted_on: true, acted_on_at: new Date().toISOString() })
         .in("id", filledIds)

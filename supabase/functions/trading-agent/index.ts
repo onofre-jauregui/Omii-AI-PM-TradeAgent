@@ -1052,6 +1052,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         .select("is_trading_halted")
         .eq("user_id", userId)
         .eq("date", today)
+        .eq("mode", riskMode)
         .maybeSingle();
       if (riskStateRow?.is_trading_halted) {
         await streamWriter.write(enc.encode(`data: ${JSON.stringify({ type: "content", content: "⛔ Trading is currently halted for your account. No trades can be placed until the halt is lifted in your risk settings." })}\n\n`));
@@ -1462,17 +1463,18 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               // Increment daily trade count in risk_state
               const today = new Date().toISOString().split("T")[0];
               const riskQuery = userId
-                ? supabase.from("risk_state").select("daily_trades").eq("user_id", userId).eq("date", today).maybeSingle()
-                : supabase.from("risk_state").select("daily_trades").is("user_id", null).eq("date", today).maybeSingle();
+                ? supabase.from("risk_state").select("daily_trades").eq("user_id", userId).eq("date", today).eq("mode", "paper").maybeSingle()
+                : supabase.from("risk_state").select("daily_trades").is("user_id", null).eq("date", today).eq("mode", "paper").maybeSingle();
               const { data: rs } = await riskQuery;
               await supabase.from("risk_state").upsert(
                 {
                   user_id: userId,
                   date: today,
+                  mode: "paper", // this block only runs on the chat paper-trade path
                   daily_trades: (rs?.daily_trades ?? 0) + 1,
                   updated_at: new Date().toISOString(),
                 },
-                { onConflict: userId ? "user_id,date" : "date" }
+                { onConflict: userId ? "user_id,date,mode" : "date,mode" }
               );
 
               toolResult = JSON.stringify({
@@ -1617,11 +1619,14 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               .limit(20);
 
             const today = new Date().toISOString().split("T")[0];
-            const { data: riskState } = await supabase
+            const stateQuery = supabase
               .from("risk_state")
               .select("*")
               .eq("date", today)
-              .maybeSingle();
+              .eq("mode", riskMode);
+            const { data: riskState } = userId
+              ? await stateQuery.eq("user_id", userId).maybeSingle()
+              : await stateQuery.is("user_id", null).maybeSingle();
 
             // Also return memory count so agent knows its memory state
             const { count: memoryCount } = await supabase

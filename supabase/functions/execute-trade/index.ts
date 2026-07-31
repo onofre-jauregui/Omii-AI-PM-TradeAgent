@@ -360,10 +360,12 @@ serve(async (req) => {
     // defaults. effective.configured is true iff a real row exists for this mode.
     const settings: RiskSettings | null =
       effective && effective.configured ? effective.riskSettings : null;
-    const riskState = await getRiskStateToday(supabase, userId);
-    // risk_state is mode-blind (shared paper+live) until PR6. Override its open-position
-    // count with the mode-scoped count computed above so a user's paper positions can't
-    // block a live trade (and vice-versa) via evaluateRisk's open-positions check.
+    // risk_state is now scoped per (user_id, date, MODE) — paper P&L and
+    // positions can no longer trip live halts or caps (the deferred "PR6").
+    const riskState = await getRiskStateToday(supabase, userId, tradeMode as "paper" | "live");
+    // Belt-and-braces: the override predates mode-scoping (paper positions were
+    // blocking live via the shared row). Harmless now — the mode-scoped count
+    // is authoritative either way — kept until legacy mixed rows age out.
     if (riskState && modeScopedOpenCount !== null) {
       (riskState as any).open_position_count = modeScopedOpenCount;
     }
@@ -411,7 +413,7 @@ serve(async (req) => {
 
     // If the evaluator says we should set a new halt reason, persist it (per-user).
     if (riskCheck.newHaltReason && userId) {
-      const { error: haltErr } = await setRiskHalt(supabase, userId, true, riskCheck.newHaltReason);
+      const { error: haltErr } = await setRiskHalt(supabase, userId, true, riskCheck.newHaltReason, tradeMode as "paper" | "live");
       if (haltErr) {
         captureMessage(`execute-trade failed to persist auto-halt: ${haltErr.message ?? haltErr}`, "error", {
           function: "execute-trade", extra: { userId, reason: riskCheck.newHaltReason },
@@ -561,7 +563,7 @@ serve(async (req) => {
       );
 
       // Update daily risk state for this tenant
-      await updateRiskState(supabase, userId, 0, settings);
+      await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live", settings);
 
       return new Response(JSON.stringify({
         success: true, trade,
@@ -972,7 +974,7 @@ serve(async (req) => {
     }
 
     // Update risk state for this tenant
-    await updateRiskState(supabase, userId, 0);
+    await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live");
 
     return new Response(JSON.stringify({
       success: true,
@@ -1026,15 +1028,18 @@ async function updateRiskState(
   supabase: any,
   userId: string | null,
   _pnlChange: number,  // kept for API compat — daily_pnl now computed from settled trades directly
+  mode: "paper" | "live",
   riskSettings?: any   // used to seed peak_portfolio_value on first trade of day
 ) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count current open positions for accurate tracking, scoped to tenant
+  // Count current open positions for accurate tracking, scoped to tenant AND
+  // mode — risk_state is one row per (user_id, date, mode) now.
   const positionQuery = supabase
     .from("trades")
     .select("*", { count: "exact", head: true })
     .in("status", ["filled", "open", "partial"])
+    .eq("mode", mode)
     .eq("action", "buy");
   const { count: openPositionCount } = userId
     ? await positionQuery.eq("user_id", userId)
@@ -1046,6 +1051,7 @@ async function updateRiskState(
     .from("trades")
     .select("pnl")
     .eq("status", "settled")
+    .eq("mode", mode)
     .gte("settled_at", `${today}T00:00:00.000Z`);
   const { data: todaySettled } = userId
     ? await settledQuery.eq("user_id", userId)
@@ -1053,7 +1059,7 @@ async function updateRiskState(
   const actualDailyPnl = (todaySettled ?? []).reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
 
   // Get current risk state for this tenant
-  const stateQuery = supabase.from("risk_state").select("*").eq("date", today);
+  const stateQuery = supabase.from("risk_state").select("*").eq("date", today).eq("mode", mode);
   const { data: current } = userId
     ? await stateQuery.eq("user_id", userId).maybeSingle()
     : await stateQuery.is("user_id", null).maybeSingle();
@@ -1068,7 +1074,7 @@ async function updateRiskState(
       max_drawdown_today: Math.min(current.max_drawdown_today || 0, actualDailyPnl),
       peak_portfolio_value: newPeak,
       updated_at: new Date().toISOString(),
-    }).eq("date", today);
+    }).eq("date", today).eq("mode", mode);
     if (userId) {
       await updateQuery.eq("user_id", userId);
     } else {
@@ -1081,6 +1087,7 @@ async function updateRiskState(
     await supabase.from("risk_state").insert({
       user_id: userId,
       date: today,
+      mode,
       daily_pnl: actualDailyPnl,
       daily_trades: 1,
       open_position_count: openPositionCount || 0,
