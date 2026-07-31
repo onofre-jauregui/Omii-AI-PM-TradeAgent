@@ -11,6 +11,9 @@ import {
   s005IsAutoQualified,
   buildQualifyEndpoint,
   buildQualifyHeaders,
+  s001EntryPriceCheck,
+  s001BreakEvenWinRatePct,
+  S001_MAX_ENTRY_PRICE_CENTS,
 } from "../_shared/trading-logic";
 import { parseQualifyResponse } from "../_shared/prompt-safety";
 
@@ -259,5 +262,52 @@ describe("LLM gate routing", () => {
 
   it("malformed response → null (treated as REJECT by caller)", () => {
     expect(parseQualifyResponse("maybe qualify this")).toBeNull();
+  });
+});
+
+// ─── S-001 Surface Arbitrage — entry-price ceiling ─────────────────────────
+//
+// Regression guard for the condition that made live trading lose money while
+// winning 87% of the time: every settled live trade was entered at 80¢+, where
+// the break-even win rate meets or exceeds what the strategy actually delivers.
+
+describe("S-001 entry-price ceiling", () => {
+  it("rejects the bands that lost real money (85¢+)", () => {
+    expect(s001EntryPriceCheck(85)).toBe(false);
+    expect(s001EntryPriceCheck(90)).toBe(false);
+    expect(s001EntryPriceCheck(92)).toBe(false);
+  });
+
+  it("rejects the thin 80-84¢ band that realised -$1.62 live over 15 trades", () => {
+    expect(s001EntryPriceCheck(81)).toBe(false);
+    expect(s001EntryPriceCheck(84)).toBe(false);
+  });
+
+  it("accepts the bands with a real measured margin (<=80¢)", () => {
+    expect(s001EntryPriceCheck(80)).toBe(true);
+    expect(s001EntryPriceCheck(76)).toBe(true);
+    expect(s001EntryPriceCheck(55)).toBe(true);
+  });
+
+  it("ceiling stays at 80¢ unless changed deliberately", () => {
+    expect(S001_MAX_ENTRY_PRICE_CENTS).toBe(80);
+  });
+
+  it("break-even win rate rises with entry price and exceeds the delivered 87% above the cap", () => {
+    // At 90¢ the leg must win ~91% of the time just to break even; the strategy
+    // delivers 87.0% overall, so these legs are structurally negative.
+    expect(s001BreakEvenWinRatePct(90)).toBeGreaterThan(90);
+    expect(s001BreakEvenWinRatePct(87)).toBeGreaterThan(87);
+    // At the cap and below there is real headroom against the measured win rate.
+    expect(s001BreakEvenWinRatePct(80)).toBeLessThan(85);
+    expect(s001BreakEvenWinRatePct(55)).toBeLessThan(62);
+  });
+
+  it("break-even is monotonic in entry price", () => {
+    const prices = [40, 55, 70, 80, 85, 90];
+    const rates = prices.map((p) => s001BreakEvenWinRatePct(p));
+    for (let i = 1; i < rates.length; i++) {
+      expect(rates[i]).toBeGreaterThan(rates[i - 1]);
+    }
   });
 });

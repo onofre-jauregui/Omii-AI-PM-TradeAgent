@@ -231,3 +231,44 @@ export function buildQualifyHeaders(
   }
   return headers;
 }
+
+/**
+ * S-001 Surface Arbitrage — entry-price ceiling for a NO leg.
+ *
+ * Buying NO at P cents risks P to win (100 - P), so the break-even win rate is
+ * ≈ P% before fees. Edge is therefore a function of how far the realised win
+ * rate sits above the entry price, not of the win rate alone. Measured over 508
+ * settled S-001 trades:
+ *
+ *   entry band   n    actual WR   break-even WR   margin
+ *   <75¢       113      74.3%         54.9%       +19.4
+ *   75-79¢     131      94.7%         75.8%       +18.9
+ *   80-84¢      76      86.8%         81.3%        +5.5
+ *   85-89¢      75      86.7%         87.9%        -1.2
+ *   90¢+       113      91.2%         91.0%        +0.2  (erased by the 7% fee)
+ *
+ * Every settled LIVE trade landed at 80¢+, which is why live realised -$1.42 at
+ * an 87% win rate: an avg win of $2.01 against an avg loss of $13.84 requires
+ * 87.3% just to break even.
+ */
+export const S001_MAX_ENTRY_PRICE_CENTS = 80;
+
+export function s001EntryPriceCheck(
+  noPriceCents: number,
+  maxEntryPriceCents: number = S001_MAX_ENTRY_PRICE_CENTS
+): boolean {
+  return noPriceCents <= maxEntryPriceCents;
+}
+
+/**
+ * Break-even win rate (as a percentage) for a NO leg bought at `noPriceCents`,
+ * including Kalshi's fee on winnings. A leg is only worth taking when the
+ * expected win rate clears this by a real margin.
+ */
+export function s001BreakEvenWinRatePct(
+  noPriceCents: number,
+  feeRate = 0.07
+): number {
+  const win = (100 - noPriceCents) * (1 - feeRate); // fee is charged on winnings
+  return (noPriceCents / (noPriceCents + win)) * 100;
+}
