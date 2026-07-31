@@ -249,9 +249,28 @@ serve(async (req) => {
     // The allowed/blocked policy gate — subscription status, live access, strategy
     // access, position size — applies to live money only.
     if (userId && effective) {
+      // Resolve the request's strategyId to its DB row's template_id — never
+      // trust the request string for entitlement. checkEntitlement now does
+      // exact template matching (the old /^S-\d+/ normalization let any id
+      // PREFIXED with an entitled template, e.g. "S-002-anything", inherit
+      // that template's live access). No row / no template_id → null, which
+      // checkEntitlement fails closed for live.
+      let resolvedTemplateId: string | null = null;
+      if (strategyId) {
+        const { data: stratRow } = await supabase
+          .from("strategies")
+          .select("template_id, id, user_id")
+          .eq("id", strategyId)
+          .maybeSingle();
+        // Only honor rows owned by this user or system rows (user_id null) —
+        // a strategy id belonging to another tenant confers nothing.
+        if (stratRow && (stratRow.user_id === userId || stratRow.user_id === null)) {
+          resolvedTemplateId = stratRow.template_id ?? stratRow.id;
+        }
+      }
       const entitlement = checkEntitlement({
         subscription: effective.subscription,
-        strategy: strategyId,
+        strategy: resolvedTemplateId ?? undefined,
         mode: tradeMode,
         positionUsd: amount,
       });

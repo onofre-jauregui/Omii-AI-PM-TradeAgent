@@ -113,9 +113,35 @@ serve(async (req) => {
       }
     }
 
+    // Wall-clock budget for the market-fetch loop. Without it, a 200-ticker
+    // batch of sequential fetches (8s timeout each) can run ~27 min worst-case
+    // against a 15-min cron — and the historical-reset tranches (see the
+    // unsettleable_404 recovery) push full batches through here deliberately.
+    // Same pattern as market-data-fetcher's RUN_BUDGET_MS: stop cleanly, let
+    // the next tick take the rest.
+    const RUN_BUDGET_MS = 40_000;
+    const runStartedAt = Date.now();
+    let budgetExhausted = false;
+
     for (const [ticker, signals] of tickerToSignals) {
+      if (Date.now() - runStartedAt > RUN_BUDGET_MS) {
+        budgetExhausted = true;
+        break;
+      }
       try {
-        // Fetch market details to check settlement status
+        // Fetch market details to check settlement status.
+        //
+        // marketPath (full path from host root) is what gets SIGNED — Kalshi
+        // verifies the signature against the full request path. But kalshiBase
+        // already ends in /trade-api/v2, so the fetch URL must append only the
+        // SHORT path. Concatenating marketPath onto kalshiBase produced
+        // /trade-api/v2/trade-api/v2/markets/... — a guaranteed 404 for every
+        // ticker, which this function then misread as "market aged out of
+        // archive retention" and stamped unsettleable_404 on 8,854 signals
+        // (100% of throughput since the status shipped). Same sign-long/
+        // fetch-short split as execute-trade's balance pre-flight and the
+        // health-check probe — those two got the fix; this was the last
+        // unfixed instance of the class.
         const marketPath = `/trade-api/v2/markets/${ticker}`;
         const timestamp = Date.now();
         const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", marketPath, timestamp);
@@ -129,7 +155,7 @@ serve(async (req) => {
         const marketTimeoutId = setTimeout(() => marketController.abort(), MARKET_FETCH_TIMEOUT_MS);
         let marketResp: Response;
         try {
-          marketResp = await fetch(`${kalshiBase}${marketPath}`, {
+          marketResp = await fetch(`${kalshiBase}/markets/${ticker}`, {
             method: "GET",
             headers: authHeaders,
             signal: marketController.signal,
@@ -244,14 +270,21 @@ serve(async (req) => {
     await supabase.from("compliance_log").insert({
       event_type: "settle_signals_run",
       severity: "info",
-      message: `Settle signals: ${settledCount} signals settled from ${results.length} markets checked`,
-      metadata: { results, total_signals_checked: unsettledSignals.length },
+      message: `Settle signals: ${settledCount} signals settled from ${results.length} markets checked${
+        budgetExhausted ? ` (run budget hit — ${tickerToSignals.size - results.length} tickers deferred to next tick)` : ""
+      }`,
+      metadata: {
+        results,
+        total_signals_checked: unsettledSignals.length,
+        budget_exhausted: budgetExhausted,
+      },
     });
 
     return new Response(JSON.stringify({
       success: true,
       settled: settledCount,
       markets_checked: results.length,
+      budget_exhausted: budgetExhausted,
       results: results.slice(0, 20), // truncate for response size
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 

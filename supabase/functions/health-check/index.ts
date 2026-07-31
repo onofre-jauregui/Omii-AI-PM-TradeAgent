@@ -586,6 +586,33 @@ serve(async (req) => {
       }
     }
 
+    // ── 12. RLS drift — any public table with row security off ────────
+    // One RLS-off table (weather_bucket_calibration, found 2026-07-08) already
+    // slipped through and left a world-writable calibration ledger. The
+    // rls_disabled_tables() RPC (service-role-only, SECURITY DEFINER) reads
+    // pg_class so this sweep pages the moment any public table drops RLS —
+    // making the whole class of drift impossible to miss again.
+    try {
+      const { data: rlsOff, error: rlsErr } = await supabase.rpc("rls_disabled_tables");
+      if (!rlsErr && rlsOff && rlsOff.length > 0) {
+        const names = rlsOff.map((r: any) => r.table_name).join(", ");
+        pendingAlerts.push({
+          type: "rls_disabled_drift",
+          fingerprint: `rls_off_${names}`,
+          cooldownHours: 12,
+          message: `🔓 [TradeAgent] RLS DISABLED on public table(s): ${names} — world-readable/writable via the anon key until re-enabled`,
+        });
+        await supabase.from("compliance_log").insert({
+          event_type: "rls_disabled_drift",
+          severity: "error",
+          message: `Public tables with RLS disabled: ${names}`,
+          metadata: { tables: rlsOff.map((r: any) => r.table_name) },
+        });
+      }
+    } catch {
+      // RPC missing (migration not applied yet) — monitoring-path only, never block the sweep.
+    }
+
     // ── Deduplicate and send ──────────────────────────────────────────
     // For each pending alert, check compliance_log to see if the same fingerprint
     // was already sent within the cooldown window. Only send new or escalating alerts.

@@ -367,6 +367,23 @@ serve(async (req) => {
   const runStartedAt = new Date().toISOString();
   langfuseIngest([traceEvent(runId, "auto-trade")]);
 
+  // Optional single-strategy scoping. trading-agent's trigger_strategy_run
+  // tool has always POSTed {strategy_id} here — and this function never read
+  // its body, so a "manual run of S-002" silently executed the FULL fleet for
+  // every onboarded user while the chat reported it ran one strategy. Honor
+  // the argument: scope this run to the requested strategy when present.
+  let requestedStrategyId: string | null = null;
+  if (req.method === "POST") {
+    try {
+      const body = await req.json();
+      if (body && typeof body.strategy_id === "string" && body.strategy_id.length > 0) {
+        requestedStrategyId = body.strategy_id;
+      }
+    } catch {
+      // No/invalid JSON body — normal for cron invocations; run the full fleet.
+    }
+  }
+
   let lockAcquired = false; // function-scoped so finally block can access it
 
   try {
@@ -497,7 +514,18 @@ serve(async (req) => {
     ]);
     const onboardedIds = new Set((onboardedProfiles || []).map((p: any) => p.id));
     const eligibleUserStrategies = (userStrategies || []).filter((s: any) => onboardedIds.has(s.user_id));
-    const strategies = [...(systemStrategies || []), ...eligibleUserStrategies];
+    let strategies = [...(systemStrategies || []), ...eligibleUserStrategies];
+
+    // Scoped manual run: filter AFTER eligibility so a request can't resurrect
+    // an inactive or non-onboarded strategy. Matches instance id OR template id
+    // — the chat tool's schema tells the LLM to pass canonical ids ("S-002"),
+    // which should run every eligible instance of that template. Unknown id →
+    // empty set → the "No active strategies" response below reports it plainly.
+    if (requestedStrategyId) {
+      strategies = strategies.filter((s: any) =>
+        s.id === requestedStrategyId || (s as any).template_id === requestedStrategyId
+      );
+    }
 
     // Update the Langfuse trace with userId now that we know the active users.
     // Uses the first non-null user_id across strategies; system-only runs stay anonymous.
@@ -514,7 +542,12 @@ serve(async (req) => {
     }
 
     if (!strategies || strategies.length === 0) {
-      return new Response(JSON.stringify({ skipped: true, reason: "No active strategies" }), {
+      return new Response(JSON.stringify({
+        skipped: true,
+        reason: requestedStrategyId
+          ? `Strategy ${requestedStrategyId} is not active/eligible for this run`
+          : "No active strategies",
+      }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -1681,8 +1714,12 @@ async function runS002LongshotBias(
     };
   }
 
-  // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot
-  const positions = await countOpenPositions(supabase, "S-002", 7, strategy.user_id ?? null, mode as "paper" | "live");
+  // Weighted position count: near-term (≤7d) = 1.0 slot, far-term = 0.5 slot.
+  // Scope by strategy.id, NOT the literal "S-002": trades store the instance id
+  // ("S-002-ea207ba1"), so the hardcoded literal matched zero rows for every
+  // per-user strategy — count 0, MAX_S002_POSITIONS never tripped, the cap was
+  // dead. Same failure class as the documented 48-position KXINX runaway.
+  const positions = await countOpenPositions(supabase, strategy.id, 7, strategy.user_id ?? null, mode as "paper" | "live");
   const openS002Count = positions.weightedCost;
   const nearTermOnly = positions.nearTermCount;
   const farTermOnly = positions.farTermCount;
@@ -2091,6 +2128,10 @@ async function runS005WeatherEdge(
     };
   }
 
+  // strategyId deliberately undefined: this compares against the USER's
+  // portfolio-level max_open_positions, so it must count positions across ALL
+  // of the user's strategies — not just S-005's. (Reviewed 2026-07-31: looks
+  // like the S-002 scoping bug's mirror image, but is correct as-is.)
   const positions = await countOpenPositions(supabase, undefined, 7, strategy.user_id ?? null, mode as "paper" | "live");
   const maxPositions = userRisk?.max_open_positions ?? 10;
   const slotsAvailable = Math.max(0, maxPositions - positions.totalCount);

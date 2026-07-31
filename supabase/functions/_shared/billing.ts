@@ -201,13 +201,25 @@ export function checkEntitlement(
     };
   }
 
-  // Strategy must be allowed. Normalize to the base template id first — live
-  // strategies carry a suffixed, per-user id ("S-001-l-ea207ba1") and paper
-  // ones too ("S-001-ea207ba1"), while the tier's allow-list holds canonical
-  // ids ("S-001"). Without this, a legitimately-allowed strategy is rejected
-  // as "not available on your tier" — and because paper mode skips this whole
-  // check, the bug only ever bit LIVE trading (0 live trades, so never seen).
-  const baseStrategy = input.strategy?.match(/^S-\d+/)?.[0] ?? input.strategy;
+  // Strategy must be allowed — EXACT template-id match, no normalization.
+  // This used to normalize with /^S-\d+/ so suffixed instance ids
+  // ("S-001-l-ea207ba1") matched their canonical template. That regex was an
+  // entitlement bypass the moment strategy names become user-controllable: a
+  // strategy named "S-002-anything" would inherit S-002's live entitlement
+  // while sharing nothing with S-002 but a prefix. Callers are now responsible
+  // for passing the strategy's REAL template lineage — auto-trade passes
+  // strategies.template_id directly, and execute-trade resolves the request's
+  // strategyId to its DB row's template_id before calling here (never trusting
+  // the request string). A strategy with no resolvable template is not a
+  // recognized product strategy and is denied live access (fail closed).
+  const baseStrategy = input.strategy;
+  if (input.mode === "live" && !baseStrategy) {
+    return {
+      allowed: false,
+      reason: "Strategy has no recognized template lineage. Live trading requires a platform strategy template.",
+      limits,
+    };
+  }
   if (baseStrategy && !limits.allowedStrategies.includes(baseStrategy)) {
     return {
       allowed: false,
