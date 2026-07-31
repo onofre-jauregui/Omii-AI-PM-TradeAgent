@@ -21,8 +21,6 @@ serve(async (req) => {
     });
   }
 
-  // Verify the caller is an authenticated user (any signed-in user).
-  // The frontend does an additional email check before rendering the page.
   const anonClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY") ?? supabaseKey, {
     global: { headers: { Authorization: authHeader } },
   });
@@ -35,6 +33,24 @@ serve(async (req) => {
 
   // Service role client bypasses the service-role-only RLS on waitlist.
   const supabase = createClient(supabaseUrl, supabaseKey);
+
+  // Any authenticated user (not just admins) previously got the full waitlist
+  // here — this function only checked "signed in", relying entirely on the
+  // frontend's client-side gate to keep non-admins out. That's not a real
+  // gate: this endpoint is reachable directly by anyone with a valid session
+  // token, bypassing the UI entirely. Check profiles.is_admin server-side,
+  // the same source of truth App.tsx's AdminRoute uses for every other admin
+  // page — this is the enforcement point, not the frontend route guard.
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("is_admin")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (!profile?.is_admin) {
+    return new Response(JSON.stringify({ error: "Forbidden" }), {
+      status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   const { data: rows, error } = await supabase
     .from("waitlist")

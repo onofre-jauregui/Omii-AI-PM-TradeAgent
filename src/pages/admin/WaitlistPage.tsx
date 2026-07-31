@@ -4,7 +4,6 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Download, RefreshCw, ArrowLeft } from "lucide-react";
 
-const ADMIN_EMAIL = "omiiaiagency@gmail.com";
 const FN_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/waitlist-admin`;
 
 interface WaitlistRow {
@@ -18,17 +17,16 @@ export default function WaitlistPage() {
   const [rows, setRows] = useState<WaitlistRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [authorized, setAuthorized] = useState<boolean | null>(null);
 
+  // This page is only ever reached through App.tsx's <AdminRoute>, which
+  // already checks profiles.is_admin (DB source of truth) before rendering
+  // it — the hardcoded ADMIN_EMAIL check formerly here was a second,
+  // inconsistent gate that would silently lock out any other admin the
+  // is_admin flag was granted to, while adding no real security (the
+  // waitlist-admin edge function is the actual enforcement point and now
+  // checks is_admin server-side itself).
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user || user.email !== ADMIN_EMAIL) {
-        setAuthorized(false);
-        return;
-      }
-      setAuthorized(true);
-      fetchWaitlist();
-    });
+    fetchWaitlist();
   }, []);
 
   async function fetchWaitlist() {
@@ -62,14 +60,6 @@ export default function WaitlistPage() {
     a.download = `waitlist-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }
-
-  if (authorized === false) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <p className="text-muted-foreground text-sm">Access denied.</p>
-      </div>
-    );
   }
 
   return (

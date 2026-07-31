@@ -75,10 +75,18 @@ async function invokeFunction(name: string): Promise<any> {
 }
 
 serve(async (req) => {
-  // Validate webhook secret
+  // Validate webhook secret. This gate fails CLOSED: if TELEGRAM_WEBHOOK_SECRET
+  // isn't configured, every request is rejected rather than let through —
+  // previously an unset secret skipped the check entirely, leaving /run trade
+  // (a real trading-cycle trigger) reachable by anyone who could also spoof
+  // the chat_id check below.
   const url = new URL(req.url);
   const secret = url.searchParams.get("secret");
-  if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) {
+  if (!WEBHOOK_SECRET) {
+    console.error("telegram-webhook: TELEGRAM_WEBHOOK_SECRET is not configured — rejecting all requests");
+    return new Response("Forbidden", { status: 403 });
+  }
+  if (secret !== WEBHOOK_SECRET) {
     return new Response("Forbidden", { status: 403 });
   }
 
