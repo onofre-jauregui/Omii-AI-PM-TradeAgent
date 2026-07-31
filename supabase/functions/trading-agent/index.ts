@@ -340,19 +340,18 @@ const CREATE_STRATEGY_TOOL = {
   function: {
     name: "create_strategy",
     description:
-      "Create a new trading strategy from a user description. Saves it as inactive — the user must activate it in the Strategies tab. Use when the user asks to create, define, or set up a strategy.",
+      "Save a new custom strategy DRAFT from a user description. Drafts do not auto-trade: the autonomous loop runs only platform strategy templates, so a draft is a saved idea the user can review in the Strategies tab, use to guide this chat, and later attach to a template. Be honest about this limit when confirming. Use when the user asks to create, define, or set up a strategy.",
     parameters: {
       type: "object",
       properties: {
         name: { type: "string", description: "Short display name for the strategy" },
         instructions: {
           type: "string",
-          description: "Natural language rules for how the agent should qualify and trade signals for this strategy",
+          description: "Natural language rules describing the user's intent for this strategy",
         },
-        market_types: {
-          type: "array",
-          items: { type: "string" },
-          description: "Market series this strategy targets, e.g. [\"weather\", \"fomc\", \"crypto\"]",
+        description: {
+          type: "string",
+          description: "One-line summary shown on the strategy card",
         },
       },
       required: ["name", "instructions"],
@@ -1996,12 +1995,21 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── create_strategy ──
         else if (fnName === "create_strategy") {
           try {
+            // This insert failed 100% of the time before 2026-07-31: it wrote a
+            // `market_types` column that does not exist AND omitted `id` on a
+            // TEXT PK with no default — two independent guaranteed failures,
+            // surfaced to the user only as an opaque error string. The id is
+            // random and non-template-prefixed so it can never collide with or
+            // inherit entitlement from a platform template (checkEntitlement
+            // is exact-match).
+            const strategyId = `custom-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
             const { data: newStrategy, error: insertErr } = await supabase
               .from("strategies")
               .insert({
+                id: strategyId,
                 name: args.name,
+                description: args.description || "",
                 instructions: args.instructions,
-                market_types: args.market_types || [],
                 active: false,
                 mode: "paper",
                 user_id: userId,
@@ -2012,7 +2020,8 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             toolResult = JSON.stringify({
               success: true,
               strategy_id: newStrategy.id,
-              message: `Strategy "${newStrategy.name}" created (inactive). Activate it in the Strategies tab to start trading.`,
+              message:
+                `Draft "${newStrategy.name}" saved to the Strategies tab. Note: custom drafts don't auto-trade — autonomous trading runs on the platform's strategy templates. This draft guides our chat and can be attached to a template later.`,
             });
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Strategy creation failed: " + e.message });

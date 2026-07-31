@@ -486,7 +486,10 @@ export function StrategiesPanel({
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
-                  <p className="text-xs text-muted-foreground">These instructions are injected into the AI agent's context when this strategy is active.</p>
+                  {/* Honest copy: instructions reach the CHAT agent's context only.
+                      The autonomous trading loop routes by strategy template and
+                      never reads this text — the previous copy claimed otherwise. */}
+                  <p className="text-xs text-muted-foreground">Guides the AI in the chat panel. Autonomous trading follows the strategy's template logic and risk settings — not this text.</p>
                   <Textarea
                     value={editingStrategy.instructions}
                     onChange={(e) => setEditingStrategy({ ...editingStrategy, instructions: e.target.value })}
@@ -539,7 +542,7 @@ export function StrategiesPanel({
             </div>
             <div className="space-y-1.5">
               <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
-              <p className="text-xs text-muted-foreground">Tell the AI how to apply this strategy when trading.</p>
+              <p className="text-xs text-muted-foreground">Guides the AI in the chat panel. Custom strategies don't auto-trade yet — autonomous trading runs on the platform's strategy templates.</p>
               <Textarea
                 value={newStrategy.instructions}
                 onChange={(e) => setNewStrategy({ ...newStrategy, instructions: e.target.value })}

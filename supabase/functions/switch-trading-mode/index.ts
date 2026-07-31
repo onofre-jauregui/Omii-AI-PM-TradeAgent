@@ -117,6 +117,12 @@ serve(async (req: Request) => {
 
     let activeStrategies: { id: string; name: string; mode: string }[] = [];
 
+    // Activation is scoped to strategies with a template_id: only template-
+    // backed strategies have an auto-trade handler, so activating anything
+    // else (custom drafts) arms rows the dispatcher will silently reject every
+    // cron cycle — and for target_mode=live, "activate EVERYTHING live-mode
+    // the user owns" is exactly the bulk-arming a promotion ladder must not
+    // allow. Drafts stay wherever the user last put them.
     if (target_mode === "live") {
       await supabase.from("strategies")
         .update({ active: false, updated_at: new Date().toISOString() })
@@ -125,6 +131,7 @@ serve(async (req: Request) => {
         .from("strategies")
         .update({ active: true, updated_at: new Date().toISOString() })
         .eq("user_id", userId).eq("mode", "live")
+        .not("template_id", "is", null)
         .select("id, name, mode");
       activeStrategies = activated ?? [];
     } else {
@@ -135,6 +142,7 @@ serve(async (req: Request) => {
         .from("strategies")
         .update({ active: true, updated_at: new Date().toISOString() })
         .eq("user_id", userId).eq("mode", "paper")
+        .not("template_id", "is", null)
         .select("id, name, mode");
       activeStrategies = activated ?? [];
     }

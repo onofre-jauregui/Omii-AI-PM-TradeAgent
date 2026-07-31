@@ -4,6 +4,31 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-31 — Entitlement matches templates exactly; callers resolve lineage from the DB
+
+**Decision:** `checkEntitlement` no longer normalizes strategy ids with `/^S-\d+/`; it requires an exact template id, `execute-trade` resolves the request's `strategyId` to its DB row's `template_id` (owner/system rows only), and live mode with no resolvable template fails closed.
+**Options:** A) Keep prefix normalization — rejected: any user-named id prefixed with an entitled template ("S-002-anything") inherits that template's live access the moment names are user-controllable. B) Exact match + DB-resolved lineage — chosen. C) FK-constrain template_id and trust it blindly — insufficient alone; the request string still needed to stop being the authority.
+**Why:** Entitlement decides real-money access; its input must be a fact the server derived, never a string the client sent.
+**Reversibility:** easy — one function + one call site; regression tests pin the bypass shut.
+**Trace:** PR #169, `_shared/billing.ts`, `execute-trade/index.ts`.
+
+## 2026-07-31 — strategy_config seeded by DB trigger, not by each insert path
+
+**Decision:** `AFTER INSERT ON strategies` trigger seeds a `strategy_config` row; existing rows backfilled; client writes limited to owner-scoped UPDATE (INSERT stays service-role).
+**Options:** A) Seed in every code path (onboarding, createInstance, chat, future authoring UI) — rejected: four paths today, more later, any new one silently re-opens the gap. B) DB trigger — chosen: no path can forget.
+**Why:** auto-trade's consecutive-failure kill switch is gated on `if (config)` — with no config row, user strategies could never auto-halt. A safety mechanism that depends on every caller remembering a second insert isn't a mechanism.
+**Reversibility:** easy — drop trigger; config rows are additive.
+**Trace:** PR #169, `20260731_p0_strategy_config_seed_and_grants.sql`.
+
+## 2026-07-31 — User-authored strategies v1 = pinned universe over templates; no predicate DSL yet; no backtest tier in the promotion ladder
+
+**Decision:** v1 authoring resolves natural language at authoring time into a pinned, user-confirmed market universe (`strategies.universe`) executed by the proven template engines. The declarative predicate DSL is deferred until real user demand shows what it must express. The promotion ladder runs draft → paper → micro_live → live with no backtest tier.
+**Options:** A) Full spec/DSL + generic runner first — rejected: inner-platform trap on a data plane that is still single-tenant (global top-50 signal pool consumed first-come-first-served; platform-wide lock whose stale window equals the cron period), plus a live unit landmine (dual cents/dollars price fields with a heuristic converter that mis-parses 1¢ as 100¢). B) Pinned universe over templates — chosen: one column + one resolver, zero new risk surface. C) Backtest tier in the ladder — rejected: shadow-PnL measures direction at mid with no fills/slippage/fees — exactly the blindspot that produced live's −$1.42 at an 87% win rate; it would launder losing strategies. Paper (real orderbook fill simulation since c8436e6) is the credible forward gate.
+**Why:** entity intent must be matched on ticker suffix/event structure (Kalshi titles are trademark-scrubbed — "Lakers" appears nowhere), users must confirm concrete markets with live books before arming, and promotion gates must see the failure mode that actually loses money.
+**Reversibility:** easy — universe column is additive; the DSL remains open as v2.
+**Trace:** plan `yes-we-should-have-soft-blanket.md`; adversarial review 2026-07-31; PRs #165/#169.
+
+
 ## 2026-07-30 — Re-registered weather-signal-cron; expanded expected_cron_jobs manifest
 
 **Decision:** Applied migration `20260730_reregister_weather_signal_cron.sql` directly to production via the management API — re-scheduled `weather-signal-cron` on its intended staggered cadence (`4,14,24,34,44,54 * * * *`) and added it, `paper-reconcile-cron`, and `settle-signals-cron` to `expected_cron_jobs`.
