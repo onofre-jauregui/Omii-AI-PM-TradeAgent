@@ -4,6 +4,15 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-07-31 — Staging DB rebuilt by statement-level replay + production parity diff
+
+**Decision:** Rebuilt the staging database from scratch: reset the false migration ledger, replayed all 66 migration files statement-by-statement (dollar-quote-aware splitter, per-statement duplicate skip), self-healed objects that exist only in production (cloned `backtest_runs`, `profiles`, `trade_lessons`, `baskets`, `waitlist`, both weather-calibration tables, 4 `agent_*` views, and 65+ dashboard-era columns from prod catalogs). Acceptance = column-level parity diff vs production: **0 of 470 prod columns missing**. Ledger restored (66 versions) so CI's pending-loop resumes cleanly.
+**Options:** A) pg_dump prod schema → restore — rejected: no prod DB password available, management API only. B) Whole-file replay — failed: legacy files mix already-created + novel objects; transactions rolled back and dropped the novel parts. C) Statement-level replay with prod-catalog self-healing — chosen.
+**Why:** Staging recorded 38 migrations as applied while containing ONE table — the old `|| echo WARN` CI loop recorded failures as successes, so every staging deploy, E2E run, and canary since has validated nothing. The migration chain is also not self-contained (several tables/columns exist only via the dashboard; some committed SQL is invalid everywhere, e.g. `select cron.schedule(...) ON CONFLICT`), so replay alone can never reproduce production — parity diffing against prod catalogs is the only honest acceptance test.
+**Reversibility:** easy — staging held no real data; prod untouched (read-only catalog queries).
+**Trace:** scratchpad replay2.py; CI run 30666952521 rerun; PR #170.
+
+
 ## 2026-07-31 — Entitlement matches templates exactly; callers resolve lineage from the DB
 
 **Decision:** `checkEntitlement` no longer normalizes strategy ids with `/^S-\d+/`; it requires an exact template id, `execute-trade` resolves the request's `strategyId` to its DB row's `template_id` (owner/system rows only), and live mode with no resolvable template fails closed.
