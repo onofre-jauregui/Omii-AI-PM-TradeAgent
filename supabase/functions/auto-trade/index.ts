@@ -1063,6 +1063,29 @@ async function runS001SurfaceArb(
   const KALSHI_FEE_RATE = 0.07;        // 7% of winnings
   const MIN_NET_EDGE_PER_LEG_CENTS = 8; // minimum per-leg edge after 7% fee; 8¢ ≈ break-even at mid-to-ask slippage
 
+  // Maximum entry price for a NO leg.
+  //
+  // Buying NO at P cents risks P to win (100-P), so the break-even win rate is
+  // ≈ P% before fees. The edge is therefore not uniform across the price curve —
+  // it is entirely a function of how far the realised win rate sits above the
+  // entry price. Measured over 508 settled S-001 trades:
+  //
+  //   entry band   n    actual WR   break-even WR   margin
+  //   <75¢       113      74.3%         54.9%       +19.4  <- real edge
+  //   75-79¢     131      94.7%         75.8%       +18.9  <- real edge
+  //   80-84¢      76      86.8%         81.3%        +5.5  <- thin; live lost $1.62 over 15
+  //   85-89¢      75      86.7%         87.9%        -1.2  <- negative
+  //   90¢+       113      91.2%         91.0%        +0.2  <- erased by the 7% fee
+  //
+  // All 23 settled LIVE trades landed at 80¢+, which is why live realised
+  // -$1.42 at an 87% win rate: avg win $2.01 against avg loss $13.84 needs
+  // 87.3% just to break even, and the strategy delivers 87.0%.
+  //
+  // A high win rate is not evidence of edge when the payout geometry is this
+  // asymmetric. Capping entry price is the one filter that follows directly from
+  // the arithmetic of the payoff rather than from curve-fitting the outcomes.
+  const MAX_ENTRY_PRICE_CENTS = 80;
+
   // 1. Fetch fresh, unexploited bracket-sum violation alerts.
   // Covers KXINX (S&P 500) and KXBTC — bracket markets where structural mispricing
   // is direction-agnostic. KXETH excluded (confirmed money-loser). Sports/weather excluded.
@@ -1278,6 +1301,10 @@ async function runS001SurfaceArb(
         const ask = yesAskCents(m);
         const noPrice = 100 - ask;
         if (ask < 5 || ask > 92) return false;    // original price band: floor ensures payout; ceiling ensures commission coverage
+        // Break-even win rate for a NO leg is ≈ its entry price, so legs bought
+        // above MAX_ENTRY_PRICE_CENTS need a win rate the strategy has never
+        // actually delivered. See the constant's definition for the per-band data.
+        if (noPrice > MAX_ENTRY_PRICE_CENTS) return false;
         if (openTickers.has(m.ticker)) return false;
         // Per-leg fee check: distribute the alert's total expected edge evenly across legs.
         // Rejects arbs where total excess (e.g. 3c across a 3-leg basket) is eaten by fees.
