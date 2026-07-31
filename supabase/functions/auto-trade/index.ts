@@ -6,7 +6,7 @@ import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
-import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
+import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 import {
@@ -2526,9 +2526,27 @@ function kellySize(trueP: number, marketP: number, bankroll: number, fraction = 
  * Performance-aware gating belongs in the Phase 2 Sharpe regime layer,
  * not in a consecutive-day counter that creates loss-aversion bias.
  */
+/**
+ * Per-field length caps for the qualify context.
+ *
+ * A single flat 300-char cap silently truncated the multi-record fields. Measured
+ * on live S-001 data: strategy_memory renders ~900 chars for the 5 selected
+ * memories, so only ~2 ever reached the model; the `note` field is 587 chars, and
+ * the half that got cut was the "Do NOT reject for generic reasons … the edge here
+ * is structural" clause — i.e. S-001's qualify gate never saw its own
+ * anti-over-rejection instruction. Scalar market fields keep the 300 default.
+ */
+const QUALIFY_FIELD_MAX_LEN: Record<string, number> = {
+  strategy_memory: 2000,
+  past_lessons: 2000,
+  note: 800,
+};
+
 function buildQualifyPrompt(strategyName: string, context: Record<string, any>, lessons: string[] = []): string {
   const ctx = Object.entries(context)
-    .map(([k, v]) => `<field name="${k}">${sanitizeMarketData(v)}</field>`)
+    .map(([k, v]) =>
+      `<field name="${k}">${sanitizeMarketData(v, QUALIFY_FIELD_MAX_LEN[k] ?? DEFAULT_FIELD_MAX_LEN)}</field>`
+    )
     .join("\n");
 
   const lessonsSection = lessons.length > 0
