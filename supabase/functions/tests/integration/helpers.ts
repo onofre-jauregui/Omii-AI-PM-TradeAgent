@@ -112,3 +112,15 @@ export async function cleanupTrades(tradeIds: string[]): Promise<void> {
     headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
   });
 }
+
+/** Same as cleanupTrades but for the baskets table — explicit ids only. */
+export async function cleanupBaskets(basketIds: string[]): Promise<void> {
+  if (basketIds.length === 0) return;
+  const supabaseUrl = requireEnv("SUPABASE_URL");
+  const serviceKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+  const idList = basketIds.map(id => `"${id}"`).join(",");
+  await fetch(`${supabaseUrl}/rest/v1/baskets?id=in.(${idList})`, {
+    method: "DELETE",
+    headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+  });
+}
