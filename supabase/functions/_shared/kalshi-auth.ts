@@ -91,3 +91,62 @@ export async function getKalshiCredentials(
 
   return { keyId, privateKey };
 }
+
+const EQUITY_FETCH_TIMEOUT_MS = 8_000;
+
+/**
+ * Real current Kalshi account equity — cash balance + value of open positions,
+ * both from GET /portfolio/balance. This is the correct denominator for
+ * concentration-style risk checks: a high-water-mark peak never drops after a
+ * loss, so sizing against it understates how much of the ACTUAL account a
+ * trade commits post-drawdown.
+ *
+ * Returns null on any credential/network failure — callers should treat null
+ * as "fall back to whatever the caller already had" (e.g. peak_portfolio_value),
+ * not as a reason to block trading. This is a risk-tightening signal, not a
+ * required dependency.
+ */
+export async function fetchLiveEquityUsd(
+  supabase: ReturnType<typeof createClient>,
+  userId: string | null,
+  { generateAuthHeaders, KALSHI_BASE_URL }: {
+    generateAuthHeaders: (keyId: string, privateKey: string, method: string, path: string, ts: number) => Promise<Record<string, string>>;
+    KALSHI_BASE_URL: string;
+  }
+): Promise<number | null> {
+  try {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(`credential fetch exceeded ${EQUITY_FETCH_TIMEOUT_MS}ms`)), EQUITY_FETCH_TIMEOUT_MS);
+    });
+    let keyId: string | null, privateKey: string | null;
+    try {
+      ({ keyId, privateKey } = await Promise.race([getKalshiCredentials(supabase, userId), timeout]));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+    if (!keyId || !privateKey) return null;
+
+    const path = "/trade-api/v2/portfolio/balance";
+    const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
+    const controller = new AbortController();
+    const balanceTimeoutId = setTimeout(() => controller.abort(), EQUITY_FETCH_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, { headers, signal: controller.signal });
+    } finally {
+      clearTimeout(balanceTimeoutId);
+    }
+    if (!resp.ok) {
+      console.error("fetchLiveEquityUsd: Kalshi balance fetch failed", resp.status, await resp.text().catch(() => ""));
+      return null;
+    }
+    const data = await resp.json();
+    const cashUsd = (data?.balance ?? 0) / 100;
+    const positionsUsd = (data?.portfolio_value ?? 0) / 100;
+    return cashUsd + positionsUsd;
+  } catch (e) {
+    console.error("fetchLiveEquityUsd failed for user", userId, ":", e instanceof Error ? e.message : e);
+    return null;
+  }
+}

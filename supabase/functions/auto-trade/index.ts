@@ -4,7 +4,8 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
-import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
+import { evaluateRisk, DEFAULT_RISK_SETTINGS, computeConcentrationCapPct, evaluateBasketConcentration } from "../_shared/risk.ts";
+import { fetchLiveEquityUsd, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse } from "../_shared/prompt-safety.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
@@ -1171,6 +1172,28 @@ async function runS001SurfaceArb(
     .join("\n");
   const s001Lessons = await fetchStrategyLessons(supabase, strategy.id);
 
+  // Real current equity + settled-trade sample size, fetched once per cron cycle
+  // (not per leg/event) — mirrors execute-trade's risk-check inputs so auto-trade's
+  // basket-level pre-scaling and execute-trade's per-order concentration check agree
+  // on the same ceiling. Live only; paper is unbounded here by design (see risk.ts).
+  let currentEquityUsd: number | null = null;
+  let settledTradeCount = 0;
+  if (mode === "live") {
+    currentEquityUsd = await fetchLiveEquityUsd(supabase, strategy.user_id || null, {
+      generateAuthHeaders,
+      KALSHI_BASE_URL,
+    });
+    const { count } = await supabase
+      .from("trades")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", strategy.user_id)
+      .eq("mode", "live")
+      .eq("status", "settled")
+      .eq("strategy_id", strategy.id);
+    settledTradeCount = count ?? 0;
+  }
+  const concentrationCapPct = computeConcentrationCapPct(settledTradeCount);
+
   for (const alert of alerts) {
     if (accountDepleted) break;
     const eventTicker = alert.event_ticker as string;
@@ -1371,8 +1394,37 @@ async function runS001SurfaceArb(
     //    so Kalshi rejected the later legs with a real insufficient_balance 400 regardless.
     //    Concurrent submission also burns the whole per-minute live execute-trade rate
     //    limit (3) on one basket, leaving zero headroom for any other order that minute.
+    // Basket-level concentration: these legs are all brackets on the SAME underlying
+    // event — correlated, not independent bets. Each leg individually clearing
+    // execute-trade's per-order concentration check doesn't stop the basket as a
+    // WHOLE from committing far more than the intended % of the account to one
+    // correlated outcome. Pre-sum Kelly's sizing for every leg in this event and
+    // scale the whole basket down (proportionally) to fit the same ceiling a single
+    // order would face — using the real current equity fetched once per cron run.
+    // Conservative by construction: if the LLM gate below rejects some legs, the
+    // actually-submitted total ends up under the cap, never over it.
+    const legKellyAmounts = tradeable.map((leg: any) => {
+      const perLegEdgeForLeg = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
+      const marketPForLeg = leg.noPrice / 100;
+      const truePForLeg = Math.min(0.99, marketPForLeg + perLegEdgeForLeg / 100);
+      return Math.min(kellySize(truePForLeg, marketPForLeg, Number(strategy.starting_balance) || 100), MAX_LEG_USD);
+    });
+    let basketLegAmounts = legKellyAmounts;
+    if (mode === "live" && currentEquityUsd != null) {
+      const basketCheck = evaluateBasketConcentration(legKellyAmounts, currentEquityUsd, concentrationCapPct);
+      basketLegAmounts = basketCheck.amounts;
+      if (basketCheck.scaled) {
+        await supabase.from("compliance_log").insert({
+          event_type: "s001_basket_scaled_down",
+          severity: "info",
+          message: `S-001: ${eventTicker} basket exceeded ${concentrationCapPct}% concentration cap ($${basketCheck.capUsd.toFixed(2)} of $${currentEquityUsd.toFixed(2)} equity) — scaled legs ${legKellyAmounts.join(",")} -> ${basketLegAmounts.join(",")}`,
+          metadata: { event_ticker: eventTicker, original_amounts: legKellyAmounts, scaled_amounts: basketLegAmounts, cap_usd: basketCheck.capUsd, equity_usd: currentEquityUsd, run_id: runId },
+        }).then(null, () => {});
+      }
+    }
+
     const legResults: { ticker: string; success: boolean; price: number }[] = [];
-    for (const leg of tradeable) {
+    for (const [legIndex, leg] of tradeable.entries()) {
       // Account balance won't replenish mid-run — once any leg (this alert or an
       // earlier one this cycle) reports insufficient_balance, every remaining leg
       // across every remaining alert is guaranteed to fail the same way. Stop
@@ -1382,18 +1434,20 @@ async function runS001SurfaceArb(
 
       const feeHurdle = feeHurdleCentsAt(leg.noPrice);
       const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
-      // Quarter-Kelly sizing instead of a flat AMOUNT_PER_LEG for every signal
-      // regardless of edge strength. marketP is the price we're actually paying;
-      // trueP is our own fair-value estimate for this leg — marketP plus the
-      // per-leg edge this same filter already computed above (the bracket-sum
-      // violation converted to cents of mispricing). Reuses kellySize(), which
-      // already existed in this file (quarter-Kelly, floor $10/cap $100) but was
-      // never called anywhere before this.
-      const marketP = leg.noPrice / 100;
-      const trueP = Math.min(0.99, marketP + perLegEdge / 100);
-      // Clamped to MAX_LEG_USD (account's risk_settings.max_position_size) — kellySize's
-      // own $10/$100 band is blind to the account's configured per-order ceiling.
-      const legAmount = Math.min(kellySize(trueP, marketP, Number(strategy.starting_balance) || 100), MAX_LEG_USD);
+      // Quarter-Kelly sizing (kellySize()), then scaled by the basket-level
+      // concentration check above. A leg scaled to 0 means the basket check
+      // dropped it — skip submitting it entirely rather than sending a dust order.
+      const legAmount = basketLegAmounts[legIndex];
+      if (legAmount <= 0) {
+        await supabase.from("compliance_log").insert({
+          event_type: "s001_leg_dropped_basket_scaling",
+          severity: "info",
+          message: `S-001: ${leg.ticker} dropped — scaled below viable size by basket concentration cap`,
+          metadata: { ticker: leg.ticker, event_ticker: eventTicker, run_id: runId },
+        }).then(null, () => {});
+        legResults.push({ ticker: leg.ticker, success: false, price: leg.noPrice });
+        continue;
+      }
 
       // LLM review gate — reuses S-002's exact qualifySetup/buildQualifyPrompt/
       // parseQualifyResponse pattern (auto-trade/index.ts ~1621-1642), fail-closed:
