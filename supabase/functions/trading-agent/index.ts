@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
 
@@ -1245,23 +1246,20 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // Helper: parse a market into a compact object.
             // Prices are normalized to integer CENTS (1-99) so the LLM passes the
             // correct value directly to execute_trade without unit conversion.
-            const toCents = (v: any): number => {
-              const n = Number(v) || 0;
-              // Kalshi API returns dollars (0.01–0.99) via *_dollars fields, cents (1–99) via raw fields.
-              // If the value is < 1 it's in dollars — multiply by 100 and round.
-              return n > 0 && n < 1 ? Math.round(n * 100) : Math.round(n);
-            };
+            // Delegates to the canonical converter for the paired reads below;
+            // this wrapper only preserves the number-not-null local contract.
+            const toCents = (v: any): number => Math.round(Number(v) || 0);
             const parseMarket = (m: any) => {
-              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
-              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
+              const ya = (marketFieldCents(m, "yes_ask") ?? 0);
+              const yb = (marketFieldCents(m, "yes_bid") ?? 0);
               return {
                 ticker: m.ticker,
                 title: m.title || m.subtitle,
                 yes_bid_cents: yb,
                 yes_ask_cents: ya,
-                no_bid_cents: toCents(m.no_bid_dollars ?? m.no_bid),
-                no_ask_cents: toCents(m.no_ask_dollars ?? m.no_ask),
-                last_price_cents: toCents(m.last_price_dollars ?? m.last_price),
+                no_bid_cents: (marketFieldCents(m, "no_bid") ?? 0),
+                no_ask_cents: (marketFieldCents(m, "no_ask") ?? 0),
+                last_price_cents: (marketFieldCents(m, "last_price") ?? 0),
                 volume: m.volume,
                 volume_24h: m.volume_24h,
                 open_interest: m.open_interest,
@@ -1273,9 +1271,9 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // Helper: is this a real tradeable market?
             const isLiquid = (m: any): boolean => {
               if ((m.ticker || "").startsWith("KXMVE")) return false;
-              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
-              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
-              const last = toCents(m.last_price_dollars ?? m.last_price);
+              const ya = (marketFieldCents(m, "yes_ask") ?? 0);
+              const yb = (marketFieldCents(m, "yes_bid") ?? 0);
+              const last = (marketFieldCents(m, "last_price") ?? 0);
               return ya >= 1 || yb >= 1 || last >= 1; // values are now in cents
             };
 

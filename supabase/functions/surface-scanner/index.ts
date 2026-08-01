@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { alertOnce } from "../_shared/telegram.ts";
 
 /**
@@ -90,19 +91,22 @@ interface SurfaceAlert {
 function parseMarket(m: RawMarket): ParsedMarket | null {
   if ((m.ticker || "").startsWith("KXMVE")) return null;
 
-  const yesBidDollars = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-  const yesAskDollars = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-  const lastDollars = Number(m.last_price_dollars ?? m.last_price) || 0;
+  // Canonical integer cents throughout — the old dollars-assumed read broke on
+  // cents-only rows (see _shared/kalshi-prices.ts). This function feeds S-001's
+  // bracket-sum math, so a unit error here IS a phantom arbitrage signal.
+  const yesBidCents = marketFieldCents(m as any, "yes_bid") ?? 0;
+  const yesAskCents = marketFieldCents(m as any, "yes_ask") ?? 0;
+  const lastCents = marketFieldCents(m as any, "last_price") ?? 0;
 
-  if (yesAskDollars <= 0.005 && yesBidDollars <= 0.005 && lastDollars <= 0.005) return null;
+  if (yesAskCents <= 0 && yesBidCents <= 0 && lastCents <= 0) return null;
 
-  const midDollars = yesAskDollars > 0 && yesBidDollars > 0
-    ? (yesBidDollars + yesAskDollars) / 2
-    : lastDollars || 0.5;
+  const midCents = yesAskCents > 0 && yesBidCents > 0
+    ? (yesBidCents + yesAskCents) / 2
+    : lastCents || 50;
 
-  const spreadDollars = yesAskDollars > 0 && yesBidDollars > 0
-    ? yesAskDollars - yesBidDollars
-    : 0.20;
+  const spreadCents = yesAskCents > 0 && yesBidCents > 0
+    ? yesAskCents - yesBidCents
+    : 20;
 
   // Derive event_ticker: everything before the last segment after final "-"
   // e.g. KXBTC-26APR4-T56000 → event_ticker = KXBTC-26APR4
@@ -121,10 +125,10 @@ function parseMarket(m: RawMarket): ParsedMarket | null {
     ticker: m.ticker,
     title: m.title || m.subtitle || m.ticker,
     event_ticker: eventTicker,
-    yes_bid_cents: Math.round(yesBidDollars * 100),
-    yes_ask_cents: Math.round(yesAskDollars * 100),
-    mid_cents: Math.round(midDollars * 100),
-    spread_cents: Math.round(spreadDollars * 100),
+    yes_bid_cents: yesBidCents,
+    yes_ask_cents: yesAskCents,
+    mid_cents: Math.round(midCents),
+    spread_cents: Math.round(spreadCents),
     volume: Number(m.volume || m.volume_24h) || 0,
     close_time: m.close_time || null,
     threshold_value: thresholdValue,

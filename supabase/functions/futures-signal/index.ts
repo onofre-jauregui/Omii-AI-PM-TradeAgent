@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 
@@ -141,11 +142,6 @@ function daysUntilDate(year: number, month: number, day: number): number {
   return (target - Date.now()) / (1000 * 60 * 60 * 24);
 }
 
-const toCents = (v: any): number | null => {
-  if (v == null) return null;
-  const n = Number(v);
-  return n > 1 ? Math.round(n) : Math.round(n * 100);
-};
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
@@ -429,8 +425,9 @@ serve(async (req) => {
       continue;
     }
 
-    const yesBid = toCents(market.yes_bid_dollars ?? market.yes_bid);
-    const yesAsk = toCents(market.yes_ask_dollars ?? market.yes_ask);
+    // Canonical converter — see _shared/kalshi-prices.ts.
+    const yesBid = marketFieldCents(market, "yes_bid");
+    const yesAsk = marketFieldCents(market, "yes_ask");
     const volume = Math.round(parseFloat(market.volume_fp || market.volume_24h_fp || market.volume || market.volume_24h || "0") || 0);
     const title: string = market.title || market.subtitle || ticker;
 
