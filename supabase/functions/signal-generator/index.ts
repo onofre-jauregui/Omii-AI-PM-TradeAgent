@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { alertOnce } from "../_shared/telegram.ts";
 
 /**
@@ -282,10 +283,12 @@ serve(async (req) => {
     // ── Filter to liquid markets ──────────────────────────────────────────────
     const isLiquid = (m: RawMarket): boolean => {
       if ((m.ticker || "").startsWith("KXMVE")) return false;
-      const ya = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-      const yb = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-      const last = Number(m.last_price_dollars ?? m.last_price) || 0;
-      return ya > 0.005 || yb > 0.005 || last > 0.005;
+      // Canonical cents conversion — the old dollars-assumed read broke on
+      // cents-only rows (see _shared/kalshi-prices.ts).
+      const ya = marketFieldCents(m as any, "yes_ask") ?? 0;
+      const yb = marketFieldCents(m as any, "yes_bid") ?? 0;
+      const last = marketFieldCents(m as any, "last_price") ?? 0;
+      return ya > 0 || yb > 0 || last > 0;
     };
 
     rawMarkets = rawMarkets.filter(isLiquid);
@@ -311,18 +314,17 @@ serve(async (req) => {
     const signals: ScoredSignal[] = [];
 
     for (const m of rawMarkets) {
-      const yesBid = Number(m.yes_bid_dollars ?? m.yes_bid) || 0;
-      const yesAsk = Number(m.yes_ask_dollars ?? m.yes_ask) || 0;
-      const lastPrice = Number(m.last_price_dollars ?? m.last_price) || 0;
+      // All in canonical integer cents from here down.
+      const yesBidCents = marketFieldCents(m as any, "yes_bid") ?? 0;
+      const yesAskCents = marketFieldCents(m as any, "yes_ask") ?? 0;
+      const lastPriceCents = marketFieldCents(m as any, "last_price") ?? 0;
       const volume = Math.round(parseFloat(m.volume_fp || m.volume_24h_fp || m.volume || m.volume_24h || "0") || 0);
 
-      // Compute mid in cents (0–100)
-      const midDollars = yesAsk > 0 && yesBid > 0
-        ? (yesBid + yesAsk) / 2
-        : lastPrice || 0.5;
-      const midCents = midDollars * 100;
-      const spreadCents = yesAsk > 0 && yesBid > 0
-        ? (yesAsk - yesBid) * 100
+      const midCents = yesAskCents > 0 && yesBidCents > 0
+        ? (yesBidCents + yesAskCents) / 2
+        : lastPriceCents || 50;
+      const spreadCents = yesAskCents > 0 && yesBidCents > 0
+        ? (yesAskCents - yesBidCents)
         : 20; // penalise if no orderbook data
 
       // Time to close
@@ -334,7 +336,6 @@ serve(async (req) => {
       }
 
       const liquidityScore = scoreLiquidity(spreadCents, volume);
-      const lastPriceCents = Math.round((lastPrice || 0) * 100);
       const edgeScore = scoreEdge(midCents, lastPriceCents);
       const timeValueScore = scoreTimeValue(daysToClose);
       const { direction, reasoning } = deriveDirection(midCents, lastPriceCents, liquidityScore, timeValueScore);
@@ -343,8 +344,8 @@ serve(async (req) => {
         ticker: m.ticker,
         title: m.title || m.subtitle || m.ticker,
         event_ticker: m.event_ticker || m.ticker.split("-").slice(0, 2).join("-"),
-        yes_bid: Math.round(yesBid * 100),
-        yes_ask: Math.round(yesAsk * 100),
+        yes_bid: yesBidCents,
+        yes_ask: yesAskCents,
         mid_price: Math.round(midCents),
         spread: Math.round(spreadCents),
         volume,

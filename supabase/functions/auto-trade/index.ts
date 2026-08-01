@@ -7,6 +7,7 @@ import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
+import { kalshiPriceToCents, marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 import {
@@ -1430,8 +1431,9 @@ async function runS001SurfaceArb(
     // 4. Find the most overpriced markets: highest YES ask = most overpriced relative to fair value
     // In a fair bracket, each market's YES price should reflect its true probability.
     // When bracket sums > 100c, all are overpriced — focus on the highest-priced ones.
-    // Kalshi API returns prices as *_dollars (e.g. yes_ask_dollars: 0.45 = 45c)
-    const yesAskCents = (m: any) => Math.round(parseFloat(m.yes_ask_dollars ?? m.yes_ask ?? "0") * 100);
+    // Canonical unit conversion — see _shared/kalshi-prices.ts. The old inline
+    // parseFloat(dollars ?? cents)*100 read a cents-only 45 as 4500c.
+    const yesAskCents = (m: any) => marketFieldCents(m, "yes_ask") ?? 0;
 
     // Ask-side bracket sum guard.
     // The scanner detects violations using mid prices; execution happens at the ask (always >= mid).
@@ -1503,9 +1505,7 @@ async function runS001SurfaceArb(
       for (const openPos of openS001InEvent) {
         const liveMarket = eventMarkets.find((m: any) => m.ticker === openPos.ticker);
         if (!liveMarket) continue;
-        const currentNoBidCents = Math.round(
-          parseFloat(liveMarket.no_bid_dollars ?? liveMarket.no_bid ?? "0") * 100
-        );
+        const currentNoBidCents = marketFieldCents(liveMarket, "no_bid") ?? 0;
         const entryPriceCents: number = openPos.price ?? 0;
         if (entryPriceCents > 0 && currentNoBidCents > 0) {
           const lossPct = (entryPriceCents - currentNoBidCents) / entryPriceCents;
@@ -2166,8 +2166,8 @@ async function runS005WeatherEdge(
         if (mktResp.ok) {
           const mktData = await mktResp.json();
           const mkt = mktData?.market ?? mktData;
-          const yesBid = Number(mkt?.yes_bid_dollars ?? mkt?.yes_bid ?? 0) * (mkt?.yes_bid_dollars !== undefined ? 100 : 1);
-          const yesAsk = Number(mkt?.yes_ask_dollars ?? mkt?.yes_ask ?? 0) * (mkt?.yes_ask_dollars !== undefined ? 100 : 1);
+          const yesBid = marketFieldCents(mkt, "yes_bid") ?? 0;
+          const yesAsk = marketFieldCents(mkt, "yes_ask") ?? 0;
           if (yesBid > 0 && yesAsk > 0) currentMid = (yesBid + yesAsk) / 2;
         }
       } catch { /* non-critical — skip this position */ }
@@ -2611,9 +2611,10 @@ async function runS005WeatherEdge(
           .map((r: any) => r.market_data)
           .find((m: any) => m.ticker === sig.ticker);
         if (liveRow) {
-          const toCents = (v: any) => v == null ? null : (Number(v) > 1 ? Math.round(Number(v)) : Math.round(Number(v) * 100));
-          effectiveYesBid = toCents(liveRow.yes_bid_dollars ?? liveRow.yes_bid) ?? sig.yes_bid ?? 50;
-          effectiveYesAsk = toCents(liveRow.yes_ask_dollars ?? liveRow.yes_ask) ?? sig.yes_ask ?? 50;
+          // Canonical converter: the old magnitude-guess (v > 1 ? v : v*100)
+          // mis-parsed a literal 1c bid as 100c.
+          effectiveYesBid = marketFieldCents(liveRow, "yes_bid") ?? sig.yes_bid ?? 50;
+          effectiveYesAsk = marketFieldCents(liveRow, "yes_ask") ?? sig.yes_ask ?? 50;
           const trueP = sig.true_probability ?? 0.5;
           liveEdge = sig.direction === "buy_yes"
             ? trueP * 100 - effectiveYesAsk
