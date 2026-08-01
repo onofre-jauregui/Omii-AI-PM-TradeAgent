@@ -3,7 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
-import { checkEntitlement, type SubscriptionRow } from "../_shared/billing.ts";
+import { checkEntitlement, resolveLimits, type SubscriptionRow } from "../_shared/billing.ts";
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
@@ -618,7 +618,30 @@ serve(async (req) => {
     ]);
     const onboardedIds = new Set((onboardedProfiles || []).map((p: any) => p.id));
     const eligibleUserStrategies = (userStrategies || []).filter((s: any) => onboardedIds.has(s.user_id));
-    let strategies = [...(systemStrategies || []), ...eligibleUserStrategies];
+
+    // Per-user active-strategy cap (tier entitlement). Every active strategy
+    // burns LLM qualify calls + Kalshi round trips on every 5-min tick — this
+    // is the cost dimension that scales with user-authored strategies, and
+    // every tier previously allowed 999999. Deterministic order (.order("id"))
+    // means the same strategies are kept each cycle, not a rotating subset.
+    const runCountByUser = new Map<string, number>();
+    const cappedUserStrategies = eligibleUserStrategies.filter((s: any) => {
+      const limits = resolveLimits(subscriptionByUserId.get(s.user_id) ?? null);
+      const used = runCountByUser.get(s.user_id) ?? 0;
+      if (used >= limits.maxActiveStrategies) return false;
+      runCountByUser.set(s.user_id, used + 1);
+      return true;
+    });
+    const droppedByCap = eligibleUserStrategies.length - cappedUserStrategies.length;
+    if (droppedByCap > 0) {
+      await supabase.from("compliance_log").insert({
+        event_type: "strategy_cap_exceeded",
+        severity: "warning",
+        message: `${droppedByCap} active strategies skipped this cycle — over their tier's maxActiveStrategies cap`,
+        metadata: { run_id: runId, dropped: droppedByCap },
+      }).then(null, () => {});
+    }
+    let strategies = [...(systemStrategies || []), ...cappedUserStrategies];
 
     // Scoped manual run: filter AFTER eligibility so a request can't resurrect
     // an inactive or non-onboarded strategy. Matches instance id OR template id
