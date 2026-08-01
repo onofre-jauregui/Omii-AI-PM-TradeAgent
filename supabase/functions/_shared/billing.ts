@@ -39,6 +39,10 @@ export interface TierLimits {
   maxPositionUsd: number;
   /** Max distinct markets the agent watches per cron tick */
   maxMarketsWatched: number;
+  /** Max ACTIVE strategies auto-trade will run per user per cycle. Every
+   * active strategy costs LLM qualify calls + Kalshi round trips on a 5-min
+   * cron — this is the cost dimension user-authored strategies scale on. */
+  maxActiveStrategies: number;
   /** Live trading enabled? false = paper-only */
   liveTradingEnabled: boolean;
   /** Strategies the user is allowed to run */
@@ -70,7 +74,8 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
       maxTradesPerDay: 5,
       maxOpenPositions: 3,
       maxPositionUsd: 25,
-      maxMarketsWatched: 999999,
+      maxMarketsWatched: 50,
+      maxActiveStrategies: 3,
       liveTradingEnabled: false,
       allowedStrategies: ALL_STRATEGIES, // paper trades always allowed regardless of strategy
     },
@@ -83,7 +88,8 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
       maxTradesPerDay: 25,
       maxOpenPositions: 8,
       maxPositionUsd: 100,
-      maxMarketsWatched: 999999,
+      maxMarketsWatched: 200,
+      maxActiveStrategies: 5,
       liveTradingEnabled: true,
       allowedStrategies: ["S-001", "S-002", "S-004"],
     },
@@ -96,7 +102,8 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
       maxTradesPerDay: 100,
       maxOpenPositions: 25,
       maxPositionUsd: 500,
-      maxMarketsWatched: 999999,
+      maxMarketsWatched: 1000,
+      maxActiveStrategies: 15,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
     },
@@ -109,7 +116,8 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
       maxTradesPerDay: 1000,
       maxOpenPositions: 100,
       maxPositionUsd: 5000,
-      maxMarketsWatched: 999999,
+      maxMarketsWatched: 5000,
+      maxActiveStrategies: 50,
       liveTradingEnabled: true,
       allowedStrategies: ALL_STRATEGIES,
     },
@@ -151,6 +159,7 @@ export function resolveLimits(sub: SubscriptionRow | null): TierLimits {
     maxOpenPositions: sub?.max_open_positions ?? def.limits.maxOpenPositions,
     maxPositionUsd: sub?.max_position_usd ?? def.limits.maxPositionUsd,
     maxMarketsWatched: sub?.max_markets_watched ?? def.limits.maxMarketsWatched,
+    maxActiveStrategies: def.limits.maxActiveStrategies,
     liveTradingEnabled: def.limits.liveTradingEnabled,
     allowedStrategies: def.limits.allowedStrategies,
   };
