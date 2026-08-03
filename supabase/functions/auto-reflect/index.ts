@@ -931,6 +931,24 @@ Return ONLY valid JSON, no markdown, no extra text:
             .single());
         }
 
+        // Benign race, not a bug: the trade selected into this batch was deleted (or its id
+        // otherwise stopped existing in `trades`) before this loop reached it — a multi-second
+        // gap opens up here because each trade's LLM call above can take real wall-clock time,
+        // and a concurrent auto-reflect invocation (manual test run overlapping the hourly cron,
+        // for instance) can process + remove the same trade first. The schema already treats
+        // this as expected: trade_lessons.trade_id is ON DELETE SET NULL, not CASCADE, precisely
+        // so a lesson can outlive its parent trade. Nothing to write or retry — skip quietly.
+        if (lessonInsertError?.code === "23503") {
+          await supabase.from("compliance_log").insert({
+            event_type: "lesson_write_skipped_trade_gone",
+            severity: "info",
+            message:
+              `Skipped lesson for trade ${trade.id} (${trade.ticker}): trade no longer exists in "trades" (likely a concurrent reflect run already handled or removed it).`,
+            metadata: { trade_id: trade.id, ticker: trade.ticker },
+          }).then(undefined, () => {});
+          continue;
+        }
+
         if (lessonInsertError) {
           await supabase.from("compliance_log").insert({
             event_type: "lesson_write_error",
