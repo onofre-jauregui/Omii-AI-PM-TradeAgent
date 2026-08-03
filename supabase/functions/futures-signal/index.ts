@@ -1,8 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
+
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping
 
 /**
  * futures-signal: Fed funds futures vs Kalshi KXFED cross-market oracle.
@@ -139,11 +142,6 @@ function daysUntilDate(year: number, month: number, day: number): number {
   return (target - Date.now()) / (1000 * 60 * 60 * 24);
 }
 
-const toCents = (v: any): number | null => {
-  if (v == null) return null;
-  const n = Number(v);
-  return n > 1 ? Math.round(n) : Math.round(n * 100);
-};
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
@@ -167,8 +165,28 @@ serve(async (req) => {
     // Same anonymous-rate-tier issue fixed in kalshi-proxy/trading-agent
     // (2026-07-26): sign with the service-tenant credential when available.
     let kalshiHeaders: Record<string, string> = { "Accept": "application/json" };
-    const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-      await getKalshiCredentials(supabase, null);
+    // Bare `await` here would hang this whole try block forever on a stalled
+    // query — same class of unguarded-credential-fetch bug fixed in
+    // market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping.
+    // The outer catch below only fires on a *thrown* error, so an indefinite
+    // hang would never reach it and this cron run (every 10 min) would stall.
+    let serviceKeyId: string | null, servicePrivateKey: string | null;
+    {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+          CREDENTIAL_FETCH_TIMEOUT_MS
+        );
+      });
+      try {
+        const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+        serviceKeyId = creds.keyId;
+        servicePrivateKey = creds.privateKey;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
     if (serviceKeyId && servicePrivateKey) {
       kalshiHeaders = {
         ...kalshiHeaders,
@@ -407,8 +425,9 @@ serve(async (req) => {
       continue;
     }
 
-    const yesBid = toCents(market.yes_bid_dollars ?? market.yes_bid);
-    const yesAsk = toCents(market.yes_ask_dollars ?? market.yes_ask);
+    // Canonical converter — see _shared/kalshi-prices.ts.
+    const yesBid = marketFieldCents(market, "yes_bid");
+    const yesAsk = marketFieldCents(market, "yes_ask");
     const volume = Math.round(parseFloat(market.volume_fp || market.volume_24h_fp || market.volume || market.volume_24h || "0") || 0);
     const title: string = market.title || market.subtitle || ticker;
 

@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -180,11 +181,20 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
     const parsed = parseInt(value, 10);
     if (!value || isNaN(parsed) || parsed < 1) return;
     setSavingPositionSize(prev => ({ ...prev, [strategyId]: true }));
-    await supabase.from("strategy_config").upsert(
-      { strategy_id: strategyId, max_position_usd: parsed, updated_at: new Date().toISOString() },
-      { onConflict: "strategy_id" }
-    );
+    // Plain UPDATE, not upsert: strategy_config INSERT is service-role-only
+    // (a DB trigger seeds the row on strategy creation, so it always exists),
+    // and INSERT..ON CONFLICT needs INSERT privilege even when it resolves to
+    // an update. The old upsert also never checked its error — it silently
+    // failed for weeks after RLS tightened, showing a ✓ while saving nothing.
+    const { error, count } = await supabase
+      .from("strategy_config")
+      .update({ max_position_usd: parsed, updated_at: new Date().toISOString() }, { count: "exact" })
+      .eq("strategy_id", strategyId);
     setSavingPositionSize(prev => ({ ...prev, [strategyId]: false }));
+    if (error || count === 0) {
+      toast.error(error ? `Position size not saved: ${error.message}` : "Position size not saved — config row not found.");
+      return;
+    }
     setSavedPositionSize(prev => ({ ...prev, [strategyId]: true }));
     setTimeout(() => setSavedPositionSize(prev => ({ ...prev, [strategyId]: false })), 2000);
   };

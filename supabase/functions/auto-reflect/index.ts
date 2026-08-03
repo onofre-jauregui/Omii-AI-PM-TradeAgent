@@ -1,7 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
-import { sendTelegramAlert, alertOnce } from "../_shared/telegram.ts";
+import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
+import { computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
+import { applyLessonDedupeFilters } from "../_shared/lesson-dedupe.ts";
 
 /**
  * auto-reflect v2: Automated learning loop — Bayesian memory, Sharpe-based
@@ -25,15 +27,24 @@ const MIN_SAMPLE_TO_EXPOSE = 5;
 const QUARANTINE_THRESHOLD = 0.30;
 const QUARANTINE_MIN_SAMPLE = 10;
 
+// Same bound as kalshi-proxy/health-check/market-data-fetcher's fetch timeouts — a stalled
+// LLM or internal call here had no guard, so one hung request blocked this cron's entire
+// 15-minute cycle (lesson writing + compaction) up to the platform's own execution timeout.
+const FETCH_TIMEOUT_MS = 8_000;
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !supabaseKey) {
-    return new Response(JSON.stringify({ error: "Missing Supabase credentials" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: "Missing Supabase credentials" }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
+    );
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey);
@@ -47,7 +58,9 @@ serve(async (req) => {
 
     const { data: activeMemories } = await supabase
       .from("agent_memory")
-      .select("id, title, is_active, alpha, beta, trade_sample_size, last_updated_at, quarantined_at")
+      .select(
+        "id, title, is_active, alpha, beta, trade_sample_size, last_updated_at, quarantined_at",
+      )
       .eq("is_active", true);
 
     let memoriesUpdated = 0;
@@ -55,7 +68,9 @@ serve(async (req) => {
 
     for (const mem of activeMemories || []) {
       // Don't re-process if updated recently
-      const lastUpdate = new Date(mem.last_updated_at || mem.updated_at || "1970-01-01").getTime();
+      const lastUpdate = new Date(
+        mem.last_updated_at || mem.updated_at || "1970-01-01",
+      ).getTime();
       if (Date.now() - lastUpdate < MEMORY_UPDATE_COOLDOWN_MS) continue;
 
       // Find newly settled attributions since last update
@@ -93,17 +108,25 @@ serve(async (req) => {
 
       // Quarantine check
       let quarantinedAt = mem.quarantined_at;
-      if (sample >= QUARANTINE_MIN_SAMPLE &&
-          exposedConfidence !== null &&
-          exposedConfidence < QUARANTINE_THRESHOLD &&
-          !quarantinedAt) {
+      if (
+        sample >= QUARANTINE_MIN_SAMPLE &&
+        exposedConfidence !== null &&
+        exposedConfidence < QUARANTINE_THRESHOLD &&
+        !quarantinedAt
+      ) {
         quarantinedAt = new Date().toISOString();
         memoriesQuarantined++;
         await supabase.from("compliance_log").insert({
           event_type: "memory_quarantined",
           severity: "warning",
-          message: `Memory quarantined: "${mem.title}" — exposed confidence ${(exposedConfidence * 100).toFixed(1)}% after ${sample} trades (α=${alpha}, β=${beta})`,
-          metadata: { memory_id: mem.id, exposed_confidence: exposedConfidence, sample_size: sample },
+          message: `Memory quarantined: "${mem.title}" — exposed confidence ${
+            (exposedConfidence * 100).toFixed(1)
+          }% after ${sample} trades (α=${alpha}, β=${beta})`,
+          metadata: {
+            memory_id: mem.id,
+            exposed_confidence: exposedConfidence,
+            sample_size: sample,
+          },
         });
       }
 
@@ -136,7 +159,9 @@ serve(async (req) => {
 
     const { data: strategies } = await supabase
       .from("strategies")
-      .select("id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason, user_id");
+      .select(
+        "id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason, user_id",
+      );
 
     const strategyResults: any[] = [];
 
@@ -158,8 +183,12 @@ serve(async (req) => {
       await supabase.from("compliance_log").insert({
         event_type: "strategy_resumed",
         severity: "info",
-        message: `Strategy "${strat.name}" auto-resumed after suspension window ended.`,
-        metadata: { strategy_id: strat.id, suspension_reason: strat.suspension_reason },
+        message:
+          `Strategy "${strat.name}" auto-resumed after suspension window ended.`,
+        metadata: {
+          strategy_id: strat.id,
+          suspension_reason: strat.suspension_reason,
+        },
       });
 
       strategiesResumed++;
@@ -169,22 +198,47 @@ serve(async (req) => {
     const activeStrategies = (strategies || []).filter((s: any) => s.active);
 
     for (const strat of activeStrategies) {
-      // Fetch last 30 settled trades, oldest first for cumulative calculations
-      const { data: rawTrades } = await supabase
+      // Fetch last 30 settled trades, oldest first for cumulative calculations.
+      // "settled" is the status auto-settle stamps once a trade has a final pnl —
+      // "filled" means still open/unresolved and never carries settled_at. This query
+      // used to filter on status="filled", an impossible combination with
+      // settled_at IS NOT NULL, so it silently matched zero rows for every strategy —
+      // Strategy Health v2's Sharpe/drawdown/hit-rate/loss-streak suspension logic has
+      // never actually evaluated a single trade since it shipped. Confirmed via a direct
+      // count: 488 trades with status="settled" all carry settled_at; 13 with
+      // status="filled" carry none.
+      // strategy=eq.${strat.name} is a fallback for legacy rows with no strategy_id
+      // (162 such settled "Surface Arbitrage" rows exist). Without also scoping by
+      // mode, that fallback cross-contaminates: paper and live strategy rows share
+      // the same name, so the live strategy's rolling window pulled in hundreds of
+      // paper trades (and vice versa) — this is what produced an impossible ~596%
+      // "drawdown" and force-suspended live trading the first time this query ever
+      // ran real data (see status="settled" fix above). mode is on every trade row,
+      // so scoping the fallback by it keeps legacy-row coverage without mixing modes.
+      // order-then-limit bug: "settled_at ascending + limit 30" returns the OLDEST 30
+      // settled trades ever, not a rolling recent window — for S-001/S-005 (paper,
+      // trading since May) this permanently evaluated health against trades from
+      // 2026-05-19, frozen at strategy launch, never actually "rolling." Fetch the
+      // most recent 30 (descending) then reverse in-memory so the cumulative
+      // peak/drawdown math below still walks oldest-to-newest within that window.
+      const { data: rawTradesDesc } = await supabase
         .from("trades")
         .select("pnl, settled_at, status")
-        .eq("status", "filled")
+        .eq("status", "settled")
         .not("settled_at", "is", null)
+        .eq("mode", strat.mode)
         .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
-        .order("settled_at", { ascending: true })
+        .order("settled_at", { ascending: false })
         .limit(30);
+      const rawTrades = rawTradesDesc ? [...rawTradesDesc].reverse() : rawTradesDesc;
 
       if (!rawTrades || rawTrades.length === 0) {
         // Also check for any trades (not yet settled)
         const { data: anyTrades } = await supabase
           .from("trades")
           .select("id")
-          .eq("status", "filled")
+          .in("status", ["filled", "settled"])
+          .eq("mode", strat.mode)
           .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
           .limit(1);
 
@@ -203,22 +257,16 @@ serve(async (req) => {
 
       // Rolling Sharpe (per-trade)
       const mean = pnls.reduce((s: number, p: number) => s + p, 0) / n;
-      const variance = pnls.reduce((s: number, p: number) => s + (p - mean) ** 2, 0) / n;
+      const variance = pnls.reduce((s: number, p: number) =>
+        s + (p - mean) ** 2, 0) / n;
       const std = Math.sqrt(variance);
       const sharpe = std > 0 ? mean / std : 0;
 
-      // Max drawdown on cumulative PnL
-      let peak = 0;
-      let running = 0;
-      let maxDdPct = 0;
-      for (const p of pnls) {
-        running += p;
-        peak = Math.max(peak, running);
-        if (peak > 0) {
-          const dd = (peak - running) / peak;
-          maxDdPct = Math.max(maxDdPct, dd);
-        }
-      }
+      // Max drawdown, measured against the strategy's actual equity base
+      // (starting balance + cumulative P&L) — see strategy-health.ts for why
+      // raw cumulative-P&L-peak was producing >100% "drawdown" readings.
+      const startingBalance = Number(strat.starting_balance) || 1000;
+      const maxDdPct = computeMaxDrawdownPct(pnls, startingBalance);
 
       // Hit rate
       const wins = pnls.filter((p: number) => p > 0).length;
@@ -238,7 +286,8 @@ serve(async (req) => {
 
       // Suspension logic
       if (sharpe < -1.0 && n >= 20) {
-        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000)
+          .toISOString();
         await supabase.from("strategies").update({
           active: false,
           suspended_until: suspendUntil,
@@ -249,14 +298,28 @@ serve(async (req) => {
         await supabase.from("compliance_log").insert({
           event_type: "strategy_suspended_sharpe",
           severity: "warning",
-          message: `Strategy "${strat.name}" suspended 24h — Sharpe ${sharpe.toFixed(2)} over ${n} trades. Total P&L: $${totalPnl.toFixed(2)}.`,
-          metadata: { strategy_id: strat.id, sharpe, n, totalPnl, max_drawdown: maxDdPct, hit_rate: hitRate },
+          message: `Strategy "${strat.name}" suspended 24h — Sharpe ${
+            sharpe.toFixed(2)
+          } over ${n} trades. Total P&L: $${totalPnl.toFixed(2)}.`,
+          metadata: {
+            strategy_id: strat.id,
+            sharpe,
+            n,
+            totalPnl,
+            max_drawdown: maxDdPct,
+            hit_rate: hitRate,
+          },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, sharpe, action: "suspended_sharpe" });
-
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          sharpe,
+          action: "suspended_sharpe",
+        });
       } else if (maxDdPct > maxAcceptableDd && n >= 10) {
-        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000)
+          .toISOString();
         await supabase.from("strategies").update({
           active: false,
           suspended_until: suspendUntil,
@@ -267,14 +330,27 @@ serve(async (req) => {
         await supabase.from("compliance_log").insert({
           event_type: "strategy_suspended_drawdown",
           severity: "warning",
-          message: `Strategy "${strat.name}" suspended 24h — max drawdown ${(maxDdPct * 100).toFixed(1)}% exceeds ${(maxAcceptableDd * 100).toFixed(0)}% threshold.`,
-          metadata: { strategy_id: strat.id, max_drawdown: maxDdPct, threshold: maxAcceptableDd, n, totalPnl },
+          message: `Strategy "${strat.name}" suspended 24h — max drawdown ${
+            (maxDdPct * 100).toFixed(1)
+          }% exceeds ${(maxAcceptableDd * 100).toFixed(0)}% threshold.`,
+          metadata: {
+            strategy_id: strat.id,
+            max_drawdown: maxDdPct,
+            threshold: maxAcceptableDd,
+            n,
+            totalPnl,
+          },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, max_drawdown: maxDdPct, action: "suspended_drawdown" });
-
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          max_drawdown: maxDdPct,
+          action: "suspended_drawdown",
+        });
       } else if (hitRate < expectedHr - 0.20 && n >= 20) {
-        const suspendUntil = new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString();
+        const suspendUntil = new Date(now.getTime() + 72 * 60 * 60 * 1000)
+          .toISOString();
         await supabase.from("strategies").update({
           active: false,
           suspended_until: suspendUntil,
@@ -285,29 +361,66 @@ serve(async (req) => {
         await supabase.from("compliance_log").insert({
           event_type: "strategy_suspended_hitrate",
           severity: "warning",
-          message: `Strategy "${strat.name}" suspended 72h — hit rate ${(hitRate * 100).toFixed(0)}% vs expected ${(expectedHr * 100).toFixed(0)}% over ${n} trades.`,
-          metadata: { strategy_id: strat.id, hit_rate: hitRate, expected_hit_rate: expectedHr, n },
+          message: `Strategy "${strat.name}" suspended 72h — hit rate ${
+            (hitRate * 100).toFixed(0)
+          }% vs expected ${(expectedHr * 100).toFixed(0)}% over ${n} trades.`,
+          metadata: {
+            strategy_id: strat.id,
+            hit_rate: hitRate,
+            expected_hit_rate: expectedHr,
+            n,
+          },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, hit_rate: hitRate, action: "suspended_hitrate" });
-
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          hit_rate: hitRate,
+          action: "suspended_hitrate",
+        });
       } else if (consecutiveLosses >= 5) {
         // Suspend for 12h — auto-resume is handled by the loop above.
-        const suspendUntil = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
+        const suspendUntil = new Date(Date.now() + 12 * 60 * 60 * 1000)
+          .toISOString();
         await supabase.from("strategies")
-          .update({ suspended_until: suspendUntil, suspension_reason: "consecutive_loss_streak", active: false })
+          .update({
+            suspended_until: suspendUntil,
+            suspension_reason: "consecutive_loss_streak",
+            active: false,
+          })
           .eq("id", strat.id);
         await supabase.from("compliance_log").insert({
           event_type: "strategy_suspended_loss_streak",
           severity: "warning",
-          message: `Strategy "${strat.name}" suspended 12h — ${consecutiveLosses} consecutive losses. Sharpe: ${sharpe.toFixed(2)}, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
-          metadata: { strategy_id: strat.id, consecutiveLosses, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate },
+          message:
+            `Strategy "${strat.name}" suspended 12h — ${consecutiveLosses} consecutive losses. Sharpe: ${
+              sharpe.toFixed(2)
+            }, drawdown: ${(maxDdPct * 100).toFixed(1)}%.`,
+          metadata: {
+            strategy_id: strat.id,
+            consecutiveLosses,
+            sharpe,
+            max_drawdown: maxDdPct,
+            hit_rate: hitRate,
+          },
         });
 
-        strategyResults.push({ id: strat.id, name: strat.name, consecutiveLosses, action: "suspended_loss_streak" });
-
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          consecutiveLosses,
+          action: "suspended_loss_streak",
+        });
       } else {
-        strategyResults.push({ id: strat.id, name: strat.name, sharpe, max_drawdown: maxDdPct, hit_rate: hitRate, consecutiveLosses, action: "healthy" });
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          sharpe,
+          max_drawdown: maxDdPct,
+          hit_rate: hitRate,
+          consecutiveLosses,
+          action: "healthy",
+        });
       }
     }
 
@@ -319,22 +432,38 @@ serve(async (req) => {
     };
 
     // ── 3. Unreflected Trade Count ───────────────────────────────
+    // A trade only has something to reflect on once it's settled (final pnl known) —
+    // same status="filled" vs "settled" mismatch as Strategy Health v2 above.
+    //
+    // Was previously `.in("trade_id", filledIds)` — with 787 settled trades that
+    // built a ~29KB query string, which the REST gateway rejects outright with a
+    // plain-text 400 (not a PostgREST JSON error). supabase-js's destructured
+    // `{ data }` silently dropped the error, so `reflected` fell back to `[]` and
+    // every settled trade was reported unreflected regardless of truth — this
+    // metric read "787 unreflected" when only 27 trades actually lacked a
+    // trade_reflections row. Fetching the full (small, ~1:1-with-trades)
+    // trade_reflections table into a Set — the same pattern already used for
+    // learnedTradeIds below — avoids the oversized IN-list entirely and scales
+    // correctly as the trade count grows.
     const { data: allFilled } = await supabase
       .from("trades")
       .select("id")
-      .eq("status", "filled");
+      .eq("status", "settled");
 
     const filledIds = (allFilled || []).map((t: any) => t.id);
 
     let unreflectedCount = 0;
     if (filledIds.length > 0) {
-      const { data: reflected } = await supabase
+      const { data: allReflected } = await supabase
         .from("trade_reflections")
-        .select("trade_id")
-        .in("trade_id", filledIds);
+        .select("trade_id");
 
-      const reflectedIds = new Set((reflected || []).map((r: any) => r.trade_id));
-      unreflectedCount = filledIds.filter((id: string) => !reflectedIds.has(id)).length;
+      const reflectedIds = new Set(
+        (allReflected || []).map((r: any) => r.trade_id),
+      );
+      unreflectedCount = filledIds.filter((id: string) =>
+        !reflectedIds.has(id)
+      ).length;
     }
 
     results.unreflected_trades = unreflectedCount;
@@ -369,8 +498,11 @@ serve(async (req) => {
         if (!trade) continue;
 
         const pnl = Number(trade.pnl) || 0;
-        const directionMatch = (trade.side === "yes" && trade.action === "buy" && sig.direction === "buy_yes") ||
-                               (trade.side === "no" && trade.action === "buy" && sig.direction === "buy_no");
+        const directionMatch =
+          (trade.side === "yes" && trade.action === "buy" &&
+            sig.direction === "buy_yes") ||
+          (trade.side === "no" && trade.action === "buy" &&
+            sig.direction === "buy_no");
 
         await supabase.from("signals").update({
           outcome_pnl: pnl,
@@ -403,20 +535,36 @@ serve(async (req) => {
         .in("provider", ["openrouter", "openai"]);
       const lessonKeys: Record<string, string> = {};
       for (const row of lessonKeyRows || []) {
-        if (row.encrypted_secret) lessonKeys[row.provider] = row.encrypted_secret;
+        if (row.encrypted_secret) {
+          lessonKeys[row.provider] = row.encrypted_secret;
+        }
       }
-      if (!lessonKeys["openrouter"]) lessonKeys["openrouter"] = Deno.env.get("OPENROUTER_API_KEY") || "";
-      if (!lessonKeys["openai"]) lessonKeys["openai"] = Deno.env.get("OPENAI_API_KEY") || "";
+      if (!lessonKeys["openrouter"]) {
+        lessonKeys["openrouter"] = Deno.env.get("OPENROUTER_API_KEY") || "";
+      }
+      if (!lessonKeys["openai"]) {
+        lessonKeys["openai"] = Deno.env.get("OPENAI_API_KEY") || "";
+      }
       const lessonAiKey = lessonKeys["openrouter"] || lessonKeys["openai"];
       const lessonAiBaseUrl = lessonKeys["openrouter"] ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1";
-      const lessonAiModel = lessonKeys["openrouter"] ? "openai/gpt-4o-mini" : "gpt-4o-mini";
+      // Claude Sonnet 5 via the same already-wired OpenRouter key — GPT-4o-mini was
+      // producing thin, near-duplicate boilerplate lessons ("executed before the
+      // market could reprice") instead of distinct causal analysis. Falls back to
+      // gpt-4o-mini only when no OpenRouter key is configured (direct OpenAI key
+      // only) — Claude isn't reachable through OpenAI's own API.
+      const lessonAiModel = lessonKeys["openrouter"] ? "anthropic/claude-sonnet-5" : "gpt-4o-mini";
 
-      const windowAgo = new Date(Date.now() - LESSON_WINDOW_HOURS * 60 * 60 * 1000).toISOString();
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const windowAgo = new Date(
+        Date.now() - LESSON_WINDOW_HOURS * 60 * 60 * 1000,
+      ).toISOString();
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+        .toISOString();
 
       const { data: recentSettled } = await supabase
         .from("trades")
-        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating")
+        .select(
+          "id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating",
+        )
         .not("settled_at", "is", null)
         .not("pnl", "is", null)
         .neq("pnl", 0)
@@ -427,11 +575,15 @@ serve(async (req) => {
       const { data: existingLessonTradeIds } = await supabase
         .from("trade_lessons")
         .select("trade_id");
-      const learnedTradeIds = new Set((existingLessonTradeIds || []).map((r: any) => r.trade_id));
+      const learnedTradeIds = new Set(
+        (existingLessonTradeIds || []).map((r: any) => r.trade_id),
+      );
 
       const { data: catchUpSettled } = await supabase
         .from("trades")
-        .select("id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating")
+        .select(
+          "id, user_id, strategy_id, ticker, side, price, pnl, resolution, notes, settled_at, user_rating",
+        )
         .not("settled_at", "is", null)
         .not("pnl", "is", null)
         .neq("pnl", 0)
@@ -440,18 +592,34 @@ serve(async (req) => {
         .limit(20); // cap to avoid runaway processing
 
       // Merge: primary window trades + orphaned catch-up trades (no lesson yet)
-      const catchUpFiltered = (catchUpSettled || []).filter((t: any) => !learnedTradeIds.has(t.id));
+      const catchUpFiltered = (catchUpSettled || []).filter((t: any) =>
+        !learnedTradeIds.has(t.id)
+      );
       const allTradesToProcess = [...(recentSettled || []), ...catchUpFiltered];
 
       const settledIds = allTradesToProcess.map((t: any) => t.id);
       const existingLessons = settledIds.length > 0
-        ? (await supabase.from("trade_lessons").select("trade_id").in("trade_id", settledIds)).data || []
+        ? (await supabase.from("trade_lessons").select("trade_id").in(
+          "trade_id",
+          settledIds,
+        )).data || []
         : [];
-      const alreadyLearned = new Set(existingLessons.map((r: any) => r.trade_id));
+      const alreadyLearned = new Set(
+        existingLessons.map((r: any) => r.trade_id),
+      );
 
       // Single source of truth — MUST MATCH the trade_lessons_lesson_type_check constraint in the DB.
       // When adding a type here, also run a migration to extend that constraint.
-      const validLessonTypes = ["forecast_bias", "market_timing", "stale_signal", "kelly_mismatch", "signal_quality", "execution", "market_structure", "general"];
+      const validLessonTypes = [
+        "forecast_bias",
+        "market_timing",
+        "stale_signal",
+        "kelly_mismatch",
+        "signal_quality",
+        "execution",
+        "market_structure",
+        "general",
+      ];
 
       for (const trade of allTradesToProcess) {
         if (alreadyLearned.has(trade.id)) continue;
@@ -470,7 +638,9 @@ serve(async (req) => {
           .order("created_at", { ascending: false })
           .limit(5);
         const priorContext = (priorLessons || [])
-          .map((l: any) => `[${l.lesson_type}/${l.outcome}] ${l.ticker}: ${l.lesson}`)
+          .map((l: any) =>
+            `[${l.lesson_type}/${l.outcome}] ${l.ticker}: ${l.lesson}`
+          )
           .join("\n") || "none";
 
         // ── LLM-generated lesson (GPT-4o-mini, ~$0.001/trade) ──
@@ -485,7 +655,8 @@ serve(async (req) => {
 
         if (lessonAiKey) {
           try {
-            const lessonPrompt = `You are a trading post-mortem analyst for a Kalshi prediction market agent.
+            const lessonPrompt =
+              `You are a trading post-mortem analyst for a Kalshi prediction market agent.
 
 A trade has settled. Write a structured lesson so the agent avoids repeating mistakes and reinforces winning patterns.
 
@@ -495,15 +666,37 @@ Trade details:
 - Side bought: ${trade.side} at ${price}¢ (implied ${price}% probability)
 - Outcome: ${outcome.toUpperCase()} — P&L: $${pnl.toFixed(2)}
 - Market resolved: ${trade.resolution || "unknown"}
-- Signal notes: ${notes.slice(0, 300) || "none"}${trade.user_rating ? `\n- User rating: ${trade.user_rating === "good" ? "GOOD — user explicitly approved this trade decision" : "BAD — user explicitly flagged this as a poor decision"}` : ""}${(() => {
-  const staleMatch = notes.match(/signal_age=(\d+)m.*live_edge=(-?[\d.]+)c/);
-  const sigEdgeMatch = notes.match(/edge=(\d+)c/);
-  if (!staleMatch) return "";
-  const ageMin = parseInt(staleMatch[1]);
-  const liveEdge = parseFloat(staleMatch[2]);
-  const sigEdge = sigEdgeMatch ? parseInt(sigEdgeMatch[1]) : null;
-  return `\n- Signal age at trade time: ${ageMin} min | Live edge at trade: ${liveEdge.toFixed(1)}¢${sigEdge !== null ? ` (signal had ${sigEdge}¢ when written)` : ""}\n- Staleness delta: ${sigEdge !== null ? (sigEdge - liveEdge).toFixed(0) : "?"}¢ of edge evaporated between signal write and trade execution`;
-})()}
+- Signal notes: ${notes.slice(0, 300) || "none"}${
+                trade.user_rating
+                  ? `\n- User rating: ${
+                    trade.user_rating === "good"
+                      ? "GOOD — user explicitly approved this trade decision"
+                      : "BAD — user explicitly flagged this as a poor decision"
+                  }`
+                  : ""
+              }${
+                (() => {
+                  const staleMatch = notes.match(
+                    /signal_age=(\d+)m.*live_edge=(-?[\d.]+)c/,
+                  );
+                  const sigEdgeMatch = notes.match(/edge=(\d+)c/);
+                  if (!staleMatch) return "";
+                  const ageMin = parseInt(staleMatch[1]);
+                  const liveEdge = parseFloat(staleMatch[2]);
+                  const sigEdge = sigEdgeMatch
+                    ? parseInt(sigEdgeMatch[1])
+                    : null;
+                  return `\n- Signal age at trade time: ${ageMin} min | Live edge at trade: ${
+                    liveEdge.toFixed(1)
+                  }¢${
+                    sigEdge !== null
+                      ? ` (signal had ${sigEdge}¢ when written)`
+                      : ""
+                  }\n- Staleness delta: ${
+                    sigEdge !== null ? (sigEdge - liveEdge).toFixed(0) : "?"
+                  }¢ of edge evaporated between signal write and trade execution`;
+                })()
+              }
 
 Recent lessons from same strategy (last 7 days):
 ${priorContext}
@@ -528,16 +721,30 @@ Return ONLY valid JSON, no markdown, no extra text:
   "market_tags": ["<ticker_prefix_lowercase>", "<city_if_weather>", "<market_category>", "<month_if_seasonal>"]
 }`;
 
-            const llmResp = await fetch(`${lessonAiBaseUrl}/chat/completions`, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${lessonAiKey}`, "Content-Type": "application/json" },
-              body: JSON.stringify({
-                model: lessonAiModel,
-                messages: [{ role: "user", content: lessonPrompt }],
-                temperature: 0,
-                max_tokens: 400,
-              }),
-            });
+            const lessonController = new AbortController();
+            const lessonTimeoutId = setTimeout(
+              () => lessonController.abort(),
+              FETCH_TIMEOUT_MS,
+            );
+            let llmResp: Response;
+            try {
+              llmResp = await fetch(`${lessonAiBaseUrl}/chat/completions`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${lessonAiKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  model: lessonAiModel,
+                  messages: [{ role: "user", content: lessonPrompt }],
+                  temperature: 0,
+                  max_tokens: 400,
+                }),
+                signal: lessonController.signal,
+              });
+            } finally {
+              clearTimeout(lessonTimeoutId);
+            }
 
             if (llmResp.ok) {
               const llmData = await llmResp.json();
@@ -547,15 +754,22 @@ Return ONLY valid JSON, no markdown, no extra text:
               // Observability cost dashboard (ObservabilityPage.tsx) picks this up
               // for free — reflection LLM calls were previously invisible to cost tracking.
               const lessonPromptTokens = llmData.usage?.prompt_tokens ?? null;
-              const lessonCompletionTokens = llmData.usage?.completion_tokens ?? null;
-              if (lessonPromptTokens != null || lessonCompletionTokens != null) {
+              const lessonCompletionTokens = llmData.usage?.completion_tokens ??
+                null;
+              if (
+                lessonPromptTokens != null || lessonCompletionTokens != null
+              ) {
                 await supabase.from("compliance_log").insert({
                   event_type: "llm_usage",
                   severity: "info",
-                  message: `auto-reflect lesson: ${lessonPromptTokens ?? "?"} in / ${lessonCompletionTokens ?? "?"} out`,
+                  message: `auto-reflect lesson: ${
+                    lessonPromptTokens ?? "?"
+                  } in / ${lessonCompletionTokens ?? "?"} out`,
                   metadata: {
                     model: lessonAiModel,
-                    provider: lessonKeys["openrouter"] ? "openrouter" : "openai",
+                    provider: lessonKeys["openrouter"]
+                      ? "openrouter"
+                      : "openai",
                     prompt_tokens: lessonPromptTokens,
                     completion_tokens: lessonCompletionTokens,
                     total_tokens: llmData.usage?.total_tokens ?? null,
@@ -566,26 +780,42 @@ Return ONLY valid JSON, no markdown, no extra text:
               }
 
               // Strip markdown code fences if present
-              const jsonText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+              const jsonText = rawText.replace(/^```(?:json)?\s*/i, "").replace(
+                /\s*```$/,
+                "",
+              ).trim();
               const parsed = JSON.parse(jsonText);
 
-              if (parsed && typeof parsed.lesson === "string" && typeof parsed.do_differently === "string") {
-                lesson_type = validLessonTypes.includes(parsed.lesson_type) ? parsed.lesson_type : "general";
+              if (
+                parsed && typeof parsed.lesson === "string" &&
+                typeof parsed.do_differently === "string"
+              ) {
+                lesson_type = validLessonTypes.includes(parsed.lesson_type)
+                  ? parsed.lesson_type
+                  : "general";
                 lesson = parsed.lesson.slice(0, 500);
                 do_differently = parsed.do_differently.slice(0, 300);
                 llmShouldPromote = parsed.should_promote === true;
-                llmMarketTags = Array.isArray(parsed.market_tags) ? parsed.market_tags.map((t: any) => String(t).toLowerCase()) : [];
+                llmMarketTags = Array.isArray(parsed.market_tags)
+                  ? parsed.market_tags.map((t: any) => String(t).toLowerCase())
+                  : [];
                 llmPromotionReason = parsed.promotion_reason || null;
                 llmUsed = true;
               }
             }
           } catch (llmErr) {
             // LLM call failed — fall through to template fallback below
-            console.warn("Lesson LLM call failed, using template fallback:", llmErr instanceof Error ? llmErr.message : llmErr);
+            console.warn(
+              "Lesson LLM call failed, using template fallback:",
+              llmErr instanceof Error ? llmErr.message : llmErr,
+            );
             await supabase.from("compliance_log").insert({
               event_type: "lesson_llm_fallback",
               severity: "warning",
-              message: `Lesson LLM failed for ${trade.ticker} — using template. Error: ${llmErr instanceof Error ? llmErr.message : String(llmErr)}`,
+              message:
+                `Lesson LLM failed for ${trade.ticker} — using template. Error: ${
+                  llmErr instanceof Error ? llmErr.message : String(llmErr)
+                }`,
               metadata: { trade_id: trade.id, ticker: trade.ticker },
             }).then(undefined, () => {});
           }
@@ -596,29 +826,56 @@ Return ONLY valid JSON, no markdown, no extra text:
           if (outcome === "loss") {
             if (price < 10 || price > 90) {
               lesson_type = "signal_quality";
-              lesson = `Entered at ${price}¢ on ${trade.ticker}. Market already priced — not an edge. Lost $${Math.abs(pnl).toFixed(2)}.`;
-              do_differently = "IF price < 10¢ OR price > 90¢ THEN REJECT — market already resolved at extremes.";
+              lesson =
+                `Entered at ${price}¢ on ${trade.ticker}. Market already priced — not an edge. Lost $${
+                  Math.abs(pnl).toFixed(2)
+                }.`;
+              do_differently =
+                "IF price < 10¢ OR price > 90¢ THEN REJECT — market already resolved at extremes.";
             } else if (notes.includes("true_p=")) {
               lesson_type = "forecast_bias";
-              lesson = `S-005 loss on ${trade.ticker} at ${price}¢. GFS model probability did not match market outcome. Lost $${Math.abs(pnl).toFixed(2)}.`;
-              do_differently = "IF GFS true_p diverges from market price by > 30pp AND prior losses on this city in last 7 days >= 2 THEN REJECT.";
+              lesson =
+                `S-005 loss on ${trade.ticker} at ${price}¢. GFS model probability did not match market outcome. Lost $${
+                  Math.abs(pnl).toFixed(2)
+                }.`;
+              do_differently =
+                "IF GFS true_p diverges from market price by > 30pp AND prior losses on this city in last 7 days >= 2 THEN REJECT.";
             } else {
               lesson_type = "market_timing";
-              lesson = `Loss on ${trade.ticker}: bought ${trade.side} at ${price}¢. Lost $${Math.abs(pnl).toFixed(2)}.`;
-              do_differently = "IF same ticker_prefix has 2+ losses in last 7 days THEN REJECT next signal.";
+              lesson =
+                `Loss on ${trade.ticker}: bought ${trade.side} at ${price}¢. Lost $${
+                  Math.abs(pnl).toFixed(2)
+                }.`;
+              do_differently =
+                "IF same ticker_prefix has 2+ losses in last 7 days THEN REJECT next signal.";
             }
           } else {
             lesson_type = "general";
-            lesson = `Win on ${trade.ticker}: bought ${trade.side} at ${price}¢. Profit $${pnl.toFixed(2)}.`;
-            do_differently = "IF similar setup (same ticker_prefix, same side, similar price range) THEN QUALIFY.";
+            lesson =
+              `Win on ${trade.ticker}: bought ${trade.side} at ${price}¢. Profit $${
+                pnl.toFixed(2)
+              }.`;
+            do_differently =
+              "IF similar setup (same ticker_prefix, same side, similar price range) THEN QUALIFY.";
           }
         }
 
         // ── Insert trade_lesson ──
         const tickerBase = trade.ticker.split("-")[0].toLowerCase();
         const lessonTags = llmUsed
-          ? [...new Set([trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase, ...llmMarketTags].filter(Boolean))]
-          : [trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase].filter(Boolean);
+          ? [
+            ...new Set(
+              [
+                trade.strategy_id?.toLowerCase(),
+                lesson_type,
+                outcome,
+                tickerBase,
+                ...llmMarketTags,
+              ].filter(Boolean),
+            ),
+          ]
+          : [trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase]
+            .filter(Boolean);
 
         const lessonPayload = {
           trade_id: trade.id,
@@ -631,7 +888,14 @@ Return ONLY valid JSON, no markdown, no extra text:
           do_differently,
           confidence: 0.8,
           tags: lessonTags,
-          trade_context: { price, pnl, resolution: trade.resolution, notes: notes.slice(0, 200), llm_generated: llmUsed, user_rating: trade.user_rating ?? null },
+          trade_context: {
+            price,
+            pnl,
+            resolution: trade.resolution,
+            notes: notes.slice(0, 200),
+            llm_generated: llmUsed,
+            user_rating: trade.user_rating ?? null,
+          },
         };
 
         let { data: insertedLesson, error: lessonInsertError } = await supabase
@@ -646,12 +910,20 @@ Return ONLY valid JSON, no markdown, no extra text:
         // Fall back to 'general' (always in the constraint) so the lesson content survives,
         // and log the drift so the constraint gets updated. This exact drift on 'stale_signal'
         // silently lost ~80 lessons over 3 days (2026-07-03→07-06) before it was caught.
-        if (lessonInsertError?.code === "23514" && /lesson_type/.test(lessonInsertError.message ?? "")) {
+        if (
+          lessonInsertError?.code === "23514" &&
+          /lesson_type/.test(lessonInsertError.message ?? "")
+        ) {
           await supabase.from("compliance_log").insert({
             event_type: "lesson_type_constraint_drift",
             severity: "warning",
-            message: `lesson_type "${lesson_type}" rejected by DB constraint; retried as "general" for trade ${trade.id} (${trade.ticker}). Add "${lesson_type}" to trade_lessons_lesson_type_check.`,
-            metadata: { trade_id: trade.id, ticker: trade.ticker, rejected_lesson_type: lesson_type },
+            message:
+              `lesson_type "${lesson_type}" rejected by DB constraint; retried as "general" for trade ${trade.id} (${trade.ticker}). Add "${lesson_type}" to trade_lessons_lesson_type_check.`,
+            metadata: {
+              trade_id: trade.id,
+              ticker: trade.ticker,
+              rejected_lesson_type: lesson_type,
+            },
           }).then(undefined, () => {});
           ({ data: insertedLesson, error: lessonInsertError } = await supabase
             .from("trade_lessons")
@@ -660,12 +932,35 @@ Return ONLY valid JSON, no markdown, no extra text:
             .single());
         }
 
+        // Benign race, not a bug: the trade selected into this batch was deleted (or its id
+        // otherwise stopped existing in `trades`) before this loop reached it — a multi-second
+        // gap opens up here because each trade's LLM call above can take real wall-clock time,
+        // and a concurrent auto-reflect invocation (manual test run overlapping the hourly cron,
+        // for instance) can process + remove the same trade first. The schema already treats
+        // this as expected: trade_lessons.trade_id is ON DELETE SET NULL, not CASCADE, precisely
+        // so a lesson can outlive its parent trade. Nothing to write or retry — skip quietly.
+        if (lessonInsertError?.code === "23503") {
+          await supabase.from("compliance_log").insert({
+            event_type: "lesson_write_skipped_trade_gone",
+            severity: "info",
+            message:
+              `Skipped lesson for trade ${trade.id} (${trade.ticker}): trade no longer exists in "trades" (likely a concurrent reflect run already handled or removed it).`,
+            metadata: { trade_id: trade.id, ticker: trade.ticker },
+          }).then(undefined, () => {});
+          continue;
+        }
+
         if (lessonInsertError) {
           await supabase.from("compliance_log").insert({
             event_type: "lesson_write_error",
             severity: "error",
-            message: `Failed to write lesson for trade ${trade.id} (${trade.ticker}): ${lessonInsertError.message}`,
-            metadata: { trade_id: trade.id, ticker: trade.ticker, error: lessonInsertError },
+            message:
+              `Failed to write lesson for trade ${trade.id} (${trade.ticker}): ${lessonInsertError.message}`,
+            metadata: {
+              trade_id: trade.id,
+              ticker: trade.ticker,
+              error: lessonInsertError,
+            },
           });
           // Dedupe on the error signature (not the trade) so a persistent write failure
           // alerts once per 2h instead of once per failing trade per reflect cycle — this
@@ -706,28 +1001,56 @@ Return ONLY valid JSON, no markdown, no extra text:
             .contains("tags", [tickerBase])
             .gte("created_at", sevenDaysAgo),
         ]);
-        const isPattern    = (lossPatternRes.data?.length ?? 0) >= 2;
-        const isWinPattern = (winPatternRes.data?.length  ?? 0) >= 3;
-        const userFlaggedBad  = trade.user_rating === "bad";
+        const isPattern = (lossPatternRes.data?.length ?? 0) >= 2;
+        const isWinPattern = (winPatternRes.data?.length ?? 0) >= 3;
+        const userFlaggedBad = trade.user_rating === "bad";
         const userFlaggedGood = trade.user_rating === "good";
-        const shouldPromote = llmShouldPromote || isPattern || isWinPattern
-                            || absP >= 10 || userFlaggedBad || userFlaggedGood;
+        const shouldPromote = llmShouldPromote || isPattern || isWinPattern ||
+          absP >= 10 || userFlaggedBad || userFlaggedGood;
 
         if (shouldPromote) {
           // Memory content = the IF/THEN rule the qualify prompt should act on
           const memoryContent = do_differently;
           const memoryTitle = do_differently.slice(0, 80);
           const memoryTags = llmUsed
-            ? [...new Set([trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase, ...llmMarketTags].filter(Boolean))]
-            : [trade.strategy_id?.toLowerCase(), lesson_type, outcome, tickerBase].filter(Boolean);
+            ? [
+              ...new Set(
+                [
+                  trade.strategy_id?.toLowerCase(),
+                  lesson_type,
+                  outcome,
+                  tickerBase,
+                  ...llmMarketTags,
+                ].filter(Boolean),
+              ),
+            ]
+            : [
+              trade.strategy_id?.toLowerCase(),
+              lesson_type,
+              outcome,
+              tickerBase,
+            ].filter(Boolean);
 
-          const { data: existingMem } = await supabase
-            .from("agent_memory")
-            .select("id, confirmations, confidence")
-            .eq("is_active", true)
-            .eq("memory_type", "lesson")
-            .contains("tags", [tickerBase])
-            .gte("created_at", sevenDaysAgo)
+          // Dedupe must match the identity of the row we would otherwise INSERT:
+          // same owner, same strategy, same outcome, same ticker family. Matching on
+          // tickerBase alone merged across all four axes — on 2026-08-01 a $22 LIVE LOSS
+          // on KXBTC-26AUG0117-B62625 landed on memory ee7b6407 (tagged "win",
+          // confirmations 27) and bumped its confidence to 0.99 four seconds after
+          // settlement, so the agent booked a total loss as further proof of a winning
+          // rule and wrote no loss lesson at all. Scoping by outcome is what makes a loss
+          // incapable of reinforcing a win; user_id/strategy_id stop cross-tenant bleed.
+          const { data: existingMem } = await applyLessonDedupeFilters(
+            supabase
+              .from("agent_memory")
+              .select("id, confirmations, confidence"),
+            {
+              tickerBase,
+              outcome,
+              strategyId: trade.strategy_id ?? null,
+              userId: trade.user_id ?? null,
+            },
+            sevenDaysAgo,
+          )
             .limit(1)
             .maybeSingle();
 
@@ -735,33 +1058,78 @@ Return ONLY valid JSON, no markdown, no extra text:
             await supabase.from("agent_memory").update({
               confirmations: (existingMem.confirmations || 1) + 1,
               // User-flagged trades get a stronger bump; good slightly less than bad (bad = avoid hard)
-              confidence: Math.min(0.99, (existingMem.confidence || 0.85) + (userFlaggedBad ? 0.05 : userFlaggedGood ? 0.04 : 0.02)),
+              confidence: Math.min(
+                0.99,
+                (existingMem.confidence || 0.85) +
+                  (userFlaggedBad ? 0.05 : userFlaggedGood ? 0.04 : 0.02),
+              ),
               // Update content with latest rule — LLM may have refined it
-              ...(llmUsed ? { content: memoryContent, summary: memoryContent.slice(0, 120) } : {}),
+              ...(llmUsed
+                ? {
+                  content: memoryContent,
+                  summary: memoryContent.slice(0, 120),
+                }
+                : {}),
               updated_at: new Date().toISOString(),
               last_updated_at: new Date().toISOString(),
             }).eq("id", existingMem.id);
           } else {
-            await supabase.from("agent_memory").insert({
-              memory_type: "lesson",
-              title: memoryTitle,
-              content: memoryContent,
-              source_type: "trade_outcome",
-              user_id: trade.user_id ?? null,
-              strategy_id: trade.strategy_id,
-              tags: [...memoryTags, ...(trade.user_rating ? ["user_rated", `user_${trade.user_rating}`] : [])],
-              confidence: userFlaggedBad ? 0.90 : userFlaggedGood ? 0.88 : (outcome === "loss" ? 0.85 : 0.75),
-              confirmations: 1,
-              is_active: true,
-              summary: memoryContent.slice(0, 120),
-            });
+            // Checked write. This insert used to be fire-and-forget: a rejected row
+            // (CHECK violation, RLS, bad enum) vanished with no trace while the run
+            // still reported success, so the learning loop could silently stop
+            // recording lessons for days. The trade_lessons insert above already logs
+            // its failures — this one now does too.
+            const { error: memInsertError } = await supabase
+              .from("agent_memory").insert({
+                memory_type: "lesson",
+                title: memoryTitle,
+                content: memoryContent,
+                source_type: "trade_outcome",
+                user_id: trade.user_id ?? null,
+                strategy_id: trade.strategy_id,
+                tags: [
+                  ...memoryTags,
+                  ...(trade.user_rating
+                    ? ["user_rated", `user_${trade.user_rating}`]
+                    : []),
+                ],
+                confidence: userFlaggedBad
+                  ? 0.90
+                  : userFlaggedGood
+                  ? 0.88
+                  : (outcome === "loss" ? 0.85 : 0.75),
+                confirmations: 1,
+                is_active: true,
+                summary: memoryContent.slice(0, 120),
+              });
+            if (memInsertError) {
+              console.error(
+                `agent_memory insert failed for trade ${trade.id}: ${memInsertError.message}`,
+              );
+              await supabase.from("compliance_log").insert({
+                event_type: "agent_memory_insert_failed",
+                severity: "error",
+                message:
+                  `auto-reflect could not persist a ${outcome} lesson for ${trade.ticker}: ${memInsertError.message}`,
+                metadata: {
+                  trade_id: trade.id,
+                  ticker: trade.ticker,
+                  outcome,
+                  strategy_id: trade.strategy_id,
+                  code: memInsertError.code,
+                },
+                user_id: trade.user_id ?? null,
+              }).then(null, () => {});
+            }
           }
         }
 
         lessonsWritten++;
       }
     } catch (lessonErr) {
-      const msg = lessonErr instanceof Error ? lessonErr.message : String(lessonErr);
+      const msg = lessonErr instanceof Error
+        ? lessonErr.message
+        : String(lessonErr);
       console.error("Lesson writing error:", msg);
       await supabase.from("compliance_log").insert({
         event_type: "lesson_write_error",
@@ -770,8 +1138,14 @@ Return ONLY valid JSON, no markdown, no extra text:
         metadata: { partial_results: results },
       }).then(undefined, () => {});
       // Lesson loop failure means trades aren't being learned from — alert on first occurrence.
-      await alertOnce(supabase, "lesson_write_error", msg.slice(0, 60), 2,
-        `⚠️ <b>[TradeAgent] Lesson Write Error</b>\nThe learning loop failed — trades are not being reflected into agent memory.\nError: ${msg.slice(0, 300)}`
+      await alertOnce(
+        supabase,
+        "lesson_write_error",
+        msg.slice(0, 60),
+        2,
+        `⚠️ <b>[TradeAgent] Lesson Write Error</b>\nThe learning loop failed — trades are not being reflected into agent memory.\nError: ${
+          msg.slice(0, 300)
+        }`,
       ).catch(() => {});
     }
 
@@ -793,17 +1167,28 @@ Return ONLY valid JSON, no markdown, no extra text:
         .maybeSingle();
 
       if (!recentCompaction) {
-        const compactResp = await fetch(
-          `${supabaseUrl}/functions/v1/compact-memory`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${supabaseKey}`,
-              "Content-Type": "application/json",
-            },
-            body: "{}",
-          }
+        const compactionController = new AbortController();
+        const compactionTimeoutId = setTimeout(
+          () => compactionController.abort(),
+          FETCH_TIMEOUT_MS,
         );
+        let compactResp: Response;
+        try {
+          compactResp = await fetch(
+            `${supabaseUrl}/functions/v1/compact-memory`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${supabaseKey}`,
+                "Content-Type": "application/json",
+              },
+              body: "{}",
+              signal: compactionController.signal,
+            },
+          );
+        } finally {
+          clearTimeout(compactionTimeoutId);
+        }
         if (compactResp.ok) {
           compactionResult = await compactResp.json();
         }
@@ -840,7 +1225,9 @@ Return ONLY valid JSON, no markdown, no extra text:
       }
     } catch (backfillErr) {
       // Bayesian confidence scores depend on settled PnL — silent failure here corrupts the learning loop.
-      const msg = backfillErr instanceof Error ? backfillErr.message : String(backfillErr);
+      const msg = backfillErr instanceof Error
+        ? backfillErr.message
+        : String(backfillErr);
       console.error("memory_attribution backfill failed:", msg);
       await supabase.from("compliance_log").insert({
         event_type: "memory_attribution_backfill_error",
@@ -848,8 +1235,14 @@ Return ONLY valid JSON, no markdown, no extra text:
         message: `memory_attribution backfill failed: ${msg}`,
         metadata: { partial_results: results },
       }).then(undefined, () => {});
-      await alertOnce(supabase, "memory_attribution_backfill_error", msg.slice(0, 60), 4,
-        `⚠️ <b>[TradeAgent] Memory Attribution Backfill Failed</b>\nBayesian confidence scores will drift — settled PnL is not being linked to memory.\nError: ${msg.slice(0, 300)}`
+      await alertOnce(
+        supabase,
+        "memory_attribution_backfill_error",
+        msg.slice(0, 60),
+        4,
+        `⚠️ <b>[TradeAgent] Memory Attribution Backfill Failed</b>\nBayesian confidence scores will drift — settled PnL is not being linked to memory.\nError: ${
+          msg.slice(0, 300)
+        }`,
       ).catch(() => {});
     }
 
@@ -857,14 +1250,16 @@ Return ONLY valid JSON, no markdown, no extra text:
     await supabase.from("compliance_log").insert({
       event_type: "auto_reflect_run",
       severity: "info",
-      message: `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${compactionResult?.summarized || 0} summarized`,
+      message:
+        `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${
+          compactionResult?.summarized || 0
+        } summarized`,
       metadata: results,
     });
 
     return new Response(JSON.stringify({ success: true, ...results }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : "Unknown error";
     console.error("auto-reflect error:", e);
@@ -874,20 +1269,26 @@ Return ONLY valid JSON, no markdown, no extra text:
         event_type: "auto_reflect_error",
         severity: "critical",
         message: `Auto-reflect v2 CRASHED: ${errMsg}`,
-        metadata: { stack: e instanceof Error ? e.stack : undefined, partial_results: results },
+        metadata: {
+          stack: e instanceof Error ? e.stack : undefined,
+          partial_results: results,
+        },
       });
     } catch { /* swallow — don't let the error handler throw */ }
 
     // Agent memory and learning loop is stopped until this is fixed. Must alert immediately.
     await sendTelegramAlert(
       `🚨 <b>[TradeAgent] auto-reflect CRASHED</b>\n` +
-      `The learning loop is stopped — memory updates, lessons, and strategy health checks are not running.\n` +
-      `Error: ${errMsg.slice(0, 300)}`
+        `The learning loop is stopped — memory updates, lessons, and strategy health checks are not running.\n` +
+        `Error: ${errMsg.slice(0, 300)}`,
     ).catch(() => {});
 
     return new Response(
       JSON.stringify({ error: errMsg, partial_results: results }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
     );
   }
 });

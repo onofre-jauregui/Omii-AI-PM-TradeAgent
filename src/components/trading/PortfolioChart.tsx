@@ -1,7 +1,7 @@
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Area, AreaChart, XAxis, YAxis } from "recharts";
 import { Loader2 } from "lucide-react";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 
 interface ChartPoint {
@@ -33,8 +33,14 @@ export function PortfolioChart({
   const [chartData, setChartData] = useState<ChartPoint[]>([]);
   const [startingBalance, setStartingBalance] = useState(FALLBACK_STARTING_BALANCE);
   const [loading, setLoading] = useState(true);
+  // Tracks the mode currently selected in the UI. A fetch started for a mode
+  // the user has since switched away from checks this before writing state,
+  // so a slow response for the old mode can never overwrite the new one's data.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   const loadChartData = useCallback(async () => {
+    const requestMode = mode;
     setLoading(true);
 
     // Get starting balance from strategies table (same source as DashboardHero).
@@ -47,7 +53,6 @@ export function PortfolioChart({
     const balance = strategyRows && strategyRows.length > 0
       ? strategyRows.reduce((s, r) => s + (r.starting_balance ?? 0), 0)
       : FALLBACK_STARTING_BALANCE;
-    setStartingBalance(balance);
 
     // Query settled trades only — pnl is 0 on filled trades until Kalshi resolves
     let q = supabase
@@ -61,6 +66,12 @@ export function PortfolioChart({
     if (strategyFilter) q = q.eq("strategy", strategyFilter);
 
     const { data: trades } = await q;
+
+    // The user may have switched mode/strategy while these two queries were
+    // in flight — discard this response rather than overwrite newer data.
+    if (requestMode !== modeRef.current) return;
+
+    setStartingBalance(balance);
 
     if (!trades || trades.length === 0) {
       setChartData([
@@ -110,7 +121,10 @@ export function PortfolioChart({
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  }, [loadChartData]);
+  // mode/strategyFilter are already implied by loadChartData's own deps (it's rebuilt
+  // whenever either changes), listed explicitly here only to satisfy exhaustive-deps —
+  // no new re-run case is introduced.
+  }, [loadChartData, mode, strategyFilter]);
 
   if (loading) {
     return (

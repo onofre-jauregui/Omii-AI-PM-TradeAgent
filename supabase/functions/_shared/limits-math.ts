@@ -3,7 +3,7 @@
  * safe to run under Vitest (Node) and Deno. The I/O wrapper lives in limits.ts.
  *
  * This is deliberately separate from limits.ts: limits.ts imports tenant.ts,
- * which imports the Supabase client from an esm.sh URL that Vitest can't resolve.
+ * which imports the Supabase client from an npm: specifier that Vitest can't resolve.
  * Keeping the testable math here lets limits.test.ts import a pure chain.
  *
  * See limits.ts for the full behavior contract (PR2 = behavior-preserving).

@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   KALSHI_BASE_URL,
   generateAuthHeaders,
@@ -60,16 +60,62 @@ serve(async (_req) => {
   let consecutiveFailures = 0;
   let abortReason: string | null = null;
 
-  const { keyId, privateKey } = await getKalshiCredentials(supabase, null);
+  let keyId: string | null = null;
+  let privateKey: string | null = null;
 
-  if (!keyId || !privateKey) {
+  // Credential fetch has no per-request budget check like the series loop below,
+  // so a stalled query here (2026-07-13: 130.6s, 2026-07-16: 61.4s) silently ate the
+  // entire run and skipped all series with no accurate cause. Bound it to the same
+  // REQUEST_TIMEOUT_MS used per-series so a hang fails fast with a real reason
+  // instead of a generic "run budget exceeded".
+  //
+  // The 8s bound alone (2026-07-28 fix) still let one slow query nuke a whole 5-min
+  // cycle: 2026-07-23 and 2026-07-29 both hit it again, each skipping all 18 series
+  // for a transient timeout, while the same underlying credential lookup succeeds
+  // moments later elsewhere (kalshi-proxy's per-request calls fall back and self-heal
+  // within the same window — see compliance_log `kalshi_proxy_service_credential_fetch_failed`
+  // rows bracketing both incidents). One retry absorbs that transient blip; a run
+  // budget of 50s comfortably covers two 8s attempts plus the series loop.
+  const fetchCredsOnce = () => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`credential fetch exceeded ${REQUEST_TIMEOUT_MS}ms`)),
+        REQUEST_TIMEOUT_MS
+      );
+    });
+    return Promise.race([getKalshiCredentials(supabase, null), timeout]).finally(() =>
+      clearTimeout(timeoutId)
+    );
+  };
+
+  try {
+    try {
+      const creds = await fetchCredsOnce();
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    } catch (firstErr) {
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.error(`market-data-fetcher: credential fetch failed or timed out, retrying once: ${firstMsg}`);
+      const creds = await fetchCredsOnce();
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`market-data-fetcher: credential fetch failed or timed out after retry: ${msg}`);
+    abortReason = `credential fetch failed or timed out after retry (${msg})`;
+    skippedSeries = [...SERIES];
+  }
+
+  if (!abortReason && (!keyId || !privateKey)) {
     console.warn(
       "market-data-fetcher: Kalshi credentials not configured. " +
       "Running unauthenticated — rate limits are lower."
     );
   }
 
-  for (const series of SERIES) {
+  for (const series of abortReason ? [] : SERIES) {
     // ── Run budget check ──────────────────────────────────────────
     const elapsed = Date.now() - runStart;
     if (elapsed >= RUN_BUDGET_MS) {

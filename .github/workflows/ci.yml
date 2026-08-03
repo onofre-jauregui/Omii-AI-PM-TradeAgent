@@ -20,6 +20,37 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # ─── Job 1b: Guard — schedule-triggered workflows must be live on main ────
+  # GitHub Actions only ever evaluates a `schedule:` trigger from the repo's
+  # *default* branch (`main` here) — a scheduled workflow merged to `dev` is
+  # never registered, never runs, and doesn't even show up in
+  # `gh workflow list`. The 90th health check built
+  # `function-drift-check.yml` believing "merged to dev" was enough; it sat
+  # completely inert. Non-blocking by design: a health-check PR into `dev`
+  # can't fix an existing gap that requires promoting `dev` → `main` (a Hard
+  # Stop only Onofre can trigger), so this only needs to make the gap loud,
+  # not fail unrelated PRs. See DECISIONS.md (2026-07-30, 91st run).
+  schedule-workflow-drift:
+    name: Guard — schedule-triggered workflows live on main?
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check every schedule-triggered workflow exists and matches on origin/main
+        run: |
+          for f in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$f" ] || continue
+            if grep -qE '^\s*schedule:' "$f"; then
+              if ! git show "origin/main:$f" > /tmp/main_version.yml 2>/dev/null; then
+                echo "::error file=$f::Uses 'schedule:' but does not exist on origin/main. GitHub Actions only evaluates scheduled triggers on the default branch — this workflow will NEVER fire until it's promoted to main (or it stays dead weight if intentionally dev-only)."
+              elif ! diff -q "$f" /tmp/main_version.yml > /dev/null 2>&1; then
+                echo "::warning file=$f::Differs from the version on origin/main. The copy actually running on schedule is main's, not this branch's."
+              fi
+            fi
+          done
+          exit 0
+
   # ─── Job 2: Apply migrations → staging DB (dev push only) ─────────────────
   migrate-staging:
     name: Apply migrations → staging DB
@@ -36,7 +67,10 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
         run: |
-          # Apply any migrations not yet in the remote history table, via Management API
+          # Apply any migrations not yet in the remote history table, via Management API.
+          # Fails the job hard on the first bad migration instead of silently recording it as
+          # applied — a prior version of this loop swallowed failures with `|| echo WARN`, which
+          # let staging drift ~40 migrations behind `main` undetected (see DECISIONS.md, 2026-07-27).
           APPLIED=$(curl -sf -X POST \
             "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -44,19 +78,25 @@ jobs:
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
           for f in $(ls supabase/migrations/*.sql | sort); do
-            VERSION=$(basename "$f" .sql | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION"; then
+            # Full filename stem going forward, so same-day multi-file migrations get distinct
+            # keys. Also check the legacy date-only prefix so migrations already recorded under
+            # the old (buggy) scheme aren't re-applied wholesale by this fix.
+            VERSION=$(basename "$f" .sql)
+            LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
               echo "Already applied: $VERSION"
               continue
             fi
             echo "Applying: $VERSION"
             SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
-            RESULT=$(curl -sf -X POST \
+            curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
-            # Record in migration history
+              -d "{\"query\": $SQL}"
+            echo "OK: $VERSION"
+            # Only record history on confirmed success — `curl -sf` above already aborts the
+            # job (bash -e) on a non-2xx response, so reaching this line means it applied clean.
             curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -79,9 +119,41 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
+          # Retry each function's deploy with backoff before failing loud, so a single
+          # transient deploy hiccup doesn't require a manual rerun.
+          #
+          # 2026-07-29 (72nd health check, run 30431158450): bundling used to import
+          # supabase-js from esm.sh at deploy time; a transient CDN 5xx there (observed
+          # 2026-07-28, run 30357821307: "Import ... failed: 522") aborted the whole job
+          # under `bash -e` and blocked staging/e2e for every function, not just the one
+          # that hit the blip. The original 3-attempt/flat-15s budget (~45s) was exhausted
+          # by manage-billing while esm.sh stayed unreachable for over 2 minutes straight
+          # (07:28:55-07:30:47). Widened to 5 attempts with exponential backoff
+          # (15/30/60/120s, ~3.75min budget) as a stopgap.
+          #
+          # 2026-07-29 (77th health check, run 30450872671): the widened budget was
+          # exhausted again — futures-signal failed after all 5 attempts (~7min) while
+          # esm.sh 522'd repeatedly. Root cause fixed at the source instead of widening
+          # further: every function now imports supabase-js via the `npm:` specifier
+          # (Deno's native npm-registry resolution) instead of esm.sh's CDN, so this CI
+          # step no longer depends on esm.sh's availability at all. This retry loop stays
+          # as defense-in-depth against any other transient deploy hiccup (npm registry,
+          # Supabase API), not as the primary fix.
           for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
-            npx supabase functions deploy "$fn" \
-              --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+            delay=15
+            for attempt in 1 2 3 4 5; do
+              if npx supabase functions deploy "$fn" \
+                --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}; then
+                break
+              fi
+              if [ "$attempt" = 5 ]; then
+                echo "Deploy failed for $fn after 5 attempts"
+                exit 1
+              fi
+              echo "Deploy attempt $attempt failed for $fn, retrying in ${delay}s..."
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
           done
 
   # ─── Job 4: E2E smoke tests → kalshitradeagent.live (dev push only) ───────
@@ -126,6 +198,8 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
         run: |
+          # Same fail-loud / success-only-recording / collision-safe scheme as migrate-staging
+          # above — see that job's comments and DECISIONS.md (2026-07-27) for why.
           APPLIED=$(curl -sf -X POST \
             "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
             -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -133,18 +207,20 @@ jobs:
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
           for f in $(ls supabase/migrations/*.sql | sort); do
-            VERSION=$(basename "$f" .sql | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION"; then
+            VERSION=$(basename "$f" .sql)
+            LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
+            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
               echo "Already applied: $VERSION"
               continue
             fi
             echo "Applying: $VERSION"
             SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
-            RESULT=$(curl -sf -X POST \
+            curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "{\"query\": $SQL}" 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"
+              -d "{\"query\": $SQL}"
+            echo "OK: $VERSION"
             curl -sf -X POST \
               "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
               -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
@@ -171,9 +247,21 @@ jobs:
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
+          # Same transient-esm.sh-CDN retry as the staging deploy job — see that job's comment
+          # (2026-07-28, run 30357821307) for the incident this guards against.
           for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
-            npx supabase functions deploy "$fn" \
-              --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+            for attempt in 1 2 3; do
+              if npx supabase functions deploy "$fn" \
+                --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "Deploy failed for $fn after 3 attempts"
+                exit 1
+              fi
+              echo "Deploy attempt $attempt failed for $fn, retrying in 15s..."
+              sleep 15
+            done
           done
       - name: Save prior SHA as artifact for canary gate
         run: echo "$PRIOR_FUNCTIONS_SHA" > prior-sha.txt

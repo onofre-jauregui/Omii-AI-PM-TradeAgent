@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 
 /**
@@ -9,6 +9,8 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
  *
  * Required Supabase secrets: STRIPE_SECRET_KEY, FRONTEND_URL
  */
+
+const STRIPE_FETCH_TIMEOUT_MS = 8_000; // same convention as kalshi-ping/health-check's BALANCE_FETCH_TIMEOUT_MS
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -50,18 +52,37 @@ serve(async (req) => {
     return json({ error: "No active subscription found. Upgrade to a paid plan first." }, 404);
   }
 
-  // Create a Stripe Billing Portal session
-  const portalResp = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${stripeKey}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      customer: sub.stripe_customer_id,
-      return_url: `${frontendUrl}/billing`,
-    }),
-  });
+  // Create a Stripe Billing Portal session.
+  // Bare `await fetch()` here had no timeout — same failure shape as
+  // create-checkout's Stripe calls: a stalled response left a paying customer's
+  // "Manage billing" click spinning indefinitely with no error ever surfaced.
+  const portalController = new AbortController();
+  const portalTimeoutId = setTimeout(() => portalController.abort(), STRIPE_FETCH_TIMEOUT_MS);
+  let portalResp: Response;
+  try {
+    try {
+      portalResp = await fetch("https://api.stripe.com/v1/billing_portal/sessions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${stripeKey}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          customer: sub.stripe_customer_id,
+          return_url: `${frontendUrl}/billing`,
+        }),
+        signal: portalController.signal,
+      });
+    } finally {
+      clearTimeout(portalTimeoutId);
+    }
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      console.error(`manage-billing: Stripe portal fetch exceeded ${STRIPE_FETCH_TIMEOUT_MS}ms`);
+      return json({ error: "Stripe didn't respond in time — please try again." }, 504);
+    }
+    throw e;
+  }
 
   const portal = await portalResp.json();
   if (!portalResp.ok) {

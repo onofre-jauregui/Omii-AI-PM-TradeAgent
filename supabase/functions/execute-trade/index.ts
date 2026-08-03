@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "../_shared/risk.ts";
@@ -23,9 +23,14 @@ async function checkRateLimit(supabase: any, userId: string, isPaper: boolean): 
   const limit = isPaper ? 15 : 3;
   const windowStart = new Date(Math.floor(Date.now() / 60000) * 60000).toISOString();
 
+  // Keyed per mode: the (user_id, endpoint, window_start) unique constraint has no
+  // mode column, so a bare "execute-trade" key lets paper fills (15/min budget) and
+  // live orders (3/min budget) increment the same counter. A user's own paper
+  // activity can then exhaust the shared count before any live order is attempted,
+  // rejecting every live leg that minute even though live made zero prior calls.
   const { data, error } = await supabase.rpc("upsert_rate_limit", {
     p_user_id: userId,
-    p_endpoint: "execute-trade",
+    p_endpoint: isPaper ? "execute-trade:paper" : "execute-trade:live",
     p_window_start: windowStart,
     p_limit: limit,
   });
@@ -84,6 +89,15 @@ async function checkLiquidity(
       // out of the strike ladder between signal detection and execution) — submitting
       // an order to Kalshi for it will always fail. Flag it so the caller skips the
       // doomed order submission instead of wasting a round trip on a dead ticker.
+      if (!result.tickerGone) {
+        // Transient network/5xx/malformed-body failure, not a real delisting — log it
+        // so a genuine Kalshi outage is visible instead of silently falling through to
+        // the same retry path as an expected ticker rollout.
+        await logCompliance(supabase, userId, null, "orderbook_fetch_failed", "warning",
+          `Orderbook fetch failed for ${ticker}${result.status ? ` (status ${result.status})` : ""}${result.error ? `: ${result.error}` : ""}`,
+          { ticker, status: result.status, error: result.error ?? null }
+        );
+      }
       return { sufficient: false, fallbackAction: "retry_with_limit", tickerGone: result.tickerGone };
     }
 
@@ -195,7 +209,10 @@ serve(async (req) => {
             user_id_in_body: parsedBody?.user_id ?? null,
           },
           user_id: null,
-        }).catch(() => {}); // never block the rejection on a log failure
+        }).then(undefined, () => {}); // never block the rejection on a log failure — supabase's
+        // query builder is a thenable, not a real Promise, so .catch() doesn't exist on it and
+        // throws a TypeError before the insert even resolves (same failure class as the
+        // 2026-07-06 auto-trade and 2026-07-26 daily-digest incidents)
         return new Response(
           JSON.stringify({ error: "Unauthorized" }),
           { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -232,9 +249,28 @@ serve(async (req) => {
     // The allowed/blocked policy gate — subscription status, live access, strategy
     // access, position size — applies to live money only.
     if (userId && effective) {
+      // Resolve the request's strategyId to its DB row's template_id — never
+      // trust the request string for entitlement. checkEntitlement now does
+      // exact template matching (the old /^S-\d+/ normalization let any id
+      // PREFIXED with an entitled template, e.g. "S-002-anything", inherit
+      // that template's live access). No row / no template_id → null, which
+      // checkEntitlement fails closed for live.
+      let resolvedTemplateId: string | null = null;
+      if (strategyId) {
+        const { data: stratRow } = await supabase
+          .from("strategies")
+          .select("template_id, id, user_id")
+          .eq("id", strategyId)
+          .maybeSingle();
+        // Only honor rows owned by this user or system rows (user_id null) —
+        // a strategy id belonging to another tenant confers nothing.
+        if (stratRow && (stratRow.user_id === userId || stratRow.user_id === null)) {
+          resolvedTemplateId = stratRow.template_id ?? stratRow.id;
+        }
+      }
       const entitlement = checkEntitlement({
         subscription: effective.subscription,
-        strategy: strategyId,
+        strategy: resolvedTemplateId ?? undefined,
         mode: tradeMode,
         positionUsd: amount,
       });
@@ -324,10 +360,12 @@ serve(async (req) => {
     // defaults. effective.configured is true iff a real row exists for this mode.
     const settings: RiskSettings | null =
       effective && effective.configured ? effective.riskSettings : null;
-    const riskState = await getRiskStateToday(supabase, userId);
-    // risk_state is mode-blind (shared paper+live) until PR6. Override its open-position
-    // count with the mode-scoped count computed above so a user's paper positions can't
-    // block a live trade (and vice-versa) via evaluateRisk's open-positions check.
+    // risk_state is now scoped per (user_id, date, MODE) — paper P&L and
+    // positions can no longer trip live halts or caps (the deferred "PR6").
+    const riskState = await getRiskStateToday(supabase, userId, tradeMode as "paper" | "live");
+    // Belt-and-braces: the override predates mode-scoping (paper positions were
+    // blocking live via the shared row). Harmless now — the mode-scoped count
+    // is authoritative either way — kept until legacy mixed rows age out.
     if (riskState && modeScopedOpenCount !== null) {
       (riskState as any).open_position_count = modeScopedOpenCount;
     }
@@ -375,7 +413,7 @@ serve(async (req) => {
 
     // If the evaluator says we should set a new halt reason, persist it (per-user).
     if (riskCheck.newHaltReason && userId) {
-      const { error: haltErr } = await setRiskHalt(supabase, userId, true, riskCheck.newHaltReason);
+      const { error: haltErr } = await setRiskHalt(supabase, userId, true, riskCheck.newHaltReason, tradeMode as "paper" | "live");
       if (haltErr) {
         captureMessage(`execute-trade failed to persist auto-halt: ${haltErr.message ?? haltErr}`, "error", {
           function: "execute-trade", extra: { userId, reason: riskCheck.newHaltReason },
@@ -444,8 +482,8 @@ serve(async (req) => {
         }).select().single();
 
         await logCompliance(supabase, userId, failedTrade?.id, "order_skipped_ticker_gone", "warning",
-          `Paper: skipped ${resolvedTicker} — real orderbook unavailable (tickerGone: ${orderbookResult.tickerGone})`,
-          { ticker: resolvedTicker, trace_id: traceId }
+          `Paper: skipped ${resolvedTicker} — real orderbook unavailable (tickerGone: ${orderbookResult.tickerGone}${orderbookResult.error ? `, error: ${orderbookResult.error}` : ""})`,
+          { ticker: resolvedTicker, trace_id: traceId, status: orderbookResult.status, error: orderbookResult.error ?? null }
         );
 
         return new Response(JSON.stringify({
@@ -525,7 +563,7 @@ serve(async (req) => {
       );
 
       // Update daily risk state for this tenant
-      await updateRiskState(supabase, userId, 0, settings);
+      await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live", settings);
 
       return new Response(JSON.stringify({
         success: true, trade,
@@ -767,7 +805,12 @@ serve(async (req) => {
     if (!kalshiResponse.ok) {
       // Log full Kalshi error internally — never expose raw API responses to the client
       const rawKalshiError = kalshiResult.message || kalshiResult.error || kalshiResult;
-      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : JSON.stringify(rawKalshiError);
+      // JSON.stringify(undefined) returns the literal value undefined, not a string —
+      // when Kalshi's rejection body is empty, rawKalshiError resolves to undefined and
+      // kalshiErrorDetail.slice() below crashed the whole handler unhandled. String()
+      // guarantees a string for every input (matches the idiom used elsewhere in this
+      // file, e.g. the outer catch's `e instanceof Error ? e.message : String(e)`).
+      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : String(rawKalshiError);
       console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
         ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
       });
@@ -931,7 +974,7 @@ serve(async (req) => {
     }
 
     // Update risk state for this tenant
-    await updateRiskState(supabase, userId, 0);
+    await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live");
 
     return new Response(JSON.stringify({
       success: true,
@@ -985,15 +1028,18 @@ async function updateRiskState(
   supabase: any,
   userId: string | null,
   _pnlChange: number,  // kept for API compat — daily_pnl now computed from settled trades directly
+  mode: "paper" | "live",
   riskSettings?: any   // used to seed peak_portfolio_value on first trade of day
 ) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count current open positions for accurate tracking, scoped to tenant
+  // Count current open positions for accurate tracking, scoped to tenant AND
+  // mode — risk_state is one row per (user_id, date, mode) now.
   const positionQuery = supabase
     .from("trades")
     .select("*", { count: "exact", head: true })
     .in("status", ["filled", "open", "partial"])
+    .eq("mode", mode)
     .eq("action", "buy");
   const { count: openPositionCount } = userId
     ? await positionQuery.eq("user_id", userId)
@@ -1005,6 +1051,7 @@ async function updateRiskState(
     .from("trades")
     .select("pnl")
     .eq("status", "settled")
+    .eq("mode", mode)
     .gte("settled_at", `${today}T00:00:00.000Z`);
   const { data: todaySettled } = userId
     ? await settledQuery.eq("user_id", userId)
@@ -1012,7 +1059,7 @@ async function updateRiskState(
   const actualDailyPnl = (todaySettled ?? []).reduce((s: number, t: any) => s + (t.pnl ?? 0), 0);
 
   // Get current risk state for this tenant
-  const stateQuery = supabase.from("risk_state").select("*").eq("date", today);
+  const stateQuery = supabase.from("risk_state").select("*").eq("date", today).eq("mode", mode);
   const { data: current } = userId
     ? await stateQuery.eq("user_id", userId).maybeSingle()
     : await stateQuery.is("user_id", null).maybeSingle();
@@ -1027,7 +1074,7 @@ async function updateRiskState(
       max_drawdown_today: Math.min(current.max_drawdown_today || 0, actualDailyPnl),
       peak_portfolio_value: newPeak,
       updated_at: new Date().toISOString(),
-    }).eq("date", today);
+    }).eq("date", today).eq("mode", mode);
     if (userId) {
       await updateQuery.eq("user_id", userId);
     } else {
@@ -1040,6 +1087,7 @@ async function updateRiskState(
     await supabase.from("risk_state").insert({
       user_id: userId,
       date: today,
+      mode,
       daily_pnl: actualDailyPnl,
       daily_trades: 1,
       open_position_count: openPositionCount || 0,

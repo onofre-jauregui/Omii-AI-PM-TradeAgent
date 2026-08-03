@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import {
   getKalshiCredentials,
@@ -14,10 +14,11 @@ import { decideReconcile, contractCount, pickAvgPrice } from "../_shared/reconci
  *
  * The order-placement path (execute-trade) only captures a fill if the order
  * fills *immediately* on POST. A live limit order that rests as `open`/`partial`
- * is otherwise never advanced to `filled`, is invisible to auto-settle (whose
- * view is paper-only), and would eventually be wrongly zeroed by the expiration
- * sweep. This cron closes that gap: for every resting live order it re-reads the
- * order from Kalshi and advances the local `trades` row.
+ * is otherwise never advanced to `filled`, so it's invisible to auto-settle
+ * (whose `agent_trades_pending_resolution` view only ever selects status=
+ * 'filled' rows, live included). This cron closes that gap: for every resting
+ * live order it re-reads the order from Kalshi and advances the local `trades`
+ * row.
  *
  * State transitions (forward-only, idempotent):
  *   Kalshi order canceled/expired        → trades.status = 'cancelled'
@@ -40,6 +41,9 @@ interface TradeRow {
   status: string;
 }
 
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+const ORDER_STATUS_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
 
@@ -51,6 +55,7 @@ serve(async (req) => {
     });
   }
   const supabase = createClient(supabaseUrl, supabaseKey);
+  const startedAt = Date.now();
 
   const summary = { checked: 0, filled: 0, partial: 0, cancelled: 0, unchanged: 0, errors: 0 };
 
@@ -67,6 +72,7 @@ serve(async (req) => {
     if (qErr) throw qErr;
     const orders = (openOrders ?? []) as TradeRow[];
     if (orders.length === 0) {
+      await logRunSummary(supabase, summary, Date.now() - startedAt);
       return json({ ok: true, ...summary, message: "no resting live orders" });
     }
 
@@ -80,7 +86,38 @@ serve(async (req) => {
     }
 
     for (const [userId, userOrders] of byUser) {
-      const { keyId, privateKey } = await getKalshiCredentials(supabase, userId);
+      // Bound the credential fetch: a stalled query here doesn't throw, so the
+      // outer try/catch (below) never fires — it would silently stall this
+      // entire multi-tenant loop (blocking every remaining user's reconcile,
+      // not just this one's) until the platform's own execution timeout kills
+      // the invocation. Same class of bug fixed in market-data-fetcher (48th
+      // run) and health-check (51st run); this is a resting-live-order path.
+      let keyId: string | null, privateKey: string | null;
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        try {
+          ({ keyId, privateKey } = await Promise.race([
+            getKalshiCredentials(supabase, userId),
+            timeout,
+          ]));
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`reconcile-orders: credential fetch failed or timed out for user ${userId}: ${msg}`);
+        await logCompliance(supabase, userId, null, "reconcile_order_check_failed",
+          `reconcile-orders: credential fetch failed or timed out — ${userOrders.length} resting order(s) not reconciled (${msg})`,
+          { order_ids: userOrders.map((o) => o.order_id) }, "error");
+        summary.errors += userOrders.length;
+        continue;
+      }
       if (!keyId || !privateKey) {
         console.warn(`reconcile-orders: no Kalshi key for user ${userId} — skipping ${userOrders.length} orders`);
         await logCompliance(supabase, userId, null, "reconcile_order_check_failed",
@@ -102,24 +139,43 @@ serve(async (req) => {
             continue;
           }
 
+          // V2 GetOrder returns fixed-point-string fields (`remaining_count_fp`,
+          // e.g. "0.00"), not the plain numeric `remaining_count` this used to read —
+          // confirmed against a live order response. That mismatch meant `remaining`
+          // was always -1, so a fully-executed order (status "executed", not in the
+          // canceled/expired set) never satisfied `remainingCount === 0` and reconcile
+          // silently left real fills sitting as "open" forever. `remaining_count` is
+          // kept as a fallback in case a different endpoint/response shape supplies it.
           const kStatus = String(kalshiOrder.status ?? "");
-          const remaining = Number(kalshiOrder.remaining_count ?? -1);
+          const remaining = Number(kalshiOrder.remaining_count_fp ?? kalshiOrder.remaining_count ?? -1);
           const initialCount = contractCount(trade.amount, trade.price);
-          const avgPriceCents = pickAvgPrice(kalshiOrder);
-          const decision = decideReconcile(kStatus, remaining, initialCount);
+          const avgPriceCents = pickAvgPrice(kalshiOrder, trade.side);
           // Kalshi's own fee fields on the order object — captured verbatim,
           // same as execute-trade's immediate-fill path (zero formula risk).
           const entryFeeCents = Math.round(
             parseFloat(kalshiOrder.maker_fees_dollars ?? kalshiOrder.taker_fees_dollars ?? "0") * 100
           );
 
+          // Only spend a second API call checking the market when the order itself
+          // still looks resting — a fill/partial/explicit-cancel never needs it.
+          let marketStatus: string | undefined;
+          if (remaining > 0 && remaining === initialCount && trade.ticker) {
+            marketStatus = await fetchMarketStatus(trade.ticker);
+          }
+
+          const decision = decideReconcile(kStatus, remaining, initialCount, marketStatus);
+
           if (decision === "cancel") {
+            const viaMarketFinalized = !TERMINAL_CANCELLED_LOWER.has(kStatus.toLowerCase());
             await updateTrade(supabase, trade.id, {
               status: "cancelled",
               cancelled_at: new Date().toISOString(),
             });
             await logCompliance(supabase, userId, trade.id, "order_cancelled",
-              `Live order ${trade.order_id} ${kStatus.toLowerCase()} on Kalshi`, { order_id: trade.order_id });
+              viaMarketFinalized
+                ? `Live order ${trade.order_id} never matched — market ${trade.ticker} settled (${marketStatus}) before it could fill`
+                : `Live order ${trade.order_id} ${kStatus.toLowerCase()} on Kalshi`,
+              { order_id: trade.order_id, market_status: marketStatus });
             summary.cancelled++;
           } else if (decision === "fill") {
             await updateTrade(supabase, trade.id, {
@@ -154,6 +210,7 @@ serve(async (req) => {
       }
     }
 
+    await logRunSummary(supabase, summary, Date.now() - startedAt);
     return json({ ok: true, ...summary });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
@@ -162,25 +219,83 @@ serve(async (req) => {
       event_type: "reconcile_orders_fatal",
       severity: "error",
       message: `reconcile-orders: run aborted — ${errMsg}`,
-      metadata: summary,
+      metadata: { ...summary, elapsed_ms: Date.now() - startedAt },
     }).then(null, () => {});
     return json({ ok: false, error: errMsg, ...summary }, 500);
   }
 });
 
+// Run-level heartbeat so a slow or lagging pass is visible in compliance_log
+// instead of only reconstructable from scattered per-order rows. Every other
+// cron'd function (auto-trade, auto-settle, market-data-fetcher, daily-digest)
+// already logs a `_run` summary row on every execution — reconcile-orders was
+// the one left without it, which is why root-causing a ~4min-late pass (2026-
+// 07-27, see docs/health-log.md 41st run) required manually cross-referencing
+// order_filled timestamps against the cron schedule instead of reading one row.
+// Warns when a pass runs long enough to risk overlapping the next 5-min cycle.
+async function logRunSummary(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  summary: { checked: number; filled: number; partial: number; cancelled: number; unchanged: number; errors: number },
+  elapsedMs: number,
+) {
+  const severity = elapsedMs > 4 * 60 * 1000 ? "warning" : "info";
+  await supabase.from("compliance_log").insert({
+    event_type: "reconcile_orders_run",
+    severity,
+    message: `reconcile-orders: ${summary.checked} checked, ${summary.filled} filled, ${summary.partial} partial, ${summary.cancelled} cancelled, ${summary.errors} errors (${elapsedMs}ms)`,
+    metadata: { ...summary, elapsed_ms: elapsedMs },
+  }).then(null, () => {});
+}
+
 // ── Kalshi ────────────────────────────────────────────────────────────────
+
+// Mirrors reconcile-logic.ts's TERMINAL_CANCELLED — used here only to decide the
+// compliance_log message wording (Kalshi-side cancel vs market-finalized cancel).
+const TERMINAL_CANCELLED_LOWER = new Set(["canceled", "cancelled", "expired"]);
 
 async function fetchKalshiOrder(keyId: string, privateKey: string, orderId: string): Promise<any | null> {
   const path = `/trade-api/v2/portfolio/orders/${orderId}`;
   const ts = Date.now();
   const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, ts);
-  const res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${orderId}`, { method: "GET", headers });
+  // Per-request hard timeout — a hung Kalshi connection won't stall the whole reconcile loop
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ORDER_STATUS_FETCH_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${orderId}`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(`Kalshi GET order ${orderId} timed out after ${ORDER_STATUS_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!res.ok) {
     console.warn(`reconcile-orders: Kalshi GET order ${orderId} → ${res.status}`);
     return null;
   }
   const body = await res.json();
   return body?.order ?? body ?? null;
+}
+
+// Public endpoint, no auth required. Used only as a fallback when an order still
+// looks fully resting — see decideReconcile's market-finalized branch.
+async function fetchMarketStatus(ticker: string): Promise<string | undefined> {
+  try {
+    const res = await fetchWithRetry(`${KALSHI_BASE_URL}/markets/${ticker}`, { method: "GET" });
+    if (!res.ok) return undefined;
+    const body = await res.json();
+    return body?.market?.status;
+  } catch (e) {
+    console.warn(`reconcile-orders: market status check failed for ${ticker}:`, e instanceof Error ? e.message : e);
+    return undefined;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

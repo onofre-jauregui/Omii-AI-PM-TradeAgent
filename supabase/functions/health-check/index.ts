@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { countTradesInWindow } from "../_shared/limits.ts";
@@ -28,6 +28,9 @@ const WIN_RATE_SAMPLE = 20;
 const VOLUME_SPIKE_MULTIPLIER = 8; // only alert on genuine runaway loops, not manual burst sessions
 const BLOCKED_SERIES = ["KXETH"];
 const LOW_BALANCE_FLOOR_USD = 15; // below this, a typical live basket leg can no longer clear collateral
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+const BALANCE_FETCH_TIMEOUT_MS = 8_000; // same convention — Kalshi portfolio/balance GET
+const TELEGRAM_FETCH_TIMEOUT_MS = 8_000; // same convention as _shared/telegram.ts's sendTelegramAlert()
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -36,14 +39,32 @@ function json(body: unknown, status = 200) {
   });
 }
 
-async function sendTelegram(token: string, chatId: string, text: string) {
+// health-check keeps its own sendTelegram (rather than _shared/telegram.ts's
+// sendTelegramAlert) because callers need the delivered/not-delivered boolean
+// to drive unclaimAlert() below — sendTelegramAlert returns void and swallows
+// its own fetch errors. This helper previously had no AbortController at all,
+// so a stalled Telegram API call would hang health-check itself — the one
+// function whose entire job is catching silent hangs elsewhere — up to the
+// platform's own execution timeout, indistinguishable from any other silent
+// stall. Same failure shape closed across _shared/telegram.ts and a dozen
+// call sites in the 68th-73rd runs; this file's own copy was missed.
+async function sendTelegram(token: string, chatId: string, text: string): Promise<boolean> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
-  });
-  return resp.ok;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+      signal: controller.signal,
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Atomically checks-and-claims a dedup slot via the same advisory-lock-guarded
@@ -472,7 +493,27 @@ serve(async (req) => {
 
     for (const { user_id } of liveKeys ?? []) {
       try {
-        const { keyId, privateKey } = await getKalshiCredentials(supabase, user_id);
+        // Bare `await` here would hang forever on a stalled query — the exact
+        // failure mode diagnosed in market-data-fetcher (2026-07-13/16: 130.6s/61.4s
+        // stalls), which a `try/catch` alone doesn't guard against since a hang never
+        // throws. health-check is the alerting path itself, so a hang here means the
+        // whole hourly sweep — not just this balance check — silently stops paging.
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        let keyId: string | null, privateKey: string | null;
+        try {
+          ({ keyId, privateKey } = await Promise.race([
+            getKalshiCredentials(supabase, user_id),
+            timeout,
+          ]));
+        } finally {
+          clearTimeout(timeoutId);
+        }
         if (!keyId || !privateKey) continue;
         // Sign against the full path (Kalshi's HMAC scheme includes it), but fetch
         // against KALSHI_BASE_URL alone — it already ends in /trade-api/v2, so
@@ -482,7 +523,22 @@ serve(async (req) => {
         // live account sitting at $1.66 (floor $15) for hours.
         const path = "/trade-api/v2/portfolio/balance";
         const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, Date.now());
-        const resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, { headers });
+        // Bare `await fetch()` here had no timeout — same failure shape as every
+        // other instance in this campaign: a stalled Kalshi response doesn't throw,
+        // it hangs this iteration (and every remaining user + check #11's own
+        // liveKeys loop after it) until the platform kills the whole invocation,
+        // invisible to compliance_log since the catch below only catches throws.
+        const balanceController = new AbortController();
+        const balanceTimeoutId = setTimeout(() => balanceController.abort(), BALANCE_FETCH_TIMEOUT_MS);
+        let resp: Response;
+        try {
+          resp = await fetch(`${KALSHI_BASE_URL}/portfolio/balance`, {
+            headers,
+            signal: balanceController.signal,
+          });
+        } finally {
+          clearTimeout(balanceTimeoutId);
+        }
         if (!resp.ok) continue; // don't let a transient Kalshi/auth hiccup page anyone
         const data = await resp.json();
         const balanceUsd = (data?.balance ?? 0) / 100;
@@ -528,6 +584,33 @@ serve(async (req) => {
       } catch {
         // Monitoring-path failure only — never let this block the rest of the sweep.
       }
+    }
+
+    // ── 12. RLS drift — any public table with row security off ────────
+    // One RLS-off table (weather_bucket_calibration, found 2026-07-08) already
+    // slipped through and left a world-writable calibration ledger. The
+    // rls_disabled_tables() RPC (service-role-only, SECURITY DEFINER) reads
+    // pg_class so this sweep pages the moment any public table drops RLS —
+    // making the whole class of drift impossible to miss again.
+    try {
+      const { data: rlsOff, error: rlsErr } = await supabase.rpc("rls_disabled_tables");
+      if (!rlsErr && rlsOff && rlsOff.length > 0) {
+        const names = rlsOff.map((r: any) => r.table_name).join(", ");
+        pendingAlerts.push({
+          type: "rls_disabled_drift",
+          fingerprint: `rls_off_${names}`,
+          cooldownHours: 12,
+          message: `🔓 [TradeAgent] RLS DISABLED on public table(s): ${names} — world-readable/writable via the anon key until re-enabled`,
+        });
+        await supabase.from("compliance_log").insert({
+          event_type: "rls_disabled_drift",
+          severity: "error",
+          message: `Public tables with RLS disabled: ${names}`,
+          metadata: { tables: rlsOff.map((r: any) => r.table_name) },
+        });
+      }
+    } catch {
+      // RPC missing (migration not applied yet) — monitoring-path only, never block the sweep.
     }
 
     // ── Deduplicate and send ──────────────────────────────────────────

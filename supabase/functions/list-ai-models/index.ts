@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { makeCorsHeaders } from "../_shared/cors.ts";
+import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 
 export interface AIModel {
   id: string;
@@ -8,6 +9,27 @@ export interface AIModel {
   provider: string;
   contextLength?: number;
   pricing?: { prompt: string; completion: string };
+}
+
+// Same bound as market-data-fetcher/health-check/reconcile-orders/trading-agent's
+// CREDENTIAL_FETCH_TIMEOUT_MS — these are simple model-list GETs, not LLM generations.
+const MODEL_LIST_TIMEOUT_MS = 8_000;
+
+/** fetch() with an AbortController timeout; converts AbortError into a message
+ *  that matches this file's existing `errors[provider] = e.message` convention. */
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(`request timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 /** Test whether a model's provider is allowed by the account's data policy.
@@ -64,20 +86,61 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
+    // This function had no auth check at all and read api_keys with no user_id
+    // filter — every caller (even unauthenticated) got a model list generated
+    // from whichever provider keys happened to exist across ALL users, mixing
+    // one user's paid API key/quota into another user's session. Require the
+    // same bearer-JWT identity check save-ai-key uses, and scope the read to
+    // that user's own rows.
+    const authHeader = req.headers.get("Authorization") ?? "";
+    const jwt = authHeader.replace(/^Bearer\s+/i, "").trim();
+    if (!jwt) {
+      return new Response(JSON.stringify({ error: "Missing Authorization header" }), {
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
-    // Read all saved AI provider keys from DB
+    const { data: { user }, error: authErr } = await supabase.auth.getUser(jwt);
+    if (authErr || !user) {
+      return new Response(JSON.stringify({ error: "Invalid token" }), {
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Read this user's saved AI provider keys. Previously this only read the
+    // legacy plaintext `encrypted_secret` column, so any key saved via
+    // save-ai-key (which writes secret_ciphertext/secret_iv, encrypted_secret:
+    // null) was structurally invisible here. Decrypt the ciphertext column
+    // first, same resolution order as getKalshiCredentials in kalshi-auth.ts.
     const { data: keys } = await supabase
       .from("api_keys")
-      .select("provider, encrypted_secret")
+      .select("provider, secret_ciphertext, secret_iv, encrypted_secret")
+      .eq("user_id", user.id)
       .in("provider", ["openrouter", "openai", "anthropic", "google"]);
+
+    const masterKeyBase64 = Deno.env.get("API_KEY_ENCRYPTION_KEY");
+    const masterKey = masterKeyBase64 ? await importMasterKey(masterKeyBase64) : null;
 
     const keyMap: Record<string, string> = {};
     for (const k of keys || []) {
-      if (k.encrypted_secret) keyMap[k.provider] = k.encrypted_secret;
+      let secret: string | null = null;
+      if (k.secret_ciphertext && k.secret_iv && masterKey) {
+        try {
+          secret = await decryptSecret(
+            { ciphertext: k.secret_ciphertext, iv: k.secret_iv } as EncryptedSecret,
+            masterKey
+          );
+        } catch (e) {
+          console.error(`list-ai-models: failed to decrypt ${k.provider} key for user ${user.id}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      if (!secret && k.encrypted_secret) secret = k.encrypted_secret;
+      if (secret) keyMap[k.provider] = secret;
     }
 
     const allModels: AIModel[] = [];
@@ -88,9 +151,11 @@ serve(async (req) => {
     const orKey = keyMap["openrouter"] || Deno.env.get("OPENROUTER_API_KEY");
     if (orKey) {
       try {
-        const res = await fetch("https://openrouter.ai/api/v1/models", {
-          headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" },
-        });
+        const res = await fetchWithTimeout(
+          "https://openrouter.ai/api/v1/models",
+          { headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" } },
+          MODEL_LIST_TIMEOUT_MS
+        );
         if (res.ok) {
           const data = await res.json();
           const models: AIModel[] = (data.data || [])
@@ -149,9 +214,11 @@ serve(async (req) => {
     const oaiKey = keyMap["openai"] || Deno.env.get("OPENAI_API_KEY");
     if (oaiKey && !orKey) {
       try {
-        const res = await fetch("https://api.openai.com/v1/models", {
-          headers: { Authorization: `Bearer ${oaiKey}` },
-        });
+        const res = await fetchWithTimeout(
+          "https://api.openai.com/v1/models",
+          { headers: { Authorization: `Bearer ${oaiKey}` } },
+          MODEL_LIST_TIMEOUT_MS
+        );
         if (res.ok) {
           const data = await res.json();
           const models: AIModel[] = (data.data || [])
@@ -174,8 +241,10 @@ serve(async (req) => {
     const googleKey = keyMap["google"] || Deno.env.get("GOOGLE_AI_API_KEY");
     if (googleKey && !orKey) {
       try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models?key=${googleKey}`
+        const res = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${googleKey}`,
+          {},
+          MODEL_LIST_TIMEOUT_MS
         );
         if (res.ok) {
           const data = await res.json();

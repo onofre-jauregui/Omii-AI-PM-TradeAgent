@@ -1,8 +1,31 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
-import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders } from "../_shared/kalshi-auth.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
+import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
+
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/kalshi-proxy
+// Bare `await fetch()` to the LLM provider had no timeout — a stalled Anthropic
+// call hangs this function's entire chat turn (this is the interactive
+// AgentPanel chat endpoint — confirmed via `cron.job`, no cron invokes
+// trading-agent directly) with no compliance_log signal, the same
+// unguarded-call class fixed 7x already in this file and
+// market-data-fetcher/health-check/reconcile-orders/settle-signals/
+// kalshi-ping/futures-signal/kalshi-proxy — just one level up the stack (the LLM
+// call itself, not the credential lookup that precedes it). 60s is generous for
+// a real completion (even a large tool-schema + long history turn) while still
+// bounding how long a user's chat session can hang on a stalled provider call.
+const LLM_FETCH_TIMEOUT_MS = 60_000;
+
+// Remaining Tier-4 sites from the 76th run's audit (trading-agent/index.ts, 10 unguarded
+// fetch() calls in the chat tool-calling loop — a hang in any of them freezes the chat
+// response). Excludes the two Tier-1 sites (execute_trade submit/cancel, real money —
+// off-limits per the 48th run's standing caution).
+const KALSHI_FETCH_TIMEOUT_MS = 8_000; // matches auto-trade's convention — public market-data GET, not an LLM call
+const INTERNAL_FUNCTION_TIMEOUT_MS = 45_000; // forwards to execute-basket/signal-generator/surface-scanner — generous enough to clear execute-basket's own 30s BASKET_TIMEOUT_MS plus network/cold-start overhead
+const STRATEGY_RUN_TIMEOUT_MS = 60_000; // trigger_strategy_run invokes auto-trade manually, which may run multiple 15s LLM qualify calls sequentially across candidate markets
+const EXTERNAL_SEARCH_TIMEOUT_MS = 10_000; // Tavily web search — third-party API with no execution budget of its own to inherit
 
 // ─── Tool Definitions ───────────────────────────────────────────────────────
 
@@ -318,19 +341,18 @@ const CREATE_STRATEGY_TOOL = {
   function: {
     name: "create_strategy",
     description:
-      "Create a new trading strategy from a user description. Saves it as inactive — the user must activate it in the Strategies tab. Use when the user asks to create, define, or set up a strategy.",
+      "Save a new custom strategy DRAFT from a user description. Drafts do not auto-trade: the autonomous loop runs only platform strategy templates, so a draft is a saved idea the user can review in the Strategies tab, use to guide this chat, and later attach to a template. Be honest about this limit when confirming. Use when the user asks to create, define, or set up a strategy.",
     parameters: {
       type: "object",
       properties: {
         name: { type: "string", description: "Short display name for the strategy" },
         instructions: {
           type: "string",
-          description: "Natural language rules for how the agent should qualify and trade signals for this strategy",
+          description: "Natural language rules describing the user's intent for this strategy",
         },
-        market_types: {
-          type: "array",
-          items: { type: "string" },
-          description: "Market series this strategy targets, e.g. [\"weather\", \"fomc\", \"crypto\"]",
+        description: {
+          type: "string",
+          description: "One-line summary shown on the strategy card",
         },
       },
       required: ["name", "instructions"],
@@ -483,15 +505,28 @@ async function callAnthropicNonStream(
   const body: any = { model, max_tokens: 8192, messages, temperature };
   if (system) body.system = system;
   if (tools.length > 0) body.tools = toAnthropicTools(tools);
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Anthropic API call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Anthropic error ${resp.status}: ${text}`);
@@ -512,15 +547,28 @@ async function streamAnthropicAsSSE(
   const { system, messages } = toAnthropicMessages(msgs);
   const body: any = { model, max_tokens: 8192, messages, temperature, stream: true };
   if (system) body.system = system;
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Anthropic stream API call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   if (!resp.ok) {
     const text = await resp.text();
     throw new Error(`Anthropic stream error ${resp.status}: ${text}`);
@@ -1005,6 +1053,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         .select("is_trading_halted")
         .eq("user_id", userId)
         .eq("date", today)
+        .eq("mode", riskMode)
         .maybeSingle();
       if (riskStateRow?.is_trading_halted) {
         await streamWriter.write(enc.encode(`data: ${JSON.stringify({ type: "content", content: "⛔ Trading is currently halted for your account. No trades can be placed until the halt is lifted in your risk settings." })}\n\n`));
@@ -1027,7 +1076,22 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
       const llmCallStart = Date.now();
 
       if (effectiveProvider === "anthropic") {
-        const { result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3);
+        let anthropicResult: any, anthropicUsage: { input_tokens: number | null; output_tokens: number | null };
+        try {
+          ({ result: anthropicResult, usage: anthropicUsage } = await callAnthropicNonStream(finalModel, keys["anthropic"], aiMessages, allTools, temperature ?? 0.3));
+        } catch (llmErr) {
+          const msg = llmErr instanceof Error ? llmErr.message : String(llmErr);
+          if (supabase) {
+            await supabase.from("compliance_log").insert({
+              event_type: "trading_agent_llm_call_failed",
+              severity: "error",
+              user_id: userId ?? null,
+              message: `trading-agent: Anthropic call failed on turn ${turnIndex} — ${msg}`,
+              metadata: { model: finalModel, provider: "anthropic", turn_index: turnIndex, duration_ms: Date.now() - llmCallStart },
+            }).then(null, () => {});
+          }
+          throw llmErr;
+        }
         result = anthropicResult;
         const durationMs = Date.now() - llmCallStart;
         if (supabase && anthropicUsage.input_tokens != null) {
@@ -1051,20 +1115,33 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         const cfg = getOpenAICompatConfig(effectiveProvider, keys);
         if (!cfg) throw new Error(`No API key for provider: ${effectiveProvider}`);
 
-        const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${cfg.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: finalModel,
-            messages: aiMessages,
-            tools: allTools,
-            temperature: temperature ?? 0.3,
-            stream: false,
-          }),
-        });
+        const compatController = new AbortController();
+        const compatTimeoutId = setTimeout(() => compatController.abort(), LLM_FETCH_TIMEOUT_MS);
+        let resp: Response;
+        try {
+          resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${cfg.apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: finalModel,
+              messages: aiMessages,
+              tools: allTools,
+              temperature: temperature ?? 0.3,
+              stream: false,
+            }),
+            signal: compatController.signal,
+          });
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") {
+            throw new Error(`AI provider call exceeded ${LLM_FETCH_TIMEOUT_MS}ms`);
+          }
+          throw err;
+        } finally {
+          clearTimeout(compatTimeoutId);
+        }
 
         if (!resp.ok) {
           const status = resp.status;
@@ -1169,23 +1246,20 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // Helper: parse a market into a compact object.
             // Prices are normalized to integer CENTS (1-99) so the LLM passes the
             // correct value directly to execute_trade without unit conversion.
-            const toCents = (v: any): number => {
-              const n = Number(v) || 0;
-              // Kalshi API returns dollars (0.01–0.99) via *_dollars fields, cents (1–99) via raw fields.
-              // If the value is < 1 it's in dollars — multiply by 100 and round.
-              return n > 0 && n < 1 ? Math.round(n * 100) : Math.round(n);
-            };
+            // Delegates to the canonical converter for the paired reads below;
+            // this wrapper only preserves the number-not-null local contract.
+            const toCents = (v: any): number => Math.round(Number(v) || 0);
             const parseMarket = (m: any) => {
-              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
-              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
+              const ya = (marketFieldCents(m, "yes_ask") ?? 0);
+              const yb = (marketFieldCents(m, "yes_bid") ?? 0);
               return {
                 ticker: m.ticker,
                 title: m.title || m.subtitle,
                 yes_bid_cents: yb,
                 yes_ask_cents: ya,
-                no_bid_cents: toCents(m.no_bid_dollars ?? m.no_bid),
-                no_ask_cents: toCents(m.no_ask_dollars ?? m.no_ask),
-                last_price_cents: toCents(m.last_price_dollars ?? m.last_price),
+                no_bid_cents: (marketFieldCents(m, "no_bid") ?? 0),
+                no_ask_cents: (marketFieldCents(m, "no_ask") ?? 0),
+                last_price_cents: (marketFieldCents(m, "last_price") ?? 0),
                 volume: m.volume,
                 volume_24h: m.volume_24h,
                 open_interest: m.open_interest,
@@ -1197,9 +1271,9 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // Helper: is this a real tradeable market?
             const isLiquid = (m: any): boolean => {
               if ((m.ticker || "").startsWith("KXMVE")) return false;
-              const ya = toCents(m.yes_ask_dollars ?? m.yes_ask);
-              const yb = toCents(m.yes_bid_dollars ?? m.yes_bid);
-              const last = toCents(m.last_price_dollars ?? m.last_price);
+              const ya = (marketFieldCents(m, "yes_ask") ?? 0);
+              const yb = (marketFieldCents(m, "yes_bid") ?? 0);
+              const last = (marketFieldCents(m, "last_price") ?? 0);
               return ya >= 1 || yb >= 1 || last >= 1; // values are now in cents
             };
 
@@ -1210,26 +1284,70 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             // 429-causing bug just fixed in kalshi-proxy (2026-07-26). Sign with
             // the service-tenant credential when available; fall back to
             // unauthenticated only if it's missing, same as kalshi-proxy.
+            //
+            // A bare `await` here would hang this tool call indefinitely on a
+            // stalled query — same unguarded-credential-fetch class fixed in
+            // market-data-fetcher/health-check/reconcile-orders/settle-signals/
+            // kalshi-ping/futures-signal/kalshi-proxy. A stall doesn't throw, so
+            // the enclosing try/catch never engages; this tool is invoked by the
+            // LLM inside auto-trade-cron (every 5 min), so a hang here stalls the
+            // whole agent turn instead of degrading to the unauthenticated fetch
+            // it already falls back to when no service credential is available.
             let kalshiHeaders: Record<string, string> = {};
-            const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-              await getKalshiCredentials(supabase, null);
+            let serviceKeyId: string | null, servicePrivateKey: string | null;
+            try {
+              let timeoutId: ReturnType<typeof setTimeout> | undefined;
+              const timeout = new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(
+                  () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+                  CREDENTIAL_FETCH_TIMEOUT_MS
+                );
+              });
+              try {
+                const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+                serviceKeyId = creds.keyId;
+                servicePrivateKey = creds.privateKey;
+              } finally {
+                clearTimeout(timeoutId);
+              }
+            } catch (credError) {
+              const msg = credError instanceof Error ? credError.message : String(credError);
+              console.error(`trading-agent fetch_live_markets: service credential fetch failed or timed out: ${msg}`);
+              await supabase.from("compliance_log").insert({
+                event_type: "trading_agent_fetch_markets_credential_fetch_failed",
+                severity: "error",
+                message: `trading-agent fetch_live_markets service credential fetch failed or timed out: ${msg}`,
+              });
+              serviceKeyId = null;
+              servicePrivateKey = null;
+            }
             if (serviceKeyId && servicePrivateKey) {
               kalshiHeaders = await generateAuthHeaders(
                 serviceKeyId, servicePrivateKey, "GET", "/trade-api/v2/markets", Date.now()
               );
             }
 
+            // A bare fetch() here would hang this tool call indefinitely on a stalled
+            // Kalshi response — same unguarded-fetch class fixed 7x already in this file.
+            // These are public read-only market-data GETs, so a timeout is a safe abort:
+            // it just returns fewer/no results, it never leaves an order in flight.
+            const fetchKalshi = (u: string) => {
+              const c = new AbortController();
+              const t = setTimeout(() => c.abort(), KALSHI_FETCH_TIMEOUT_MS);
+              return fetch(u, { headers: kalshiHeaders, signal: c.signal }).finally(() => clearTimeout(t));
+            };
+
             if (args.keyword) {
               // Free-text keyword search across all Kalshi markets
               const encoded = encodeURIComponent(args.keyword);
               const url = `${kalshiBase}/markets?limit=50&status=open&search=${encoded}`;
-              const res = await fetch(url, { headers: kalshiHeaders });
+              const res = await fetchKalshi(url);
               const data = await res.json();
               allMarkets = (data.markets || []).map(parseMarket);
             } else if (args.category) {
               // Series ticker fetch
               const url = `${kalshiBase}/markets?limit=${Math.min(limit * 3, 60)}&status=open&series_ticker=${args.category}`;
-              const res = await fetch(url, { headers: kalshiHeaders });
+              const res = await fetchKalshi(url);
               const data = await res.json();
               allMarkets = (data.markets || []).filter(isLiquid).map(parseMarket);
             } else {
@@ -1246,7 +1364,7 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               ];
 
               const fetches = series.map(s =>
-                fetch(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`, { headers: kalshiHeaders })
+                fetchKalshi(`${kalshiBase}/markets?limit=20&status=open&series_ticker=${s}`)
                   .then(r => r.json()).catch(() => ({ markets: [] }))
               );
 
@@ -1343,17 +1461,18 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               // Increment daily trade count in risk_state
               const today = new Date().toISOString().split("T")[0];
               const riskQuery = userId
-                ? supabase.from("risk_state").select("daily_trades").eq("user_id", userId).eq("date", today).maybeSingle()
-                : supabase.from("risk_state").select("daily_trades").is("user_id", null).eq("date", today).maybeSingle();
+                ? supabase.from("risk_state").select("daily_trades").eq("user_id", userId).eq("date", today).eq("mode", "paper").maybeSingle()
+                : supabase.from("risk_state").select("daily_trades").is("user_id", null).eq("date", today).eq("mode", "paper").maybeSingle();
               const { data: rs } = await riskQuery;
               await supabase.from("risk_state").upsert(
                 {
                   user_id: userId,
                   date: today,
+                  mode: "paper", // this block only runs on the chat paper-trade path
                   daily_trades: (rs?.daily_trades ?? 0) + 1,
                   updated_at: new Date().toISOString(),
                 },
-                { onConflict: userId ? "user_id,date" : "date" }
+                { onConflict: userId ? "user_id,date,mode" : "date,mode" }
               );
 
               toolResult = JSON.stringify({
@@ -1402,29 +1521,76 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── cancel_order ──
         else if (fnName === "cancel_order") {
           try {
-            const { data: trades } = await supabase
-              .from("trades")
-              .update({
-                status: "cancelled",
-                cancelled_at: new Date().toISOString(),
-                notes: `Cancelled by agent: ${args.reason}`,
-              })
-              .eq("order_id", args.orderId)
-              .select();
-
+            // Live mode: cancel on Kalshi FIRST, and only mark the local trade
+            // row cancelled if Kalshi confirms it. The previous version fired
+            // an unauthenticated, unchecked DELETE (no HMAC headers at all —
+            // Kalshi rejects this) and marked the DB row cancelled regardless,
+            // so a still-resting live order could fill later while our system
+            // believed it was long closed, with reconcile-orders never
+            // re-checking it (it only polls status IN ('open','partial')).
             if (mode === "live") {
-              await fetch(`${KALSHI_BASE_URL}/portfolio/orders/${args.orderId}`, { method: "DELETE" });
+              const { keyId, privateKey } = await getKalshiCredentials(supabase, userId);
+              if (!keyId || !privateKey) {
+                toolResult = JSON.stringify({ success: false, error: "No Kalshi credentials configured for this account — cancel not attempted." });
+              } else {
+                const path = `/trade-api/v2/portfolio/orders/${args.orderId}`;
+                const ts = Date.now();
+                const headers = await generateAuthHeaders(keyId, privateKey, "DELETE", path, ts);
+                const res = await fetchWithRetry(`${KALSHI_BASE_URL}/portfolio/orders/${args.orderId}`, { method: "DELETE", headers });
+
+                if (!res.ok) {
+                  const bodyText = await res.text().catch(() => "");
+                  await supabase.from("compliance_log").insert({
+                    event_type: "order_cancel_failed",
+                    severity: "error",
+                    message: `Kalshi DELETE order ${args.orderId} failed (status ${res.status}) — local trade row left unchanged, order may still be live`,
+                    metadata: { order_id: args.orderId, status: res.status, raw_body: bodyText.slice(0, 500) },
+                  });
+                  toolResult = JSON.stringify({ success: false, error: `Kalshi rejected the cancel (status ${res.status}) — order may still be live, local record left unchanged.` });
+                } else {
+                  const { data: trades } = await supabase
+                    .from("trades")
+                    .update({
+                      status: "cancelled",
+                      cancelled_at: new Date().toISOString(),
+                      notes: `Cancelled by agent: ${args.reason}`,
+                    })
+                    .eq("order_id", args.orderId)
+                    .select();
+
+                  await supabase.from("compliance_log").insert({
+                    trade_id: trades?.[0]?.id || null,
+                    event_type: "order_cancelled",
+                    severity: "info",
+                    message: `Order ${args.orderId} cancelled: ${args.reason}`,
+                    metadata: { order_id: args.orderId, reason: args.reason },
+                  });
+
+                  toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
+                }
+              }
+            } else {
+              // Paper mode: no live order to cancel — DB is the only source of truth.
+              const { data: trades } = await supabase
+                .from("trades")
+                .update({
+                  status: "cancelled",
+                  cancelled_at: new Date().toISOString(),
+                  notes: `Cancelled by agent: ${args.reason}`,
+                })
+                .eq("order_id", args.orderId)
+                .select();
+
+              await supabase.from("compliance_log").insert({
+                trade_id: trades?.[0]?.id || null,
+                event_type: "order_cancelled",
+                severity: "info",
+                message: `Order ${args.orderId} cancelled: ${args.reason}`,
+                metadata: { order_id: args.orderId, reason: args.reason },
+              });
+
+              toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
             }
-
-            await supabase.from("compliance_log").insert({
-              trade_id: trades?.[0]?.id || null,
-              event_type: "order_cancelled",
-              severity: "info",
-              message: `Order ${args.orderId} cancelled: ${args.reason}`,
-              metadata: { order_id: args.orderId, reason: args.reason },
-            });
-
-            toolResult = JSON.stringify({ success: true, message: `Order ${args.orderId} cancelled: ${args.reason}` });
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Cancel failed: " + e.message });
           }
@@ -1451,11 +1617,14 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               .limit(20);
 
             const today = new Date().toISOString().split("T")[0];
-            const { data: riskState } = await supabase
+            const stateQuery = supabase
               .from("risk_state")
               .select("*")
               .eq("date", today)
-              .maybeSingle();
+              .eq("mode", riskMode);
+            const { data: riskState } = userId
+              ? await stateQuery.eq("user_id", userId).maybeSingle()
+              : await stateQuery.is("user_id", null).maybeSingle();
 
             // Also return memory count so agent knows its memory state
             const { count: memoryCount } = await supabase
@@ -1651,23 +1820,36 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "execute_basket") {
           try {
             const basketUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/execute-basket`;
-            const basketResp = await fetch(basketUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                strategy_id: args.strategyId || null,
-                strategy_name: args.strategy || null,
-                alert_id: args.alert_id || null,
-                legs: args.legs,
-                mode,
-                user_id: userId,
-                expected_edge_cents: args.expected_edge_cents || 0,
-                reasoning: args.reasoning || "",
-              }),
-            });
+            const basketController = new AbortController();
+            const basketTimeoutId = setTimeout(() => basketController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let basketResp: Response;
+            try {
+              basketResp = await fetch(basketUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  strategy_id: args.strategyId || null,
+                  strategy_name: args.strategy || null,
+                  alert_id: args.alert_id || null,
+                  legs: args.legs,
+                  mode,
+                  user_id: userId,
+                  expected_edge_cents: args.expected_edge_cents || 0,
+                  reasoning: args.reasoning || "",
+                }),
+                signal: basketController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`execute-basket call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(basketTimeoutId);
+            }
             const basketResult = await basketResp.json();
             toolResult = JSON.stringify({
               ...basketResult,
@@ -1684,17 +1866,30 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "fetch_signals") {
           try {
             const sigUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/signal-generator`;
-            const sigResp = await fetch(sigUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                limit: args.limit || 20,
-                category: args.category || undefined,
-              }),
-            });
+            const sigController = new AbortController();
+            const sigTimeoutId = setTimeout(() => sigController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let sigResp: Response;
+            try {
+              sigResp = await fetch(sigUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  limit: args.limit || 20,
+                  category: args.category || undefined,
+                }),
+                signal: sigController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`signal-generator call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(sigTimeoutId);
+            }
             if (!sigResp.ok) {
               const errText = await sigResp.text();
               toolResult = JSON.stringify({ error: `signal-generator error: ${errText}` });
@@ -1714,16 +1909,29 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "scan_surface") {
           try {
             const scanUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/surface-scanner`;
-            const scanResp = await fetch(scanUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                min_edge_cents: args.min_edge_cents || 3,
-              }),
-            });
+            const scanController = new AbortController();
+            const scanTimeoutId = setTimeout(() => scanController.abort(), INTERNAL_FUNCTION_TIMEOUT_MS);
+            let scanResp: Response;
+            try {
+              scanResp = await fetch(scanUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  min_edge_cents: args.min_edge_cents || 3,
+                }),
+                signal: scanController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`surface-scanner call exceeded ${INTERNAL_FUNCTION_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(scanTimeoutId);
+            }
             if (!scanResp.ok) {
               const errText = await scanResp.text();
               toolResult = JSON.stringify({ error: `surface-scanner error: ${errText}` });
@@ -1746,17 +1954,30 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             if (!tavilyKey) {
               toolResult = JSON.stringify({ error: "Web search not configured — add TAVILY_API_KEY secret" });
             } else {
-              const resp = await fetch("https://api.tavily.com/search", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  api_key: tavilyKey,
-                  query: args.query,
-                  search_depth: "basic",
-                  max_results: 5,
-                  ...(args.focus ? { topic: args.focus } : {}),
-                }),
-              });
+              const tavilyController = new AbortController();
+              const tavilyTimeoutId = setTimeout(() => tavilyController.abort(), EXTERNAL_SEARCH_TIMEOUT_MS);
+              let resp: Response;
+              try {
+                resp = await fetch("https://api.tavily.com/search", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    api_key: tavilyKey,
+                    query: args.query,
+                    search_depth: "basic",
+                    max_results: 5,
+                    ...(args.focus ? { topic: args.focus } : {}),
+                  }),
+                  signal: tavilyController.signal,
+                });
+              } catch (err) {
+                if (err instanceof Error && err.name === "AbortError") {
+                  throw new Error(`Tavily search exceeded ${EXTERNAL_SEARCH_TIMEOUT_MS}ms`);
+                }
+                throw err;
+              } finally {
+                clearTimeout(tavilyTimeoutId);
+              }
               if (!resp.ok) {
                 toolResult = JSON.stringify({ error: `Tavily error: ${resp.status}` });
               } else {
@@ -1777,12 +1998,21 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── create_strategy ──
         else if (fnName === "create_strategy") {
           try {
+            // This insert failed 100% of the time before 2026-07-31: it wrote a
+            // `market_types` column that does not exist AND omitted `id` on a
+            // TEXT PK with no default — two independent guaranteed failures,
+            // surfaced to the user only as an opaque error string. The id is
+            // random and non-template-prefixed so it can never collide with or
+            // inherit entitlement from a platform template (checkEntitlement
+            // is exact-match).
+            const strategyId = `custom-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
             const { data: newStrategy, error: insertErr } = await supabase
               .from("strategies")
               .insert({
+                id: strategyId,
                 name: args.name,
+                description: args.description || "",
                 instructions: args.instructions,
-                market_types: args.market_types || [],
                 active: false,
                 mode: "paper",
                 user_id: userId,
@@ -1793,7 +2023,8 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
             toolResult = JSON.stringify({
               success: true,
               strategy_id: newStrategy.id,
-              message: `Strategy "${newStrategy.name}" created (inactive). Activate it in the Strategies tab to start trading.`,
+              message:
+                `Draft "${newStrategy.name}" saved to the Strategies tab. Note: custom drafts don't auto-trade — autonomous trading runs on the platform's strategy templates. This draft guides our chat and can be attached to a template later.`,
             });
           } catch (e: any) {
             toolResult = JSON.stringify({ success: false, error: "Strategy creation failed: " + e.message });
@@ -1804,14 +2035,27 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "trigger_strategy_run") {
           try {
             const autoTradeUrl = `${Deno.env.get("SUPABASE_URL")}/functions/v1/auto-trade`;
-            const resp = await fetch(autoTradeUrl, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ strategy_id: args.strategy_id, run_mode: "manual" }),
-            });
+            const runController = new AbortController();
+            const runTimeoutId = setTimeout(() => runController.abort(), STRATEGY_RUN_TIMEOUT_MS);
+            let resp: Response;
+            try {
+              resp = await fetch(autoTradeUrl, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ strategy_id: args.strategy_id, run_mode: "manual" }),
+                signal: runController.signal,
+              });
+            } catch (err) {
+              if (err instanceof Error && err.name === "AbortError") {
+                throw new Error(`auto-trade run exceeded ${STRATEGY_RUN_TIMEOUT_MS}ms`);
+              }
+              throw err;
+            } finally {
+              clearTimeout(runTimeoutId);
+            }
             const runData = await resp.json();
             toolResult = JSON.stringify({
               success: resp.ok,

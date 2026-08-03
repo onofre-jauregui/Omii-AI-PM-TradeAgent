@@ -1,13 +1,95 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant } from "../_shared/tenant.ts";
+import { isAllowedProxyRequest } from "../_shared/kalshi-proxy-logic.ts";
 
 // Module-level, so it resets on cold start but doesn't spam compliance_log on
 // every warm-instance request — one warning per instance lifetime is enough
 // to catch a silent regression back to the anonymous (rate-limited) tier.
 let loggedMissingServiceKey = false;
+
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal
+
+// The service-tenant credential is one static row shared by every request on
+// this path (public market/events/series browsing — the highest-traffic
+// endpoint, hit on every page load's category tabs + pre-warm + trending
+// fan-out, up to 6 concurrent per the frontend's own cap). Re-fetching and
+// re-decrypting the same row on every single request serializes on the DB
+// under that concurrency and was the direct cause of the
+// `kalshi_proxy_service_credential_fetch_failed` timeouts observed
+// 2026-07-29 (5 occurrences in ~3h, all bursts of concurrent requests).
+// Caching it per warm instance with a TTL removes the DB round trip from the
+// hot path entirely while still picking up a key rotation within 5 minutes.
+const SERVICE_CREDENTIAL_CACHE_TTL_MS = 5 * 60_000;
+let cachedServiceCredential: { keyId: string; privateKey: string; expiresAt: number } | null = null;
+
+// A cache HIT removes the DB round trip, but a cache MISS (cold start, or the
+// instant the TTL lapses) is not itself coalesced — concurrent requests that
+// land in that same miss window (the same up-to-6-concurrent frontend burst
+// this cache exists to absorb) each independently checked the cache, each saw
+// it empty, and each raced their own DB fetch, reproducing the exact
+// contention the cache was meant to remove. Confirmed 2026-07-29: the timeout
+// recurred twice (14:37, 14:38 UTC) roughly 30min after this cache's own
+// deploy — long enough that the TTL lapsing (not just cold start) reopened
+// the same thundering-herd window. Sharing one in-flight fetch across every
+// concurrent request that observes a miss removes that window entirely.
+let inFlightServiceCredentialFetch: Promise<{ keyId: string | null; privateKey: string | null }> | null = null;
+
+// `EXPLAIN ANALYZE` on the underlying query (85th run, 2026-07-29) confirms it
+// executes in <1ms against the 4-row api_keys table — the DB query itself is
+// never the bottleneck. The timeouts logged here (still recurring hours after
+// the caching + coalescing fix in #134/#135, e.g. 20:39/21:03/21:10/21:33/21:43
+// UTC on 2026-07-29) are transient round-trip jitter, not query cost. Giving
+// up on the first stall and falling back straight to the 429-prone anonymous
+// tier wastes a recoverable request. One retry — same pattern already proven
+// for this exact failure signature in market-data-fetcher (84th run) — absorbs
+// the blip before degrading.
+function fetchCredsOnce(adminClient: ReturnType<typeof createClient>) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+      CREDENTIAL_FETCH_TIMEOUT_MS
+    );
+  });
+  return Promise.race([getKalshiCredentials(adminClient, null), timeout]).finally(() =>
+    clearTimeout(timeoutId)
+  );
+}
+
+async function fetchServiceCredential(
+  adminClient: ReturnType<typeof createClient>
+): Promise<{ keyId: string | null; privateKey: string | null }> {
+  let keyId: string | null, privateKey: string | null;
+  try {
+    try {
+      const creds = await fetchCredsOnce(adminClient);
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    } catch (firstErr) {
+      const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out, retrying once: ${firstMsg}`);
+      const creds = await fetchCredsOnce(adminClient);
+      keyId = creds.keyId;
+      privateKey = creds.privateKey;
+    }
+  } catch (credError) {
+    const msg = credError instanceof Error ? credError.message : String(credError);
+    console.error(`kalshi-proxy: service-tenant credential fetch failed or timed out after retry: ${msg}`);
+    await adminClient.from("compliance_log").insert({
+      event_type: "kalshi_proxy_service_credential_fetch_failed",
+      severity: "error",
+      message: `kalshi-proxy public-endpoint service-tenant credential fetch failed or timed out after retry: ${msg} — falling back to the anonymous rate tier for this request.`,
+    });
+    return { keyId: null, privateKey: null };
+  }
+  if (keyId && privateKey) {
+    cachedServiceCredential = { keyId, privateKey, expiresAt: Date.now() + SERVICE_CREDENTIAL_CACHE_TTL_MS };
+  }
+  return { keyId, privateKey };
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight(req, "extended");
@@ -23,6 +105,18 @@ serve(async (req) => {
     const url = new URL(req.url);
     const endpoint = url.searchParams.get("endpoint") || "markets";
 
+    if (!isAllowedProxyRequest(req.method, endpoint)) {
+      await adminClient.from("compliance_log").insert({
+        event_type: "kalshi_proxy_endpoint_blocked",
+        severity: "warning",
+        message: `kalshi-proxy blocked disallowed ${req.method} ${endpoint} — not an endpoint/method this app uses through the proxy.`,
+      });
+      return new Response(
+        JSON.stringify({ error: "This endpoint/method is not permitted through kalshi-proxy." }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     // Public endpoints (market data) don't need auth
     const isPublicEndpoint =
       endpoint.startsWith("markets") || endpoint.startsWith("events") || endpoint.startsWith("series");
@@ -32,8 +126,42 @@ serve(async (req) => {
 
     if (!isPublicEndpoint) {
       const { userId } = await resolveTenant(req, adminClient);
-      const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } =
-        await getKalshiCredentials(adminClient, userId);
+      // Bare `await` here would hang this request indefinitely on a stalled
+      // query — same class of unguarded-credential-fetch bug fixed in
+      // market-data-fetcher/health-check/reconcile-orders/settle-signals/
+      // kalshi-ping/futures-signal. Unlike those cron-driven paths, this one
+      // is hit synchronously by every authenticated frontend call through the
+      // proxy (portfolio, orders, trades) — a hang here stalls the user's
+      // request until the platform's own execution timeout kills it.
+      let kalshiKeyId: string | null, kalshiPrivateKey: string | null;
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+            CREDENTIAL_FETCH_TIMEOUT_MS
+          );
+        });
+        try {
+          const creds = await Promise.race([getKalshiCredentials(adminClient, userId), timeout]);
+          kalshiKeyId = creds.keyId;
+          kalshiPrivateKey = creds.privateKey;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (credError) {
+        const msg = credError instanceof Error ? credError.message : String(credError);
+        console.error(`kalshi-proxy: credential fetch failed or timed out for user ${userId}: ${msg}`);
+        await adminClient.from("compliance_log").insert({
+          event_type: "kalshi_proxy_credential_fetch_failed",
+          severity: "error",
+          message: `kalshi-proxy credential fetch failed or timed out: ${msg}`,
+        });
+        return new Response(
+          JSON.stringify({ error: "Could not verify Kalshi credentials right now — please try again." }),
+          { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
 
       if (!kalshiKeyId || !kalshiPrivateKey) {
         return new Response(
@@ -50,8 +178,34 @@ serve(async (req) => {
       // moves these calls off Kalshi's lowest anonymous rate tier onto the
       // authenticated tier. No key configured → fall back to unauthenticated,
       // same as before. Read-only endpoints only, so this never risks a trade.
-      const { keyId: serviceKeyId, privateKey: servicePrivateKey } =
-        await getKalshiCredentials(adminClient, null);
+      //
+      // Bare `await` here would hang this request indefinitely on a stalled
+      // query — same class of unguarded-credential-fetch bug fixed at the
+      // authenticated branch above and across market-data-fetcher/health-check/
+      // reconcile-orders/settle-signals/kalshi-ping/futures-signal. A prior
+      // health-check run (57th) left this call site unguarded on the reasoning
+      // that "it has its own existing unauthenticated-fallback path so a stall
+      // degrades rather than hangs" — that's incorrect: the fallback below only
+      // triggers when the query *resolves* with a falsy value, not when it never
+      // resolves at all. This is the highest-traffic remaining unguarded site —
+      // hit on every public market/events/series browse, logged in or not.
+      let serviceKeyId: string | null, servicePrivateKey: string | null;
+      if (cachedServiceCredential && cachedServiceCredential.expiresAt > Date.now()) {
+        serviceKeyId = cachedServiceCredential.keyId;
+        servicePrivateKey = cachedServiceCredential.privateKey;
+      } else {
+        // Every request that observes a miss awaits the SAME in-flight fetch
+        // instead of starting its own — a concurrent burst during a miss costs
+        // one DB round trip total, not one per request.
+        if (!inFlightServiceCredentialFetch) {
+          inFlightServiceCredentialFetch = fetchServiceCredential(adminClient).finally(() => {
+            inFlightServiceCredentialFetch = null;
+          });
+        }
+        const creds = await inFlightServiceCredentialFetch;
+        serviceKeyId = creds.keyId;
+        servicePrivateKey = creds.privateKey;
+      }
       if (serviceKeyId && servicePrivateKey) {
         const timestamp = Date.now();
         headers = await generateAuthHeaders(serviceKeyId, servicePrivateKey, req.method, apiPath, timestamp);

@@ -1,6 +1,12 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
+
+// The SendGrid call below had no timeout and is awaited before the signup response
+// returns — a stalled SendGrid request hung the user-facing waitlist form itself, up to
+// the platform's own execution timeout, despite the comment above the call site claiming
+// this path is "non-blocking." Same bound as the rest of the timeout-guard campaign.
+const FETCH_TIMEOUT_MS = 8_000;
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return preflight();
@@ -19,7 +25,10 @@ serve(async (req) => {
   // Insert — UNIQUE constraint on email means duplicate signups silently succeed
   const { error: insertErr } = await supabase
     .from("waitlist")
-    .insert({ email: email.trim().toLowerCase(), plan_interest: plan_interest ?? null });
+    .insert({
+      email: email.trim().toLowerCase(),
+      plan_interest: plan_interest ?? null,
+    });
 
   if (insertErr && !insertErr.message.includes("duplicate")) {
     console.error("waitlist-signup insert error:", insertErr);
@@ -32,28 +41,35 @@ serve(async (req) => {
       console.error("waitlist-signup: confirmation email failed:", e.message)
     );
   } else {
-    console.warn("waitlist-signup: SENDGRID_API_KEY not set — skipping confirmation email");
+    console.warn(
+      "waitlist-signup: SENDGRID_API_KEY not set — skipping confirmation email",
+    );
   }
 
   return json({ ok: true });
 });
 
 async function sendConfirmation(apiKey: string, to: string): Promise<void> {
-  const resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      personalizations: [{ to: [{ email: to }] }],
-      from: { email: "tradeagentcomm@yahoo.com", name: "TradeAgent" },
-      reply_to: { email: "tradeagentcomm@yahoo.com" },
-      subject: "You're on the TradeAgent waitlist",
-      content: [
-        {
-          type: "text/html",
-          value: `<!DOCTYPE html>
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: "tradeagentcomm@yahoo.com", name: "TradeAgent" },
+        reply_to: { email: "tradeagentcomm@yahoo.com" },
+        subject: "You're on the TradeAgent waitlist",
+        content: [
+          {
+            type: "text/html",
+            value: `<!DOCTYPE html>
 <html>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f0f0f;margin:0;padding:40px 20px;">
 <div style="max-width:520px;margin:0 auto;background:#1a1a1a;border-radius:16px;padding:40px;border:1px solid rgba(255,255,255,0.06);">
@@ -73,10 +89,13 @@ async function sendConfirmation(apiKey: string, to: string): Promise<void> {
 </div>
 </body>
 </html>`,
-        },
-      ],
-    }),
-  });
+          },
+        ],
+      }),
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");

@@ -25,7 +25,16 @@ SELECT cron.schedule(
     body    := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);
+-- NOTE (2026-07-28): the line above originally read
+-- `) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;` —
+-- SELECT has no ON CONFLICT semantics, so that was a syntax error that
+-- silently aborted this entire migration (including the manifest INSERT
+-- below) every time it was applied. cron.schedule() already upserts by
+-- jobname internally, so the clause was redundant as well as invalid. Fixed
+-- live via 20260728_register_paper_reconcile_cron.sql after the job was
+-- found never-registered; corrected here too so a fresh migration replay
+-- doesn't reintroduce the same failure. See that file for full root cause.
 
 -- Register in the expected-cron manifest (20260725_expected_cron_manifest.sql)
 -- so cron_health() alerts if this job is ever missing entirely, not just

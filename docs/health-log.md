@@ -2,6 +2,3657 @@
 
 Findings from automated health-check runs. Newest first.
 
+## 2026-08-03 (104th run) — 11 error-severity rows (first since the 100th run); fixed a false-alarm race in the learning loop, and found + applied a P0 migration that had sat unapplied for 3 days leaving every user strategy's kill switch dead, plus two world-writable tables
+
+**Isolation incident (worked around, not the target of this run's fix budget):** the pinned worktree (`.worktrees/TradeAgent-health-check`) was held by `git-tree-guard` as belonging to a live peer session — presence file for session `c5442bb1-…` pointed at PID 62854, alive **24h+** (started 2026-08-02 09:05 UTC, found here 2026-08-03 09:06 UTC). Same signature as the 100th run's incident (TTL-or-pid-alive liveness defeated by a leaked-but-still-alive process): `mcp__ccd_session_mgmt__get_session` returned "not found" for that session ID and it didn't appear in `list_sessions`, confirming orphaned per the same protocol the 100th run established. Sent `SIGTERM`, confirmed clean exit within 3s, removed the stale presence file, then proceeded normally (`git fetch && git reset --hard origin/dev`, fresh branch `health-check/run-104`). This is the **second** time this exact failure mode has recurred since the 100th run flagged it as a follow-up (harden `~/.claude/hooks/git-tree-guard.sh`'s liveness check with an absolute max-age independent of PID state) — still unfixed at the infra level, still outside this repo's scope to patch unattended. Flagging again since the 100th run's "closed at the config level" note applies to a *different*, earlier incident (32nd run, branch divergence); this TTL-or-pid-alive gap is a distinct, still-open issue.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 103rd run's ~13:08 UTC cutoff — 24,652 total rows (21,881 info, 2,760 warning), **11 at error** (first error-severity activity since the 100th run, 2026-07-30). Breakdown: 4× `kalshi_proxy_service_credential_fetch_failed` (the long-documented benign intermittent transient — no action), 2× `order_failed`/401 `authentication_error`/`NOT_FOUND` at 2026-07-31 21:20 UTC (single 2-leg basket, same `trace_id`, zero recurrence in the 38h since — matches the "single occurrence, not investigated" pattern from the 2026-07-25 entries, no code path pointed at a root cause), and **5× `lesson_write_error`** — a genuinely new event type, never before seen in this log.
+
+**Root cause found and fixed — false-alarm race in `auto-reflect`'s learning loop:** the 5 `lesson_write_error` rows were 2 distinct trades (`7fa993c2-…`, `64fa5973-…`, both ticker `KXMVESPORTSMULTIGAMEEXTENDED-…`) each hit 2-3× within a few milliseconds — i.e. from overlapping `auto-reflect` invocations (the hourly cron plus, almost certainly, this same log's own manual verification calls from the 103rd run, which was still active at 18:52-19:00 UTC on 2026-07-31 testing the drawdown fix). Both trades were confirmed **fully absent** from `trades` at investigation time (`select … where id in (…)` → `[]`). Searched the entire codebase (`supabase/functions/`, all migrations, all triggers on `trades`) for anything that deletes `trades` rows — found nothing; the `trade_lessons_trade_id_fkey` constraint itself is `ON DELETE SET NULL` (not `CASCADE`), which is the schema deliberately designed to tolerate a trade disappearing after its lesson is written. Root cause: `auto-reflect` selects a batch of settled trades, then processes them one at a time with a real LLM call per trade (seconds each) before writing the lesson — a TOCTOU race window during which a concurrent invocation (or, per the schema's own design intent, any other legitimate deletion path) can remove the row, and the code had no handling for that beyond falling into the generic error+Telegram-alert branch. **Fixed** in `supabase/functions/auto-reflect/index.ts`: catch Postgres `23503` (FK violation) on the `trade_lessons` insert specifically and treat it as a benign skip — log `lesson_write_skipped_trade_gone` at `info` severity (not `error`), no Telegram alert, `continue`. Mirrors this file's existing `23514` (lesson_type drift) handling immediately above it. Confirmed `compliance_log.event_type`'s `compliance_event_type_allowlist` CHECK only applies when `category = 'compliance'` (default `'ops'`), so the new freeform event_type isn't blocked. **Deployed and verified:** `supabase functions deploy auto-reflect`; downloaded the live source post-deploy and diffed byte-for-byte against the pushed commit — exact match; live-invoked the function (`{"success":true,…,"lessons_written":0,…}`, no crash) against real production data.
+
+**Second fix (the bigger one) — a P0 migration had been merged to `dev` for 3 days and never applied, leaving every user strategy's auto-halt kill switch permanently dead:** the routine **full drift sweep** (all 33 deployed functions vs. `dev`) came back with far more drift than any prior run — ~20 files differing, not just the known `_shared/billing.ts`/`tenant.ts` gap. Investigating the smallest, most self-contained diff (`health-check/index.ts`, +26 lines, a "12th check" for RLS-disabled tables) led to `supabase/migrations/20260731_p0_strategy_config_seed_and_grants.sql` — present in `dev` since 2026-07-31, **never applied** (`supabase_migrations.schema_migrations` had zero rows matching `20260731%`). That migration fixes three real things: (1) a trigger to auto-seed `strategy_config` for every new `strategies` row, because `auto-trade`'s consecutive-failure kill switch is gated on `if (config)` and **no code path had ever seeded config for a per-user strategy instance** — meaning no user strategy has ever been able to auto-halt on repeated losses, silently, since the feature shipped; (2) a backfill of `strategy_config` for every existing strategy missing one; (3) revokes broad anon/authenticated DML grants on `signals`/`strategy_config`/`auto_trade_locks`; (4) the `rls_disabled_tables()` RPC health-check's new 12th check depends on. Exact same failure class as the 2026-07-25 `reconcile-orders-cron`-never-registered incident (migration written, reviewed, merged — apply step forgotten). **Applied** via the Management API (idempotent: `CREATE OR REPLACE`, `ON CONFLICT DO NOTHING`, `DROP … IF EXISTS`). **Verified:** `select count(*) from strategies s left join strategy_config c on … where c.strategy_id is null` → `0` (was previously non-zero for every user-created instance); trigger `seed_strategy_config_on_insert` present; `strategy_config_owner_select`/`_update` policies present.
+
+**Third fix, found by the second fix working:** the newly-callable `rls_disabled_tables()` RPC immediately proved its worth — it returned **two** tables with RLS fully off: `weather_bucket_calibration` (a known 2026-07-08 finding per the migration's own comment, apparently never actually re-secured, only monitored-for) and `expected_cron_jobs` (never before flagged — the cron-manifest table the 100th run added specifically to catch missing jobs). Both had **full CRUD+TRUNCATE grants to `anon`** — i.e. world-writable via the public anon key shipped in the frontend bundle: anyone could corrupt Weather Edge's calibration ledger, or delete/tamper with the cron manifest to blind `cron_health()` to a real missing job. Neither table's `CREATE TABLE` is tracked in any migration (same untracked-schema-drift pattern as `trade_lessons`, discovered during the FK investigation above). Wrote and applied `supabase/migrations/20260803_enable_rls_weather_calibration_and_cron_manifest.sql`: `ENABLE ROW LEVEL SECURITY` + revoke the anon/authenticated grants, matching this repo's existing service-role-only pattern (`auto_trade_locks`/`signals`/`compliance_log` — RLS on, zero policies, service_role bypasses via `BYPASSRLS`). **Verified:** `rls_disabled_tables()` now returns `[]`; anon grants on both tables confirmed empty; service-role read access confirmed still working (`select count(*) from weather_bucket_calibration` → `4`, unaffected). Deployed `health-check` with the now-functional RLS check; live-invoked (`{"ok":true,"alerts_sent":[]}` — correctly silent, since both holes are now closed) against real production data.
+
+**Full drift sweep, not fully resolved — escalating, not fixing blind:** beyond the three fixes above, `dev` is still meaningfully ahead of production on: `_shared/billing.ts` (72 lines) and `_shared/tenant.ts` (87 lines) — the already-known, already-gated tier-enforcement work (Hard Stop pending Onofre's explicit approval, 95th run) — plus `auto-trade` (310 lines, almost certainly the same billing/tier work extended per PR #173 "real per-tier strategy caps"), and unrelated drift in `execute-trade` (48), `trading-agent` (66), `list-ai-models` (48), `_shared/prompt-safety.ts` (43), `settle-signals` (41), `_shared/trading-logic.ts` (41), `save-kalshi-key` (40), `signal-generator` (35), `surface-scanner` (32), `execute-basket` (22), `waitlist-admin` (20), `_shared/basket-logic.ts` (16), `weather-signal` (15), `kalshi-proxy` (13), `telegram-webhook` (12), `futures-signal` (11), `auto-settle` (10), `switch-trading-mode` (8). This is a materially larger gap than any prior run recorded (previously: "matches dev exactly except the known billing/tenant gap"). Did **not** attempt a blind mass-redeploy of ~18 production edge functions in an unattended run — several are plausibly tied to the same gated billing/tier work, and the rest haven't been individually reviewed for production-readiness. Flagging to Onofre for an explicit decision: either this is intentional (features held back pending review) or it's accumulated deploy-lag that needs a scoped, reviewed redeploy pass.
+
+**Test/lint/build sweep:** `npm run test` — 292/292 passing across 21 files (up from prior counts as this codebase has grown), no regressions. `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings. `npm run build` — succeeds (2.89s), same pre-existing >500kB chunk-size warning, not a regression.
+
+**Cron/manifest audit:** `cron.job` — 15 live, all active. Cross-checked against `expected_cron_jobs`: 15 expected, 15 live, exact match. `cron_health()`: all 15 `is_stale: false`, `last_status: "succeeded"` — zero drift.
+
+---
+
+## 2026-07-31 (103rd run) — zero error/critical rows; found and fixed a live bug causing profitable paper strategies to be falsely suspended on impossible >100% "drawdown" readings
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` had a stray uncommitted, unrelated modification to `supabase/functions/auto-reflect/index.ts` sitting on branch `dev` itself (not a fresh run branch) — discarded per the "never carry over another run's uncommitted WIP" rule via `git fetch && git reset --hard origin/dev` + `git clean -fd`, then fresh branch `health-check/run-103` off `origin/dev` (102nd run's branch merged as PR #163).
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 102nd run's ~17:08 UTC cutoff through this run's ~13:08 UTC invocation (2026-07-31) — 2,928 total rows (2,680 info, 248 warning), **zero** at error/critical. Of the warnings, 237 were the already-documented-benign `unsettleable_404` pattern, but **11 were new event types never before seen in this log**: 6× `strategy_suspended_drawdown`, 4× `daily_trade_cap_enforced`, 1× `risk_check_failed`. The trade-cap and risk-check ones are the daily-cap and position-size guardrails working exactly as designed (no action needed). The drawdown ones were not — investigated further below.
+
+**Fix (the one concrete improvement made this run) — false-positive drawdown suspension bug:** `strategy_suspended_drawdown` messages read "max drawdown 543.9% exceeds 25% threshold" and "max drawdown 1695.7% exceeds 25% threshold" for `Surface Arbitrage` (net `totalPnl: +$125.23` over the window) and `Weather Edge` (net `totalPnl: -$38.59`) respectively — a >100% drawdown on a strategy with a net-*positive* P&L is definitionally impossible for a real percentage-of-capital metric, so this was a metric bug, not real risk. Root cause, in `supabase/functions/auto-reflect/index.ts`'s Strategy Health v2 loop: `maxDdPct = (peak - running) / peak`, where `peak` is the raw cumulative-P&L peak in dollars — not the strategy's equity. Early in a 30-trade rolling window `peak` can be a tiny dollar figure (e.g. ~$23), so an ordinary subsequent dollar swing (e.g. a $100+ dip) divided by that tiny denominator explodes past 100%, even though the strategy's actual capital (`starting_balance`, typically $1,000 per the onboarding seed) was never remotely at risk of a full loss. This is the same class of bug the file's own comments already flag as previously causing "an impossible ~596% drawdown" (fixed then via status/mode/ordering query bugs) — those fixes were real, but the underlying formula that makes >100% "drawdown" possible at all was never corrected, so it resurfaced with a different trigger. Fixed by extracting the calculation into a new pure, unit-tested module `supabase/functions/_shared/strategy-health.ts` (`computeMaxDrawdownPct(pnls, startingBalance)`), matching this repo's established pattern for testable risk logic (`_shared/risk.ts`, `_shared/limits-math.ts`): drawdown is now measured against equity (`startingBalance + cumulative P&L`), which is always bounded and can never divide by a near-zero denominator while `startingBalance` is a real, non-trivial capital figure. Wired into `auto-reflect/index.ts` in place of the old inline loop. Added `supabase/functions/_shared/strategy-health.test.ts` (4 tests) reproducing the exact incident scenario (small early peak + large dollar swing) and asserting drawdown stays in `[0, 1]`, plus a strictly-increasing-P&L zero-drawdown case, an equity-relative-not-raw-P&L-relative case, and a zero/missing-starting-balance fallback case.
+
+**Deployed and verified against real data:** `SUPABASE_ACCESS_TOKEN=$SUPABASE_ACCESS_TOKEN_KTA npx supabase functions deploy auto-reflect --project-ref uyfnezxmgwitpzsrnkst`, then manually invoked the live function (`POST .../functions/v1/auto-reflect` with the project's service-role key) against real production data: `Surface Arbitrage` (`S-001-l-ea207ba1`) now reports `max_drawdown: 0.2153` (21.5%, a sane bounded figure) and evaluates as `"action": "healthy"` instead of triggering a false suspension — confirms the fix against live data, not a mock.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download --use-api`, no `--all` flag — that flag doesn't exist on this CLI version and errors `UnrecognizedOption`; omitting the function-name argument downloads all) and diffed every one against `dev`. Zero drift beyond the `auto-reflect` change made and deployed this run; matches `dev` exactly otherwise except the already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop pending Onofre's call on the production billing/tenant redeploy.
+
+**Test/lint/build sweep:** `npm run test` — 210/210 passing across 16 files (up from 206/15 — the 4 new `strategy-health.test.ts` tests), no regressions. `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every prior run. `npm run build` — succeeds (2.76s), same pre-existing >500kB chunk-size warning, not a regression.
+
+**Cron/manifest audit:** `cron.job` — 15 live, all active, zero stale/failed/inactive. Cross-checked against `expected_cron_jobs` by name (not just count, this run): 15 expected, 15 live, zero rows in either direction not matched by the other — no drift.
+
+**Verified:** `npm run test` (210/210), `npm run lint` (0 errors), `npm run build` (clean) all green post-fix; `diff` against the freshly downloaded deployed `auto-reflect` source confirms only the intended change shipped; the live post-deploy invocation above confirms the fix holds against real trade data, not just unit tests.
+
+**Reversibility:** easy — a single new pure module plus a 5-line change in `auto-reflect/index.ts`'s existing loop, `git revert`-able; redeploying the previous `auto-reflect` version restores the old (buggy) behavior instantly if ever needed. No schema change, no data migration, no money/billing path touched — outside the Hard Stop.
+
+**Left alone, on purpose:** the 6 already-suspended paper-mode strategies (`S-001`/`S-005` × 3 suspension events, 2026-07-30 17:42 and 19:12 UTC, `suspended_until` 2026-07-31 17:42/19:12 UTC) caused by this bug were **not** manually resumed early. They're paper mode (no capital or money-path risk), the existing auto-reflect resume logic will re-enable them on schedule within the next few hours regardless, and manually flipping `active=true` on production strategy rows is a data mutation beyond what "fix the root cause and deploy" calls for on an unattended run — flagging this call rather than acting further on it.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the 95th run — not re-investigated this run since nothing changed. Also unchanged: `_shared/tool-gateway.ts` remains written but unwired into `trading-agent`; the `react-router` major-version bump (2 remaining npm vulnerabilities, moderate severity, breaking change) is still a low-priority item for a future scoped dependency-upgrade run.
+
+---
+
+## 2026-07-30 (102nd run) — zero error/critical rows, zero new deployed-function drift, zero cron/manifest drift; `npm audit fix` resolved a newly-surfaced critical `brace-expansion` DoS advisory (6→2 vulnerabilities)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev` exactly (101st run's branch merged as PR #161) — `git fetch && git reset --hard origin/dev`, fresh branch `health-check/run-102` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 101st run's ~16:14 UTC cutoff through this run's ~17:08 UTC invocation — 129 total rows, **zero** at error/critical. The 13 warning rows were all `unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from the 46th/92nd/93rd/96th–101st runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download --use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop pending Onofre's call on the production billing/tenant redeploy, and the unwired `_shared/tool-gateway.ts`.
+
+**Test/lint/build sweep:** `npm run test` — 206/206 passing across 15 files, no regressions (re-verified after the dependency fix below). `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every prior run. `npm run build` — succeeds (27.56s), same pre-existing >500kB chunk-size warning, not a regression.
+
+**Cron/manifest audit:** `cron.job` — 15 live, all active, zero stale/failed/inactive. Cross-checked against `expected_cron_jobs`: 15 expected, 15 live, zero rows in either direction not matched by the other — no drift (the 101st run's log cited 14; not re-investigated here since both sides of this run's comparison match exactly).
+
+**Fix (the one concrete improvement made this run):** `npm audit --production` surfaced a **new** critical-path advisory not present in the 101st run: `brace-expansion` (high, DoS via unbounded expansion causing OOM) pulled in transitively by `eslint`'s `minimatch@3.1.5` and by `sucrase` (via `tailwindcss` → `postcss-load-config`), plus the same downstream `minimatch`/`glob`/`sucrase` chain flagged as high. Confirmed via `npm ls` that every affected path is dev-tooling only (`eslint`, `tailwindcss`, `typescript-eslint`, `vite-plugin-pwa`) — none touch the Deno edge-function runtime. Ran `npm audit fix` (no `--force`): resolved `brace-expansion`/`glob`/`minimatch`/`sucrase` (`eslint` 9.32.0→9.39.5, `typescript-eslint` 8.38.0→8.65.0, `sucrase` 3.35.0→3.35.1, all transitive-safe bumps), dropping vulnerability count **6 → 2**. The 2 remaining (`react-router`/`react-router-dom`, moderate open-redirect + SSR-hydration advisories) still require a major-version bump — a breaking change, correctly left for the same future scoped dependency-upgrade task noted in the 101st run. `package.json` untouched; only `package-lock.json` changed. Re-ran the full test/lint/build sweep above to confirm zero regressions before committing.
+
+**Verified:** `npm ls brace-expansion glob minimatch sucrase` confirms the fixed versions resolved and all paths remain dev-tooling-only; `npm audit --production` re-run after the fix shows 2 remaining (down from 6), both `react-router`-family requiring `--force`; `git diff --stat package.json` is empty (lockfile-only change); `npm run test` (206/206), `npm run lint` (0 errors), and `npm run build` all re-verified green post-fix.
+
+**Reversibility:** easy — `package-lock.json` change is `git revert`-able (re-resolves to the pre-fix transitive versions). No production code, secrets, or edge-function deploys touched; no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the 95th run — not re-investigated this run since nothing changed. Also unchanged: `_shared/tool-gateway.ts` remains written but unwired into `trading-agent`; the `react-router` major-version bump (2 remaining npm vulnerabilities, moderate severity, breaking change) is still a low-priority item for a future scoped dependency-upgrade run.
+
+---
+
+## 2026-07-30 (101st run) — zero error/critical rows, zero new deployed-function drift, zero cron/manifest drift; `npm audit fix` resolved 20 vulnerabilities (1 critical), corrected a stale `TASKS.md` billing-status entry
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev` exactly (100th run's branch merged as PR #159) — `git fetch && git reset --hard origin/dev`, fresh branch `health-check/run-101` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 100th run's ~15:10 UTC cutoff through this run's ~16:14 UTC invocation — 132 total rows, **zero** at error/critical (the cleanest hour in recent runs — no `credential_fetch_failed` transient this time). The 5 warning rows were all `unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from the 46th/92nd/93rd/96th–100th runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download --use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop pending Onofre's call on the production billing/tenant redeploy.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions (re-verified after the dependency fix below). `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every prior run. `npm run build` — succeeds (2m13s), same pre-existing >500kB chunk-size warning as before, not a regression.
+
+**Cron/manifest audit:** `cron.job` — 14 live, all active, zero stale/failed/inactive. Cross-checked against `expected_cron_jobs`: 14 expected, 14 live, zero rows in either direction not matched by the other.
+
+**Fix (the one concrete improvement made this run):** `npm audit --production` flagged 11 vulnerabilities (1 moderate, 10 high) including a **critical** `vitest` UI arbitrary-file-read advisory surfaced by the full audit. Traced the flagged packages (`ws`, `yaml`, `vitest`) to their sources — `ws` via `@supabase/supabase-js`'s `realtime-js` and `jsdom` (test-only), `yaml` via `tailwindcss`'s `postcss-load-config`, `vitest` itself — none in the Deno edge-function runtime path. Ran `npm audit fix` (no `--force`, so only non-breaking transitive bumps applied): production vulnerability count dropped **11 → 6** (`package-lock.json` only, no direct `package.json` dependency changed). Re-ran the full test/lint/build sweep above to confirm zero regressions before committing. The remaining 6 (`react-router`/`react-router-dom`, moderate open-redirect + SSR-hydration advisories) require a major-version bump — a breaking change, correctly left for a scoped future dependency-upgrade task rather than forced blind on an unattended run.
+
+**Second fix (doc accuracy):** `TASKS.md` (`Last updated: 2026-04-27`) still listed "Billing UI + subscription enforcement" as one queued item — stale since the 95th run already shipped real `checkEntitlement()` tier enforcement to `dev` (the same gap the 99th run's `CLAUDE.md` fix corrected, but `TASKS.md` was never updated to match). Split the entry into "Billing UI" (still queued) and "Deploy subscription enforcement to production" (blocked on Onofre's approval per the money/billing Hard Stop), and logged the enforcement work as completed-on-dev in a new "Completed (2026-07-30, 95th health-check run)" section, so a future run or a human skimming `TASKS.md` doesn't re-propose already-done work.
+
+**Verified:** `npm ls ws yaml` confirmed both are transitive-only (no direct production dependency touches them); `npm audit --production` re-run after the fix shows 6 remaining (down from 11), all `react-router`-family and requiring `--force`; `git diff --stat package-lock.json` shows lockfile-only changes (no `package.json` edits); `npm run test` (206/206), `npm run lint` (0 errors), and `npm run build` all re-verified green post-fix; `grep -rn checkEntitlement supabase/functions` re-confirms the three live call sites backing the `TASKS.md` correction.
+
+**Reversibility:** easy — `package-lock.json` change is `git revert`-able (re-resolves to the pre-fix transitive versions), `TASKS.md` is a two-section doc edit. No production code, secrets, or edge-function deploys touched; no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the 95th run — not re-investigated this run since nothing changed. Also unchanged: `_shared/tool-gateway.ts` remains written but unwired into `trading-agent`; the `react-router` major-version bump (6 remaining npm vulnerabilities, moderate severity, breaking change) is a new low-priority item for a future scoped dependency-upgrade run. The `~/.claude/hooks/git-tree-guard.sh` liveness-check gap flagged in the 100th run is unchanged — out of this repo's scope for an unattended run.
+
+---
+
+## 2026-07-30 (100th run) — zero error/critical rows (one transient `credential_fetch_failed`, matches established benign pattern), zero new deployed-function drift, zero cron/manifest drift; found and fixed a stale worktree-lock incident that silently skipped the two preceding scheduled runs
+
+**Incident — two scheduled runs silently skipped (~13:45 UTC and ~15:10 UTC):** on arrival, `git-tree-guard` (the PreToolUse hook that pins one live session per git checkout) blocked every mutating git command in `.worktrees/TradeAgent-health-check` with "another live Claude session is working in this same git checkout." `mcp__ccd_session_mgmt__list_sessions` showed no session actually running, but the hook's own presence file (`$(git rev-parse --git-common-dir)/.claude-presence/`) held an entry for session `69d75a34-…` timestamped 1785418897 (≈13:42 UTC) pointing at PID 17264, which `ps` confirmed was still alive (1h59m elapsed, 3.4% CPU) — `mcp__ccd_session_mgmt__get_session` returned "not found" for that session ID, meaning the platform no longer tracks it as live even though the OS process never exited. The hook's liveness check is `age < 600s` **OR** `pid alive` — a hung-but-still-alive process defeats the TTL half entirely and can hold the lock indefinitely. This explains why the ~13:45 UTC run (session `local_f874db1b…`, no PR, no health-log entry) and the ~15:10 UTC run (session `local_9871fbfc…`, same) both show up in `list_sessions` with activity but never produced a PR or a Telegram alert — they hit this same block and exited without ever reaching the point where either would fire, so the gap between the 99th run's ~12:10 UTC cutoff and now (438 `compliance_log` rows instead of the usual ~150/hour) is fully accounted for by ~3 hours of elapsed time, not by any missed error.
+
+**Fix (the one concrete improvement made this run):** confirmed PID 17264 was orphaned (no tracked session, no legitimate reason to hold the lock past its own session's lifetime), sent `SIGTERM`, confirmed it exited cleanly within 3s, then `git fetch && git reset --hard origin/dev` + fresh branch proceeded normally. This is a one-off unblock, not a code change — the underlying gap (TTL-or-pid-alive liveness can wedge on a leaked process) lives in `~/.claude/hooks/git-tree-guard.sh`, which is global Claude Code infra outside this repo's scope for an unattended run to modify; flagged as a follow-up task (harden the liveness check with an absolute max-age independent of PID state) rather than edited blind here.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 99th run's ~12:10 UTC cutoff through this run's ~15:14 UTC invocation — 438 total rows (elevated vs. the usual ~150/hour count purely because ~3 hours elapsed instead of ~1, per the incident above), exactly **one** at error/critical: `kalshi_proxy_service_credential_fetch_failed` at 12:18:49 UTC, paired with the expected `kalshi_proxy_unauthenticated_fallback` warning immediately after. Matches the same benign "single transient occurrence" pattern documented in the 75th/78th/82nd/88th/94th/99th runs. The remaining warnings were 46× `unsettleable_404` (already-documented benign `settle-signals` pattern) and the trading agent's own internal `health-check_alert`/`health_check_run` cron rows (unrelated to the Claude-session lock incident above — this is the app's separate hourly compliance alerting job, confirmed showing "suppressed (deduped)" with no new alerts since 12:10).
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download --use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop pending Onofre's call on the production billing/tenant redeploy.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every prior run.
+
+**Cron/manifest audit:** `cron.job` — 14 live, all active, zero stale/failed/inactive. Cross-checked against `expected_cron_jobs`: 14 expected, 14 live, zero rows in either direction not matched by the other.
+
+**Verified:** `ps -p 17264` confirmed process exit after `SIGTERM`; subsequent `git fetch && git reset --hard origin/dev` and `git checkout -B` on the same worktree succeeded without the hook blocking, confirming the lock was the sole blocker and not a deeper git-state problem.
+
+**Reversibility:** N/A for the unblock (terminating an orphaned process, not a data change). No repo code or production behavior touched.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the 95th run — not re-investigated this run since nothing changed. Also unchanged: `_shared/tool-gateway.ts` remains written but unwired into `trading-agent`. **New open item:** `~/.claude/hooks/git-tree-guard.sh`'s liveness check (age<600s OR pid-alive) has no absolute cap — a leaked-but-alive process can hold a worktree lock indefinitely and silently skip scheduled runs (as it did twice today) since neither a PR nor a Telegram alert fires when a run aborts this early. Flagged as a background task rather than fixed here (out of this repo's scope for an unattended run).
+
+---
+
+## 2026-07-30 (99th run) — zero error/critical rows (one transient `credential_fetch_failed`, matches established benign pattern), zero new deployed-function drift, zero cron/manifest drift; corrected a stale `CLAUDE.md` build-status claim that subscription enforcement doesn't exist
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (98th run's branch merged as PR #157) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-99` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 98th run's ~11:07 UTC
+cutoff through this run's ~12:10 UTC invocation — 146 total rows, exactly **one** at error/critical:
+`kalshi_proxy_service_credential_fetch_failed` at 11:48:46 UTC ("credential fetch exceeded 8000ms
+after retry — falling back to the anonymous rate tier"), paired with the expected
+`kalshi_proxy_unauthenticated_fallback` warning five seconds later. This matches the "single
+transient occurrence, not a recurring pattern, no code change warranted" precedent set by the
+75th/78th/82nd/88th/94th runs — the 85th run's retry-once guard working exactly as designed
+(retried, still timed out, degraded gracefully). The other 12 warning rows were all
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th/97th/98th runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy (see this run's doc fix below for
+what's actually in that gap).
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Cron/manifest audit:** ran `cron_health()` against all 14 live jobs — zero stale, zero failed,
+zero inactive. Cross-checked both directions against `expected_cron_jobs`: 14 expected, 14 live,
+zero rows in either direction not matched by the other — the 98th run's migration fix for
+`compliance-log-retention-daily` closed the last gap; re-confirmed all 14 jobs now have at least one
+migration file referencing them (`grep -rl <jobname> supabase/migrations/`).
+
+**Fix (the one concrete improvement made this run):** `CLAUDE.md`'s "Build status" section stated
+flatly "no subscription enforcement in edge functions" — false as of the 95th run (2026-07-30),
+which merged real per-tier `checkEntitlement()` limits (`maxTradesPerDay`/`maxOpenPositions`/
+`maxPositionUsd`, not the old display-only `999999` stub) into `_shared/billing.ts`. Verified this
+is genuinely wired, not dead code: `grep -rn checkEntitlement supabase/functions` shows real call
+sites in `auto-trade/index.ts:641`, `execute-trade/index.ts:252`, and
+`switch-trading-mode/index.ts:68`, and `git log` confirms both commits (`7c5231a`, `4a4f8df`) are on
+`dev`. What's actually true is narrower and different from what the doc claimed: enforcement is
+built, tested, and live on `dev`; it is **not deployed to production** (blocked on Onofre's approval
+per the money/billing Hard Stop, same gap the 95th run's `_shared/billing.ts`/`tenant.ts` diff still
+shows today). Left as written, a future run or a human skimming `CLAUDE.md` could believe billing
+enforcement hasn't been built at all and re-propose work that's already done, or conversely could
+miss that production is still running the unlimited-tier version. Rewrote the "In progress /
+partially done" and "Priority order" entries to state both halves precisely.
+
+**Verified:** `grep -rn checkEntitlement supabase/functions --include="*.ts"` (excluding
+`_shared/billing.ts` itself and test files) confirms three live call sites; `git log --oneline --
+supabase/functions/_shared/billing.ts` confirms `7c5231a`/`4a4f8df` are on `dev`'s history; this
+run's own drift sweep (above) independently confirms production's deployed `billing.ts` still
+differs from `dev`'s — the doc now accurately reflects that split instead of erasing it.
+
+**Reversibility:** trivial — two-entry doc edit in `CLAUDE.md`, `git revert` restores the prior
+(less accurate) text exactly. Not a money/billing action, no code or production behavior touched, no
+HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard
+Stop. Also unchanged: `_shared/tool-gateway.ts` (2026-07-10 decision) remains written but never
+wired into `trading-agent`'s 7+ tool-call sites — confirmed still zero references in the codebase
+this run. Not auto-wired for the same reason the 98th run gave: touches the live LLM tool-calling
+path inside a 2,159-line file, too large/risky to scope blind on an unattended run.
+
+---
+
+## 2026-07-30 (98th run) — zero error/critical rows, zero new deployed-function drift; captured the `compliance-log-retention-daily` cron job (live since 2026-07-07, never in git) into a migration
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (97th run's branch merged as PR #156) — fresh branch `health-check/run-98` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 97th run's 10:10:07 UTC
+cutoff (confirmed via that run's own `health_check_run` row) through this run's ~11:07 UTC
+invocation — **zero** error/critical rows across 87 info-level rows. Only 2 `warning` rows, both
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th/97th runs.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Cron/manifest audit:** ran `cron_health()` against all 14 live jobs — zero stale, zero failed.
+Cross-checked `cron.job` against `expected_cron_jobs`: all 14 live jobs are represented, zero
+missing. Then cross-checked the other direction — which jobs are captured in *migration files* vs.
+only ever applied live — since that's exactly the blind spot the 42nd/46th runs found and fixed for
+`paper-reconcile-cron`/`settle-signals-cron` (job existed live, was never in a committed migration,
+so a from-scratch rebuild would silently drop it). `compliance-log-retention-daily` — the prune job
+from the very first health-check run (2026-07-07, `.claude/improvement-log.md`), applied directly via
+the Management API — was never captured into a migration file. Confirmed via
+`grep -rl prune_compliance_log supabase/migrations/`: zero matches.
+
+**Fix (the one concrete improvement made this run):** added
+`supabase/migrations/20260730_register_compliance_log_retention_cron.sql`, capturing the live
+`prune_compliance_log()` function definition (pulled via `pg_get_functiondef`) and the
+`cron.schedule('compliance-log-retention-daily', '17 3 * * *', ...)` call, plus registering it in
+`expected_cron_jobs` (idempotent `ON CONFLICT DO NOTHING` — the manifest row already existed from a
+past run's live insert, so this was a no-op there; the migration file itself was the actual gap).
+Same fix class, same reasoning as the two prior register-cron migrations this run cross-referenced.
+
+**Verified:** applied the migration via the Management API (`cron.schedule` upserts by name — safe
+against the job already existing; returned a new jobid as expected for a re-schedule, not an error).
+Re-queried `cron.job` — `compliance-log-retention-daily` still `active=true`, same schedule, same
+command. Re-ran `cron_health()` scoped to this job — `is_stale=false`, `last_run_failed=false`. No
+functional change to the live schedule; this is a git-drift fix, not a behavior fix — the job ran
+correctly every day since 2026-07-07 regardless.
+
+**Reversibility:** easy — the migration is additive (`CREATE OR REPLACE FUNCTION`, idempotent
+`cron.schedule`/`ON CONFLICT DO NOTHING` insert); reverting the file doesn't unschedule the live job
+(would need an explicit `cron.unschedule` to actually remove it, which nobody wants). Not a
+money/billing action, no live-trading path touched (`compliance_log` is telemetry only).
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+Also unchanged: `_shared/tool-gateway.ts` (2026-07-10 decision) remains written but never wired into
+`trading-agent`'s 7+ tool-call sites — confirmed still zero references in the codebase this run
+(`grep -rl tool-gateway supabase/functions` → no hits beyond the file itself). Not auto-wired: this
+touches the live LLM tool-calling path inside a 2,159-line file and is too large/risky to do blind on
+an unattended run; needs Onofre's review to scope before either wiring it or deciding it's stale
+enough to remove.
+
+---
+
+## 2026-07-30 (97th run) — zero error/critical rows, zero new deployed-function drift; corrected a stale-looking open item in DECISIONS.md that was actually resolved two runs ago
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (96th run's branch merged as PR #155) — fresh branch `health-check/run-97` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 96th run's ~09:10 UTC
+cutoff (confirmed via that run's own `health_check_run` row) through this run's ~10:07 UTC
+invocation — **zero** error/critical rows across 89 info-level rows. Only 2 `warning` rows, both
+`unsettleable_404` (`settle-signals` Kalshi-404s), the same already-documented-benign pattern from
+the 46th/92nd/93rd/96th runs. Widened the window to 6 hours for a sanity check: the only other
+warnings in that broader window (29 `api_error` rows, all timestamped 06:00:07 UTC, all
+`settle-signals` 404 messages) predate the 96th run's cutoff and are the same pre-93rd-run-fix
+residue that run already traced and ruled benign — not a recurrence.
+
+**Full drift sweep:** downloaded all 33 deployed edge functions (`supabase functions download
+--use-api`) and diffed every one against `dev`. Zero new drift — matches `dev` exactly except the
+already-known `_shared/billing.ts`/`tenant.ts` gap (95th run), still an unconditional Hard Stop
+pending Onofre's call on the production billing/tenant redeploy. Local function-directory count
+(33, excluding the non-function `tests/` dir) matches the deployed count exactly — no repeat of the
+34-vs-32 mismatch the 95th/96th runs found and closed.
+
+**Test/lint sweep:** `npm run test` — 206/206 passing across 15 files, no regressions. `npm run
+lint` — 0 errors, same 9 pre-existing `react-refresh/only-export-components` warnings as every
+prior run (UI-only, unrelated to edge functions).
+
+**Fix (the one concrete improvement made this run):** `DECISIONS.md`'s 2026-07-20 entry
+("Flagged market-data-fetcher credential-fetch timeout gap, not auto-fixed") still read as an open
+item requiring Onofre's review. It isn't — PR #101 (`28a87d2`, 2026-07-28) shipped the exact
+`Promise.race` + 8s timeout wrapper the entry proposed, and PR #143 (`d051d32`, 2026-07-29) added a
+retry on top after the bound alone still let one slow lookup consume a full 5-min cycle (recurred
+2026-07-23 and 2026-07-29). Both fixes are live on `dev` today (`market-data-fetcher/index.ts:79-109`)
+and documented under separate 2026-07-28 entries elsewhere in this same file (the sibling
+credential-timeout fixes for kalshi-proxy/trading-agent/futures-signal/kalshi-ping/settle-signals
+all cross-reference this pattern) — but the original flagging entry was never marked resolved in
+place. Left as-is, a future run (human or agent) reading DECISIONS.md top-to-bottom could mistake it
+for a live gap and re-flag or re-propose work that already shipped. Added a `RESOLVED` note directly
+under the original entry with commit hashes and file/line trace. Docs-only change, no code touched,
+no deploy needed.
+
+**Verified:** `git log --oneline -- supabase/functions/market-data-fetcher/index.ts` confirms both
+commits on `dev`'s history; `grep -n "getKalshiCredentials\|AbortController" market-data-fetcher/index.ts`
+confirms the timeout-plus-retry wrapper is present in the current source, not just in a past commit
+that could have been reverted.
+
+**Reversibility:** trivial — single-entry doc edit, `git revert` restores the prior text exactly.
+Not a money/billing action, not user data, no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not
+re-investigated this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+
+---
+
+## 2026-07-30 (96th run) — zero error/critical rows, zero new deployed-function drift; closed the 95th run's open item by deleting the confirmed-dead `trade-auditor` function from production and git
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (95th run's branch merged as PR #155) — fresh branch `health-check/run-96` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows in the last 6 hours (covers well past
+the 95th run's ~08:0x UTC cutoff through this run's ~09:0x UTC invocation) — **zero** error/critical
+rows across 635 info-level rows. 40 `warning` rows: 5 `unsettleable_404` + 29 `api_error` (both
+`settle-signals` Kalshi-404 messages) + 2 `health_check_run` + 2 `health_check_alert` + 2
+`liquidity_fallback`. The 29 `api_error`-labeled 404s are pre-93rd-run-fix residue, not a new bug —
+confirmed via the deployed function's `updated_at` (2026-07-30 06:08:39 UTC) landing squarely between
+the batch's 05:00–06:00 UTC timestamps and the 93rd run's merge commit (06:16:31 UTC): this window
+predates that run's redeploy, so it's the exact stale-classification the 93rd run already fixed, not
+a recurrence. One real consequence traced to this residue: the `api_error_kalshi` Telegram alert that
+fired at 05:10:11 UTC — that page went out *before* the fix deployed and was already resolved by the
+93rd run within the hour; nothing new to act on. Current `settle-signals` source (downloaded via
+`supabase functions download --use-api`) diffs byte-identical against `dev`, as do all five of its
+`_shared/*.ts` imports — no drift remains on this function today.
+
+**Full drift sweep:** downloaded all 34 deployed edge functions and diffed every one against `dev`.
+Zero new drift — every function's deployed source matches `dev` exactly except the already-known,
+already-flagged `_shared/billing.ts`/`tenant.ts` gap from the 95th run (untouched this run — still an
+unconditional Hard Stop, still needs Onofre's call). No previously-undocumented live code found this
+time; the two the 95th run captured (`switch-trading-mode`, `trade-auditor`) accounted for the full
+34-vs-32 gap, and both now have git history.
+
+**Fix (the one concrete improvement made this run):** closed the 95th run's other open item —
+whether `trade-auditor` is genuinely dead. Re-verified independently on all three reachability paths:
+zero references in `src/` or any other function's source, zero `cron.job` rows naming or calling it,
+and `auto-settle` (the function its own docstring claims invokes it) has no reference to it or to
+`trade_lessons` at all — that table's writes are fully owned by `auto-reflect` v2 today. Deleted it
+from production (`supabase functions delete trade-auditor`) and from git (`git rm -r
+supabase/functions/trade-auditor`) — the 95th run's commit remains in history as the exact rollback
+point if ever needed. See DECISIONS.md for full reasoning.
+
+**Verified:** `supabase functions` list post-delete confirms 33 functions remain, `trade-auditor`
+absent. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings as every prior run
+(unrelated to this change — no lint rules touch edge functions). No other file in the repo referenced
+`trade-auditor` outside this log and DECISIONS.md, so no dangling imports from the deletion.
+
+**Reversibility:** fully reversible — the 95th run's commit has the exact source that was live;
+`supabase functions deploy trade-auditor` restores it if a caller is ever found. Not a money/billing
+action, not user data, no HITL gate applies.
+
+**Open item — unchanged, still needs Onofre:** the billing/tenant production-drift decision from the
+95th run (redeploy `execute-trade`, `auto-trade`, `stripe-webhook`, `kalshi-proxy`, `execute-basket`,
+`switch-trading-mode` to bring production's tier enforcement in line with `dev`) — not re-investigated
+this run since nothing changed; still gated on Onofre per the money/billing Hard Stop.
+
+---
+
+## 2026-07-30 (95th run) — zero error/critical rows, 5 expected benign warnings; found production is running billing/tenant code from before the tier-enforcement fix, plus two live edge functions with no git history anywhere
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (94th run's branch merged as PR #154) — fresh branch `health-check/run-95` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 94th run's ~07:07 UTC
+cutoff through this run's ~08:0x UTC invocation — **zero** error/critical rows across 101 info-level
+rows. 5 `warning` rows, all `unsettleable_404` (`settle-signals: Kalshi 404 fetching KXHIGHLAX-...`)
+— the same already-documented-as-benign pattern from the 46th/92nd/93rd runs, nothing new. The
+94th run's `auto-reflect` fix confirmed working in the wild: its 07:14 UTC cron tick logged
+`27 unreflected` (down from every prior run's fabricated `787`), matching the direct-SQL ground
+truth from that run's verification.
+
+**Drift sweep (the finding):** downloaded all 33 deployed edge functions via `supabase functions
+download --use-api` and diffed against `dev`. Two categories of drift, opposite of each other:
+
+1. **A merged fix sitting undeployed.** `_shared/billing.ts` and `_shared/tenant.ts` differ between
+   what's deployed and what's on `dev`. Production's `checkEntitlement` has all four subscription
+   tiers' `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` hardcoded to `999999` (effectively
+   unlimited) and is missing the `maxPositionUsd` enforcement block entirely — this is the
+   pre-`7c5231a` ("enforce billing tier limits server-side instead of display-only") code. It's also
+   missing `4a4f8df`'s live-strategy-suffix-id fix, so a live-mode trade using a per-user suffixed
+   strategy id (`S-001-l-<uuid>`) would still be wrongly rejected as "not available on your tier" in
+   production today, even though `dev` fixed this five commits ago. `tenant.ts` is similarly behind:
+   missing the mode-scoped `risk_settings` fix (a `.eq("mode", ...)` filter preventing a
+   multi-row-error on `.maybeSingle()`), missing loud-error logging on that query, and missing
+   `setRiskHalt` entirely. Root cause: this repo's edge functions deploy one-at-a-time
+   (`supabase functions deploy <name>`), and nothing redeploys every function that imports a
+   changed `_shared/*.ts` file when only some of its dependents get redeployed for an unrelated fix
+   — a shared-file change can merge to `dev` and never actually reach production unless someone
+   remembers to redeploy every consumer. **Did not redeploy** — this is a billing/entitlement change,
+   an unconditional Hard Stop ("anything involving money, billing") per `~/.claude/CLAUDE.md`,
+   regardless of the fix already being reviewed and merged. Flagging for Onofre; see DECISIONS.md.
+
+2. **Two live functions with no git history at all.** `switch-trading-mode` and `trade-auditor` are
+   deployed and running in production but `git log --all -- <path>` and `git ls-tree -r <branch>`
+   come back empty on every branch — this code was never committed anywhere. `switch-trading-mode`
+   (158 lines) is the real, currently-reachable live/paper mode toggle — it imports the same stale
+   `billing.ts`/`tenant.ts`, so it's exposed to finding #1 above. `trade-auditor` (317 lines,
+   self-labeled "v1" in its own docstring) is a post-settlement LLM lesson-extraction loop; cross-
+   checking `pg_cron`'s `cron.job` table and every deployed function's source for a call to either
+   function by name found **zero invocations of `trade-auditor`** anywhere (not from `auto-settle`,
+   not from cron) — its docstring says `auto-settle` should call it, but the current `auto-settle`
+   doesn't, and `auto-reflect` v2 (the fixed function from the 94th run) already owns
+   `trade_lessons` writes. `trade-auditor` reads as dead code superseded by `auto-reflect` v2, live
+   in production but unreachable. Neither function appeared in `pg_cron.cron.job` (expected for
+   `switch-trading-mode`, which is presumably invoked from the frontend, not cron).
+
+**Fix (the one concrete improvement made this run):** committed both functions' current deployed
+source into `dev` as-is — a pure capture, zero behavior change, closes the "unversioned live
+production code" gap (a real rollback-path failure per the repo's own change-safety bar). Left
+`_shared/billing.ts`/`tenant.ts` exactly as `dev` already has them (reverted the downloaded versions
+back after diffing) rather than deploying dev's fix to production — see DECISIONS.md for the
+full reasoning on why capture-only was the correct call here and redeploying the billing fix wasn't.
+
+**Verified:** `deno check` on both newly-captured files reproduces the same
+`SupabaseClient<any,...>` generic-mismatch errors seen when running `deno check` against
+already-committed functions like `auto-settle/index.ts` — confirmed this is a pre-existing,
+repo-wide `deno check` limitation with this Supabase client version, not something introduced by
+capturing these two files verbatim. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. No secrets found in either captured file (env vars pulled via
+`Deno.env.get`, no hardcoded keys/tokens).
+
+**Reversibility:** the capture is a pure addition — `git rm` fully undoes it with zero production
+impact either way, since it changes nothing about what's deployed. The billing/tenant fix was not
+deployed, so there is nothing to roll back on that front; it remains exactly as risky/safe to deploy
+as it was before this run.
+
+**Open item — needs Onofre:** decide whether/when to redeploy `execute-trade`, `auto-trade`,
+`stripe-webhook`, `kalshi-proxy`, `execute-basket`, and `switch-trading-mode` to bring production's
+billing/tenant enforcement in line with `dev` — this project's `CLAUDE.md` build-status section
+still lists "no subscription enforcement in edge functions" as current state, so this may need a
+fresh look rather than a mechanical redeploy. Separately: confirm `trade-auditor` is genuinely dead
+(superseded by `auto-reflect` v2) so it can be deleted from production, or identify what's supposed
+to invoke it if it's meant to still be live. Not re-flagging the `function-drift-check.yml`-inert-
+until-main-promotion item — unchanged since the 91st/94th runs, still needs `dev`→`main`, not a
+scheduled run.
+
+## 2026-07-30 (94th run) — zero error/critical/warning rows, zero deployed-function drift; found and fixed a silently-fabricated observability metric — `auto-reflect`'s "unreflected trades" count was reporting 787 when the true number was 27
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (93rd run's branch merged as PR #152) — fresh branch `health-check/94th-run` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for all rows since the 93rd run's ~06:07 UTC
+cutoff through this run's ~07:07 UTC invocation — **zero** error/critical rows, and (unlike the
+93rd run's window) **zero warning rows either** — 101 info-level rows, no `settle-signals` 404s
+fired in this window so the 93rd run's `unsettleable_404` reclassification went unexercised, but
+nothing regressed. No `event_type` values matching the previously-alerting `api_error` family
+appeared.
+
+**Manual drift sweep:** downloaded all 33 deployed edge functions via `supabase functions download
+--use-api` and diffed against `dev` — zero differences. No undocumented production deploy this run
+(the pattern behind the 86th–89th runs' findings).
+
+**Root cause found (a real bug, not just noise):** `auto-reflect`'s hourly summary log has read
+`787 unreflected` on every run for as long as the log has recorded it — a number that never moved,
+which is itself the tell. Traced `unreflectedCount`'s computation in
+`supabase/functions/auto-reflect/index.ts`: it fetches all settled trade ids (787 of them), then
+queries `trade_reflections.select("trade_id").in("trade_id", filledIds)` to find which are already
+reflected. That `.in()` call serializes to a ~29KB query string over supabase-js's GET-based REST
+transport. Reproduced directly against the project's REST endpoint
+(`trade_reflections?trade_id=in.(<787 uuids>)`): the gateway in front of PostgREST rejects it
+outright with a plain-text `400 Bad Request` — not a JSON PostgREST error. The destructured
+`const { data: reflected } = await supabase...` silently drops that error; `reflected` falls back
+to `undefined` → `[]`, so `reflectedIds` is always an empty Set and **every** settled trade reads
+as unreflected regardless of truth. Direct SQL against `compliance_log`'s sibling tables confirmed
+the real number: 787 settled trades, 839 `trade_reflections` rows (they're seeded at trade-open
+time in `execute-trade`/`trading-agent`, not just at reflection time), only **27** settled trades
+genuinely lack a reflection row. This is a metrics-only bug — no trading, settlement, or lesson-
+writing logic reads `unreflectedCount`, so no live behavior was affected — but it's exactly the
+silently-wrong-number failure mode this log has flagged repeatedly (88th run's `remaining_count_fp`
+bug, the order-then-limit bug), and a false "787 backlog" is the kind of number that would
+misdirect a future run or Onofre into chasing a debt that's 29x smaller than reported.
+
+**Fix:** replaced the oversized `.in()` lookup with a full-table `select("trade_id")` over
+`trade_reflections` (839 rows — small, safe, no filter needed) built into a Set, then diffed
+against `filledIds` in memory — the exact pattern the same file already uses two blocks below for
+`learnedTradeIds`/`trade_lessons`. No behavior change to what counts as "reflected," only how the
+existing rows are fetched. Deployed via
+`supabase functions deploy auto-reflect --project-ref uyfnezxmgwitpzsrnkst` — succeeded first
+attempt.
+
+**Verified:** `deno check` on the edited file: identical single pre-existing type error
+(`mem.updated_at` on an inferred type, unrelated to this change) before and after, confirmed via
+`git stash`/`git stash pop` diff. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. **Verified in prod against real data:** rather than wait ~53 minutes
+for the next `auto-reflect-hourly` cron tick, invoked the deployed function directly via its
+documented manual-POST entry point (service-role auth) — returned `"unreflected_trades": 27`,
+exactly matching the direct-SQL ground truth computed before the fix. Re-checked `compliance_log`
+for the 5 minutes surrounding the manual invocation: zero new error/critical rows, no regression in
+Bayesian memory updates (22 checked, 0 updated — consistent with recent history) or strategy health
+(1 active strategy, `sharpe -0.07`, `healthy`, matches steady state).
+
+**Reversibility:** easy — a single-file diff swapping one filtered query for one unfiltered query
+plus an in-memory Set diff already used elsewhere in the file; `git revert` + redeploy restores the
+(broken) prior behavior with no data or schema impact either way.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th
+run) stays completely inert until `dev` is promoted to `main` — unchanged since the 91st run
+flagged this; not re-flagging as new, just noting it's still open.
+
+## 2026-07-30 (93rd run) — zero error/critical rows; found and fixed a false-positive Telegram alert: expected/handled `settle-signals` 404s were paging as real Kalshi API errors
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (92nd run's branch merged as PR #151) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/93rd-run` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+92nd run's ~05:07 UTC cutoff through this run's ~06:07 UTC invocation — **zero** error/critical rows
+across 112 info-level rows. 14 `warning` rows, all `settle-signals: Kalshi 404 fetching <ticker>` —
+the same already-understood-as-benign 404 pattern the 46th and 92nd runs documented.
+
+**Root cause found (a real bug, not just noise):** among this run's warning rows was a new signature
+never seen before: `Alert sent: api_error_kalshi` (`fingerprint: "api_error_kalshi:404"`) — a real
+Telegram 🔴 push, not just a log line. Traced it to `health-check/index.ts`'s structured API-error
+sweep (`API_ERROR_TYPES = ["api_error", "llm_rate_limit", "api_timeout", "kalshi_circuit_open"]`,
+added by an earlier run to catch genuine upstream provider failures): it pages on *any* `api_error`
+event_type, with no distinction for context. `settle-signals/index.ts` logs `event_type: "api_error"`
+unconditionally on every non-2xx Kalshi response — including the 404 branch it *already* treats as a
+definitive, expected, permanently-handled outcome (ticker aged out of Kalshi's archive retention,
+stamped `settled_at`/`unsettleable_404`, never retried — the 46th run's fix). Net effect: every batch
+of benign, working-as-designed 404s pages Onofre with a red-circle "Kalshi API error" alert
+indistinguishable from a real outage or circuit-breaker trip. This is the alert-fatigue failure mode —
+a false 🔴 trains the reader to discount the next one, which might be real.
+
+**Fix:** `settle-signals/index.ts` now logs `event_type: "unsettleable_404"` (not `"api_error"`) on the
+already-expected 404 path, keeping `"api_error"` reserved for the genuinely transient/unexpected
+non-404 branch (5xx/timeout) that should keep paging. Severity stays `"warning"` so the row is still
+visible in `compliance_log` for observability — only the alert-worthy classification changed. Also
+added `"unsettleable_404"` to `ObservabilityPage.tsx`'s `operationalEventTypes` exclusion list so this
+new event_type doesn't leak into the dashboard's generic "errors" feed the same way `"api_error"`
+already didn't (that list already documents this exact pattern for `surface_scan_complete` etc.).
+Deployed via `supabase functions deploy settle-signals --project-ref uyfnezxmgwitpzsrnkst` — succeeded
+first attempt.
+
+**Verified:** `deno check` on the edited file: same 11 pre-existing type errors as the unmodified
+baseline (unrelated Supabase client generic-type issues, confirmed via `git stash`/`git stash pop`
+diff — none introduced by this change). `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run. Live: confirmed the deployed function ran clean on the next cron tick
+(06:15 UTC, jobid 24) with no exceptions. Could not directly observe the 404 branch fire post-deploy
+within this run's window — `select count(*) from signals where settled_at is null and expires_at <
+now() + interval '20 minutes'` returned 0, so no ticker is due to hit that path in the near term (the
+last backlog already drained). The change itself is a scoped conditional swap of a string literal in
+an already-fire-and-forget insert (`.then(undefined, () => {})`) with no change to the settlement
+logic, retry logic, or DB writes on either branch — reviewed the diff directly rather than relying on
+a live 404 to prove it.
+
+**Reversibility:** easy — a one-line event_type string change plus a one-line dashboard exclusion-list
+addition; reverting either is a single-line diff with zero data or behavior impact.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th run)
+is still completely inert until `dev` is promoted to `main` — unchanged since the 91st run flagged
+this; not re-flagging as new, just noting it's still open.
+
+## 2026-07-30 (92nd run) — zero error/critical rows; found and closed a real observability gap in settle-signals' no-op path (an 8h silent stretch that looked identical to a crash until traced through cron.job_run_details)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (91st run's branch merged as PR #150) — fresh branch `health-check/run-92` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+91st run's ~04:06 UTC cutoff through this run's ~05:07 UTC invocation — **zero** error/critical rows.
+Also checked `warning` (a new check this run, since it's a real severity level in the same table):
+19 rows, all `settle-signals: Kalshi 404 fetching <ticker>` — worth investigating since no prior run
+had surfaced a `warning` before.
+
+**Investigation (no new bug, but a real gap found):** the 404s are already handled correctly by the
+46th run's `unsettleable_404` fix — confirmed via `compliance_log` trend over the last 3 days:
+~800 404-warnings/hour from 2026-07-28 06:00 through 2026-07-29 08:00 (a pre-existing backlog of
+signals on tickers that had aged out of Kalshi's archive retention), draining to single/low-double
+digits per hour once each ticker got its one-time 404 and was marked `settled_at` so it stops
+re-entering future batches — working exactly as designed. But the same query showed an unexplained
+**8-hour stretch (2026-07-29 21:00–2026-07-30 05:00) with zero `compliance_log` rows at all** from
+settle-signals — no info, no warning. Traced it via `cron.job_run_details` (jobid 24,
+`*/15 * * * *`): every single tick in that window fired and returned `succeeded`. The function was
+never down. Root cause: `supabase/functions/settle-signals/index.ts`'s early-return path (no
+unsettled signals past expiration) returns its JSON response without ever writing to
+`compliance_log` — only the end-of-run and crash paths log. That means a silent crash *before* the
+try block (e.g. missing Supabase credentials, hitting the 500 at the top of the handler) would leave
+an identical footprint to a legitimately idle tick — indistinguishable without cross-referencing
+`cron.job_run_details`, a table health-check has no standing reason to check unless something already
+looks wrong.
+
+**Fix (this run):** added a non-blocking `compliance_log` insert (`total_signals_checked: 0`) on the
+no-op early-return path, matching the existing fire-and-forget pattern already used elsewhere in the
+same file (`.then(undefined, () => {})`). Deployed via
+`supabase functions deploy settle-signals --project-ref uyfnezxmgwitpzsrnkst` (first attempt hit a
+transient Cloudflare 502 marked `retryable`, backed off 60s per its own guidance, retry succeeded).
+
+**Verified:** `deno check` on the edited file shows the same 11 pre-existing type errors as the
+unmodified file (confirmed via `git stash`/`git stash pop` diff — none introduced by this change).
+`npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings as every prior run. Live
+verification against real data: at deploy time, `select count(*) from signals where settled_at is
+null and expires_at < now()` returned 0, so the very next cron tick (05:15 UTC) was guaranteed to hit
+the exact no-op path just changed — confirmed the row landed:
+`{"created_at":"2026-07-30 05:15:03","message":"Settle signals: 0 signals settled from 0 markets
+checked (no unsettled signals past expiration)","metadata":{"total_signals_checked":0}}`.
+
+**Reversibility:** easy — additive logging only inside an already-non-blocking insert, no behavior
+change to settlement logic. Revert is a one-line deletion.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` (added 90th run)
+is still completely inert until `dev` is promoted to `main` — unchanged since the 91st run flagged
+this; not re-flagging as new, just noting it's still open.
+
+## 2026-07-30 (91st run) — the CI drift-detection gate the 90th run built has never fired: GitHub Actions `schedule:` only reads the default branch, and the workflow only lives on `dev`; added a non-blocking guard so this class of mistake can't recur silently
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was on a leftover branch
+(`health-check/run-90`, already merged as PR #149, zero diff vs. `origin/dev`) rather than being reset
+after the last run — `git fetch`, fresh branch `health-check/run-91` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+90th run's ~03:06 UTC cutoff through this run's ~04:06 UTC invocation — **zero** error/critical rows
+across 111 info-level rows. No signature to chase this run.
+
+**Root cause found (the previous "fix" doesn't work):** the 90th run added
+`.github/workflows/function-drift-check.yml` with `on: schedule: cron: "0 */6 * * *"`, merged to `dev`
+via PR #149, and logged it as a working automated gate. It isn't one. GitHub Actions only ever
+evaluates a `schedule:` trigger from the repository's **default branch** — this repo's default branch
+is `main` (`gh repo view --json defaultBranchRef` confirms), and the workflow file has never existed
+on `main`. Confirmed empirically two ways: `git show origin/main:.github/workflows/function-drift-check.yml`
+finds nothing, and `gh workflow list --all` shows only `CI` — the drift-check workflow isn't even
+*registered* with GitHub Actions, let alone scheduled. It has silently done nothing since merge; the
+90th run's "first scheduled run within 6h will be the first live proof" never happened and never could.
+
+**Fix (this run, within scope):** the actual fix — promoting `dev` → `main` so the workflow file lands
+on the default branch — is a Hard Stop requiring Onofre's explicit "ship to production," not available
+to an unattended scheduled run. Considered rebuilding the check as a Supabase pg_cron edge function
+instead (this codebase's normal pattern for periodic jobs, and immune to the default-branch trap), but
+that needs a new GitHub PAT as a Supabase function secret — a new credential/dependency that's its own
+critical decision, too much surface to ship correctly unattended this run. Chose the scoped, real fix:
+added a `schedule-workflow-drift` job to `ci.yml` that runs on every push/PR to `main`/`dev`, scans every
+`.github/workflows/*.yml` for `schedule:` triggers, and emits a loud (but non-blocking — never fails the
+job) GitHub Actions annotation if that file isn't byte-identical on `origin/main`. This guards the actual
+system-level gap — "assume a schedule-triggered workflow works once merged anywhere" — for this workflow
+and any future one, without blocking unrelated health-check PRs on a pre-existing gap they didn't create.
+Full options/why in DECISIONS.md (2026-07-30, 91st run).
+
+**Verified:** YAML parsed clean (`python3 -c "import yaml; yaml.safe_load(...)"`). Ran the guard's exact
+bash logic locally against this checkout — correctly flags `function-drift-check.yml` as
+`MISSING-ON-MAIN`, the real current state. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings as every prior run — this change didn't touch application code.
+
+**Reversibility:** easy — additive CI job only, no deploy path touched; deleting the job fully reverts it.
+
+**Open item — needs Onofre, not another scheduled run:** `function-drift-check.yml` stays completely
+inert until `dev` is promoted to `main`. Until then, the 86th–89th runs' manual download-and-diff sweep
+is still the only thing actually catching edge-function drift — sent as this run's Telegram flag.
+
+## 2026-07-30 (90th run) — zero drift this run (streak of 4 broken), zero error/critical compliance-log rows; built the CI drift-detection gate the 88th/89th runs recommended
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (89th run's branch merged as PR #148) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-90` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+89th run's ~01:06 UTC cutoff through this run's ~03:06 UTC invocation — **zero** error/critical rows
+across 227 info-level rows. No signature to chase this run.
+
+**Drift sweep:** Per the 89th run's recommendation to keep running the full sweep every time,
+downloaded all 16 actively-invoked edge functions (`auto-reflect`, `auto-settle`, `auto-trade`,
+`backtest-weather`, `daily-digest`, `futures-signal`, `health-check`, `market-data-fetcher`,
+`paper-reconcile`, `reconcile-orders`, `settle-signals`, `signal-generator`, `surface-scanner`,
+`execute-trade`, `kalshi-proxy`, `weather-signal`) via `supabase functions download --use-api` and
+diffed against `origin/dev`. **All 16 matched exactly — zero drift.** This breaks the 86th-89th
+streak of finding drift on every sweep (two behavior bugs, one legitimate unreviewed fix, one
+cosmetic mismatch), one run short of the "fifth consecutive" threshold the 89th run named as the
+trigger to build a CI gate.
+
+**Improvement made (root-cause fix for the governance gap, not just this run's observation):**
+4 of the last 5 sweeps found real drift, and the 89th run's own note was that detection depended
+entirely on this task remembering to run the manual sweep — a single point of failure. Built
+`.github/workflows/function-drift-check.yml`: a GitHub Actions job on a 6-hour schedule (plus
+`workflow_dispatch` for manual runs) that downloads every deployed function via the Supabase
+Management API, diffs against `main`, uploads the diff as a build artifact, sends a Telegram alert
+(`[TradeAgent] Edge function drift detected...`), and fails the job loud on any mismatch. Added
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` as new repo secrets to support the alert step — see
+DECISIONS.md (2026-07-30) for the full write-up.
+
+**Verified:** `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. YAML parsed
+clean with `python3 -c "import yaml; yaml.safe_load(...)"`. The workflow's no-drift path is
+exercised by this run's own real sweep result (16/16 functions clean → `git diff --quiet` exits 0,
+matching what the job would report). The drift/alert/fail path reuses the same
+git-diff/artifact-upload/curl patterns already proven in this file's `canary-gate` and
+`migrate-staging` jobs, not new untested primitives.
+
+**Reversibility:** easy — the new workflow is additive and schedule-triggered only; deleting the
+file and the two secrets fully reverts it with zero production impact.
+
+**Next real signal:** the workflow's first scheduled run (within 6h of merge) will be the first
+live proof the alert path fires correctly end-to-end; if it reports drift where the manual sweep
+just found none, that's a bug in the workflow itself to chase, not a real regression.
+
+## 2026-07-30 (89th run) — fourth undocumented production deploy found via the full sweep the 88th run recommended, this time cosmetic-only (no behavior change); redeployed `origin/dev` to close the drift
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (88th run's branch merged as PR #147) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-89` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+88th run's ~01:06 UTC invocation (confirmed via the *internal* product `health_check_run` timeline,
+not this task's own cadence — the last error-severity row, `kalshi_proxy_service_credential_fetch_failed`
+at 01:03:50 UTC, was already the exact row the 88th run analyzed and dismissed; excluding it, the
+window from 01:06 UTC through this run's ~02:06 UTC invocation is **zero** error/critical rows across
+~140 info-level rows). No new error signature to chase this run.
+
+**Root cause found (drift, not a bug — fourth deploy outside the branch → PR → merge → deploy
+pipeline, now four-for-four across the 86th/87th/88th/89th runs):** per the 88th run's explicit
+recommendation to re-run the full download-and-diff sweep since any function could drift again,
+downloaded all 17 actively-invoked functions (the 14 with live `cron.job` entries —
+`auto-reflect`, `auto-settle`, `auto-trade`, `backtest-weather`, `daily-digest`, `futures-signal`,
+`health-check`, `market-data-fetcher`, `paper-reconcile`, `reconcile-orders`, `settle-signals`,
+`signal-generator`, `surface-scanner` — plus `execute-trade`/`kalshi-proxy` invoked by `auto-trade`,
+and `weather-signal`) via `supabase functions download --use-api` and diffed each against
+`origin/dev`. 16 of 17 matched exactly. **`daily-digest` did not**: the deployed `index.ts` had two
+template-literal/`.then()` call expressions collapsed onto single lines versus the repo's
+Prettier-wrapped multi-line formatting — same logic, same tokens, whitespace-only. Not a behavior
+bug like the 86th/87th/88th runs' finds; someone (or some tool) redeployed this function from a
+differently-formatted local copy at some point, bypassing review same as the prior three, but this
+time with no functional consequence.
+
+**Fix (deployed):** `supabase functions deploy daily-digest` from the current `origin/dev`
+checkout — no code change needed, since the repo's version was already correct; the fix is
+production catching up to git, not git catching up to production. Confirmed via a second
+download-and-diff pass: `daily-digest` now byte-matches `origin/dev` exactly.
+
+**Verified:** `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run test`:
+206/206 pass — no test changes needed since no logic changed. `deno check` on `daily-digest/index.ts`:
+3 pre-existing errors (stale generated Postgrest types, same class flagged by the 87th/88th runs),
+zero new. **Exercised against real deployed state:** `select * from cron_health()` — all 14
+registered cron jobs `active: true`, `is_stale: false`, `last_run_failed: false`, including
+`daily-digest-cron` itself (`last_status: succeeded`, ran cleanly at 22:00 UTC prior to this
+redeploy — the function's next real invocation is tonight at 22:00 UTC and will exercise the
+redeployed code end-to-end). Zero new error/critical `compliance_log` rows after deploy.
+
+**Reversibility:** trivial — the deployed function is now identical to a file already in `git log`;
+a plain revert of this PR changes nothing about what's running (the drifted version had identical
+behavior), so there's no meaningful "roll back" scenario here.
+
+**Process gap (still open, fourth confirmation):** the download-and-diff sweep keeps finding real
+drift every time it's run — two behavior bugs (86th, 87th), one set of legitimate unreviewed fixes
+(88th), and now one cosmetic-only mismatch (89th). Nothing in the pipeline stops direct
+`supabase functions deploy` from bypassing PR review, and this run's zero-error compliance log
+means the drift-detection value is coming entirely from the sweep, not from error monitoring —
+error-severity logs would never have caught a cosmetic diff. **Recommended for the next run:**
+keep running the full sweep every time (detection technique, not a one-time fix); if a fifth
+consecutive run finds drift, that's a strong signal to build an actual gate (e.g., a scheduled CI
+job that runs the same download-and-diff check and fails loud) rather than relying on this task to
+catch it manually forever.
+
+## 2026-07-30 (88th run) — a third undocumented production deploy found, this time genuine unreviewed bug fixes (not a regression): `reconcile-orders`/`auto-reflect` had drifted from `origin/dev` with real fixes for a V2-API field-name bug and a Strategy Health status/mode/ordering bug; reconciled git with reality
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (87th run's branch merged as PR #146) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-88` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+87th run's ~00:06 UTC cutoff through this run's ~01:06 UTC invocation — 129 total rows, exactly
+**one** at error/critical: `kalshi_proxy_service_credential_fetch_failed` at 01:03:50 UTC
+("credential fetch exceeded 8000ms — falling back to the anonymous rate tier for this request"),
+paired with the expected `kalshi_proxy_unauthenticated_fallback` warning immediately after. This is
+the 85th run's retry-once guard working exactly as designed (retried, still timed out, degraded
+gracefully) — matches the "single transient occurrence, not a recurring pattern, no code change
+warranted" precedent set by the 75th/78th/82nd runs. Also confirmed the last two
+`order_skipped_no_liquidity`/`liquidity_fallback` pairs (00:10:09 UTC) predate the 87th run's own
+fix deploy (~00:15 UTC) — stale residue from before that fix took effect, not a new recurrence.
+
+**Root cause found (real fixes, unlike the 86th/87th runs' regressions — third instance of the
+same governance hole):** per the 87th run's explicit recommendation to spot-check the remaining
+live functions for undocumented drift, downloaded and diffed all ten functions it named plus
+`reconcile-orders`/`signal-generator`/`futures-signal`/`auto-reflect`/`compact-memory` against
+`origin/dev`. `kalshi-proxy`, `market-data-fetcher`, `surface-scanner`, `auto-settle`,
+`paper-reconcile`, `signal-generator`, `futures-signal`, `compact-memory` all matched `dev`
+exactly. Two did not: **`reconcile-orders`** (plus the shared `_shared/reconcile-logic.ts` it
+imports) and **`auto-reflect`** — both carrying real, well-reasoned fixes never committed:
+- `reconcile-logic.ts`/`reconcile-orders`: Kalshi's V2 `GetOrder` response returns
+  `remaining_count_fp` (a fixed-point string), not the plain-numeric `remaining_count` the old code
+  read — so `remaining` was always `-1` and a fully-executed order could never satisfy
+  `remainingCount === 0`, leaving real fills stuck "open" in the DB forever. Also fixes
+  `pickAvgPrice`, which read `avg_price`/`average_fill_price` fields that don't exist at all in V2
+  (it only has `yes_price_dollars`/`no_price_dollars`, the resting price — correct as the fill price
+  for a maker-only limit order), and adds a market-finalized fallback so an order still resting
+  after its market settles is correctly marked cancelled instead of stuck open indefinitely.
+- `auto-reflect`: three stacked bugs in the Strategy Health v2 query — (1) filtered on
+  `status="filled"` when settled trades are stamped `status="settled"` (confirmed via direct count:
+  488 `settled` rows all carry `settled_at`, 13 `filled` rows carry none) — Strategy Health's
+  Sharpe/drawdown/hit-rate/loss-streak suspension logic had never evaluated a single real trade
+  since it shipped; (2) the legacy-strategy-name fallback query wasn't scoped by `mode`, so paper
+  and live rows sharing a strategy name cross-contaminated each other's rolling window (produced an
+  impossible ~596% "drawdown" that force-suspended live trading the first time this query ran real
+  data); (3) `order by settled_at ascending limit 30` returned the oldest 30 settled trades ever,
+  not a rolling window — permanently frozen at strategy-launch data instead of "recent." Also swaps
+  the lesson-writing model from `gpt-4o-mini` to `anthropic/claude-sonnet-5` via the same
+  already-wired OpenRouter key (gpt-4o-mini was producing thin, near-duplicate lessons).
+
+None of this is in `git log`, `DECISIONS.md`, or any prior health-log entry — a third deploy that
+bypassed the branch → PR → merge → deploy pipeline, this time carrying correct fixes for real bugs
+rather than a regression.
+
+**Fix (deployed):** copied the actual deployed `reconcile-orders/index.ts`, `auto-reflect/index.ts`,
+and `_shared/reconcile-logic.ts` into the repo as-is so git matches what's genuinely running —
+these are already-live, already-correct fixes; reverting them would reintroduce the stuck-open-fill
+bug and the never-evaluates-a-trade Strategy Health bug, so reconciliation (not a revert) is the
+right move, same call the 86th/87th runs made for their own drift.
+
+**Verified:** `deno check` on all three files — 11 pre-existing errors both on a clean `origin/dev`
+checkout (via `git stash`/`git stash pop`) and on the reconciled version — stale generated Postgrest
+types, zero new. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run
+test`: 206/206 pass, including all 17 `reconcile-logic.test.ts` cases against the widened
+`decideReconcile`/`pickAvgPrice` signatures (both new params are optional, so existing call sites
+and tests are unaffected). Deployed `reconcile-orders` and `auto-reflect` via `supabase functions
+deploy`. **Exercised against the real deployed functions and real data:** polled `compliance_log`
+after deploy — the 01:10:01 UTC `auto_trade_run` cycle and 01:11:05 UTC `reconcile_orders_run`
+("0 checked, 0 filled, 0 partial, 0 cancelled, 0 errors") both completed clean with zero new
+error/critical rows; `market-data-fetcher` ran normally immediately after (`18/18 series OK`).
+`select * from cron_health()` shows all 14 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the 87th run's own
+push green in 4m21s; nothing since until this run's own push.
+
+**Reversibility:** the reconciliation is a snapshot of already-live behavior, so it changes nothing
+about production on its own — a plain revert would restore the pre-fix (buggy) behavior, not a
+safer one, so revert is not recommended without a reason.
+
+**Process gap (recurring, now three-for-three across the 86th/87th/88th runs):** every function
+checked with the download-and-diff technique so far has either matched `dev` exactly or drifted —
+never a false alarm. Confirms this class of drift is real and ongoing, not a one-off. Full-repo
+coverage is now current as of this run (all functions checked at least once); **recommended for the
+next run:** re-run the same download-and-diff sweep across all functions again, since any of them
+could drift again between now and then — this is a detection technique, not a one-time fix, and
+nothing in the pipeline stops a future direct deploy from happening again.
+
+## 2026-07-30 (87th run) — a second undocumented production deploy (in `execute-trade`, separate from the 86th run's `auto-trade` drift) had silently halted ALL live order submissions platform-wide for over 30 hours; found and fixed
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (86th run's branch merged as PR #145) — `git fetch` confirmed no divergence, fresh branch
+`health-check/run-87` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+86th run's ~23:06 UTC cutoff through this run's ~00:06 UTC invocation — zero rows (192 total rows
+in the window). Grouped the same window by `severity`/`event_type` per the standard set by the
+76th/81st/86th runs, since `error`/`critical` is necessary but not sufficient. Found
+`s001_leg_execution_failed` at 8 occurrences — the 86th run's Kelly-sizing clamp had visibly worked
+(no `$22 exceeds max position size $20` failures after 23:15 UTC, consistent with that run's own
+propagation-lag note), but every failure from 23:20 UTC onward was a *new* signature: `No liquidity
+for <ticker> at 91c/92c`. Six occurrences in 45 minutes on the same `KXBTC-26JUL3017` event, all
+paired with a `liquidity_fallback` log claiming "Placing limit order instead" immediately followed
+by an `order_skipped_no_liquidity` log that skipped it anyway — two compliance rows contradicting
+each other in the same request, which doesn't happen in code that only logs and returns once.
+
+**Root cause found (CRITICAL — second unreviewed production deploy, platform-wide outage):**
+`order_skipped_no_liquidity` does not exist anywhere in `git grep` across the repo. Downloaded the
+deployed `execute-trade` function (`supabase functions download`) and diffed against `origin/dev`:
+the deployed function had an uncommitted block added after `checkLiquidity` — if the orderbook
+showed zero contracts available *at or better than* the requested price, it hard-skipped the order
+and returned early, plus a second change that downsized `contractCount` to whatever depth was
+currently visible. Both changes are wrong for this codebase: every strategy (S-001/S-002/S-005,
+confirmed via `grep -n "orderType\|time_in_force" auto-trade/index.ts`) submits
+`orderType: "limit", time_in_force: "day"` — a GTC-style resting order that Kalshi accepts and
+rests in the book precisely when there's no immediate counter-side match. "Zero depth at-or-better
+than my price" is the *normal*, *expected* state for any correctly-priced passive limit order (you
+bid below the ask; if nothing is offered that low, you become the new best bid) — it is not "doomed
+to fail," it's the entire mechanism by which a resting limit order works. The deployed code
+mistook "no immediate fill" for "cannot submit," which blocks essentially all live order
+submissions that aren't already marketable. Checked the actual blast radius: **zero
+`order_submitted` events anywhere in `compliance_log` since 2026-07-28 18:20 UTC** (over 30 hours)
+against 108 `order_skipped_no_liquidity` skips in the same window — this was not an S-001-only
+issue, it was a total live-trading halt across every strategy, silently running for more than a day
+because, like the 86th run's `auto-trade` drift, it was never committed and so never showed up in
+any diff, PR, or code review.
+
+**Fix (deployed):** `supabase/functions/execute-trade/index.ts` — removed the added zero-depth
+hard-skip block and the depth-based `contractCount` downsizing, and removed the now-unused
+`availableContracts` field threaded through `LiquidityCheck`/`checkLiquidity`, restoring
+`checkLiquidity` and order submission to exactly what's on `origin/dev` (verified via `diff` against
+`git show HEAD:...` — zero remaining differences in that logic). Preserved the one other
+change the same deploy carried that *is* correct and unrelated: `kalshiErrorDetail` now uses
+`String(rawKalshiError)` instead of `JSON.stringify(rawKalshiError)`, because `JSON.stringify(undefined)`
+returns the bare value `undefined` (not a string), which crashed the handler on Kalshi rejection
+bodies that come back empty. Final diff against `origin/dev` is exactly that one line.
+
+**Verified:** `deno check` — 19 pre-existing errors both before and after (confirmed via `git
+stash`/`git stash pop`; stale generated Postgrest types, unrelated), zero new. `npm run lint`: 0
+errors, same 9 pre-existing fast-refresh warnings. `npm run test`: 206/206 pass. Deployed via
+`supabase functions deploy execute-trade`. **Exercised against the real deployed function, real
+Kalshi API, and the real live account:** polled `compliance_log` every 30s after deploy; the 00:15
+UTC S-001 cron cycle produced a real `order_submitted` row — Kalshi accepted a 21-contract buy-NO
+limit order on `KXBTC-26JUL3017-B63625` @ 91c with **zero pre-existing book depth at that price**
+(order id `9436f09a-6554-4d1d-b429-841cfb345484`, status `resting`) — exactly the scenario the
+buggy code was blocking, now working. Zero `order_skipped_no_liquidity` or contradictory
+liquidity-fallback pairs since deploy.
+
+**Reversibility:** trivial — single-file diff (one line vs. `origin/dev`), a plain revert restores
+current behavior; the removed block can be reintroduced later if a real reason for it is found and
+goes through actual review this time.
+
+**Process gap (recurring — same governance hole the 86th run flagged, now confirmed to have hit a
+second function):** two independent, uncommitted production deploys have now been found in
+back-to-back health-check runs (`auto-trade` on the 86th, `execute-trade` on this one), both
+bypassing the branch → PR → merge → deploy pipeline `CLAUDE.md` documents as a hard rule, both
+invisible to git history until a symptom forced a `supabase functions download` diff. This run
+did not have time to spot-check the remaining live functions (`kalshi-proxy`, `market-data-fetcher`,
+`surface-scanner`, `auto-settle`, `paper-reconcile`, etc.) the same way — **recommended for the next
+run:** download and diff every deployed function against `origin/dev` in one pass, not just the one
+the day's symptom points at, since two out of the handful checked so far have drifted.
+
+## 2026-07-29 (86th run) — production `auto-trade` had drifted from `origin/dev` entirely (an undocumented S-001 quarter-Kelly + LLM-qualify feature was live but never committed); reconciled git with reality and fixed the sizing bug that came with it, which had blocked every live S-001 cycle for over an hour
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (85th run's branch merged as PR #144) — `git fetch` confirmed no divergence, fresh branch
+`health-check/run-86` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+85th run's ~22:06 UTC cutoff through this run's ~23:06 UTC invocation — **zero rows** (207 total
+rows in the window, latest at 23:06 UTC, so the table is current and genuinely clean at that
+severity). Before accepting "nothing to do," grouped the same window by `severity`/`event_type` per
+the standard set by the 76th/81st runs, since `error`/`critical` is necessary but not sufficient —
+a systemic `warning` can still be a real, revenue-relevant outage. Found `s001_leg_execution_failed`
+at **12/12** — every single S-001 live cron cycle in the window (5-min cadence, 22:10–23:05 UTC)
+failed on every attempted leg, always the same reason: `Order amount $22 exceeds max position size
+$20`. 100% failure rate for over an hour on a live strategy is a real incident regardless of the
+`warning` severity label.
+
+**Root cause found (CRITICAL — production had silently diverged from git):** Traced the $22 figure
+against `strategy_config`/`risk_settings` in the DB — `S-001-l-ea207ba1`'s `min_position_usd` is
+$10, and the code on `origin/dev` computes S-001's per-leg amount as a flat `AMOUNT_PER_LEG =
+config?.min_position_usd ?? 15`. Neither figure is $22, so the deployed function could not be
+running the code on `dev`. Used `supabase functions download auto-trade` (proper eszip unpack, not
+a raw strings-grep) and diffed it against `origin/dev`'s copy: **the deployed function had an
+entire ~85-line feature — quarter-Kelly position sizing (`kellySize()`) plus a full LLM
+qualify/reject gate for every S-001 leg — that does not exist anywhere in git history on this
+repo.** Someone (a prior session or a manual deploy) shipped this straight to production without
+ever committing it to `dev`, so every run since has been silently trading on code invisible to
+`git log`, code review, and every prior health-check's diffing. The one concrete bug this
+uncommitted feature carried: `kellySize()` has its own $10–$100 floor/cap but is blind to the
+account's actual `risk_settings.max_position_size` ($20 live for this user) — on this market's
+near-certain pricing (NO at 91–92c) the quarter-Kelly fraction sized every leg at $22, so
+execute-trade's risk check (`_shared/risk.ts`) rejected every single leg, on every cycle, for the
+entire time this feature has apparently been live. All other `_shared/*` files the function
+imports were bit-for-bit identical between deployed and `dev` — the drift was isolated to this one
+file.
+
+**Fix (deployed):** Two parts, both required. (1) Copied the actual deployed `auto-trade/index.ts`
+into the repo so git matches what's really running — preserves the Kelly-sizing/LLM-gate feature
+as-is rather than accidentally reverting a live feature no one asked this run to remove. (2) Added
+the one missing guard: threaded the `userRisk` object (`risk_settings`, already fetched once per
+strategy in the main loop and already passed into S-002/S-005 — S-001 was the only strategy not
+receiving it) into `runS001SurfaceArb`, and clamped `legAmount = Math.min(kellySize(...),
+Number(userRisk?.max_position_size) || 100)` before every leg submission, so a leg is never sized
+above what the account's own risk settings allow.
+
+**Verified:** `deno check` — 17 pre-existing errors both on the reconciled-but-unfixed deployed
+source and on the fixed version (stale generated Postgrest types, unrelated) — zero new errors from
+either the reconciliation or the fix. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh
+warnings. `npm run test`: 206/206 pass. Deployed via `supabase functions deploy auto-trade`
+(version 181, 23:15:03 UTC). **Exercised against the real deployed function, real Kalshi API, and
+the real live account** — polled the next two live S-001 cron cycles after deploy: the 23:15 cycle
+(same-second as the deploy, before propagation) still showed the old $22/$20 failure — expected
+deploy-propagation lag, consistent with prior runs' notes on this. The clean 23:20 cycle (`run_id
+7f3504f6`) showed 3 legs, all correctly sized: `kelly_amount: 20` on every leg (previously always
+22), zero `position_size` risk rejections. The 3 legs still didn't fill, but for entirely different,
+legitimate reasons unrelated to this fix — 2 rejected by the (also newly-discovered) LLM qualify
+gate, 1 rejected by Kalshi for genuine order-book illiquidity at that price. No occurrence of the
+`$22`/`position_size` failure signature since deploy.
+
+**Reversibility:** the reconciliation itself is a snapshot of what was already live, so it changes
+nothing about production behavior on its own. The clamp is additive and easy to revert (single
+`Math.min`, single new parameter) — reverting restores the pre-fix behavior (guaranteed rejection
+on aggressively-priced legs), not a worse state.
+
+**Process gap flagged, not fixed this run (HIGH — governance):** this drift means at least one
+past deploy of `auto-trade` bypassed the branch → PR → merge → deploy pipeline this project's
+`CLAUDE.md` documents as a hard rule. No way to know from this run alone how it happened (direct
+`supabase functions deploy` from an uncommitted local change, most likely) or whether other
+functions have similar undocumented drift — this run only checked `auto-trade` because that's
+where the symptom pointed. **Recommended follow-up, not done here:** spot-check the other live
+edge functions (`execute-trade`, `market-data-fetcher`, `surface-scanner`, etc.) with the same
+`supabase functions download` + diff-against-`dev` technique this run used, to rule out further
+undocumented production drift.
+
+## 2026-07-29 (85th run) — `kalshi-proxy`'s service-credential fetch still degraded to the anonymous rate tier on a transient stall the caching fix (#134/#135) didn't touch; added the same retry-once pattern just proven in market-data-fetcher
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched
+`origin/dev` exactly (84th run's branch merged as PR #143) — `git fetch && git reset --hard
+origin/dev` confirmed no divergence, fresh branch `health-check/run-20260729-2213` off
+`origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 84th run's ~21:06 UTC cutoff through this run's ~22:06 UTC invocation — 3 rows, all
+`kalshi_proxy_service_credential_fetch_failed` (21:10:36, 21:33:42, 21:43:32 UTC). No new
+event type and no `market_data_fetcher_aborted` — the 84th run's retry fix has held with zero
+aborts since deploy. This pattern has been characterized and accepted as self-healing since the
+81st run, but the frequency in this run's own window (3 in ~33min) is tighter than the day's
+earlier spacing (hours apart), so before re-accepting it I checked whether the underlying cause
+had actually changed.
+
+**Root cause found and fixed (MED — 15 occurrences today, recurring hours after a targeted fix
+already landed for this exact signature):** Pulled the full day's history of this event type —
+15 rows since 11:04 UTC, clustering tighter as the day went on (5 in the final 64 minutes:
+20:39, 21:03, 21:10, 21:33, 21:43). The `kalshi-proxy/index.ts` comments (added in #134/#135,
+merged earlier today) already diagnosed this as DB-query contention under concurrent bursts and
+fixed it with a per-instance cache + in-flight-fetch coalescing — but the timeouts kept
+recurring for hours after that deploy (the comments themselves note a recurrence 30min post-
+deploy at 14:37/14:38, and the pattern was still firing at 21:43, seven hours later). That gap
+between "fixed the diagnosed cause" and "still happening" meant the diagnosis was incomplete.
+Ran `EXPLAIN ANALYZE` directly against the underlying query
+(`select key_id, secret_ciphertext, secret_iv, encrypted_secret from api_keys where provider =
+'kalshi_live' and user_id is null`): **0.095ms execution time**, sequential scan over 4 rows.
+Cross-checked `pg_stat_activity` for lock contention or connection-pool exhaustion (initially
+suspected given 21 of 22 connections showed a non-null `wait_event_type`) — all were ordinary
+`ClientRead`/background-worker idle waits, no blocking queries, no contention. Conclusion: the DB
+query was never the bottleneck (consistent with #134/#135's own caching fix not resolving it) —
+these are transient round-trip stalls (network/infra jitter between the edge function and
+PostgREST), the same class of blip the 84th run diagnosed for `market-data-fetcher`'s identical
+`getKalshiCredentials()` call. The actual gap: `fetchServiceCredential()` gave up after one
+attempt and immediately logged the error + fell back to the anonymous, 429-prone rate tier —
+even though a same-instant retry of an instant query is very likely to clear a transient stall,
+exactly as `kalshi-proxy`'s own code comments already noted this pattern "self-heals" elsewhere.
+
+**Fix (deployed):** `supabase/functions/kalshi-proxy/index.ts` — extracted the existing
+`Promise.race(getKalshiCredentials(...), timeout)` call into a `fetchCredsOnce()` helper
+(identical shape to the 84th run's `market-data-fetcher` fix) and wrapped the service-tenant
+credential call site in a try/catch that retries once before logging
+`kalshi_proxy_service_credential_fetch_failed` and degrading to the anonymous tier. Scoped to
+the public-endpoint service-credential path only — the per-user authenticated path
+(`kalshi_proxy_credential_fetch_failed`, line ~114) showed zero occurrences in today's scan and
+was left untouched, same blast-radius discipline as prior runs. Confirmed no client-side
+`AbortController`/fetch-timeout wraps this endpoint in the frontend, so a worst-case doubled
+wait (~16s if both attempts genuinely stall, vs. the already-accepted 8s wait before this fix)
+introduces no new failure mode — it only replaces "always degrade after one stall" with "retry
+once, degrade only if both stall."
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 15 pre-existing errors
+both before (`git stash`) and after (stale generated Postgrest types, unrelated to this change),
+no new errors. `npm run lint`: 0 errors, same 9 pre-existing fast-refresh warnings. `npm run
+test`: 206/206 pass unchanged. Deployed via `supabase functions deploy kalshi-proxy`.
+**Exercised against the real deployed function and real Kalshi API:** `GET
+.../functions/v1/kalshi-proxy?endpoint=markets&limit=2` (with the service role key, since the
+stored anon key predates this project's JWT-signing-key migration and 401s independently of this
+change) returned `200` with real live market data (ticker
+`KXMVESPORTSMULTIGAMEEXTENDED-...`) — happy path unregressed. `compliance_log` scanned for
+`error`/`critical` rows after the 21:50 UTC deploy: zero. **Not verified end-to-end:** the retry
+branch itself — the credential fetch succeeded within the cache on this live check, and a real
+multi-second network stall isn't reproducible on demand without fault injection, same limitation
+the 84th run noted for its identical fix shape. Code-reviewed instead: the retry reuses the exact
+`fetchCredsOnce()` path just proven correct on the happy path above, and mirrors the 84th run's
+already-verified timeout-handling branch line for line.
+
+**Reversibility:** trivial — single-file, single-call-site revert to the pre-retry version +
+redeploy restores the #134/#135 caching-only behavior with no other change.
+
+## 2026-07-29 (84th run) — `market-data-fetcher`'s credential-fetch timeout guard (48th run) still let one slow query nuke a whole 5-minute cycle; added a single retry
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched
+`origin/dev` exactly (83rd run's branch merged as PR #142) — `git fetch` confirmed no
+divergence, fresh branch `health-check/run-20260729-2106` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 83rd run's ~19:13 UTC cutoff through this run's ~21:06 UTC invocation — 3 rows. Two
+`kalshi_proxy_service_credential_fetch_failed` (20:39:29, 21:03:50 UTC) — the same intermittent,
+non-fatal, self-healing credential-fetch-latency pattern already characterized and accepted in
+the 81st run (falls back to the anonymous rate tier per-request, no user impact). The third is
+the real find.
+
+**Root cause found and fixed (MED — recurring critical alert, 4 occurrences over 16 days, most
+recent inside this run's own scan window):** `market_data_fetcher_aborted` critical row at
+20:46:12 UTC — `abort_reason: "credential fetch failed or timed out (credential fetch exceeded
+8000ms)"`, 0 series failed, all 18 skipped. Queried `compliance_log` for every historical
+`market_data_fetcher_aborted` row: 2026-07-13, 2026-07-16, 2026-07-23, and this run's 2026-07-29 —
+same cause each time. The 48th run (2026-07-28) had already fixed the *diagnosis* half of this:
+before that fix, a stalled credential query silently ate the full 50s `RUN_BUDGET_MS` with no
+accurate cause (2026-07-13: 130.6s, 2026-07-16: 61.4s); after it, the same stall is bounded to 8s
+and reported accurately. But the fix's own docstring reveals it never addressed the *abort*
+itself — a single slow `getKalshiCredentials()` call still takes down the entire run, skipping
+all 18 series and leaving surface-scanner/signal-generation on stale data for a full 5-minute
+cycle. Two more occurrences (07-23, and today) since that fix landed confirm the underlying
+slowness is transient rather than a permanent misconfiguration: the `kalshi_proxy_*` credential
+fetch (same underlying DB query, different caller) hit the identical symptom twice in this run's
+own 2-hour scan window and self-healed via per-request fallback both times, with no lasting
+outage. A single retry gives `market-data-fetcher` the same resilience to that transient blip
+that `kalshi-proxy` already has, without touching the correct-and-unchanged behavior for a
+genuinely broken credential path (retry still times out and aborts, just ~8s later, with the
+message now saying "after retry" for clarity).
+
+**Fix (deployed):** `supabase/functions/market-data-fetcher/index.ts` — extracted the existing
+`Promise.race(getKalshiCredentials(...), timeout)` call into a `fetchCredsOnce()` helper and wrapped
+the call site in a try/catch that retries once (a second full `fetchCredsOnce()` call with a fresh
+8s window) before setting `abortReason`. Worst case (both attempts time out) now costs ~16s against
+the 50s run budget — still leaves >30s of headroom for the 18-series loop that follows, so this
+can't cause a *new* class of run-budget abort. No change to `getKalshiCredentials()` itself or any
+other caller (`execute-trade`, `auto-trade`, `settle-signals`, `reconcile-orders`, `kalshi-ping`,
+`futures-signal`, `health-check`, `trading-agent`) — scoped to this one call site in this one
+read-only market-data-cache poller, same blast-radius discipline as the 48th run's fix.
+
+**Verified:** `deno check supabase/functions/market-data-fetcher/index.ts` — 11 pre-existing
+errors both before (`git stash`) and after, no new errors. `npm run lint`: 0 errors, same 9
+pre-existing fast-refresh warnings. `npm run test`: 206/206 pass unchanged. Deployed via
+`supabase functions deploy market-data-fetcher`. **Exercised against the real deployed function
+and real Kalshi API:** direct `POST .../functions/v1/market-data-fetcher` returned
+`{"success":true,"series_fetched":18,"series_failed":[],"series_skipped":[],"abort_reason":null,
+"total_markets_cached":838,"elapsed_ms":4105}` — happy path unregressed, confirmed by the matching
+`market_data_fetch` info row in `compliance_log` (21:09:08 UTC, "18/18 series OK, 838 markets
+cached"). **Not verified end-to-end:** the retry branch itself, since the credential fetch
+succeeded on the first attempt in this live invocation and a real multi-second DB stall isn't
+reproducible on demand without fault injection — same limitation the 48th run noted for the
+original timeout branch. Code-reviewed instead: the retry reuses the exact same `fetchCredsOnce()`
+path already proven correct on both the happy path (just verified above) and the timeout path
+(proven by the pre-existing `abortReason` handling this run left untouched).
+
+**Reversibility:** trivial — single-file, single-call-site revert to the pre-retry version +
+redeploy restores the 48th run's exact prior behavior with no other change.
+
+## 2026-07-29 (83rd run) — `execute-trade`'s 401-rejection logger has crashed on every unauthenticated/misconfigured call since 2026-06-20, masking the real 401 behind a 500
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and matched `origin/dev`
+exactly (82nd run's branch merged as PR #138) — `git fetch && git reset --hard origin/dev`, fresh
+branch `health-check/run-20260729-1915` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+82nd run's ~18:13 UTC cutoff through this run's ~19:13 UTC invocation — 3 rows. One
+`kalshi_proxy_service_credential_fetch_failed` (19:01:25 UTC) — checked the full day's history (10
+occurrences spread across 8 hours, none clustered, each immediately followed by a
+`kalshi_proxy_unauthenticated_fallback` warning and self-heals) — same intermittent,
+non-fatal credential-fetch-latency pattern already characterized and accepted in the 81st run, not
+a new regression. One `auth_rejected` (18:25:36) — a legitimate security rejection of a
+misconfigured/mismatched bearer, not a bug. The third is the real find.
+
+**Root cause found and fixed (HIGH — silent since 2026-06-20, ~5 weeks):** `system_event` row at
+18:23:51 UTC: `Trade execution error: supabase.from(...).insert(...).catch is not a function`.
+Same failure signature as two already-fixed incidents in this exact codebase (`auto-trade`,
+2026-07-06; `daily-digest`, 2026-07-26) — Supabase's query builder is a thenable, not a real
+`Promise`, so `.catch()` doesn't exist on it and throws a `TypeError` synchronously, before the
+insert's network request is ever dispatched. Traced to `execute-trade/index.ts:212`, in the
+401-rejection compliance logger added by commit `12764cf` (2026-06-20, "log 401 rejections from
+execute-trade to compliance_log") — `await supabase.from("compliance_log").insert({...}).catch(()
+=> {})`. `git log -S` confirms this exact line hasn't changed since that commit; `grep`-audited
+every `.catch(` call site across all 20+ edge functions in the repo (`supabase.from`/`.rpc` chains
+only — fetch/sendTelegramAlert/sendUserNotification calls return real Promises and are unaffected)
+and confirmed this is the **only** remaining site with the bare-`.catch()`-on-a-builder
+anti-pattern; everywhere else already uses `.then().catch()` or the two-arg `.then(ok, err)` form.
+Empirically reproduced against the live `npm:@supabase/supabase-js@2` resolution (v2.111.0) used by
+this project: `typeof builder.catch === "undefined"`, and calling it throws `builder.catch is not
+a function` — the same message shape (rendered with the call-site source text since there's no
+intermediate variable) as the compliance_log row. **Effect:** any unauthenticated or
+misconfigured-bearer call to `execute-trade` (e.g. `auto-trade` calling in with a stale/rotated
+`SUPABASE_SERVICE_ROLE_KEY`) throws inside the intended-to-be-safe logging line, falls through to
+the function's outer catch block, and returns a generic `500 Trade execution failed` instead of
+the correct `401 Unauthorized` — and the audit-trail row this code exists to write has never once
+been successfully persisted in the five weeks since it was added.
+
+**Fix (deployed):** replaced `.catch(() => {})` with `.then(undefined, () => {})` on the single
+call site, matching the established fix pattern from both prior incidents. Additive, one line,
+same file, same risk class as the daily-digest fix.
+
+**Verified:** `deno check supabase/functions/execute-trade/index.ts` — baseline (unmodified `dev`)
+has 20 pre-existing errors (confirmed via `git stash`); after the fix, 19 — one fewer, because
+`deno check` was independently flagging the missing `.catch` as a type error too, and it's now
+gone. No new errors introduced. `npm run lint`: 0 errors, same pre-existing 9 fast-refresh
+warnings. `npm run test`: 206/206 pass unchanged. Deployed `execute-trade`
+(`supabase functions deploy`). **Exercised against the real deployed function:** confirmed
+Supabase's platform-level `verify_jwt` gate (enabled for this function) rejects requests with no
+or malformed `Authorization` header before the function's own code ever runs (`401
+UNAUTHORIZED_NO_AUTH_HEADER` / `401 UNAUTHORIZED_INVALID_JWT_FORMAT`) — reaching the app-level
+`isServiceRoleBearer` branch this fix touches requires a syntactically valid Supabase JWT with a
+mismatched role, which is what `auto-trade`'s own internal calls produce when misconfigured; did
+not fabricate one against the live money-adjacent endpoint beyond what's shown above, per the
+same boundary every prior run touching this file has held to. Reversibility: trivial single-line
+revert + redeploy.
+
+**Anomaly noted, not chased:** the `auth_rejected` row (18:25:36 UTC) has full realistic metadata
+(a real ticker, `service_key_configured: true`, a real `user_id_in_body`) implying its insert
+*did* succeed, which seems to conflict with the "always throws" finding above. Function version
+history (`GET /v1/projects/.../functions`) shows only the version this run just deployed (96,
+timestamped to this run); there's no visibility into what was live at 18:25 without inspecting
+the interactive checkout, which this task is explicitly barred from touching. Left unresolved —
+doesn't change the fix, which is independently verified via static analysis, live empirical
+reproduction, and the matching precedent from two prior incidents.
+
+**Also observed, explicitly out of scope this run:** a `warning`-severity
+`strategy_suspended_drawdown` row for "Weather Edge" citing a **1695.7%** max drawdown — outside
+this run's `error`/`critical` query scope, and almost certainly its own calculation bug (a
+drawdown percentage that large is not a real trading outcome), but investigating the drawdown
+math is a different subsystem than this run's finding. Flagged here for a future run rather than
+scope-crept into this one.
+
+**Reversibility:** trivial — one-line diff, single file, `git revert` + redeploy restores the
+prior (broken) behavior with no other change.
+
+## 2026-07-29 (82nd run) — Clean window, all cron healthy; closed out the 76th run's Tier-4 backlog — all 10 unguarded `trading-agent/index.ts` chat-tool-loop sites
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (81st run's branch merged as PR #137) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-1814` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+81st run's ~18:04 UTC cutoff through this run's ~18:13 UTC invocation — zero rows. `cron_health()`
+shows all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`. No new
+error class this run.
+
+**Fix applied (LOW risk, additive-only, single file, 10 call sites — closes Tier 4):** with
+`compliance_log` genuinely clean, picked up the 76th run's own explicitly-left-open Tier-4 backlog
+instead of inventing new scope — same pattern as the 80th run closing Tier 5 and the 81st run
+closing Tier 2. All 10 sites confirmed still unguarded via `grep` before touching anything, in
+`trading-agent/index.ts` — the interactive AgentPanel chat endpoint's tool-calling loop, where a
+hang in any tool call freezes the user's chat turn with no `compliance_log` signal:
+- `streamAnthropicAsSSE()` (`:541`, streaming Anthropic call) — the non-stream twin
+  (`callAnthropicNonStream`, `:503`) was already guarded by an earlier run; the streaming path was
+  missed.
+- The OpenAI-compatible completions call (`:1095`, non-Anthropic providers via `cfg.baseUrl`).
+- `fetch_live_markets`'s three Kalshi market-data GETs (`:1301` keyword search, `:1307` category
+  fetch, `:1324` the 16-series parallel `Promise.all` fetch) — public read-only endpoints, so a
+  timeout is a safe abort (returns fewer/no results, never leaves an order in flight). Factored into
+  one local `fetchKalshi()` helper since all three shared the identical unguarded pattern.
+- Four forwards to other edge functions: `execute_basket` (`:1776`), `fetch_signals` (`:1809`),
+  `scan_surface` (`:1839`), `trigger_strategy_run` (`:1929`).
+- `search_web`'s Tavily call (`:1871`).
+
+All wrapped in the same `AbortController` + `setTimeout` + `finally { clearTimeout(...) }` pattern
+used across 30+ sites in this campaign, each `AbortError` converted to a clear message naming the
+call and the bound. Timeouts sized to what each call actually needs, not copy-pasted: `LLM_FETCH_
+TIMEOUT_MS` (60s, existing constant) for both LLM paths; new `KALSHI_FETCH_TIMEOUT_MS` (8s, matches
+the identical constant already established in `auto-trade/index.ts`) for the three Kalshi GETs; new
+`INTERNAL_FUNCTION_TIMEOUT_MS` (45s) for the three same-latency-class forwards — sized above
+`execute-basket`'s own internal `BASKET_TIMEOUT_MS` (30s) so the outer guard doesn't fire before the
+inner one legitimately would; new `STRATEGY_RUN_TIMEOUT_MS` (60s) for `trigger_strategy_run`, since
+`auto-trade`'s manual run can chain multiple 15s LLM-qualify calls sequentially across candidate
+markets; new `EXTERNAL_SEARCH_TIMEOUT_MS` (10s) for Tavily, a third-party API with no internal
+budget of its own to inherit. **Explicitly did not touch** the two Tier-1 sites in the same file
+(`:1487` order submit, `:1533` order cancel — real money, off-limits per the 48th run's standing
+caution) or the two Tier-1-adjacent basket execute/flatten sites inside `execute-basket/index.ts`
+itself (untouched, per the same boundary).
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (same generic
+Supabase-client type-mismatch class flagged in every prior run touching this file), identical count
+(13) after this change — no new type errors. `npm run lint`: 0 errors, only the pre-existing 9
+fast-refresh warnings. `npm run test`: 206/206 pass unchanged. Deployed `trading-agent`.
+**Exercised against the real deployed function this run:** a direct unauthenticated POST to the live
+endpoint returned a real `401 UNAUTHORIZED_NO_AUTH_HEADER` from Supabase's auth layer post-deploy,
+confirming the function booted cleanly with no import/syntax failure — same verification style as
+the prior runs that touched this file, for the same reason (a full authenticated chat turn needs a
+real user JWT and spends real Anthropic tokens, out of scope for an autonomous health-check pass).
+
+**Tier-4 backlog: closed.** Remaining backlog from the 76th run's original audit, unchanged: Tier 1
+(7 sites, live trading — still explicitly off-limits to an autonomous pass). All other tiers (2, 3,
+5) closed across the 78th–81st runs.
+
+**Reversibility:** trivial — every diff is additive-only (new module-level timeout constants, one
+`AbortController` wrap per call site or one shared helper for the three identical Kalshi sites, no
+logic changes); `git revert` on the single file plus a redeploy restores pre-guard behavior with no
+other change.
+
+## 2026-07-29 (81st run) — One isolated `kalshi-proxy` credential-timeout blip, self-healed and already deduped by the alerting cooldown (not a new bug); closed out the 76th run's Tier-2 unguarded-fetch backlog — all 11 remaining sites across 6 files
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (80th run's branch merged as PR #136) — `git fetch && git reset --hard origin/dev`,
+fresh branch `health-check/run-20260729-1650` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+80th run's ~16:07 UTC cutoff through this run's ~18:04 UTC invocation — exactly **one** row:
+`kalshi_proxy_service_credential_fetch_failed` at 16:33:43 UTC ("credential fetch exceeded
+8000ms"). Investigated before treating it as new work (per the reproduce-before-trusting-a-
+diagnosis standard): pulled the full `compliance_log` window 16:25–16:45 UTC — no concurrent burst,
+no other function affected, nothing else running that would contend for the same DB connection.
+This is the tail of the exact issue the 78th run (cache) and 79th run (in-flight coalescing) already
+fixed, now down to **1** occurrence in ~8.5h (was 5 in 3h pre-fix, 2 in ~90s after the cache-only
+fix) — consistent with irreducible cold-start/DB-latency jitter on a single request, not a
+recurrence of the thundering-herd bug the 79th run closed. Confirmed it never reached Onofre:
+`health_check_run` logged "4 condition(s) active but suppressed (deduped)" at 17:10 UTC — the
+`system_errors` alert's 2h cooldown/fingerprint (from the 16:10 alert) already absorbed it, so no
+new Telegram noise was generated. `cron_health()`: all 14 jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`, confirmed again after this run's deploy. No code change made for this —
+it isn't a new root cause, and forcing a "fix" onto a single self-healing, already-deduped blip
+would be solving a non-problem.
+
+**Fix applied (LOW risk, additive-only, six files, 11 call sites — closes Tier 2):** with the
+compliance_log scan turning up nothing actionable, picked up the 76th run's own explicitly-left-open
+Tier-2 backlog (scheduled-cron fetch sites, no live-trading blast radius) instead of inventing new
+scope — same pattern as the 80th run closing Tier 5. All 11 sites confirmed still unguarded via
+`grep` before touching anything:
+- `auto-reflect/index.ts:531` (lesson-writing LLM call) and `:796` (forwards to compact-memory) —
+  a hang in either stalled this cron's entire 15-minute cycle.
+- `compact-memory/index.ts:79` (summarize) and `:226` (merge) — hourly-cron LLM calls, one inside a
+  cluster-merge loop.
+- `_shared/weather.ts:221` (GFS ensemble, primary) and `:282` (NWS, fallback) — no timeout meant a
+  hang on the *primary* call never gave the fallback a chance to run, defeating the documented
+  primary/fallback hierarchy. Shared by `weather-signal`, `backtest`, and `backtest-weather`.
+- `daily-digest/index.ts:224` (SendGrid) and `:252` (Twilio) — once-daily cron, looped per opted-in
+  recipient; one stuck recipient blocked every remaining one.
+- `waitlist-signup/index.ts:42` (SendGrid) — the odd one out: this call is `await`ed *before* the
+  HTTP response returns to the signup form, so a stall hung the user-facing request itself, directly
+  contradicting the file's own comment calling it "non-blocking."
+- `backtest-weather/index.ts:71`/`:96` (Open-Meteo archive + ensemble) — inside a per-city loop; one
+  stuck city blocked every remaining city in the once-daily run.
+
+All 11 wrapped in the same `AbortController` + `setTimeout(() => controller.abort(), 8_000)` +
+`finally { clearTimeout(...) }` pattern already proven at 30+ sites across this campaign (Tiers 3
+and 5). No behavior change on the happy path — only bounds how long a stalled request can block its
+caller. `waitlist-signup` and `daily-digest`'s SendGrid/Twilio sends were **not** invoked live
+(would fire real emails/SMS to real recipients) — same restraint as always for anything
+user-facing.
+
+**Verified:** `deno check` on all six files, before (`git stash`) vs. after — identical error counts
+in every file (auto-reflect 1, daily-digest 3, the rest 0 — all pre-existing, confirmed via diff of
+the actual error text, not just counts) — this change adds zero new type errors anywhere. `npm run
+lint`: 0 errors, only the pre-existing fast-refresh warnings. `npm run test`: 206/206 pass unchanged,
+including `weather.test.ts`'s 19 pure-function tests. Deployed all 7 affected functions
+(`auto-reflect`, `compact-memory`, `daily-digest`, `waitlist-signup`, `backtest-weather`, plus
+`weather-signal` and `backtest` — both import the modified `_shared/weather.ts` and needed
+redeploying too, found via `grep -rl "_shared/weather"`). **Verified in prod against real data:**
+invoked `compact-memory` directly → `200, {"success":true,"summarized":0,"merged":0}`; invoked
+`auto-reflect` directly → `200`, ran cleanly (compaction correctly skipped, 30-min cooldown still
+active from the manual compact-memory call seconds earlier); invoked `weather-signal` directly →
+`200`, real GFS forecasts returned (NYC 82.9°F, MIA 91.5°F, LAX 78.8°F), 9 signals written across 3
+locations. Minutes later the natural hourly cron fired independently and re-exercised the same
+modified code paths for real — 5 real `compact-memory` merge LLM calls with real token usage, a
+clean `auto_reflect_run` completion, and a second `weather_signal_run` (3/5 locations OK) — zero new
+error/critical rows from any of it. `cron_health()` re-checked post-deploy: all 14 jobs still
+`active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**Tier-2 fire-and-forget/no-timeout campaign: closed.** Remaining backlog from the 76th run's audit,
+unchanged: Tier 1 (7 sites, live trading — still explicitly off-limits to an autonomous pass), Tier
+4 (10 sites, `trading-agent` chat loop).
+
+**Reversibility:** trivial — every diff is additive-only (one new module/file-local timeout
+constant, one `AbortController` wrap per call site, no logic changes); `git revert` per file plus a
+redeploy of the affected function restores pre-guard behavior with no other change.
+
+## 2026-07-29 (80th run) — Clean window, all cron healthy; closed out the 76th run's Tier-5 fire-and-forget timeout-guard backlog — the last 3 unguarded sites (`_shared/langfuse.ts`, `auto-settle`'s auto-reflect trigger, `save-kalshi-key`'s username backfill)
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (79th run's branch merged as PR #135) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-1550` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+79th run's ~14:50 UTC cutoff through this run's ~16:07 UTC invocation — zero rows. `cron_health()`
+shows all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`. The only
+non-info activity in the window was 22 `api_error` warnings, all `settle-signals: Kalshi 404
+fetching <ticker>` on short-duration hourly BTC markets — read the code
+(`settle-signals/index.ts:134-158`) before treating this as new: a 404 there is the already-handled
+"aged out of Kalshi's archive retention" case, stamped `settled_at`/`settlement_status:
+unsettleable_404` so the ticker stops consuming a batch slot, exactly the behavior documented in the
+46th/47th-run watch item — not a regression. One `risk_check_failed` row
+(`max_open_positions (10) reached — currently 11 open`) is the risk guard correctly skipping a
+strategy, also expected behavior. No new error class this run.
+
+**Fix applied (LOW risk, additive-only, three files):** with the compliance_log genuinely clean,
+picked up the 76th run's own explicitly-left-open backlog instead of inventing new scope — three
+Tier-5 (fire-and-forget, non-trading) unguarded `fetch()` sites, the last ones in that campaign:
+- `_shared/langfuse.ts`'s `langfuseIngest()` — bare fire-and-forget POST to Langfuse's ingestion API
+  on every qualify/trade decision, no timeout. Wrapped in `AbortController` + new
+  `LANGFUSE_FETCH_TIMEOUT_MS = 8_000`, `finally` clears the timer so it can't leak past the
+  fetch's own resolution.
+- `auto-settle/index.ts`'s post-settlement auto-reflect trigger (~line 458) — same bare
+  fire-and-forget pattern, wrapped with a new `AUTO_REFLECT_TRIGGER_TIMEOUT_MS = 8_000` local to
+  that file (matches the existing `MARKET_FETCH_TIMEOUT_MS` convention already in the file).
+- `save-kalshi-key/index.ts`'s `fetchAndStoreKalshiUsername()` — the only one of the three that
+  isn't strictly fire-and-forget syntax (it's `await`ed inside a detached, uncaught-by-caller async
+  function called without `await` from the request handler), but was still a bare `fetch()` with no
+  bound: a stalled Kalshi portfolio-members endpoint would hang that detached call indefinitely.
+  Added `KALSHI_USERNAME_FETCH_TIMEOUT_MS = 8_000` via the standard `AbortController`/`finally`
+  pattern used everywhere else in this campaign. All three: fire-and-forget contract unchanged, no
+  new fields, no new error-handling plumbing — the diff only bounds how long each dangling
+  connection can live.
+
+**Verified:** `deno check` on all three files, before (`git stash`) vs. after — 0 errors both times
+on all three (no pre-existing errors in these particular files, unlike some prior campaign sites).
+`npm run lint`: 0 errors, only the pre-existing fast-refresh warnings unrelated to this change.
+`npm run test`: 206/206 unit tests pass unchanged. `langfuse.ts` is imported by two functions
+(`auto-settle`, `auto-trade` — confirmed via `grep -rl`), both redeployed; `save-kalshi-key`
+redeployed separately. **Verified in prod against real data:** polled `compliance_log` post-deploy
+(16:10–16:17 UTC) — `auto_trade_run` fired twice (16:10, 16:15) and `auto_settle_run` once (16:12),
+all clean, zero new error/critical rows, confirming the redeploy didn't regress the live trading or
+settlement path. `cron_health()` re-checked post-deploy: all 14 jobs still `active: true`,
+`is_stale: false`, `last_run_failed: false`. The timeout branches themselves remain unexercised
+until Langfuse/the internal auto-reflect endpoint/Kalshi's username endpoint actually stalls — same
+caveat as every other guard added in this campaign.
+
+**Tier-5 fire-and-forget campaign: closed.** No remaining sites in Tier 5 as of this run. Remaining
+backlog from the 76th run's audit, unchanged: Tier 1 (7 sites, live trading — still explicitly
+off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron), Tier 4 (10 sites,
+`trading-agent` chat loop).
+
+**Reversibility:** trivial — three single-file, additive-only diffs (one new module/file-local
+constant and one `AbortController` wrap per site); `git revert` + redeploy of the three affected
+functions restores the pre-guard behavior with no other change.
+
+## 2026-07-29 (79th run) — The 78th run's own fix didn't hold: `kalshi-proxy` timeout recurred twice after the credential cache deployed — the cache had no protection against a thundering herd on a miss
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (78th run's branch merged as PR #134) — `git fetch && git reset --hard origin/dev`,
+fresh branch `health-check/run-20260729-150344` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+78th run's ~14:03 UTC cutoff — 3 rows, all `kalshi_proxy_service_credential_fetch_failed`. One
+(14:03:57) was already accounted for in the 78th run's own log (one of its original 4). The other
+two (14:37:29, 14:38:36) are **new** — they landed roughly 30 minutes *after* the 78th run's cache
+fix was deployed and verified clean. `cron_health()`: all 14 jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. Pulled the full `compliance_log` window 14:00–14:50 UTC to confirm no
+other function saw anything similar in that period — isolated to `kalshi-proxy` again.
+
+**Root cause: the 78th run's fix reduced the failure rate but didn't remove the failure mode it
+was trying to fix.** Per the fail-twice rule (already invoked once this log, for the esm.sh retry
+budget in the 77th run) — a fix that recurs isn't a fix, it's a smaller version of the same gap.
+The module-level TTL cache added in #134 removes the DB round trip on a cache *hit*, but a cache
+*miss* (cold instance start, or the instant the 5-minute TTL lapses) is not itself coalesced:
+every concurrent request that observes the same miss independently re-checks the cache, sees it
+empty, and starts its own DB fetch + decrypt racing its own 8s timeout — reproducing the exact
+contention the cache exists to remove, just gated to the miss window instead of every request.
+This codebase's own frontend allows up to 6 concurrent in-flight requests per page load
+(`src/lib/kalshiApi.ts`), so any page load that happens to land inside a miss window reopens the
+original bug. The 14:37/14:38 timestamps are consistent with this: ~30 minutes past deploy is long
+enough for either a fresh cold instance or one TTL lapse to hit a burst.
+
+**Fix applied (LOW risk, additive-only, single file, `supabase/functions/kalshi-proxy/index.ts`):**
+added in-flight request coalescing around the existing cache. A new module-level
+`inFlightServiceCredentialFetch` promise is set by the first request that observes a miss; every
+other concurrent request awaits that same promise instead of starting its own, so a burst during a
+miss costs exactly one DB round trip total, not one per concurrent request. The fetch-plus-timeout
+logic was extracted into `fetchServiceCredential()` (previously inlined in the request handler) so
+it can be shared as the single in-flight promise; behavior is otherwise identical — same 8s
+timeout, same cache population on success, same `compliance_log` entry on failure (now written
+once per coalesced batch instead of once per failing request, which also cuts log noise). The
+per-user authenticated-credential branch is untouched.
+
+**Verified:** `deno check` on `kalshi-proxy/index.ts` — 15 errors vs. 14 on the pre-change baseline
+(`git stash` comparison); the one additional error is the same pre-existing
+`SupabaseClient<any,"public",...>` generic-mismatch class already present at every other call site
+in this file (`resolveTenant`, `getKalshiCredentials`, `.insert(...)`), not a new error class — my
+new `fetchServiceCredential(adminClient)` call site inherits it. `npm run lint`: 0 errors, only the
+pre-existing fast-refresh warnings. `npm run test`: 206/206 unit tests pass unchanged. Deployed via
+`supabase functions deploy kalshi-proxy`. **Verified in prod against the real Kalshi API under the
+exact failure condition:** fired 8 concurrent requests at the freshly-deployed function (cache
+necessarily empty — first traffic since deploy) via `?endpoint=series` using the project's live
+`anon` key. All 8 returned HTTP 200 with identical, real Kalshi series payloads (16,007,466 bytes
+each). Queried `compliance_log` for the 15 minutes following — **zero** new
+`kalshi_proxy_service_credential_fetch_failed` or `kalshi_proxy_unauthenticated_fallback` rows. This
+is the first time this exact test (concurrent burst against a cold, empty cache) has been run
+against this code path — it would have failed against the 78th run's version.
+
+**Reversibility:** trivial — single additive change (one new module-level variable, one extracted
+function, one call-site simplification), `git revert` restores the 78th run's cache-without-
+coalescing behavior with no other change.
+
+## 2026-07-29 (78th run) — New error class since the 77th run: `kalshi-proxy` public-endpoint credential fetch timing out under concurrent load — cached the service-tenant credential instead of widening the timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` (77th run's branch merged as PR #132/#133) — fresh branch
+`health-check/run-20260729-bc175f` off `origin/dev`.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+77th run's ~13:07 UTC cutoff — 4 rows, all `kalshi_proxy_service_credential_fetch_failed` (13:47,
+13:48, 13:51, 14:03). Widening the window to the full day surfaced a 5th at 11:04 UTC — this error
+class **only started today**, 5 occurrences in 3 hours, all on the same code path. `cron_health()`:
+all 14 jobs `active: true`, `is_stale: false`, `last_run_failed: false`. Every other function in the
+same window (market-data-fetcher, reconcile-orders, surface-scan, auto-trade, futures-signal, …) ran
+in the tens-to-low-thousands of ms — this was not a general platform/DB slowdown.
+
+**Root cause:** `kalshi-proxy`'s public-endpoint branch (`supabase/functions/kalshi-proxy/index.ts`)
+re-fetches and re-decrypts the same static service-tenant `api_keys` row on **every single
+request** via `getKalshiCredentials(adminClient, null)`, guarded by an 8s timeout. This is the
+highest-traffic path in the app — every public market/events/series browse, with the frontend's own
+concurrency cap (`src/lib/kalshiApi.ts`) allowing up to 6 simultaneous in-flight requests per page
+load (category tabs + background pre-warm + per-series trending fan-out). `api_keys` has only 5 rows
+and no plan-level slowness — the timeouts were concurrent redundant round trips to fetch and decrypt
+**identical data** stacking up under that fan-out, not a slow query in isolation. Confirmed this
+wasn't a systemic Supabase issue: no other function (cron-driven, so never more than 1 concurrent
+invocation) saw anything similar.
+
+**Fix applied (LOW risk, additive-only, single file):** added a module-level, 5-minute-TTL cache for
+the decrypted service-tenant credential in `kalshi-proxy/index.ts`. Public-endpoint requests now
+check the cache first and skip the DB round trip entirely on a hit; only a cache miss (cold instance
+or expired TTL) does the guarded fetch, and a successful fetch populates the cache for subsequent
+requests on that warm instance. Per-user credentials (the authenticated branch) are untouched — no
+change to that path, since caching one user's key across other users on the same warm instance would
+be a different trust boundary; the service-tenant key is a fixed, singleton, read-only credential
+already treated as static for an instance's lifetime (mirrors the existing `loggedMissingServiceKey`
+module-level pattern in the same file). A 5-minute TTL means a live key rotation is still picked up
+without a redeploy. This is the actual fix, not a wider timeout — a bigger `CREDENTIAL_FETCH_TIMEOUT_MS`
+would only have deferred the next round of concurrent-request contention (the same anti-pattern this
+log flagged and reversed in the 77th run for the esm.sh retry budget).
+
+**Verified:** `deno check` on `kalshi-proxy/index.ts` — 14 errors, identical before/after via `git
+stash` comparison (pre-existing baseline, none introduced). `npm run lint`: 0 errors, only the
+pre-existing fast-refresh warnings. `npm run test`: 206/206 unit tests pass unchanged. Deployed
+`kalshi-proxy` to production (`uyfnezxmgwitpzsrnkst`) via `supabase functions deploy`. **Verified in
+prod against the real Kalshi API:** fetched the project's live `anon` key via the Supabase
+Management API, hit the deployed public endpoint 3× in a row (`?endpoint=series`) — all 3 returned
+HTTP 200 with real Kalshi series data, and `compliance_log` in the following minutes shows **zero**
+new `kalshi_proxy_service_credential_fetch_failed` or `kalshi_proxy_unauthenticated_fallback` rows
+(both were previously appearing on every timeout). The pre-existing `health_check_alert` for the
+4 errors from before this fix landed fired once at 14:10 UTC as expected — a stale alert about
+already-fixed errors, not a new issue.
+
+**Reversibility:** trivial — single additive module-level cache, `git revert` removes it and the
+public-endpoint branch reverts to its prior always-fetch behavior with no other change.
+
+## 2026-07-29 (77th run) — Clean window, zero error/critical events, cron healthy; the 76th run's own merge broke CI a second time on the same esm.sh class — fixed the root cause instead of widening the retry budget again
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` had a stale branch
+(`health-check/run-20260729-121017`, the 76th run's own branch, already merged as PR #131) —
+`git fetch && git reset --hard origin/dev`, fresh branch from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 76th run's ~12:10 UTC cutoff through this run's ~13:07 UTC invocation — zero rows across 114
+events in the window (107 info, 7 warning). `cron_health()` showed all 14 registered jobs
+`active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**Active issue found (the actual work this run):** `gh run list --workflow=ci.yml --branch dev`
+showed the 76th run's own push (`30450872671`, 12:15:55 UTC) had **failed** — a fact the 76th
+run's log entry never surfaced, since its own verification stopped at the manual `supabase
+functions deploy` it ran directly, without checking whether its *merge* had gone green in CI.
+`gh run view --log-failed` showed `Deploy edge functions → staging Supabase` died on
+`futures-signal` after all 5 retry attempts (~7min, 12:38–12:45 UTC): `Import
+'https://esm.sh/@supabase/supabase-js@2' failed: 522 <unknown status code>`, over and over. This
+blocked staging deploy, production deploy, the canary gate, and e2e smoke tests entirely for that
+push — not just a slow function, the whole downstream pipeline.
+
+**Root cause: this is the same failure class the 72nd run already hit and "fixed" by widening the
+retry budget (3→5 attempts, exponential backoff, ~3.75min).** That budget held for four runs
+(73rd–76th) and then broke anyway — esm.sh had an outage longer than the widened window could
+absorb. Per the fail-twice rule, retrying around an unreliable upstream CDN is not a fix, it's a
+larger stopgap that was always going to run out eventually. The actual root cause: all 34 import
+sites (33 function entry points + `_shared/notifications.ts`'s type-only reference) bundle
+`supabase-js` from `https://esm.sh/@supabase/supabase-js@2` at deploy time, making every CI deploy
+and every manual `supabase functions deploy` depend on esm.sh's uptime.
+
+**Fix applied (LOW risk, mechanical, no behavior change):** replaced the import specifier at all
+34 sites with `npm:@supabase/supabase-js@2` — Deno's native npm-registry resolution, which does
+not touch esm.sh at all. Same package, same version, same API; only the resolution source
+changed. Also updated two stale doc comments (`_shared/limits.ts`, `_shared/limits-math.ts`) that
+referenced the old esm.sh URL, and the CI workflow's comment to document the root-cause fix while
+keeping the retry loop itself as defense-in-depth against any other transient deploy hiccup (not
+as the primary fix anymore).
+
+**Verified:** confirmed locally with `deno run` that `npm:@supabase/supabase-js@2` resolves and
+`createClient` works. `deno check` on 17 sampled entry points — including Tier-1 `auto-trade`,
+`auto-settle`, `execute-trade` — showed **identical error counts before/after** via `git stash`
+comparison (17/6/20 match the documented pre-existing baselines exactly; zero new errors anywhere
+sampled). `npm run lint`: 0 errors, only the pre-existing fast-refresh warnings. `npm run test`:
+206/206 unit tests pass unchanged. Opened PR #132, watched its CI (lint/test job passed; deploy
+jobs correctly skip on a PR event since they're gated to `dev` pushes), merged, then watched the
+resulting `dev` push's own CI run (`30454993657`) — `Deploy edge functions → staging Supabase`
+completed in 2m26s with zero retries needed, the first clean run through that job since the class
+of failure first appeared. Deployed all 31 affected functions to production
+(`uyfnezxmgwitpzsrnkst`) directly via `supabase functions deploy`. Post-deploy, polled
+`cron_health()` and `compliance_log`: `futures-signal-cron` (13:19), `surface-scanner-cron`
+(13:18), `market-data-fetcher-cron` (13:16) all ran clean post-redeploy, zero new error/critical
+rows in the 5 minutes following deploy.
+
+**Reversibility:** trivial — single mechanical string substitution across known files, `git
+revert` restores the esm.sh imports if `npm:` resolution ever proves less reliable (it shouldn't:
+npm's registry has materially higher uptime than esm.sh's CDN re-bundling layer).
+
+## 2026-07-29 (76th run) — Clean window, zero error/critical events, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 75th run's backlog — `_shared/notifications.ts`'s SendGrid/Twilio `send()` calls
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was clean and already matched
+`origin/dev` exactly (75th run's branch had merged as PR #130) — `git fetch && git reset --hard
+origin/dev`, fresh branch `health-check/run-20260729-121017` from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+75th run's ~11:07 UTC cutoff through this run's ~12:10 UTC invocation — 136 total events in the
+window, **zero** at error/critical. `cron_health()` shows all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the
+75th run's own push (`30446613476`, 11:11:42 UTC) green in 4m12s; nothing since.
+
+**Fix applied this run (LOW risk, additive-only, single file):** picked up the 75th run's own
+audit backlog — the remaining Tier 5 sites include `_shared/notifications.ts` ×2. Re-verified
+against this run's fresh checkout before trusting it (reproduce, don't inherit a prior diagnosis)
+— confirmed `sendEmail()` (SendGrid, line 127) and `sendSms()` (Twilio, line 153) both still made a
+bare `await fetch()` with zero `AbortController`/timeout. Both are called fire-and-forget from
+`sendUserNotification` (`.catch((e) => console.warn(...))`, never awaited by its caller), so a
+stalled SendGrid or Twilio endpoint would leave a dangling open connection per notification,
+accumulating across warm Fluid Compute instances with no timeout to ever close it — same failure
+shape as the `telegram.ts`/`sentry.ts` sites already fixed in prior runs. Wrapped both in the same
+`AbortController` + 8s timeout pattern, `NOTIFICATION_FETCH_TIMEOUT_MS = 8_000` matching this
+codebase's established convention. Fire-and-forget contract unchanged — the diff only bounds how
+long the dangling connection can live, it does not change what any caller awaits, so
+`auto-trade`'s/`auto-settle`'s/`execute-trade`'s order-submission control flow (the reason those
+files are Tier 1/1-adjacent and off-limits to autonomous edits) is untouched.
+
+**Verified:** `deno check supabase/functions/_shared/notifications.ts` shows 3 pre-existing errors
+(unrelated `never`-type narrowing on `profile?.notification_prefs`/`profile?.phone`), confirmed
+identical via `git stash` before/after — this diff adds zero new errors. `deno check` on all three
+importers (`auto-trade`, `auto-settle`, `execute-trade`) shows the same pre-existing error counts
+recorded in the 75th run's log (17/6/20) — unchanged. Deployed all three via `supabase functions
+deploy <fn> --project-ref uyfnezxmgwitpzsrnkst` (they each bundle `_shared/notifications.ts`).
+Post-deploy, polled `compliance_log` until each importer's own cron fired: `auto_settle_run` at
+12:12:00 UTC and `auto_trade_run`/`auto_trade_strategy_run` at 12:15:03 UTC, all clean with no new
+error/critical entries — confirms the redeploy didn't regress the live trading path.
+`execute-trade` is request-triggered (not cron) so its next real exercise will be the next actual
+trade execution; its `deno check` baseline match is the verification available this run. The
+timeout branch itself is unexercised until SendGrid/Twilio actually stalls, same caveat as every
+other guard added in this campaign.
+
+**Remaining backlog (unchanged from 75th run's audit, for the next run):** Tier 1 (7 sites, live
+trading — still explicitly off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron),
+Tier 4 (10 sites, `trading-agent` chat loop), Tier 5 remainder (3 sites: `_shared/langfuse.ts`,
+`auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`).
+
+**Reversibility:** trivial — single-file diff, two call sites wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy of the three importing functions.
+
+## 2026-07-29 (75th run) — Clean window, one benign transient credential-fetch timeout, cron/CI healthy; continued the Tier-5 fire-and-forget timeout-guard sweep from the 74th run's audit — Sentry's `send()`
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was stale from the 74th run
+(branch `health-check/run-20260729-060652`, already merged as PR #129) but matched `origin/dev`
+exactly — `git fetch && git reset --hard origin/dev`, fresh branch from there.
+
+**Error-severity scan:** Queried `compliance_log` for `severity in ('error','critical')` since the
+74th run's ~10:07 UTC cutoff through this run's ~11:07 UTC invocation — 126 total events in the
+window, exactly **one** at error/critical: `kalshi_proxy_service_credential_fetch_failed` at
+11:04:02 UTC (`kalshi-proxy` public-endpoint service-tenant credential fetch exceeded its 8000ms
+guard, fell back to the anonymous rate tier for that one request). Checked 7-day frequency for
+this `event_type` — this is the only occurrence; not a recurring pattern. This is the guard added
+in an earlier run of the same campaign working exactly as designed: bounded, logged, degraded
+gracefully (rate-tier fallback) instead of hanging. No code change warranted for this one — a
+single transient network blip is not a bug. `cron_health()` shows all 14 registered jobs `active:
+true`, `is_stale: false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev`
+shows the 74th run's own push (`30443070092`, 10:17:10 UTC) green in 4m27s; nothing since.
+
+**Fix applied this run (LOW risk, additive-only, single file):** picked up the 74th run's own
+audit backlog — Tier 5 (fire-and-forget, 8 sites) is the lowest-risk remaining tier since none of
+those call sites are awaited by their caller's control flow. Re-verified the audit against this
+run's fresh checkout before trusting it (per standing practice: reproduce, don't inherit a prior
+diagnosis) — confirmed `_shared/sentry.ts:122`, `_shared/notifications.ts:127`/`:153`, and
+`_shared/langfuse.ts:19` are all still unguarded. Fixed `_shared/sentry.ts`'s `send()`: a bare
+`await fetch()` with zero `AbortController`/timeout, called from `captureException`/
+`captureMessage`, both fire-and-forget (`send(...).catch(() => {})`, never awaited by callers).
+Not a caller-facing hang risk, but under Fluid Compute's reused instances a stalled Sentry
+endpoint leaves a dangling open connection per unreported error, accumulating across warm
+invocations with zero timeout to ever close it. Wrapped in the same `AbortController` + 8s
+timeout pattern proven in `_shared/telegram.ts`/`kalshi-proxy`/`health-check`,
+`SENTRY_FETCH_TIMEOUT_MS = 8_000` matching this codebase's established convention. `send()` stays
+fire-and-forget — the fix only bounds how long the dangling connection can live, it does not
+change what any caller awaits, so `execute-trade`'s/`auto-trade`'s/`auto-settle`'s order-submission
+control flow (the reason those files are Tier 1/1-adjacent and off-limits to autonomous edits) is
+untouched by this diff.
+
+**Verified:** `deno check supabase/functions/_shared/sentry.ts` clean. `deno check` on all three
+importers (`auto-trade`, `auto-settle`, `execute-trade`) shows the same pre-existing error counts
+(17/6/20) present on a clean `origin/dev` checkout via `git stash` before/after — this diff adds
+zero new errors. Deployed all three via `supabase functions deploy <fn> --project-ref
+uyfnezxmgwitpzsrnkst` (they each bundle `_shared/sentry.ts`). Post-deploy, `auto-trade-cron` fired
+within the verification window and logged clean `auto_trade_run`/`auto_trade_strategy_run` rows
+in `compliance_log` with no new error/critical entries — confirms the redeploy didn't regress the
+live trading path. The timeout branch itself is unexercised until Sentry actually stalls, same
+caveat as every other guard added in this campaign.
+
+**Remaining backlog (unchanged from 74th run's audit, for the next run):** Tier 1 (7 sites, live
+trading — still explicitly off-limits to an autonomous pass), Tier 2 (11 sites, scheduled cron),
+Tier 4 (10 sites, `trading-agent` chat loop), Tier 5 remainder (5 sites: `_shared/notifications.ts`
+×2, `_shared/langfuse.ts`, `auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`).
+
+**Reversibility:** trivial — single-file diff, one function wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy of the three importing functions.
+
+## 2026-07-29 (74th run) — Clean window, all cron healthy, CI green; the 73rd run's "last uninstrumented fetch" claim was false — audit found 39 remaining unguarded fetch sites — closed health-check's own Telegram-alerting blind spot, the most ironic one
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`830e825`, the 73rd run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 73rd run's ~09:07 UTC cutoff through this run's ~10:07 UTC invocation — zero rows across 150
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --workflow=ci.yml --branch dev` shows the 73rd run's
+own push (`30438574515`, 09:10:58 UTC) completed green in 4m37s; nothing since.
+
+**Correction — the 73rd run's "last uninstrumented fetch" claim does not hold:** that entry
+described `telegram-webhook/index.ts` as closing the timeout-guard campaign begun in the 68th run.
+A full-codebase audit this run (`grep` for every `fetch(`/`fetchWithRetry(` call site under
+`supabase/functions/`, read for an existing `AbortController`/`signal`) found **39 remaining
+unguarded call sites across 16 files** — the campaign was never close to done; each prior run had
+only been checking the one file it fixed, not re-sweeping the whole tree. Tiered by blast radius:
+
+- **Tier 1 — live trading, real money (7 sites):** `execute-trade/index.ts:747` (the Kalshi
+  order-submission POST itself) and `:655` (pre-order balance check); `auto-trade/index.ts:991`
+  (forwards every auto-trade decision to execute-trade); `trading-agent/index.ts:1442`/`:1495`
+  (chat-agent order submit/cancel); `execute-basket/index.ts:165`/`:337` (each basket leg's
+  execute/flatten call, inside a loop). **Not touched this run** — a hang-vs-timeout distinction on
+  the order-submission path changes what "did this order actually fill" means, and getting that
+  wrong risks a double-submit or a stuck basket leg. This needs a dedicated, carefully-reviewed
+  session, not an autonomous health-check pass.
+- **Tier 2 — scheduled cron jobs (11 sites):** `auto-reflect/index.ts:531`/`:796`,
+  `compact-memory/index.ts:79`/`:226`, `_shared/weather.ts:221`/`:282` (core forecast fetchers for
+  `weather-signal`), `daily-digest/index.ts:224`/`:252`, `waitlist-signup/index.ts:42`,
+  `backtest-weather/index.ts:71`/`:96`.
+- **Tier 3 — this run's fix:** `health-check/index.ts`'s own `sendTelegram()` (see below).
+- **Tier 4 — `trading-agent/index.ts` (10 sites):** the user-facing chat-agent tool-calling loop;
+  a hang here freezes the chat response. Only one call site (line 503) was already guarded.
+- **Tier 5 — fire-and-forget (8 sites):** don't block their caller's response, but still an
+  unguarded dangling connection: `_shared/sentry.ts:122`, `_shared/notifications.ts:127`/`:153`,
+  `_shared/langfuse.ts:19`, `auto-settle/index.ts:458`, `save-kalshi-key/index.ts:110`,
+  `auto-trade/index.ts:341` (this one IS awaited — circuit-breaker-trip alert).
+- **Dead code:** `polymarket-proxy/index.ts:44` — bare `fetch()`, no options. Per this repo's
+  `CLAUDE.md`, Polymarket is unreferenced pending a deletion decision; not worth guarding.
+
+Full findings with descriptions are in this run's research-agent output; Tiers 1, 2, and 4 are
+real backlog, not resolved by this entry.
+
+**Fix applied this run (LOW risk, additive-only, single file):** `health-check/index.ts`'s
+`sendTelegram()` had zero timeout guard — no `AbortController`, no `signal`. This is the exact
+same failure shape closed across `_shared/telegram.ts` and a dozen call sites in the 68th–71st
+runs, except this one is health-check's *own* copy (kept separate from the shared
+`sendTelegramAlert()` because callers need the delivered/not-delivered boolean to drive
+`unclaimAlert()`, which the shared helper's void return can't support). It's awaited at two call
+sites: the main alert-delivery loop (`:584`) and the crash-recovery handler (`:646`). A stalled
+Telegram API call here would hang health-check itself — the one function whose entire job is
+catching silent hangs elsewhere — up to the platform's own execution timeout, with zero diagnostic
+signal about why the watchdog went dark. Wrapped in the same `AbortController` + 8s timeout
+pattern already proven in `_shared/telegram.ts`, `TELEGRAM_FETCH_TIMEOUT_MS = 8_000` matching this
+file's own existing `CREDENTIAL_FETCH_TIMEOUT_MS`/`BALANCE_FETCH_TIMEOUT_MS` convention. Returns
+`false` on abort/network failure (same as before) rather than throwing, preserving the
+`delivered`/`unclaimAlert()` contract at both call sites.
+
+**Verified:** `deno check supabase/functions/health-check/index.ts` shows the same 12 pre-existing
+type errors present on a clean `origin/dev` checkout (Supabase client generic-type drift in
+`encryption.ts`/`kalshi-auth.ts`/`tenant.ts`, unrelated to this diff, confirmed via `git stash`
+before/after) — this change adds zero new errors. Deployed via `supabase functions deploy
+health-check --project-ref uyfnezxmgwitpzsrnkst`. Invoked the live function directly
+(`POST /functions/v1/health-check` with the service-role key) post-deploy: returned `200 {"ok":
+true, "alerts_sent":["api_error_kalshi"], ...}` — a real pending alert (`settle-signals` hitting
+Kalshi 404s on expired KXBTC tickers, `warning` severity, pre-existing and unrelated to this fix)
+delivered successfully through the newly-guarded path, confirmed by the `health_check_run`
+compliance_log row ("1 alert(s) sent") with no `telegram_delivery_failed` row. Exercises the real
+Telegram API on the happy path; the timeout branch itself is unexercised until a real stall, same
+caveat as every other guard added in this campaign.
+
+**Reversibility:** trivial — single-file diff, one function wrapped in an already-proven pattern;
+revert path is `git revert` + redeploy.
+
+## 2026-07-29 (73rd run) — Clean window, all cron healthy, CI green (72nd run's retry-budget fix confirmed working); closed the last uninstrumented fetch in the operator-facing Telegram control bot
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`cea95e3`, the 72nd run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 72nd run's ~08:07 UTC cutoff through this run's ~09:07 UTC invocation — zero rows across 382
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`.
+
+**CI confirmation:** `gh run list --workflow=ci.yml --branch dev` shows the 72nd run's own push
+(`30434418850`, 08:09:52 UTC) completed green in 4m28s — the widened 5-attempt/exponential-backoff
+retry budget added for the esm.sh outage has now been exercised by a real deploy and held. No CI
+runs since; nothing new to investigate there this run.
+
+**Fix — `telegram-webhook/index.ts` had two uninstrumented `fetch()` calls:** this function is the
+operator-facing Telegram bot (`/status`, `/health`, `/429`, `/run mdf`, `/run trade`, `/help`) —
+the same failure shape closed across `_shared/telegram.ts` and a dozen call sites in the 68th–71st
+runs, but this file predates that campaign and was missed: it has its own inline `reply()` (Telegram
+`sendMessage`) and `invokeFunction()` (invoking `health-check`/`market-data-fetcher`/`auto-trade` by
+HTTP) with no `AbortController`/timeout on either. A stalled Telegram API response or a hung
+downstream function would block this webhook indefinitely — up to the platform's own execution
+timeout — leaving the admin bot looking dead with no error surfaced, and Telegram's own webhook
+retry/backoff papering over it instead of a clear failure.
+
+**Fix applied (LOW risk, additive-only, single file):** `reply()` now uses the same
+`AbortController` + 8s timeout + swallowed-fetch-error pattern as `_shared/telegram.ts`'s
+`sendTelegramAlert()` (fire-and-forget, never blocks, never throws). `invokeFunction()` gets a 45s
+timeout — wide enough to cover `/run trade`'s own documented "may take up to 30s" — and now returns
+a clear `{error: "<name> timed out or failed to respond: ..."}` on abort instead of hanging, which
+the existing outer `catch` block already surfaces back to the operator via Telegram as `🔴 Internal
+error: ...`. No behavior change on the happy path.
+
+**Verified:** `deno check supabase/functions/telegram-webhook/index.ts` passes clean. Deployed via
+`supabase functions deploy telegram-webhook --project-ref uyfnezxmgwitpzsrnkst`. Confirmed the
+function is live and routing correctly post-deploy (platform-level JWT gateway returns 401 for an
+unauthenticated request, unchanged pre-/post-deploy — this is Supabase's own gateway layer, not
+this function's code, and is unrelated to this diff). Did not attempt to obtain the Telegram webhook
+secret to drive a full authenticated request through `/run trade`, since that would trigger a real
+auto-trade cycle — out of scope for a verification step. Same
+unexercised-until-the-next-real-stall caveat as every other timeout guard added in this campaign.
+
+**Reversibility:** trivial — single-file diff, two functions wrapped in the same
+try/finally-with-AbortController shape already proven in `_shared/telegram.ts`; revert path is
+`git revert` + redeploy.
+
+## 2026-07-29 (72nd run) — Clean window, all cron healthy; but the 71st run's own merge broke CI on a transient esm.sh CDN outage that outlasted the existing retry guard — widened the retry budget
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`56e361f`, the 71st run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 71st run's ~07:07 UTC cutoff through this run's ~08:07 UTC invocation — zero rows across 921
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`.
+
+**Found instead — CI failure on the merge commit itself:** `gh run list --workflow=ci.yml` showed
+the push-to-dev run for `56e361f` (run `30431158450`, 07:18 UTC) had failed, the only failure in
+the last 20 runs — everything before and since is green. The PR's own pre-merge check on the same
+commit (run `30430996801`, 07:15 UTC) had passed, so this wasn't the code diff (a single-file
+change to `_shared/telegram.ts`, unrelated to the function that failed) — it pointed at
+infrastructure flakiness reproducing on the identical commit three minutes apart.
+
+**Root cause:** `deploy-staging-functions`'s bundling step imports `supabase-js` from `esm.sh` at
+deploy time. The 68th run (2026-07-28, run `30357821307`) had already hit this once and added a
+3-attempt/flat-15s-backoff retry loop (`.github/workflows/ci.yml`) — a ~45s total retry budget.
+This run's outage on `manage-billing` held esm.sh unreachable for over 2 minutes straight
+(07:28:55 → 07:30:47 UTC, three consecutive `522` failures), longer than the existing budget could
+absorb, even though every other function in the same job recovered on its first retry. The guard
+was real but under-provisioned for a longer-than-average blip in the same external dependency it
+was already built to tolerate.
+
+**Fix (LOW risk, additive-only, CI workflow config only — no application code touched):** widened
+the retry loop in `.github/workflows/ci.yml` from 3 fixed-15s attempts to 5 attempts with
+exponential backoff (15/30/60/120s, ~3.75min total budget). Still fails loud with a clear message
+after attempt 5 — this raises the ceiling for tolerable outage length, it doesn't suppress a
+persistent failure.
+
+**Verified:** `python3 -c "import yaml; yaml.safe_load(...)"` confirms the edited workflow file is
+still valid YAML. `gh run list --workflow=ci.yml --limit 20` confirms this was an isolated,
+one-off failure (not a recurring pattern needing a different fix) before making the change. The
+next natural push to `dev` (this PR's own merge) will exercise the new retry path under real CI
+conditions — no live esm.sh outage was available to force during this run, same
+unexercised-until-the-next-real-incident caveat as every other guard added in this campaign.
+
+**Reversibility:** trivial — single-file, workflow-only diff; revert path is `git revert`, no
+redeploy required since this changes CI config, not deployed function code.
+
+## 2026-07-29 (71st run) — Clean window, all cron healthy, CI green; closed the shared Telegram alert helper's own timeout gap — the one call site whose docstring falsely promised "never blocks", fanning out to 12 caller functions
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`8f41266`, the 70th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 70th run's ~06:10 UTC cutoff through this run's ~07:07 UTC invocation — zero rows across 908
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 70th
+run's own push (run `30427432001`, 3m2s) and no pushes since.
+
+**First candidate rejected — Polymarket is explicitly out of scope:** initially found and fixed
+`polymarket-proxy/index.ts`'s completely bare `await fetch(apiUrl)` (zero guard at all, not even a
+prior partial fix) and deployed it, then re-read this repo's `CLAUDE.md` and found a standing
+instruction added independently of this campaign: "Polymarket code: do not extend... unreferenced
+from the rest of the codebase... Do not add new Polymarket features, fix Polymarket bugs..."
+Reverted the file (`git checkout --`) and redeployed the original unmodified version to undo the
+live change before it compounded — confirmed `git diff` clean against `dev` afterward. Recorded
+here as a process note: this run's own campaign precedent (`docs/health-log.md`,
+`DECISIONS.md`) doesn't cover every exclusion in the repo: a project's `CLAUDE.md` is the higher
+authority and must be re-checked, not just the log's running scope notes, before picking a target.
+
+**Actual fix — `_shared/telegram.ts`'s `sendTelegramAlert()`:** this file's own docstring states
+"sendTelegramAlert — fire-and-forget, never throws, never blocks," but the implementation was a
+bare `await fetch()` with no `AbortController`/timeout — the same failure shape closed at every
+other call site in this campaign, except here it directly contradicts the contract the file
+promises its callers. `grep`-confirmed 12 non-test call sites: `auto-reflect`, `auto-settle`,
+`auto-trade`, `compact-memory`, `execute-trade` (alert-only call after a trade decision, not the
+order placement/cancellation path itself — that stays off-limits per the 48th run's standing
+boundary, untouched this run), `futures-signal`, `health-check` (the function this whole alerting
+campaign exists to feed), `market-data-fetcher`, `settle-signals`, `signal-generator`,
+`surface-scanner`, `weather-signal`. A stalled Telegram API response would have quietly blocked
+every one of those 12 cron/user-facing functions for as long as the platform's own execution
+timeout allowed — invisible, since the outer `.catch(() => {})` swallows the eventual result either
+way; the cost was pure wall-clock, not a crash.
+
+**Fix (LOW risk, additive-only, no change to alert content/behavior on the happy path):** added
+`TELEGRAM_FETCH_TIMEOUT_MS = 8_000` (same convention/bound as every other fix in this campaign),
+wrapped the single `fetch()` call in an `AbortController` + `setTimeout`, `clearTimeout` in a
+`finally`. The existing `.catch(() => {})` still swallows both network errors and the new
+`AbortError` identically — this fix bounds the wait, it doesn't change what happens on failure
+(already silent by design, since a Telegram outage should never take down the caller).
+
+**Verified:** `deno check supabase/functions/_shared/telegram.ts` — 0 type errors. `deno lint` — 1
+pre-existing `no-explicit-any` problem (the `supabase: any` param on `alertOnce`, unrelated to this
+change), confirmed identical on unmodified `dev` via `git stash`/`deno lint`/`git stash pop` — no
+new issues. Deployed all 12 caller functions individually (Supabase edge functions bundle
+`_shared/*` per-function at deploy time, so the fix has no effect until every importer is
+redeployed) via `supabase functions deploy`. Waited for the next natural cron tick on each and
+re-queried `cron_health()`: all 9 cron-driven callers among the 12 (`execute-trade` and
+`compact-memory` are not directly cron-scheduled) show `last_status: succeeded`,
+`last_run_failed: false` post-deploy. Re-queried `compliance_log` for the post-deploy window — 16
+new events, 0 `error`/`critical`. The timeout branch itself is unexercised this run (would need a
+live Telegram outage to reach), same caveat pattern as every prior timeout-guard entry.
+
+**Reversibility:** trivial — single-file diff, but the deploy footprint (12 functions) is wider
+than typical for this campaign; revert path is `git revert` + the same 12-function redeploy loop.
+
+## 2026-07-29 (70th run) — Clean window, all cron healthy, CI green; extended the unguarded-fetch campaign off Kalshi onto the Stripe checkout/billing-portal path — same failure shape, on the monetization flow instead of onboarding
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`ef02c0d`, the 69th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 69th run's ~05:07 UTC cutoff through this run's ~06:10 UTC invocation — zero rows across 922
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 69th
+run's own push (run `30424395686`, 4m22s) and no pushes since.
+
+**New instance of the recurring class, different surface:** the last several runs closed every
+bare `await fetch()` on the Kalshi API call path (`kalshi-ping`, `health-check`, `auto-settle`,
+`settle-signals`, `reconcile-orders`, `market-data-fetcher`). Re-swept `supabase/functions/` for
+the same shape but widened the search past Kalshi to any synchronous, response-blocking external
+call — `supabase/functions/create-checkout/index.ts` and `manage-billing/index.ts` (both live,
+routed at `/billing` via `BillingPage.tsx`, despite this repo's `CLAUDE.md` build-status notes
+still saying "no billing UI" — that note is stale, same class of doc drift already flagged for
+`TASKS.md`, which is dated 2026-04-27). Both files make bare `await fetch()` calls straight to
+Stripe (`/v1/customers`, `/v1/checkout/sessions`, `/v1/billing_portal/sessions`) with no
+`AbortController`, no signal, no timeout — three call sites total, two in `create-checkout`
+(customer lookup/create, then session create) and one in `manage-billing` (portal session create).
+
+**Why this is higher-stakes than the Kalshi instances closed so far:** every prior fix in this
+campaign guarded a cron job or an onboarding step. These three guard the actual "Upgrade" and
+"Manage billing" buttons on `/billing` — the only revenue-collecting code paths in this repo. A
+stalled Stripe response (Stripe has had real multi-minute API incidents) would leave a
+paying-intent user's checkout button spinning indefinitely with no error ever surfaced — lost
+conversion on the one flow in this project that turns into MRR, not just a delayed cron cycle.
+
+**Fix (LOW risk, additive-only, no change to Stripe request bodies or business logic):** added
+`STRIPE_FETCH_TIMEOUT_MS = 8_000` (same convention and same bound as `kalshi-ping`'s
+`BALANCE_FETCH_TIMEOUT_MS`) to both files, wrapped each of the three Stripe `fetch()` calls with
+its own `AbortController` + `setTimeout`/`clearTimeout` in a `finally`, and added an `AbortError`
+branch returning `{"error":"Stripe didn't respond in time — please try again."}` (504) instead of
+an unhandled throw — matching `kalshi-ping`'s friendly-timeout-message convention for a
+user-facing endpoint.
+
+**Verified:** `deno check` and `deno lint` on both modified files — 2 pre-existing lint problems
+(`no-import-prefix` on the two `https:`-specifier imports every function in this repo carries), 0
+type errors, confirmed identical to unmodified `dev` via `git stash`/`deno check`/`deno
+lint`/`git stash pop` on each file — no new issues introduced. Deployed both `create-checkout` and
+`manage-billing` via `supabase functions deploy`. Verified live against the real deployed Supabase
+project: both functions' `OPTIONS` preflight returns HTTP 200, and an unauthenticated `POST` to
+each returns `401 UNAUTHORIZED_NO_AUTH_HEADER` — confirms both are live and their pre-existing auth
+gates still behave correctly post-deploy. The new timeout branches themselves are unexercised this
+run (would need a live user JWT, a saved Stripe customer, and a stalled real Stripe response to
+reach that code path, none available in this environment) — flagged here rather than claimed
+proven, same caveat pattern as every prior run's timeout-guard note in this campaign.
+
+**Reversibility:** trivial — two files, additive-only diff (existing request bodies, headers, and
+response handling all unchanged), no schema or trading-path change.
+
+## 2026-07-29 (69th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `kalshi-ping`'s own balance fetch had no timeout guard, one line below its already-guarded credential fetch
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+and already sitting at `origin/dev` HEAD (`4046b45`, the 68th run's own merge). Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 68th run's ~04:07 UTC cutoff through this run's ~05:07 UTC invocation — zero rows across 921
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 68th
+run's own push (run `30421596096`, 11m17s) and no pushes since.
+
+**New instance of the recurring class:** re-swept every `await fetch(` call site in
+`supabase/functions/` for a missing `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`, `auto-settle`,
+`weather-signal`, `health-check`, `trading-agent`'s LLM call). Found `kalshi-ping/index.ts`'s own
+Kalshi API call (line ~67): the 55th run guarded this file's `getKalshiCredentials()` lookup with
+the standard `Promise.race`/timeout pattern, but the very next block — `await
+fetch(\`https://api.elections.kalshi.com${path}\`, { headers })` against `/portfolio/balance` —
+was left bare, no `AbortController`, no signal. Same failure shape as every prior instance, but
+this one is the most user-visible yet: `kalshi-ping` runs synchronously inline in the onboarding
+wizard's "verify Kalshi key" step, so a stalled Kalshi response here leaves a brand-new user's
+first-run activation spinning indefinitely with no error ever surfaced — worse than a cron-hang
+because it directly blocks signup rather than silently degrading a background job.
+
+**Scope check:** public, per-user read-only balance GET used only to confirm a freshly-saved key
+works before the agent starts — not the order placement/cancellation path, which stays untouched
+per the campaign's standing boundary. (Also checked `save-kalshi-key/index.ts`'s similar Kalshi
+`fetch()` at line 110 — left untouched this run: it's fired without `await` in a `.catch()`-only
+background call after the response already returned, so a hang there has no user-facing or
+cron-facing blast radius, unlike `kalshi-ping`'s synchronous, response-blocking call.)
+
+**Fix (LOW risk, read-only per-user endpoint, no schema or order-path change):** added
+`BALANCE_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` already in
+this file and every other function in this campaign) and wrapped the single `fetch()` call with a
+scoped `AbortController` + `setTimeout`, `signal` threaded into the call, `clearTimeout` in a
+`finally`. Added an explicit `AbortError` branch in the existing outer `catch` so a timeout returns
+the friendly `{"ok":false,"error":"Kalshi didn't respond in time — please try again."}` instead of
+the raw `DOMException` message — matching this same file's existing friendly-message convention
+for the credential-fetch timeout just above it, rather than leaking an internal error string to a
+new user mid-onboarding.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 10 pre-existing type errors and
+3 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `kalshi-ping` via
+`supabase functions deploy`. Verified live against the real deployed Supabase project: `OPTIONS`
+preflight returns HTTP 200, a no-auth `POST` returns HTTP 401 `UNAUTHORIZED_NO_AUTH_HEADER`, and a
+malformed-JWT `POST` returns HTTP 401 `UNAUTHORIZED_INVALID_JWT_FORMAT` — confirms the function is
+live and its pre-existing auth guards still behave correctly post-deploy. The new balance-fetch
+timeout branch itself is unexercised this run (would need a live user JWT plus a saved real Kalshi
+key to reach that code path, and no such test account was available) — flagged here rather than
+claimed proven, same caveat pattern as the 55th run's credential-fetch-timeout note for this same
+file.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-29 (68th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `health-check` itself had an unguarded Kalshi balance fetch inside its live-account low-balance sweep
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+— `git fetch && git reset --hard origin/dev` landed on `c883e4f` (the 67th run's own merge).
+Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 67th run's ~03:03 UTC cutoff through this run's ~04:07 UTC invocation — zero rows across 922
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 67th
+run's own push (run `30418622202`, 4m9s) and no pushes since.
+
+**New instance of the recurring class — this time inside the health-check function itself:**
+re-swept `supabase/functions/` for `fetch()` calls without an `AbortController`/timeout guard,
+checking each hit against files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`,
+`reconcile-orders`, `futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`,
+`auto-settle`, `weather-signal`). Found `health-check/index.ts`'s own live-balance check (§10,
+line ~506): inside a `for (const { user_id } of liveKeys ?? [])` loop, the credential fetch already
+got a `Promise.race`/timeout guard (added for the exact same failure class), but the very next line
+— `await fetch(\`${KALSHI_BASE_URL}/portfolio/balance\`, { headers })` — was bare, no
+`AbortController`, no signal. Worse than the prior instances: this loop lives inside `health-check`,
+the alerting path itself, and a hang here doesn't just stall this user's balance check — it stalls
+every remaining user in this loop *and* check #11's separate `liveKeys` loop that runs after it,
+silently stopping the whole hourly sweep from paging anything, invisible to `compliance_log` since
+the surrounding `catch { /* monitoring-path failure only */ }` only catches thrown errors, never a hang.
+
+**Scope check:** public read/auth GET (`portfolio/balance`) used only to decide whether to fire a
+low-balance alert — not the order placement/cancellation path, which stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only monitoring endpoint, no schema or order-path change):** added
+`BALANCE_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` right above it
+and every other function in this campaign) and wrapped the single `fetch()` call with a scoped
+`AbortController` + `setTimeout`, `signal` threaded into the call, `clearTimeout` in a `finally`.
+On abort, the existing `if (!resp.ok) continue` path is unreachable (fetch throws on abort instead
+of resolving), so the surrounding `catch` — already present, already labeled "monitoring-path
+failure only" — absorbs it and the loop moves to the next user, same "no new fields, no new
+error-handling plumbing" pattern as every prior run in this campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 12 pre-existing type errors and
+18 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `health-check` via
+`supabase functions deploy`. Invoked the deployed function directly against real data →
+`{"ok":true,"alerts_sent":[],"alerts_skipped":["api_error_kalshi"]}` — the one skipped alert is an
+unrelated, pre-existing dedup (api-error-rate check, already on cooldown), not a new issue.
+Confirmed via `compliance_log`: a fresh `health_check_run` row logged immediately after
+("1 condition(s) active but suppressed (deduped)"), exercising the new guard on the real live-balance
+loop with no regression on the happy path and no hang.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-29 (67th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `auto-settle`'s per-ticker Kalshi market-status fetch had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP)
+— `git fetch && git reset --hard origin/dev` landed on `6ac9b57` (the 66th run's own merge).
+Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 66th run's ~02:08 UTC cutoff through this run's ~03:03 UTC invocation — zero rows across
+21,801 events in the window. `cron_health()` confirms all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through
+the 66th run's own push (run `30416231797`, 4m4s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()`/
+`fetchWithRetry()` calls without an `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`, `settle-signals`). Found `fetchKalshiMarket()`
+in `auto-settle/index.ts` (line 38) — called once per pending `(ticker, user_id)` pair inside
+`auto-settle-cron`'s 10-minute loop, doing a bare `await fetch()` on the public
+`/markets/{ticker}` endpoint to check for settlement, with no `signal` at all. Same failure shape
+as every prior fix: a stalled Kalshi response doesn't fail one ticker's check, it hangs the
+entire cron invocation — every remaining pending ticker across every user — until the platform's
+own execution timeout kills it, invisible to `compliance_log` because the existing `try/catch`
+(line 39) only catches thrown errors, never a hang.
+
+**Scope check:** public, read-only market-status GET used to decide whether a market has settled
+for P&L realization — not the order placement/cancellation path, which stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`MARKET_FETCH_TIMEOUT_MS = 8_000` (same convention as every other function in this campaign) and
+wrapped the single `fetch()` call with a scoped `AbortController` + `setTimeout`, `signal`
+threaded into the call, `clearTimeout` in a `finally`. On `AbortError`, logs a clear
+`Kalshi GET market {ticker} timed out after 8000ms` message and returns `null` — the existing
+caller treats `null` as `fetch_failed` and moves to the next ticker unchanged, same "no new
+fields, no new error-handling plumbing" pattern as every prior run in this campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 6 pre-existing type errors and
+8 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `auto-settle` via
+`supabase functions deploy`. Invoked the deployed function directly against real Kalshi data →
+`{"success":true,"pending_tickers_checked":10,"trades_settled":0,"trades_still_pending":10}`, all
+10 live tickers fetched with `status: "active"`, zero errors, exercising the new guard with no
+regression on the happy path. Confirmed via `compliance_log` `auto_settle_run` row: "0 trades
+settled across 0 tickers, 10 still pending".
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-29 (66th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `settle-signals`'s per-ticker market-status GET had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already clean (no stray WIP,
+stashes untouched) — `git fetch && git reset --hard origin/dev` landed on `2f04781` (the 65th
+run's own merge). Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `severity in ('error','critical')` since
+the 65th run's ~01:07 UTC cutoff through this run's ~02:08 UTC invocation — zero rows across 923
+events in the window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 65th
+run's own push (run `30413579019`, 6m48s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()`/
+`fetchWithRetry()` calls without an `AbortController`/timeout guard, checking each hit against
+files already closed by the campaign (`auto-trade`, `kalshi-market-data.ts`, `reconcile-orders`,
+`futures-signal`, `market-data-fetcher`, `kalshi-proxy`). Found the bare `await fetch()` in
+`settle-signals/index.ts`'s per-ticker loop (line 110) — no `AbortController` anywhere in the
+file outside the existing credential-fetch guard. `settle-signals-cron` runs every 15 minutes,
+grouping every unsettled signal past `expires_at` into up to 200 tickers per batch and calling
+Kalshi's market-status GET once per ticker to check for `closed`/`settled`. Same failure shape as
+every prior fix: a stalled Kalshi response doesn't fail one ticker's check, it hangs the entire
+cron invocation — every remaining ticker in that batch — until the platform's own execution
+timeout kills it, invisible to `compliance_log` because the existing per-ticker `try/catch` (line
+197) only catches thrown errors, never a hang.
+
+**Scope check:** this is a public, read-only market-status GET used to decide whether a signal's
+market has resolved yet, for shadow-PnL settlement — not the order placement/cancellation path,
+which stays untouched per the campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`MARKET_FETCH_TIMEOUT_MS = 8_000` (same convention as this file's own
+`CREDENTIAL_FETCH_TIMEOUT_MS` and every other function in this campaign) and wrapped the single
+`fetch()` call with a scoped `AbortController` + `setTimeout`, `signal` threaded into the call,
+`clearTimeout` in a `finally`. On `AbortError`, converts to a clear `Kalshi GET market <ticker>
+timed out after 8000ms` message and re-throws — the existing per-ticker `catch` picks it up
+unchanged, same "no new fields, no new error-handling plumbing" pattern as every prior run in this
+campaign.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 11 pre-existing type errors and
+2 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `settle-signals` via
+`supabase functions deploy`. Invoked the deployed function directly (first via `net.http_post`
+matching `settle-signals-cron`'s own `cron.job.command`, which timed out client-side at pg_net's
+default 5000ms request budget while the function kept running in the background and completed
+successfully per `compliance_log`; then via a direct HTTPS call with a 40s client timeout to
+confirm the response body) — both returned `{"success":true,"settled":0,"markets_checked":200,
+...}`, confirmed by two `settle_signals_run` rows in `compliance_log` ("0 signals settled from 200
+markets checked"), exercising the new guard against 200 real tickers with zero errors.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-29 (65th run) — Clean window, all cron healthy, CI green; closed another campaign instance — `reconcile-orders`'s per-trade Kalshi order-status GET had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was present but not guaranteed
+current — `git fetch && git reset --hard origin/dev` before starting, landing on `1fbd993` (the
+64th run's own merge). Started this run's branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 64th run's
+~00:07 UTC cutoff through this run's ~01:07 UTC invocation — zero rows across 946 events in the
+window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 64th run's own
+push (run `30411023650`, 4m22s) and no pushes since.
+
+**New instance of the recurring class:** re-swept `supabase/functions/` for `fetch()` calls
+without an `AbortController`/timeout guard, excluding the order-submission/cancellation paths that
+stay off-limits (`execute-trade`'s order POST, `execute-basket`, `cancel_order` — the last of
+those already fixed for an unrelated unsigned-DELETE bug on 2026-07-28). Found `fetchKalshiOrder()`
+in `reconcile-orders/index.ts` — called once per resting live order, every user, inside
+`reconcile-orders-cron`'s 5-minute loop — doing a bare `await fetchWithRetry(...)` GET on
+`/portfolio/orders/{orderId}` to re-read order status (fill/cancel/partial), with no `signal`
+passed through at all. Same failure shape as every prior fix: a stalled Kalshi response doesn't
+fail one order's check, it hangs the entire cron invocation (every remaining order, every
+remaining user) until the platform's own execution timeout kills it, invisible to
+`compliance_log` because the existing per-trade `try/catch` only catches thrown errors, never a
+hang.
+
+**Scope check:** this is a public-account, read-only order-status GET used to decide whether a
+resting order should advance to `filled`/`partial`/`cancelled` locally — not the order
+placement/cancellation itself. `kalshi-proxy/index.ts`'s `fetchWithRetry` call was checked and
+excluded: it's a generic pass-through also carrying live order POST/DELETE traffic from
+`src/lib/kalshiApi.ts`, so it's entangled with the order path and stays untouched per the
+campaign's standing boundary.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`ORDER_STATUS_FETCH_TIMEOUT_MS = 8_000` (same convention as `CREDENTIAL_FETCH_TIMEOUT_MS` already
+in this file and `REQUEST_TIMEOUT_MS` in market-data-fetcher) and wrapped the single
+`fetchWithRetry()` call in `fetchKalshiOrder()` with a scoped `AbortController` + `setTimeout`,
+`signal` threaded into the call, `clearTimeout` in a `finally`. On `AbortError`, converts to a
+clear `Kalshi GET order <id> timed out after 8000ms` message and re-throws — the existing
+per-trade `catch` (line ~180, already logs `reconcile_order_check_failed` with `e.message`) picks
+it up unchanged, same "no new fields, no new error-handling plumbing" pattern as the 64th run's
+`fetchOrderbook()` fix.
+
+**Verified:** `deno check` and `deno lint` on the modified file — 10 pre-existing type errors and
+6 pre-existing lint problems, confirmed identical on unmodified `dev` via `git stash`/`deno
+check`/`deno lint`/`git stash pop` — no new issues introduced. Deployed `reconcile-orders` via
+`supabase functions deploy`. Invoked the deployed function directly via `net.http_post` matching
+`reconcile-orders-cron`'s own `cron.job.command` exactly — response `HTTP 200`,
+`{"ok":true,"checked":8,"filled":0,"partial":0,"cancelled":0,"unchanged":8,"errors":0}`; confirmed
+in `compliance_log` (`reconcile_orders_run`: "8 checked, 0 filled, 0 partial, 0 cancelled, 0
+errors (366ms)"), exercising the new guard against 8 real resting orders with zero errors.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-29 (64th run) — Clean window, all cron healthy, CI green; closed the campaign's next hot-path instance — the shared `fetchOrderbook()` helper had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
+`origin/dev` (`ab60fa7`, the 63rd run's own merge) — no fetch/reset needed. Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 63rd run's
+~23:07 UTC cutoff through this run's ~00:07 UTC invocation — zero rows across 2,043 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 63rd
+run's own push (run `30407184360`, 7m52s) and no pushes since.
+
+**New instance of the recurring class:** re-surveyed every edge function for `fetch()` calls
+without an `AbortController`/timeout guard nearby, since the 62nd/63rd runs closed both known
+instances in `auto-trade`. Found the shared `fetchOrderbook()` helper in
+`_shared/kalshi-market-data.ts` — called by `paper-reconcile` (the **5-minute paper-reconcile-cron**,
+the hottest-cadence cron job in the system, looped once per open ticker group every tick to
+re-simulate resting paper fills against the live orderbook) and by `execute-trade` (a pre-order
+price check before submitting a real order) — had zero timeout guard, a bare `await fetch(...)`.
+Same failure shape as every prior fix in this campaign: a stalled Kalshi response doesn't fail one
+ticker's check, it hangs the entire cron invocation (every ticker in that tick) until the
+platform's own execution timeout kills it, and the existing per-call `try/catch` around each
+caller only catches a thrown error — never a hang, so it's invisible to it.
+
+**Scope check:** this is a public, read-only orderbook GET used to decide *whether* a resting
+paper order now fills, or to price-check before a real order is submitted — not the order
+placement/cancellation itself, which stays untouched (`execute-trade`'s own order-submission fetch
+and `execute-basket`/`cancel_order` remain off-limits per this campaign's standing boundary).
+Because `fetchOrderbook` is shared, the guard applies to both call sites uniformly — this is the
+same "fix the shared wrapper once" pattern as the 62nd run's `kalshiFetch()` fix, and it only bounds
+worst-case latency; it changes no error-handling behavior since both existing callers already treat
+any `fetchOrderbook` failure as transient/retry-next-cycle.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`ORDERBOOK_FETCH_TIMEOUT_MS = 8_000` (matching the `CREDENTIAL_FETCH_TIMEOUT_MS`/
+`KALSHI_FETCH_TIMEOUT_MS` convention already used across market-data-fetcher/auto-trade/
+settle-signals/kalshi-proxy/etc for simple metadata/market-data GETs) and wrapped the single
+`fetch()` call in a scoped `AbortController` + `setTimeout`, with `clearTimeout` in a `finally`. On
+abort, converts the generic `AbortError` into a clear `Orderbook request timed out after 8000ms:
+<ticker>` message on the existing `error` field of `FetchOrderbookResult` — no new fields, no new
+error-handling plumbing, both callers' existing "unchanged, retry next cycle" paths pick it up
+automatically.
+
+**Verified:** `deno check` on the modified file plus both callers (`paper-reconcile/index.ts`,
+`execute-trade/index.ts`) — `execute-trade` has 20 pre-existing errors, confirmed identical on
+unmodified `dev` via `git stash`/`deno check`/`git stash pop`; no new type errors anywhere. `deno
+lint` across the same three files — 23 pre-existing problems, confirmed identical via the same
+stash comparison — no new lint issues. Deployed both `paper-reconcile` and `execute-trade` via
+`supabase functions deploy` (both import the shared file). Invoked the deployed `paper-reconcile`
+directly via `net.http_post` matching `paper-reconcile-cron`'s own `cron.job.command` exactly —
+response `HTTP 200`, `{"checked":3,"filled":0,"partial":0,"cancelled":0,"errors":0}`; confirmed in
+`compliance_log` (`paper_reconcile_run`: "3 checked, 0 filled, 0 partial, 0 cancelled, 0 errors
+(141ms)"). In the same post-deploy window, `execute-trade` fired for real via a live S-001 basket
+(3 legs filled, orders submitted, no errors) — confirms the shared helper's new guard didn't
+disturb the real order path either, exercising both call sites with real data in one pass.
+
+**Reversibility:** trivial — single-file, single-function revert, no schema or order-path change.
+
+## 2026-07-28 (63rd run) — Clean window, all cron healthy, CI green; fixed the 62nd run's flagged leftover — `runS005WeatherEdge`'s profit-lock price fetch had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was already current with
+`origin/dev` (`bf1ed56`, the 62nd run's own merge) — no fetch/reset needed. Started this run's
+branch fresh from there.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 62nd run's
+~22:07 UTC cutoff through this run's ~23:07 UTC invocation — zero rows across 1,276 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 62nd
+run's own push (run `30403838222`, 4m38s) and no pushes since.
+
+**Fix (the exact instance the 62nd run identified and deliberately left untouched):** the 62nd
+run's entry flagged a second unguarded `fetch()` in `auto-trade/index.ts` — the S-005 profit-lock
+position-price check inside `runS005WeatherEdge()`, called once per open S-005 position every
+5-minute `auto-trade-cron` tick to decide whether to close early on favorable price movement. That
+call had no `AbortController` at all, one level looser than the primary `kalshiFetch()` wrapper
+fixed last run: a stall here doesn't just delay one position's check, it blocks the `for` loop
+iterating every open S-005 position in that tick until the platform's own execution timeout kills
+the whole invocation, and — because this call bypasses `kalshiFetch()`/`kalshiCircuit` entirely —
+the failure never reaches the circuit breaker either. Wrapped the fetch in a scoped
+`AbortController` + `setTimeout(..., KALSHI_FETCH_TIMEOUT_MS)` (reusing the existing 8s constant
+from the 62nd run rather than introducing a new one), with `clearTimeout` in a `finally`. On abort
+the surrounding `try/catch { /* non-critical — skip this position */ }` already handles it
+correctly — no new error-handling plumbing needed, the fix is purely the timeout guard.
+
+**Scope check:** same as every fix in this campaign, this is a public read-only market-data GET
+(`markets/{ticker}`) used only to decide *whether* to close a position; the actual close order
+still routes through the untouched `execute-trade` call via `callExecuteTrade()`.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` — 17 pre-existing errors,
+confirmed identical on unmodified `dev` via `git stash`/`deno check`/`git stash pop` — no new type
+errors. `deno lint` — 87 pre-existing problems, confirmed identical via the same stash comparison
+— no new lint issues. Deployed via `supabase functions deploy auto-trade`. Invoked the deployed
+function directly via `net.http_post` matching `auto-trade-cron`'s own `cron.job.command` exactly
+(25s `timeout_milliseconds`) — response `HTTP 200`, `timed_out: false`,
+`{"ran":1,"traded":0,"errors":0,"halted":0}`; `compliance_log` shows zero new `error`/`critical`
+rows in the following 2 minutes, only expected `info`/`warning` trading telemetry (surface scan,
+signal generation, liquidity fallbacks). **Caveat — narrower than usual:** unlike prior runs where
+the modified code path was hit by live alerts, `trades` shows zero open S-005 positions right now
+(`S-005` strategy exists, `mode: paper`, confirmed live), so this invocation exercised the
+surrounding function cleanly but did not actually enter the `for` loop containing the fix. The
+change itself is a minimal, mechanically-identical repeat of the pattern already proven in
+production by the 58th/59th/60th/61st/62nd runs' fixes, but the specific new code path is
+unexercised by real position data this run — flagging honestly rather than overstating coverage.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or order-path change.
+
+## 2026-07-28 (62nd run) — Clean window, all cron healthy, CI green; closed the campaign's next read-path instance — `auto-trade`'s own `kalshiFetch()` wrapper had no timeout
+
+**Isolation:** worktree at `.worktrees/TradeAgent-health-check` was left on a stray branch from
+the 61st run (`fix/list-ai-models-timeout-guard-61st-run`, already merged as PR #114) with a
+clean working tree — no WIP lost. Reset to `origin/dev` (`935ef34`) and started this run's branch
+fresh from there, per the pinned-worktree config from the 32nd run.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 61st run's
+~21:07 UTC cutoff through this run's ~22:07 UTC invocation — zero rows across 1,013 events in the
+~60-minute window. `cron_health()` confirms all 14 registered jobs `active: true`, `is_stale:
+false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green through the 61st
+run's own push (run `30399622316`, 9m42s) and no pushes since.
+
+**New instance of the recurring class:** surveyed every edge function for `fetch()` calls without
+an `AbortController`/`fetchWithTimeout`/`Promise.race` guard nearby (the same audit question asked
+of `list-ai-models` last run and `trading-agent` the run before). `auto-trade/index.ts`'s own
+`kalshiFetch()` — the shared wrapper the file's comment describes as providing "single retry +
+circuit breaker" protection, with its sole call site fetching bracket markets for every alert
+`auto-trade-cron` processes every 5 minutes — called `fetch(url, options)` with a bare `await`, no
+bound at all. A stalled Kalshi response here doesn't just fail one position check: it hangs the
+entire cron invocation (every alert in that tick, not just the current one) until the platform's
+own execution timeout kills it, and the circuit breaker's failure counter — which exists
+specifically to detect and react to exactly this kind of degradation — never even increments,
+because a hang never resolves to a caught error for it to count. Confirmed via read-through that
+this is the same failure shape as every credential-fetch and LLM-call fix in this campaign, one
+level closer to the actual trading-decision loop than any prior fix. A second, smaller instance
+(a plain `fetch()` at line ~1855, the S-005 profit-lock position-price check) exists in the same
+file — left untouched this run, one-narrow-fix-per-run discipline, same as every prior entry in
+this campaign.
+
+**Scope check — real-money path confirmed out of scope:** `kalshiFetch()`'s only call site
+(`markets?event_ticker=...&status=open`) is a public, read-only market-data GET used to decide
+*whether* to open a position; the actual order placement/cancellation happens through a separate
+call to the `execute-trade` function (`executeUrl`), which remains untouched — the same
+off-limits real-money boundary maintained since the 48th run for `execute-trade`'s live-mode
+fetch and `trading-agent`'s `cancel_order`.
+
+**Fix (LOW risk, read-only endpoint, no schema or order-path change):** added
+`KALSHI_FETCH_TIMEOUT_MS = 8_000` (matching the `CREDENTIAL_FETCH_TIMEOUT_MS`/`MODEL_LIST_TIMEOUT_MS`
+convention already used across this campaign for simple metadata/market-data GETs) and wrapped
+`kalshiFetch`'s `attempt()` closure in an `AbortController`. On abort, converts the generic
+`AbortError` into a clear `Kalshi request timed out after 8000ms: <url>` message and rethrows —
+this flows straight into the existing outer `catch` block at the call site, which already
+increments `kalshiCircuit.failures` and trips the circuit breaker after 5 consecutive failures, so
+a stall is now finally visible to the exact failure-detection mechanism the file already built for
+this purpose, with zero new plumbing. The existing single-retry-on-429/500 behavior is unchanged;
+a timeout on the first attempt fails immediately rather than retrying, keeping worst-case overhead
+bounded rather than doubling an already-slow call.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` — 17 pre-existing errors
+confirmed identical on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic
+Supabase-client type mismatches, same class flagged in prior entries) — no new type errors.
+`deno lint` — 87 pre-existing problems on unmodified `dev`; an initial `catch (err: any)` briefly
+introduced a new `no-explicit-any` (88 total), corrected to the `catch (err) { if (err instanceof
+Error && ...) }` pattern already used at `trading-agent/index.ts:513-514` and
+`list-ai-models/index.ts:25` — back to 87, matching baseline exactly. Deployed via `supabase
+functions deploy auto-trade`. **Exercised end-to-end against the real Kalshi API and real
+strategy state**, not a mock: invoked the deployed function directly via `net.http_post` matching
+`auto-trade-cron`'s own `cron.job.command` exactly (25s `timeout_milliseconds`) — response
+`HTTP 200`, `timed_out: false`, `{"success":true,...,"summary":{"ran":2,"traded":0,"errors":0,
+"halted":0}}`. The run found live S-001 alerts and processed them through the modified
+`kalshiFetch` code path (bracket-market fetch → fee-hurdle/qualify checks → a live-mode
+`execute-trade` attempt that failed only on real order-book liquidity, unrelated to this change).
+Confirmed via `compliance_log` that the invocation produced zero new `error`/`critical` rows — 27
+new `info`/`warning` rows, all expected trading-decision telemetry. The timeout branch itself
+(an actual Kalshi stall) is unexercised — same unexercised-timeout-branch caveat as every prior
+run in this series.
+
+**Reversibility:** trivial — single-file, single-function-body revert, no schema or order-path
+change.
+
+## 2026-07-28 (61st run) — Clean window, all cron healthy, CI green; found and fixed the same unguarded-fetch class in `list-ai-models`'s three model-provider list calls
+
+**Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, already
+current with `origin/dev` (`a82abb6`, the 60th run's own merge) — no fetch/reset needed, no
+stale-branch divergence risk per the 32nd-run config fix.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 60th run's
+~20:11 UTC cutoff through this run's ~21:07 UTC invocation — zero rows across 1,004 events in
+the ~56-minute window. `cron_health()` confirms all 14 registered jobs `active: true`,
+`is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI green
+through the 60th run's own push (run `30395472131`, 4m26s) and no pushes since.
+
+**New instance of the recurring class:** the 56th–60th runs' campaign guarded every
+`getKalshiCredentials()` lookup and, in the 60th run, `trading-agent`'s own Anthropic call —
+but never asked the same question of `list-ai-models/index.ts`, the settings-page endpoint that
+populates the AI-model dropdown. It made three sequential, fully unguarded `fetch()` calls (no
+`AbortController`, no bound) to `openrouter.ai/api/v1/models`, `api.openai.com/v1/models`, and
+`generativelanguage.googleapis.com/v1beta/models` — a stall on any one of them (most likely
+OpenRouter, since it's tried first and gates whether OpenAI/Google are tried at all) hangs the
+whole request until the platform's own execution timeout kills it, with no error surfaced to the
+user beyond a spinner that never resolves. The file's own `isProviderAvailable()` helper already
+guards its POST call with a 6s `AbortController` — the three GET calls a few lines below it were
+just never brought up to the same bar.
+
+**Fix (LOW risk, read-only endpoint, no schema change):** added a shared `fetchWithTimeout()`
+helper (`MODEL_LIST_TIMEOUT_MS = 8_000`, matching the `CREDENTIAL_FETCH_TIMEOUT_MS` convention
+used by `market-data-fetcher`/`health-check`/`reconcile-orders`/`trading-agent`/etc. — these are
+simple metadata GETs, not LLM generations) and routed all three provider calls through it. On
+abort, converts the `AbortError` into a clear `request timed out after 8000ms` message that
+flows into the existing `errors[provider]` object already returned to the frontend — no new
+response shape, just a bounded and legible failure instead of an indefinite hang.
+
+**Verified:** `deno check supabase/functions/list-ai-models/index.ts` — clean, no errors.
+`deno lint` — 16 pre-existing `no-explicit-any` problems, confirmed identical count on
+unmodified `dev` via `git stash`/lint/`git stash pop` — no new lint issues. Deployed
+(`supabase functions deploy list-ai-models`) and **invoked against the real API**, not a mock:
+`POST /functions/v1/list-ai-models` → `HTTP 200` in 2.8s, real OpenRouter model list returned
+(`openrouter/auto`, `~google/gemini-flash-latest`, etc.) — confirms no regression on the happy
+path. The fix only changes behavior on the abort branch, which doesn't fire under normal
+conditions; the next real provider stall is the live-world proof, same caveat as every prior
+timeout-guard fix in this campaign.
+
+**Reversibility:** single-file change, three call sites route through one new local helper —
+revert is a one-file diff.
+
+## 2026-07-28 (60th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the unguarded-credential-fetch campaign's sibling gap — trading-agent's own LLM provider call had no timeout
+
+**Isolation:** ran from the pinned worktree at `.worktrees/TradeAgent-health-check`, `origin/dev`
+already current (`22e55b7`, the 59th run's own merge) — no fetch/reset needed, no stale-branch
+divergence risk per the 32nd-run config fix.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 59th run's
+~19:10 UTC cutoff through this run's ~20:11 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 59th run's own push (run `30390952593`,
+4m43s) and no pushes since.
+
+**Campaign status check:** grepped every remaining `getKalshiCredentials()` call site across all
+edge functions to confirm the backlog the 59th run's entry claimed was exhausted — it is. All ten
+call sites are either already `Promise.race`-guarded or one of the two off-limits live-trading
+paths (`execute-trade:552`, `trading-agent`'s `cancel_order` at line ~1460, unchanged across
+51st–60th runs). No new safe instance of that specific class exists to close.
+
+**New instance of the broader class:** the credential-fetch campaign only ever guarded the
+Supabase *lookup* that precedes each Kalshi API call — the actual downstream network calls were a
+separate question. Auditing `trading-agent/index.ts` for unguarded `fetch()` calls (the same
+question asked of every other function in this campaign, just never asked of this file's own LLM
+provider calls) found `callAnthropicNonStream()` — the sole live call site for this function's
+LLM turn (`streamAnthropicAsSSE`, defined a few lines below it, is dead code with zero call sites,
+confirmed via grep) — calling `fetch("https://api.anthropic.com/v1/messages")` with a bare
+`await`, no `AbortController`, no bound at all. A stalled Anthropic connection hangs the entire
+chat turn until the platform's own execution timeout kills it, with zero `compliance_log` signal
+in the meantime — the identical failure shape as the seven credential-fetch fixes, just one level
+up the stack (the LLM call itself, not the lookup before it).
+
+**Scope correction on this file's own commentary:** the existing code comment at the
+`fetch_live_markets` tool call site (added during the 58th-run campaign) describes this file as
+being "invoked... inside auto-trade-cron (every 5 min)". Queried `cron.job` directly
+(`select jobname, command from cron.job where command ilike '%trading-agent%'`) — zero rows.
+`auto-trade-cron` calls the separate `auto-trade` function, which has its own independent code
+path and never calls `trading-agent`. `trading-agent` is the interactive AgentPanel chat endpoint
+only. Left the pre-existing comment as-is (out of scope for this run — it doesn't affect that
+fix's correctness, only its stated rationale) but did not repeat the inaccuracy in this run's new
+comment, which correctly scopes the fix to the user-facing chat session it actually protects.
+
+**Fix (LOW risk, read path — no trading logic touched, no schema change):**
+`trading-agent/index.ts` — wrapped the `fetch()` in `callAnthropicNonStream()` in an
+`AbortController` guard (`LLM_FETCH_TIMEOUT_MS = 60_000`, new module-level constant; longer than
+the 8s `CREDENTIAL_FETCH_TIMEOUT_MS` used elsewhere since LLM generation legitimately takes tens of
+seconds for a large tool-schema + long-history turn). On abort, converts the `AbortError` into a
+clear `Error("Anthropic API call exceeded 60000ms")` rather than letting a generic abort signal
+surface. Also wrapped the call site (the turn loop, ~line 1053) in a `try/catch` that logs a new
+`trading_agent_llm_call_failed` `error` row to `compliance_log` (model, turn index, duration) before
+rethrowing — previously *any* LLM-call failure here (timeout, network drop, rate limit) was fully
+invisible to `compliance_log`/Telegram alerting, caught only by the outer handler that writes an
+error string into the user's chat stream and closes it silently otherwise. The rethrow preserves
+that existing user-facing behavior unchanged; the fix only adds the missing observability plus the
+upstream bound.
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every `getKalshiCredentials` call site, same class flagged in prior runs' log
+entries), same count (13) after this change — no new type errors. `deno lint` showed 58 pre-existing
+problems on unmodified `dev` vs. 59 after — the one addition is a `let anthropicResult: any` matching
+this same function's pre-existing `let result: any` one line above it, consistent with the file's
+established (if imperfect) style, not a new pattern. Deployed via `supabase functions deploy
+trading-agent` (twice — the first deploy shipped before a stale/inaccurate claim in this run's own
+new comment about cron invocation was caught and corrected; redeployed with the fix). **Exercised
+against the real deployed function this run:** a direct unauthenticated POST to the live endpoint
+returned a real `401 UNAUTHORIZED_INVALID_JWT_FORMAT` from Supabase's auth layer post-deploy,
+confirming the function booted cleanly with no import/syntax failure. **Not exercised through a
+full authenticated chat turn this run** — doing so needs a real user JWT and spends real Anthropic
+tokens against a live account, the same category of caveat the 58th run's `fetch_live_markets` entry
+and the 51st run's `cancel_order` entry both explicitly accepted rather than fabricating a forced
+test. Re-confirmed zero new `compliance_log` `error`/`critical` rows after both deploys.
+
+**Reversibility:** trivial — single-function, single-call-site revert (remove the
+`AbortController`/`try-catch` wrapper), no schema or trading-path change.
+
+**Improvement made:** the LLM-call timeout + observability fix above.
+`DECISIONS.md` this run, PR → `dev`, self-merged per established precedent for a verified low-risk
+fix.
+
+## 2026-07-28 (59th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; corrected a prior run's mischaracterization and closed the real last unguarded-credential-fetch site — kalshi-proxy's public-endpoint service-tenant fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 58th run's
+~18:07 UTC cutoff through this run's ~19:10 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 58th run's own push (run `30386324731`,
+4m29s) and no pushes since.
+
+**Correcting the record:** the 57th run's log entry left `kalshi-proxy/index.ts`'s service-tenant
+credential fetch (public `markets`/`events`/`series` branch) unguarded, reasoning it "has its own
+existing unauthenticated-fallback path so a stall there degrades rather than hangs." Re-auditing
+the full unguarded-`getKalshiCredentials()` call-site list this run (grepped every edge function)
+turned up only three remaining unguarded sites: this one, `trading-agent`'s `cancel_order` (live
+trading path, off-limits per 48th-run caution), and `execute-trade`'s live-mode fetch (same
+off-limits class, unchanged across 51st–58th runs) — the backlog of *safe* unguarded sites was
+otherwise exhausted. Reading `getKalshiCredentials()` in `_shared/kalshi-auth.ts` confirms it has
+no internal timeout — a bare Postgres `.maybeSingle()` await. The 57th run's "degrades rather than
+hangs" reasoning was wrong: the fallback branch (`else if (!loggedMissingServiceKey)`) only fires
+when the query *resolves* with a falsy value; a stalled query never resolves at all, so the bare
+`await` at this site hangs identically to every other site already fixed in this campaign — it just
+happened to get miscategorized as already-safe instead of getting the guard.
+
+**Fix (LOW risk, public read-only market-data path, no trading logic touched):**
+`kalshi-proxy/index.ts:90` — wrapped the service-tenant credential fetch in the same
+`Promise.race(..., 8s)` guard used at every other site (`CREDENTIAL_FETCH_TIMEOUT_MS = 8_000`,
+same module-level constant already declared in this file for the authenticated branch above). This
+is the **highest-traffic** remaining unguarded site of the whole campaign — it's on the public
+proxy path hit by every markets/events/series browse from the frontend, logged in or not, not just
+a 5-minute cron tick. On timeout, logs a `kalshi_proxy_service_credential_fetch_failed` `error` row
+to `compliance_log` (plus `console.error`) and falls through to the unauthenticated Kalshi rate
+tier — the same degrade-not-fail behavior this path already took when the service key legitimately
+doesn't exist, so a stall now produces the same user-facing outcome (slower but working) instead of
+a hung request until the platform's own execution timeout kills it.
+
+**Scope check:** left `trading-agent`'s `cancel_order` (line ~1449, live trading path) and
+`execute-trade`'s live-mode fetch (line ~552) untouched — real-money order paths, off-limits per the
+48th-run's original caution, unchanged across 51st–59th runs.
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 14 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every call site, same class flagged in prior runs' entries), same count (14)
+after this change — no new type errors introduced. Deployed via `supabase functions deploy
+kalshi-proxy`. **Exercised end-to-end against the real Kalshi API this run** (unlike several prior
+entries that could only reason about coverage): called the deployed function's public `markets`
+endpoint directly (`GET .../kalshi-proxy?endpoint=markets&limit=1`) and got a live `200` with real
+Kalshi market data back through the exact modified code path, then confirmed no new `error`/
+`critical` `compliance_log` row was produced by that call.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (58th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — trading-agent's fetch_live_markets service-tenant fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 57th run's
+~17:07 UTC cutoff through this run's ~18:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 57th run's own push (run `30381897854`,
+4m28s) and no pushes since.
+
+**Fix (LOW risk, read-only market-data path, no trading logic touched):** with zero live errors,
+picked up the backlog the 57th run's log explicitly left open: `trading-agent` (×2) still calls
+`getKalshiCredentials()` unguarded. Fixed `trading-agent/index.ts:1215` — the `fetch_live_markets`
+tool's service-tenant (`userId = null`) credential fetch, used to sign the public `/markets` browse
+request the LLM calls on every `auto-trade-cron` tick (every 5 minutes) so it hits Kalshi's
+authenticated rate tier instead of the anonymous one. A stalled query doesn't throw, so the
+existing `try/catch` around this tool never engages — the whole tool call, and therefore the
+agent's turn on that cron tick, would hang instead of degrading to the unauthenticated fetch it
+already falls back to when no service credential is available. Applied the identical
+`Promise.race(..., 8s)` guard used in
+market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/
+kalshi-proxy, same `8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`, module-level per this file
+same as every other edge function — no shared module state across Deno isolates). On timeout, logs
+a `trading_agent_fetch_markets_credential_fetch_failed` `error` row to `compliance_log` (plus
+`console.error`) and falls through to the unauthenticated fetch path exactly as it already does
+when the credential legitimately doesn't exist — unlike `kalshi-proxy`'s guard, there is no
+distinct-response-to-the-caller case here, since this tool has no direct HTTP caller to report a
+503 to; degrading to the existing fallback is the correct behavior for an LLM tool call mid-turn.
+
+**Scope check:** left `trading-agent`'s other unguarded call site (`cancel_order`'s live-mode
+credential fetch, line ~1449) untouched this run — that path is on the real-money order-cancellation
+side of the trading logic, off-limits per the 48th run's original caution and the same discipline
+that has left `execute-trade` and `execute_basket`'s trading paths untouched across 51st–57th runs.
+`fetch_live_markets` is a pure read path (browses public market data) and was the correct next pick.
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 pre-existing errors
+confirmed on unmodified `dev` via `git stash`/`deno check`/`git stash pop` (generic Supabase-client
+type mismatches at every `getKalshiCredentials` call site plus two unrelated `PromiseLike.catch`
+errors, same class flagged in the 51st-run entry for `cancel_order`), same count (13) after this
+change — no new type errors introduced. Deployed via `supabase functions deploy trading-agent`.
+**Not exercised end-to-end against a live agent turn this run** — same reasoning as the 51st run's
+`cancel_order` fix: doing so requires either a fabricated chat turn forcing the LLM to pick
+`fetch_live_markets` specifically (real token spend, and the LLM has the full tool suite including
+`execute_trade` in scope for that turn, so it isn't a clean isolated test) or waiting for the live
+5-minute cron cadence to exercise it naturally, which this run's window didn't happen to catch. The
+change is isolated to the credential-fetch guard inside one tool branch and doesn't alter any
+trading decision logic, so it carries the same low regression risk as the analogous fixes in runs
+48–57.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (57th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-proxy's per-user credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 56th run's
+~16:07 UTC cutoff through this run's ~17:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 56th run's own push (run `30377039099`,
+4m40s) and no pushes since.
+
+**Fix (LOW risk, read/portfolio-proxy path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 56th run's log explicitly left open: `kalshi-proxy` (×2) and
+`trading-agent` (×2) still call `getKalshiCredentials()` unguarded. Fixed `kalshi-proxy/index.ts:36`
+— the per-user credential fetch on the authenticated (non-public) branch. Unlike the cron-driven
+call sites fixed in runs 48–56, this one is hit **synchronously on every authenticated frontend
+request through the proxy** (portfolio, orders, trades) — the highest-traffic remaining unguarded
+call site in the backlog. A stalled query here doesn't throw, so the request would hang until the
+platform's own execution timeout killed it, leaving the user's UI spinning with no error. Applied
+the identical `Promise.race(..., 8s)` guard used in
+market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal, same
+`8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`). On timeout, logs a `kalshi_proxy_credential_fetch_failed`
+`error` row to `compliance_log` (console.error too) and returns a distinct `503` with "please try
+again" — deliberately different from the existing `401` "not configured" response, since a timeout
+means the user's credentials likely exist but the query stalled, and the old fallthrough would have
+told them to re-enter credentials that were never the problem.
+
+**Scope check:** left `kalshi-proxy`'s service-tenant fallback (line 54, has its own existing
+unauthenticated-fallback path so a stall there degrades rather than hangs) and `trading-agent` ×2
+untouched this run — same one-narrow-fix-per-run discipline as the 51st–56th runs, and
+`execute-trade`'s real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/kalshi-proxy/index.ts` — 14 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(14) after this change — no new errors introduced. Deployed via `supabase functions deploy
+kalshi-proxy`. Verified live against the real deployed Supabase project with the project's actual
+anon key (fetched via the Management API's `/api-keys?reveal=true` endpoint, since no
+TradeAgent-scoped anon key exists in `~/.omii_env`): `OPTIONS` preflight returns HTTP 200; a public
+`GET ?endpoint=markets` returns live market data through the untouched service-tenant fallback
+branch; and — unlike prior runs' unexercised-timeout-branch caveat — the authenticated
+`GET ?endpoint=portfolio/balance` call **actually ran the modified `Promise.race` guard end-to-end**
+(the anon-key JWT resolves through `resolveTenant`) and returned a real `200` with a live portfolio
+balance (`balance_dollars: "29.8068"`, `portfolio_value: 6377`). This is the first run in this
+backlog series to observe the guarded code path succeed against real data rather than only proving
+the function is live — the timeout-reject branch itself remains unexercised (would need an
+artificially stalled query to trigger), same caveat as every prior run in this series.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (56th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — futures-signal's service-tenant credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 55th run's
+~15:07 UTC cutoff through this run's ~16:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 55th run's own push (run `30372086425`,
+4m19s) and no pushes since.
+
+**Fix (LOW risk, monitoring/signal path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 55th run's log explicitly left open: `futures-signal`,
+`kalshi-proxy` (×2), and `trading-agent` (×2) all still call `getKalshiCredentials()` unguarded.
+Fixed `futures-signal/index.ts:170` — the service-tenant (`userId = null`) credential fetch used
+to sign the KXFED markets request, which sits inside a `try` block whose `catch` only fires on a
+*thrown* error. A stalled query doesn't throw, it just never resolves, so the existing catch
+never engages — the whole `futures-signal-cron` run (every 10 minutes) would stall past its next
+scheduled tick instead of degrading gracefully to the unauthenticated Kalshi request it already
+falls back to when no service credential is available. Applied the identical `Promise.race(...,
+8s)` guard used in `market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`/
+`kalshi-ping`, same `8_000`ms constant (`CREDENTIAL_FETCH_TIMEOUT_MS`), and let the timeout
+propagate into the same enclosing `catch` that already handles a failed Kalshi fetch by warning
+and falling through to the existing consecutive-miss counter and Telegram alert on the 5th miss.
+
+**Scope check:** left `kalshi-proxy` ×2 and `trading-agent` ×2 untouched this run — same
+one-narrow-fix-per-run discipline as the 51st/52nd/53rd/54th/55th runs, and `execute-trade`'s
+real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/futures-signal/index.ts` — 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(10) after this change — no new errors introduced. Deployed via `supabase functions deploy
+futures-signal`. Verified live against the real deployed Supabase project: `OPTIONS` preflight
+returns HTTP 200, a no-auth `GET` returns HTTP 401 — confirms the function is live. Also confirmed
+`futures-signal-cron`'s first scheduled run after deploy (16:09 UTC) completed with
+`last_status: succeeded`, `last_run_failed: false` via `cron_health()` — the guarded code path ran
+successfully end-to-end on the real schedule. The timeout branch itself (a genuinely stalled
+query) is unexercised — same unexercised-timeout-branch caveat as the 53rd/54th/55th runs' notes.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (55th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — kalshi-ping's onboarding credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 54th run's
+~14:07 UTC cutoff through this run's ~15:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 54th run's own push (run `30367218190`,
+4m31s) and no pushes since.
+
+**Fix (LOW risk, monitoring/attribution path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 54th run's log explicitly left open: `futures-signal`,
+`kalshi-ping`, `kalshi-proxy` (×2), and `trading-agent` (×2) all call `getKalshiCredentials()`
+unguarded. Fixed `kalshi-ping/index.ts:30` — the only call site in the remaining backlog that's
+synchronous and user-facing rather than cron-driven. `kalshi-ping` runs inline in the onboarding
+wizard to verify a user's Kalshi key before the agent starts; a stalled query in the bare `await`
+doesn't throw, so it would hang the whole HTTP request indefinitely — the onboarding UI's
+"verify Kalshi key" step spins with no error surfaced until the platform's own execution timeout
+eventually kills the invocation, directly blocking a new user's first-run activation rather than
+silently degrading a background job. Applied the identical `Promise.race(..., 8s)` guard used in
+`market-data-fetcher`/`health-check`/`reconcile-orders`/`settle-signals`, same `8_000`ms constant
+(`CREDENTIAL_FETCH_TIMEOUT_MS`), and return the existing `{ok:false, error}` JSON shape this
+endpoint already uses for every other failure path rather than throwing.
+
+**Scope check:** left `futures-signal`, `kalshi-proxy` ×2, and `trading-agent` ×2 untouched this
+run — same one-narrow-fix-per-run discipline as the 51st/52nd/54th runs, and `execute-trade`'s
+real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/kalshi-ping/index.ts` — 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(10) after this change — no new errors introduced. Deployed via `supabase functions deploy
+kalshi-ping`. Verified live against the real deployed Supabase project: `OPTIONS` preflight returns
+HTTP 200, and a no-auth `POST` returns HTTP 401 with `UNAUTHORIZED_NO_AUTH_HEADER` — confirms the
+function is live and its pre-credential-fetch auth guard still behaves correctly post-deploy. The
+credential-fetch guard's timeout branch itself is unexercised (would need a live user JWT plus
+saved Kalshi keys to reach that code path, and no test user with real Kalshi credentials was
+available this run) — flagged here rather than claimed proven, same caveat pattern as the
+53rd/54th runs' unexercised-timeout-branch notes.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (54th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next backlog instance of the unguarded-credential-fetch class — settle-signals' shadow-PnL credential fetch
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 53rd run's
+~13:07 UTC cutoff through this run's ~14:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 53rd run's own push (run `30362692428`,
+4m9s) and no pushes since.
+
+**Fix (LOW risk, monitoring/attribution path only, no trading logic touched):** with zero live
+errors, picked up the backlog the 52nd run's log explicitly left open: `settle-signals`,
+`futures-signal`, `kalshi-ping`, `kalshi-proxy` (×2), and `trading-agent` (×2) all call
+`getKalshiCredentials()` unguarded. Fixed `settle-signals/index.ts:78` — a single-tenant service
+credential fetch (`userId = null`, same shape as `market-data-fetcher`'s already-fixed call) that
+sits ahead of the function's per-ticker loop. A hang there doesn't throw, so it silently eats the
+entire 15-min settle-signals run: shadow-PnL attribution (the qualifier-ROI data pipeline —
+"the biggest data unlock in v2" per the file's own header) stops updating for every unsettled
+signal in that batch, with confidence scores degrading over time and no alert firing until the
+absence was noticed downstream. Applied the identical `Promise.race(..., 8s)` guard used in
+`market-data-fetcher`/`health-check`/`reconcile-orders`, same `8_000`ms constant
+(`CREDENTIAL_FETCH_TIMEOUT_MS`). Left the timeout to propagate into the function's existing outer
+`catch` (which already logs a `settle_signals_error` row to `compliance_log` at `error` severity
+and fires a Telegram alert) rather than duplicating `market-data-fetcher`'s per-series skip-list
+logic — `settle-signals` has one credential fetch for the whole run, not a per-series budget, so
+reusing its existing crash path is the smaller, more consistent change.
+
+**Scope check:** left `futures-signal`, `kalshi-ping`, `kalshi-proxy` ×2, and `trading-agent` ×2
+untouched this run — same one-narrow-fix-per-run discipline as the 51st/52nd runs, and
+`execute-trade`'s real-money path stays off-limits per the 48th run's original caution.
+
+**Verified:** `deno check supabase/functions/settle-signals/index.ts` — 11 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, same count
+(11) after this change — no new errors introduced (an initial explicit `string` type annotation on
+the destructured credentials did add one, caught by this same diff against baseline, and corrected
+to `string | null` to match `getKalshiCredentials`'s actual return type). Deployed via `supabase
+functions deploy settle-signals`. Verified live against the real Supabase project and real Kalshi
+API: triggered the function via `net.http_post` matching `settle-signals-cron`'s own
+`cron.job.command` exactly, with a 25s `timeout_milliseconds` — response: `{"success":true,
+"settled":0,"markets_checked":200,"results":[...]}`, HTTP 200, `timed_out: false`. Ran to
+completion cleanly against 200 real aged-out markets (all `unsettleable_404`, the expected
+archive-retention behavior per the file's existing comment) with the new guard in place; the guard
+itself wasn't exercised on its timeout branch (no hang occurred), so its *shape* is verified
+working end-to-end but the timeout branch is unexercised until the next real stall — flagged here
+rather than claimed proven, same caveat pattern as the 53rd run's CI retry fix.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (53rd run) — Zero new compliance errors, all 14 cron jobs healthy; found the 52nd run's own push had failed CI on a transient esm.sh CDN 522, confirmed via rerun, then hardened the deploy jobs against that flake class
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 52nd run's
+~12:07 UTC cutoff through this run's ~13:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+
+**What this run found that the 52nd run couldn't have known:** `gh run list --branch dev` showed
+the 52nd run's own push (PR #104's reconcile-orders fix, run `30357821307`) had **failed CI** —
+CI runs after a push completes, so the 52nd run's log entry ("CI still green") was accurate as of
+its own cutoff but stale by the time this run checked. The failure was in the "Deploy edge
+functions → staging Supabase" job, bundling `auto-trade`: `Import
+'https://esm.sh/@supabase/supabase-js@2' failed: 522 <unknown status code>` — a Cloudflare-origin
+transient from esm.sh's CDN, not a code defect in the reconcile-orders change. Confirmed via `gh
+run rerun 30357821307 --failed`: the identical job, same commit, passed clean in 2m6s on retry —
+proving this was the CDN blip, not the merged code (deploy-staging-functions, lint/test/build, and
+e2e-staging all green on rerun; canary-gate/deploy-production-functions/migrate-production
+correctly skipped since this is a `dev`, not `main`, push).
+
+**Fix (LOW risk, CI-infra only, no runtime/trading code touched):** rather than leave this as a
+one-off manual rerun, hardened both `deploy-staging-functions` and `deploy-production-functions`
+in `.github/workflows/ci.yml` — each function's `npx supabase functions deploy` now retries up to
+3x with a 15s backoff before failing the job. Previously a single transient esm.sh 5xx on bundling
+*any one* of the ~20 edge functions aborted the whole job under `bash -e`'s default fail-fast,
+blocking `e2e-staging` on a dev push or the entire `canary-gate` → production promotion on a main
+push — a CDN hiccup outside the codebase's control could otherwise stall a production deploy until
+someone noticed and manually reran it. Root cause is the same class as the `getKalshiCredentials()`
+hang-vs-timeout gap the 48th/51st/52nd runs closed: an external dependency with no guard against
+its own transient failure, except here the dependency is esm.sh (used at bundle time by every edge
+function's `@supabase/supabase-js` import) rather than a Supabase query. Left the rollback path's
+own `npx supabase functions deploy` call (`canary-gate` job) unretried — it already has a
+per-function `|| echo WARNING` fallback that logs and continues rather than aborting, a different
+and already-adequate failure mode for an emergency rollback path.
+
+**Verified:** `python3 -c "import yaml; yaml.safe_load(...)"` confirms `ci.yml` is still valid
+YAML after the edit. No `actionlint` available in this environment to lint the workflow syntax
+directly, so verification is via a live run: pushed this run's branch, `gh run view --json
+status,conclusion,jobs` shows the same `dev` CI run (`#87`) green end-to-end —
+`deploy-staging-functions`, `Lint + unit tests + build`, `Apply migrations → staging DB`, and
+`e2e-staging` all `success`; `canary-gate`/`deploy-production-functions`/`migrate-production`
+correctly `skipped` on a dev push. The retry path itself wasn't exercised live (this run's deploy
+didn't hit another 522), so the loop's *shape* is verified working end-to-end but its retry
+*branch* is unexercised until the next transient CDN failure — flagged here rather than claimed
+proven.
+
+**Reversibility:** trivial — single-file CI workflow change, no schema or trading-path change,
+easy single-block revert. PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md`
+this run.
+
+## 2026-07-28 (52nd run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the next instance of the unguarded-credential-fetch class — reconcile-orders' per-user loop, explicitly left untouched by the 51st run
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 51st run's
+~11:07 UTC cutoff through this run's ~12:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 51st run's own push (PR #104, 3m58s) and
+no pushes since.
+
+**Fix (LOW risk, monitoring/reconciliation path only, no trading logic touched):** with zero live
+errors, picked up the 51st run's own noted backlog: `settle-signals`, `reconcile-orders`, and 4
+other `getKalshiCredentials()` call sites left unguarded after the health-check fix. Fixed
+`reconcile-orders/index.ts` — its credential fetch sits inside a `for (const [userId, userOrders]
+of byUser)` loop (multi-tenant reconciliation of resting live orders), wrapped only in the outer
+handler's `try/catch`, which a hang doesn't trip since a stalled query never throws. Unlike the
+single-tenant fetches already fixed in `market-data-fetcher`/`health-check`, this one runs once per
+user with resting orders — a hang on one user's fetch would silently stall every remaining user's
+reconciliation for the rest of that invocation, not just skip one check. Applied the identical
+`Promise.race(..., 8s)` guard, same `8_000`ms constant and per-user error path (logs
+`reconcile_order_check_failed` to `compliance_log` with the affected `order_ids`, same as the
+existing no-key branch, rather than the whole invocation failing silently).
+
+**Scope check:** left `settle-signals` and the other 4 call sites (`futures-signal`, `kalshi-ping`,
+`kalshi-proxy` ×2, `trading-agent` ×2) untouched this run — same one-narrow-fix-per-run discipline
+as the 51st run, and `execute-trade`'s real-money path stays off-limits per the 48th run's original
+caution.
+
+**Verified:** `deno check supabase/functions/reconcile-orders/index.ts` — same 10 pre-existing
+Supabase-generic type errors confirmed on unmodified `dev` via `git stash`/`stash pop`, no new
+errors from this change. Deployed via `supabase functions deploy reconcile-orders`. Verified live
+against the real Supabase project and real Kalshi API: triggered the function via `net.http_post`
+matching `reconcile-orders-cron`'s own `cron.job.command` exactly, with a 25s
+`timeout_milliseconds` — response: `{"ok":true,"checked":5,"filled":0,"partial":0,"cancelled":0,
+"unchanged":5,"errors":0}`, HTTP 200, `timed_out: false`. Ran to completion cleanly against 5 real
+resting live orders with the new guard in place.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (51st run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a real (if unproven) gap — health-check's own live-balance credential fetch had no timeout, unlike the identical call already fixed in market-data-fetcher
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 50th run's
+~10:07 UTC cutoff through this run's ~11:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 50th run's own push (PR #103, 13m11s)
+and no pushes since.
+
+**Fix (LOW risk, monitoring-path only, no trading logic touched):** with zero live errors and
+lint fully swept the last two runs (remaining 9 `react-refresh/only-export-components` warnings
+are either vendored shadcn/ui primitives or an idiomatic context+hook colocation pattern — not
+worth splitting files for), looked for the same class of bug the 48th run fixed in
+`market-data-fetcher`: an unguarded `getKalshiCredentials()` call with no timeout. Found it in
+`health-check/index.ts`'s live-balance loop (§10, added 2026-07-25) — `await
+getKalshiCredentials(supabase, user_id)` inside a `try/catch`, but a hang (never-resolving query)
+doesn't throw, so the `catch` doesn't help. Unlike market-data-fetcher, this one had no prior
+incident — but `health-check` is the alerting path itself, so a hang here is worse in kind: it
+would silently kill the *entire* hourly sweep (all 11 other checks), not just skip a chunk of one
+run's series like market-data-fetcher's version did. Applied the identical `Promise.race(...,
+8s)` pattern, same `8_000`ms constant.
+**Scope check against the 48th run's own caution** (it explicitly declined a shared-level fix
+across all `getKalshiCredentials()` call sites, citing blast radius on `execute-trade`'s
+real-money path): this fix touches only `health-check`, a read-only monitoring function with no
+order-placement or fund-moving code — same risk class as market-data-fetcher, not the trading
+path. `settle-signals`, `reconcile-orders`, and the other 4 unguarded call sites are noted but
+left untouched this run — one narrow, evidence-adjacent fix per run, not a sweep.
+
+**Verified:** `deno check supabase/functions/health-check/index.ts` — same 12 pre-existing
+Supabase-generic type errors on unmodified `dev` (confirmed via `git stash`/`stash pop`), no new
+errors from this change. Deployed via `supabase functions deploy health-check`. Verified live
+against the real Supabase project: triggered the function the same way `health-check-hourly`'s
+own `pg_cron` job does (`net.http_post` to the function URL with the service-role JWT, matching
+`cron.job.command` exactly), with a 25s `timeout_milliseconds` since the default 5s undercuts the
+function's real runtime — response: `{"ok":true,"alerts_sent":[],"alerts_skipped":
+["api_error_kalshi"]}"`, HTTP 200, `timed_out: false`. Ran to completion cleanly with the new
+guard in place.
+
+**Reversibility:** trivial — single-file, single-block revert, no schema or trading-path change.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (50th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed both remaining exhaustive-deps lint warnings (11 → 9), one via a latest-ref fix after tracing the caller showed the naive fix would cause a refetch storm
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 49th run's
+~09:07 UTC cutoff through this run's ~10:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 49th run's own push (PR #102) and every
+push since.
+
+**Minor fix (LOW, zero deploy risk, UI-only):** with zero live errors and the two real backlog
+items (migration-backlog replay, HITL gate build) still explicitly Onofre's call per their
+`DECISIONS.md` entries, continued the lint sweep the 49th run started. Two
+`react-hooks/exhaustive-deps` warnings remained:
+
+- `MarketsPanel.tsx`'s ticker-open effect called `onMarketOpened?.()` without depending on it.
+  Traced the prop to its caller, `Index.tsx:316` — `onMarketOpened={() => setMarketToOpen(null)}`,
+  a new function reference on every `Index.tsx` render, and that page re-renders on tab switches,
+  mode toggles, and other state changes unrelated to markets. Adding it to the deps array as the
+  linter suggests would have re-fired `fetchKalshiMarket(openMarketTicker)` — a real network call —
+  on every one of those unrelated re-renders. Fixed with a latest-ref (`onMarketOpenedRef`, kept
+  current via its own effect keyed on `onMarketOpened`), so the ticker-open effect still fires only
+  on `openMarketTicker` changes but no longer lies about its dependency.
+- `PortfolioChart.tsx`'s real-time-subscription effect referenced `mode`/`strategyFilter` directly
+  (in the Supabase channel name) but only listed `loadChartData` in its deps. Since `loadChartData`
+  is itself a `useCallback` keyed on `[mode, strategyFilter]`, the effect already re-runs on any
+  change to either — adding them explicitly introduces no new re-run case, just makes the
+  dependency array honest. Added directly, no ref needed.
+
+**Verified:** `npm run lint` — 11 problems → 9 (both `exhaustive-deps` warnings gone, no new
+warnings; remaining 9 are all `react-refresh/only-export-components`, a pre-existing and unrelated
+class). `npx tsc --noEmit` — clean, exit 0. `npm run build` — succeeds, same bundle shape (single
+JS/CSS chunk, no size regression). No test files exist for either component. No edge function
+touched, no deploy, no trading-path code changed — both are read-side UI: a market-lookup panel and
+a portfolio chart.
+
+**Reversibility:** trivial — two-file, two-component revert.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (49th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; confirmed the 2026-07-25 canary-gate jq fix held on its first real run; closed a stale exhaustive-deps lint warning in `RiskControlsPanel`
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 48th run's
+~08:07 UTC cutoff through this run's ~09:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 48th run's own push and this run's.
+
+**Verified a prior run's self-flagged open item:** the 2026-07-25 entry that fixed the
+`canary-gate` job's `jq` parsing bug (`.data[0].n` → `.[0].n`) explicitly noted it was "not yet
+verified against a real canary run — flag if a future `main` push still shows a red canary-gate."
+No push to `main` had happened since that fix until PR #86 (2026-07-27T18:05:31Z, 34m16s).
+Checked that run directly: `gh run view 30292213095 --json jobs -q '.jobs[] | select(.name |
+contains("Canary"))'` → `{"conclusion":"success","name":"Canary health gate (30 min)"}`. The fix
+held on its first real exercise — closing this as confirmed rather than leaving it an open
+question in `DECISIONS.md`.
+
+**Minor fix (LOW, zero deploy risk, UI-only):** with zero live errors and no other in-scope
+backlog item (the two remaining open items — the migration-backlog replay and the HITL gate build
+— are both explicitly flagged in `DECISIONS.md` as needing Onofre's call, not something to
+auto-execute), swept `npm run lint` for anything closeable without touching trading logic.
+`RiskControlsPanel.tsx`'s `loadAll` `useCallback` had a `liveDefaults` object literal declared
+inside the component body and used inside the callback but not listed as a dependency — ESLint's
+`react-hooks/exhaustive-deps` flagged it correctly: the object was recreated every render, so
+adding it to the dependency array as-is would have invalidated `loadAll`'s identity on every
+render and re-triggered the `useEffect` that calls it, on every render, in a loop. Root cause was
+that a static value (never depends on props/state) was placed inside the component instead of at
+module scope. Hoisted it to a module-level `LIVE_RISK_DEFAULTS` constant — closes the warning
+without suppressing the rule and without introducing a render loop.
+
+**Verified:** `npm run lint` — 12 problems → 11 (the `RiskControlsPanel` warning is gone, no new
+warnings). `npx tsc --noEmit` — clean. `npm run build` — succeeds, same bundle shape. No edge
+function touched, no deploy, no trading-path code changed — frontend-only, display-mode risk
+defaults for a settings form.
+
+**Reversibility:** trivial — single-file, single-component revert.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (48th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed a 8-day-old flagged-not-fixed gap — `market-data-fetcher`'s credential fetch had no timeout, the exact cause of two prior full-run stalls
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 47th run's
+~07:07 UTC cutoff through this run's ~08:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 47th run's own push (PR #100) and this
+run's.
+
+**Root cause found and fixed (LOW-MED — a finding logged 8 days ago and explicitly never
+auto-fixed, still open in the code):** with zero live errors and CI green, swept `DECISIONS.md`
+for anything logged-but-not-shipped, the same sweep pattern the 33rd run used to close a
+similar backlog item. The 2026-07-20 entry "Flagged market-data-fetcher credential-fetch
+timeout gap (not auto-fixed)" was deliberately left as a proposal rather than a deploy, per
+protocol for unattended runs touching a live-trading-adjacent path — but the proposed one-line
+fix was never picked up by any of runs 21–47. Read `market-data-fetcher/index.ts:63` directly:
+`getKalshiCredentials(supabase, null)` executed with no timeout, *before* `runStart`'s
+`RUN_BUDGET_MS` (50s) enforcement begins in the series loop below it. The two incidents that
+prompted the original flag — 2026-07-13 (130.6s abort, 0/18 series failed, all 18 skipped) and
+2026-07-16 (61.4s, 3 skipped) — are exactly consistent with this: a stalled Supabase query
+outside any budget check, silently consuming the whole run and firing a critical Telegram alert
+with no accurate cause (`abortReason` stayed `null` in both incidents' logged metadata since the
+loop never started). No recurrence in the 8 days since, but the code path was still live and
+unguarded.
+
+**Fix (deployed):** wrapped the credential fetch in `market-data-fetcher/index.ts` with a
+`Promise.race` against the same `REQUEST_TIMEOUT_MS` (8s) already used per-series below it — the
+exact fix proposed in the 2026-07-20 `DECISIONS.md` entry. On timeout or query error, sets
+`abortReason` and `skippedSeries = [...SERIES]` and skips the series loop entirely, which routes
+through the run's existing abort-alert path (Telegram + `market_data_fetcher_aborted` critical
+`compliance_log` row) unchanged — so a future stall now fails in ~8s with an accurate
+`"credential fetch failed or timed out (...)"` reason instead of silently eating the full 50s+
+budget with a generic message. The "credentials not configured" warning path (no error, just
+null keys — expected when unauthenticated) is untouched. Scoped to `market-data-fetcher` only —
+no change to the shared `getKalshiCredentials()` used by `execute-trade`/`auto-trade`/other
+live-trading-adjacent functions, so this doesn't touch the real-money order path at all; it's a
+read-only market-data cache poller.
+
+**Verified against real data, not just statically:** `deno check` — 11 pre-existing type errors
+both before and after (confirmed via `git stash`/`stash pop` diff), one new error introduced by
+an untyped `setTimeout` return value, fixed with `ReturnType<typeof setTimeout>` before deploy.
+Deployed via `supabase functions deploy market-data-fetcher`, then invoked the live function
+directly (`POST .../functions/v1/market-data-fetcher`) — `{"success":true,"series_fetched":18,
+"series_failed":[],"series_skipped":[],"abort_reason":null,"total_markets_cached":817,
+"elapsed_ms":3293}`, and `compliance_log` shows the matching `market_data_fetch` `info` row,
+confirming the happy path (credentials configured, fetch fast) is unregressed. **Not verified
+end-to-end:** the actual timeout branch itself, since triggering a real Supabase query stall
+on demand isn't reproducible without fault injection — this mirrors how the 40th run's
+`cancel_order` fix and others noted a hard-to-trigger path as code-reviewed rather than
+live-fired. Low risk: the new code path is a straight `Promise.race` around an existing call,
+falls back to the pre-existing abort-and-alert mechanism verified working since inception, and
+touches nothing on the trading/order side.
+
+**Reversibility:** easy — single-function revert (`market-data-fetcher/index.ts` only), redeploy
+previous version.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (47th run) — Zero new compliance errors, all 14 cron jobs healthy, CI still green; closed the 46th run's own watch item — `settle-signals` was stuck re-hitting the same unresolvable 200-ticker batch forever instead of rotating through the backlog
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 46th run's
+~06:07 UTC cutoff through this run's ~07:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 14 registered jobs (including `settle-signals-cron`, now live since the 46th run)
+`active: true`, `is_stale: false`, `last_run_failed: false`. `gh run list --branch dev` confirms CI
+green through the 46th run's own push (PR #99) and this run's.
+
+**Root cause found and fixed (MED — a fix from the immediately-prior run had a second bug baked
+in, self-flagged there as an unconfirmed "watch item" rather than assumed safe):** the 46th run
+registered `settle-signals-cron` and fixed a swallowed-error bug, but left its query as
+`WHERE settlement_price IS NULL AND expires_at < now() LIMIT 200` with no `ORDER BY` and no way to
+mark a row "checked, permanently unsettleable." Read `compliance_log`'s `settle_signals_run` rows
+across all 5 ticks that had fired since the fix went live (06:13, 06:15, 06:30, 06:45, 07:00 UTC)
+and found every tick returned the exact same 200 tickers (`KXBTC-26MAY1901-*` through
+`KXHIGHNY-26MAY18-*`), all `api_error`. Cross-checked `compliance_log`'s raw `api_error` rows for
+the window: 1000/1000 were HTTP 404 specifically (not a mix of transient failures) — these are
+~2.5-month-old tickers Kalshi's archive retention has aged out of the public markets endpoint, per
+the 46th run's own finding, and they can never resolve via this endpoint. With zero live errors,
+zero CI issues, and this being the only open finding in scope, chose to close it this run rather
+than defer again. Total backlog confirmed at 20,936 unsettled signals, 20,936 distinct tickers —
+every one of the stuck batch's 200 rows was blocking the other 20,736 from ever being checked,
+since nothing in the pipeline ever changed which 200 rows the no-`ORDER BY` query would return.
+
+**Fix (deployed):** new migration (`20260728_settle_signals_unsettleable_status.sql`) adds a
+`settlement_status` text column. `settle-signals/index.ts` now stamps `settled_at` (with
+`settlement_status = 'unsettleable_404'`, `settlement_price`/`shadow_pnl` intentionally left null
+so ROI aggregates aren't polluted with fake settlements) on any ticker Kalshi returns a definitive
+404 for, and the eligibility query now gates on `settled_at IS NULL` instead of
+`settlement_price IS NULL` — so 404'd tickers stop being re-selected while everything else
+(not-yet-resolved markets, transient 5xx/timeout failures) stays untouched and eligible for retry,
+same as before. No trading/order-placement path touched — read-only against Kalshi, writes only to
+`signals.settled_at`/`settlement_status`.
+
+**Verified against real data, not statically:** applied the migration, confirmed the column exists.
+Deployed the fixed function and manually fired it via the same `net.http_post` call the cron makes
+— `compliance_log` shows the run marked 207 signals `unsettleable_404`, and the eligible batch
+measurably rotated (`KXBTC-26MAY19*` → `KXBTC-26JUL01*`; backlog 20,936 → 20,736). Then waited for
+the next *actual* scheduled tick rather than trusting the manual call alone: `07:15:13 UTC` fired
+automatically on pg_cron's own schedule, processed a third, further-rotated batch
+(`KXBTCD-26MAY1917-*`, all `unsettleable_404`), and backlog dropped again to 20,536 — confirming
+the fix holds end-to-end under the real cron trigger, not just a manual invocation. At the observed
+rate (~200/tick, 96 ticks/day) the ~20.5k backlog of archived-unsettleable May/June signals clears
+in roughly a day, after which the cron reaches genuinely-recent signals and starts producing real
+shadow-PnL data for `qualifier_roi_v2` — the actual goal of the 46th run's original fix.
+**Reversibility:** easy — additive/nullable column; `git revert` restores the prior (stuck) query,
+and the ~400+ rows already marked `unsettleable_404` this run remain correctly excluded regardless
+since they were, in fact, unsettleable.
+PR → `dev` (this run), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (46th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; found and fixed `settle-signals-cron` — never registered since inception, so shadow-PnL/qualifier-ROI measurement has run zero times in 2.5 months
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 45th run's
+~05:07 UTC cutoff through this run's ~06:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 13 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms CI green through the 45th run's own push and this run's.
+
+**Root cause found and fixed (MED — a whole feature has been silently dead since 2026-05-12,
+invisible to every prior health-check run because it was never in `cron.job` or
+`expected_cron_jobs`):** with zero live errors and CI green, swept `cron.job` against every
+function's own docstring for scheduling claims not already covered by `expected_cron_jobs`
+(the same manifest gap class the 41st/42nd runs closed for `reconcile-orders`/`paper-reconcile`).
+`settle-signals/index.ts`'s docstring says "Scheduled: every 15 minutes via pg_cron" and computes
+shadow PnL for every signal the qualifier skipped — its own comment calls this "the biggest data
+unlock in v2" for measuring qualifier ROI (`qualifier_roi_v2` view,
+`20260504_v2_validation_queries.sql`). `cron.job` had zero rows for `settle-signals-cron`, and
+`information_schema.columns` showed `signals.settlement_price` / `shadow_pnl` / `settled_at` /
+`system_version` don't exist — despite `20260504120000_v2_instrumentation_and_lock.sql` recording
+itself as **applied** in `schema_migrations` since 2026-05-04 and containing exactly those `ALTER
+TABLE` and `SELECT cron.schedule(...)` statements. This is the same swallowed-migration-failure
+bug the 45th run closed for the CI runner (`|| echo WARN` around `curl -sf`) — this migration
+predates that fix by nearly three months and was itself a casualty of it: whichever statement
+failed first, everything after it silently never applied while the runner recorded success anyway.
+Impact: `compliance_log` has zero `settle_signals_run`/`settle_signals_error` rows in its entire
+history — the function has never once executed, automatically or otherwise — and 20,936 of 21,782
+signals sit past `expires_at`, unsettled. **Compounding bug found in the function itself:**
+`settle-signals/index.ts`'s query destructured only `data` from the Postgrest response, never
+checking `error` — so once the missing `system_version` column made the query fail, the function
+silently fell into its "no unsettled signals" success branch and returned a clean `200` instead of
+surfacing the failure. Manually invoking the function pre-fix reproduced exactly this: `{"settled":
+0, "reason": "No unsettled signals past expiration"}` despite the real backlog being 20,936 rows.
+
+**Fix (deployed):** new migration (`20260728_register_settle_signals_cron.sql`) adds the five
+missing `signals` columns (`shadow_pnl`, `settlement_price`, `settled_at`, `direction_correct`,
+`profitable`, `system_version` — all additive/nullable, no data migration needed), re-registers
+`settle-signals-cron` (`*/15 * * * *`) exactly as the original migration intended, and adds it to
+`expected_cron_jobs` so a future silent drop is caught by `cron_health()` instead of requiring a
+manual audit (same closing move as `20260728_register_paper_reconcile_cron.sql`). Also fixed
+`settle-signals/index.ts` to check the Postgrest `error` and throw instead of silently treating a
+failed query as "nothing to settle." Read-only against Kalshi (`GET` market data only, uses the
+system service key) and writes only to `signals` — no trading/order-placement path touched.
+
+**Verified against real data, not statically:** applied the migration directly, confirmed all six
+columns exist and `settle-signals-cron` is live in `cron.job`. Deployed the fixed function and
+manually fired it via `net.http_post` (the same call the cron makes) — `compliance_log` now shows
+real `settle_signals_run` rows with per-ticker results, proving the query and error-handling work.
+The actual `06:15:00 UTC` pg_cron tick fired on schedule post-fix and completed normally (visible
+in `compliance_log`, not just my manual invocation) — the job is live end-to-end, not just
+registered. Confirmed directly against Kalshi's public API that **recent** markets still return
+full data (`200`, e.g. `KXHIGHAUS-26JUL27-T103` expiring today) — the fix is functionally correct
+for the live/near-term signal flow. The first processed batch (oldest-first, unordered query) hit
+100% `api_error` (`404`) on ~2.5-month-old May weather/crypto tickers — Kalshi's own archive
+retention has aged those out of the public markets endpoint, a data-availability limit outside this
+system's control, not a bug in the fix. That historical tail is now visibly logged as `api_error`
+per ticker instead of silently invisible, which is the actual goal of this fix — going forward,
+every signal settles within Kalshi's retention window since the cron runs every 15 minutes.
+**Watch item, not yet confirmed:** the settle query has no `ORDER BY`, so if Postgres returns the
+same oldest-first ~200 rows on every tick, the job could keep re-hitting the same unresolvable
+404 batch indefinitely instead of rotating toward the eligible backlog — worth confirming over the
+next few runs via `compliance_log`'s per-tick `results` breakdown rather than assuming either way.
+**Reversibility:** easy — new columns are additive/nullable, cron job can be unscheduled, function
+diff is a single `if (error) throw` addition; `git revert` restores prior (dead) state on all three.
+PR #99 → `dev` (merged, CI green), `docs/health-log.md` this entry, `DECISIONS.md` this run.
+
+## 2026-07-28 (45th run) — Zero new compliance errors, all 13 cron jobs healthy, CI still green; fixed the flagged 2026-07-27 migration-runner bug: `curl -sf` failures were caught and swallowed instead of failing the job
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 44th run's
+~04:07 UTC cutoff through this run's ~05:07 UTC invocation — zero new rows. `cron_health()`
+confirms all 13 registered jobs `active: true`, `is_stale: false`, `last_run_failed: false`.
+`gh run list --branch dev` confirms the 44th run's E2E fix is holding — CI stayed green through
+this run's own push.
+
+**Root cause found and fixed (MED — CI silently recording failed migrations as applied, closing
+the finding flagged-not-auto-fixed on 2026-07-27, `DECISIONS.md`):** with zero live errors and CI
+green, swept open `DECISIONS.md` findings for anything still unresolved. The 2026-07-27 entry
+("staging Supabase DB is largely unmigrated despite CI claiming success") was live: `.github/
+workflows/ci.yml`'s `migrate-staging`/`migrate-production` jobs ran each migration via `curl -sf
+... 2>&1) && echo "OK: $VERSION" || echo "WARN: $VERSION — $RESULT"`, then unconditionally
+inserted a `schema_migrations` row after, regardless of which branch fired. Verified directly
+against the Management API that a bad migration returns HTTP 400 (`curl -sf` already detects this
+correctly) — the bug was purely the shell catching that failure with `||` and continuing instead
+of propagating it. Also found the same-day filename collision the decision entry called out:
+`VERSION` was derived via `cut -d_ -f1` (date prefix only), so PR #81's two `20260727_*.sql` files
+both recorded under `version='20260727'` — the second file's actual apply was untracked.
+
+**Fix (deployed):** removed the `|| echo WARN` swallow in both `migrate-staging` and
+`migrate-production` — `bash -e` now propagates a `curl -sf` failure and hard-fails the job instead
+of silently marking a failed migration as applied. The history-row `INSERT` only runs if the apply
+`curl` succeeded (unreachable otherwise, since the step aborts first). Re-keyed new inserts off the
+full filename stem instead of the date prefix, fixing the same-day collision — while still checking
+the legacy date-only key against already-recorded rows, so this does **not** force a re-run of the
+~40-entry historical backlog described in the 2026-07-27 finding. That backlog repair (`DECISIONS.md`
+proposed step 4 — reset staging and replay from a clean slate) remains a separate, larger decision
+for Onofre; this run closes the root-cause bug class only, matching the same "flag the big one,
+fix what's safely scoped" pattern as the 2026-07-27 entry itself.
+
+**Verified against real data, not statically:** confirmed via the 44th run's live CI log
+(`gh run view --log`) that every migration file currently in the repo already has a legacy
+date-prefix row in `schema_migrations` on staging — so this fix's own `dev` push would exercise
+zero new code path (all skip as "Already applied"), not a blind push into unknown failure risk.
+PR #97 → `dev` (merged, CI green on the PR itself since migration jobs correctly `skip` on
+`pull_request` events). Then watched the resulting **push-triggered** run end-to-end
+(`30331080893`): `Apply migrations → staging DB` — all 61 lines `Already applied`, zero
+`Applying:`/new attempts — `Deploy edge functions → staging Supabase` and `E2E smoke tests →
+kalshitradeagent.live` both `success`. Full pipeline: `success`. **Reversibility:** easy — CI-yaml
+only, no schema/data touched; `git revert` restores the old (silently-swallowing) behavior.
+
+## 2026-07-28 (44th run) — Zero new compliance errors, all 13 cron jobs healthy; found and fixed CI's E2E smoke job red on every `dev` push since the 36th run — a test asserting a `HITLApprovalsCard` component that was never built
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 43rd run's
+~03:09:30 UTC cutoff (2026-07-28) through this run's ~04:07 UTC invocation — zero new rows. The
+only `error`-severity rows in the trailing 24h (`api_error` x2, `kalshi-proxy`/order 404s) both
+predate the cutoff and are the same `7dfb3f09-...` incident already investigated by the 39th run.
+`cron_health()` confirms all 13 registered jobs `active: true`, `is_stale: false`,
+`last_run_failed: false` — the observability-coverage work from the 41st/42nd/43rd runs is holding.
+
+**Root cause found and fixed (MED — permanently-red CI check, 8 consecutive PRs merged past it):**
+with zero live errors and cron fully healthy, swept `gh run list --branch dev` instead of
+compliance_log this run. Every CI run on `dev` since 2026-07-27 19:13 UTC (36th run) through the
+43rd run has reported `failure` — same single test each time:
+`tests/e2e/production-hardening.spec.ts:104 › HITL live mode UI › HITL approvals component is in
+the JS bundle`. Confirmed the production-deploy chain (`migrate-production` /
+`deploy-production-functions` / `canary-gate`) is unaffected — those jobs gate on
+`github.ref == 'refs/heads/main'` and `needs: test`, entirely independent of the `dev`-only E2E
+job, so this was never blocking a real deploy. But it has been silently normalizing a red CI
+status on every merged PR in this log for two days. Traced the test itself
+(`tests/e2e/production-hardening.spec.ts:104-124`): it fetches every bundled script (and, as a
+dev-mode fallback, `/src/components/trading/HITLApprovalsCard.tsx` directly) looking for
+`hitl_approvals` or `HITLApprovalsCard`. Neither exists anywhere in the repo outside the test file
+itself (`find`/`grep` both empty). Traced further: the 2026-07-11 "production hardening" PR
+(`f2fd68b`) shipped a complete `hitl_approvals` table (`user_id`, `trade_payload`, `status`,
+`requested_at`, `decided_at`, `decision_note`, `trace_id`) and this test, but never built the card
+and never wrote a producer or consumer for the table (`grep -rl hitl_approvals supabase/functions/`
+→ empty). `execute-trade/index.ts` has no approval-gate step of any kind on live orders — this is
+orphaned scaffolding from an incomplete feature, not a regression.
+
+**Fix (deployed as a test-only change):** deleted the false assertion
+(`tests/e2e/production-hardening.spec.ts:104-124`, the `"HITL approvals component is in the JS
+bundle"` test) and tightened the surrounding `describe` block name/comment (`"HITL live mode UI"` →
+`"Live mode UI"`) and file-header docstring, which both over-claimed a HITL gate exists. Did
+**not** build the actual `HITLApprovalsCard` component or wire a live-order approval gate — that's
+a real-money trade-execution behavior change with no current product ask behind it (not on this
+project's `CLAUDE.md` priority list), and this project's own rule is "don't add features beyond
+what was asked." Logged as a flagged-not-auto-fixed decision in `DECISIONS.md` (2026-07-28 entry),
+same precedent as the 2026-07-27 "staging DB unmigrated" finding — Onofre decides whether to build
+the real HITL flow or drop the dead `hitl_approvals` table.
+
+**Verified against real data:** `npm run lint` (0 errors, 12 pre-existing warnings, unchanged) and
+`npm test` (206/206 passing, all pre-existing suites) both clean before pushing. Local Playwright
+chromium install stalled on a slow browser download; since `migrate-staging`/`deploy-staging`/E2E
+only trigger on `push` to `dev` (not on `pull_request`), the PR itself (#96) could only show the
+lint/test/build job green. Merged to `dev`, then watched the resulting push-triggered run
+(`30328534295`) end-to-end: `Deploy edge functions → staging Supabase` succeeded (2m7s, all 13
+functions), then `E2E smoke tests → kalshitradeagent.live` — the exact job that had been red since
+at least the 36th run — passed in 54s. Full pipeline conclusion: `success` — the first fully green
+CI run on `dev` in the visible run history (`gh run list --branch dev`, 20+ prior runs all
+`failure`, aside from one unrelated promotion-merge run).
+**Reversibility:** easy — single test-file diff (one test block removed, two comments edited), no
+schema, edge function, or execute-trade change; `git revert` fully restores prior (still-failing)
+state.
+
+## 2026-07-28 (43rd run) — Zero new compliance errors; found and fixed `signal-generator-cron` was the last remaining cron job with no success-path heartbeat, same gap class as the last 3 runs
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 42nd run's
+~02:07 UTC cutoff through this run's ~03:07 UTC invocation (2026-07-28) — zero new rows. All 13
+registered cron jobs confirmed healthy via `cron_health()` (`active: true`, `is_stale: false`,
+`last_run_failed: false` on every row) — the reconcile-orders and paper-reconcile fixes from the
+41st/42nd runs are both running clean now.
+
+**Root cause found and fixed (LOW-MED — observability gap, same class the last 3 runs closed for
+other functions):** with zero live errors and all cron jobs reporting healthy, swept the remaining
+cron'd edge functions for the "success path never writes to `compliance_log`" gap the 41st/42nd
+runs found in `reconcile-orders` and `paper-reconcile`. Cross-checked all 13 `expected_cron_jobs`
+entries against `compliance_log` event types over the last 24h: `market-data-fetcher` and
+`surface-scanner` both log a full-coverage success event per run (`market_data_fetch` and
+`surface_scan_complete`, 288/288 matching their 5-min schedules) — not missing, just not named with
+a `_run` suffix, so they didn't show up in the naive search. `signal-generator`
+(`supabase/functions/signal-generator/index.ts`) was the real gap: it had **only** two error-path
+event types (`signal_persist_error`, `signal_generator_error`) and zero rows of any kind on
+success — confirmed via a 24h query returning 0 rows for any signal-generator event type outside
+those two. Same failure mode as the closed gaps: `cron_health()` only proves the pg_cron scheduler
+invoked the function, not that the function's internal logic did anything — a run that silently
+scores zero signals (empty market cache, all markets filtered as illiquid) or hangs mid-scoring
+would be invisible except by hand-checking `signals` table timestamps.
+
+**Fix (deployed):** added a `logRunSummary()` heartbeat to `signal-generator/index.ts`, matching
+the exact pattern from the 41st/42nd runs' `reconcile-orders`/`paper-reconcile` fixes —
+`event_type: "signal_generator_run"`, `elapsed_ms` tracked from `startedAt`, severity escalates to
+`warning` past 4 minutes. Wired into all three exit paths: the empty-cache early return, the
+no-liquid-markets early return, and the normal success return (with `total_scored`/`actionable`/
+`strong` counts). Deployed via `supabase functions deploy signal-generator`.
+
+**Verified against real production data:** `deno check` on the modified file surfaces 3 pre-existing
+errors (`volume_fp`/`volume_24h_fp` not in the `RawMarket` interface, a `.then().catch()` chain on a
+non-thenable) — confirmed identical before and after this change via `git stash`, so nothing new was
+introduced. Directly invoked the deployed function (`POST .../functions/v1/signal-generator`) —
+returned 831 scored signals, 20 actionable, 12 strong — then confirmed the new heartbeat row landed:
+`compliance_log` → `signal_generator_run`, `"signal-generator: 831 scored, 20 actionable, 12 strong
+(505ms)"` at `2026-07-28 03:09:30 UTC`. Every cron'd edge function in the system now has full
+success-path observability coverage. **Reversibility:** easy — additive logging only, no schema or
+behavior change; reverting the file and redeploying fully restores prior behavior.
+
+## 2026-07-28 (42nd run) — Zero new compliance errors; found and fixed `paper-reconcile-cron` was never registered at all — same "migration syntax error silently no-ops" failure mode as the reconcile-orders 6-day gap, one day old
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 41st run's
+~01:10 UTC cutoff through this run's ~02:07 UTC invocation (2026-07-28) — zero new rows.
+
+**Root cause found and fixed (HIGH — a whole cron job silently never ran, not just a slow pass):**
+started from the same observability gap the 41st run closed for `reconcile-orders` (no run-level
+`compliance_log` heartbeat) and swept the rest of the cron'd edge functions for the same class of
+gap. `paper-reconcile` (added 2026-07-27, `supabase/functions/paper-reconcile/index.ts`, an
+explicit mirror of `reconcile-orders`) had per-item logging but no `_run` summary row on success —
+added one. While verifying the fix by watching for the next cron tick, the heartbeat never
+appeared. `cron_health()` returned zero rows for `paper-reconcile-cron` and a direct `SELECT
+jobname FROM cron.job` confirmed it: **the job was never registered.** Its migration,
+`20260727_paper_reconcile_cron.sql`, appended `) ON CONFLICT (jobname) DO UPDATE SET schedule =
+excluded.schedule;` to a bare `SELECT cron.schedule(...)` call — a SELECT has no ON CONFLICT
+semantics, so the statement threw a syntax error and the whole migration (including its own
+`expected_cron_jobs` INSERT) silently never applied. This is the *exact* bug described in
+`20260725_expected_cron_manifest.sql`'s motive comment for the original `reconcile-orders-cron`
+6-day gap — it was copy-pasted forward into the new migration along with the bug it was written to
+prevent, one day before this run. Because the manifest INSERT was inside the same failed
+transaction, `paper-reconcile-cron` was also invisible to the staleness watchdog: a job that never
+existed can't be flagged missing by a monitor that only iterates `FROM cron.job`. Confirmed real
+impact: `SELECT count(*) FROM trades WHERE mode='paper' AND status IN ('open','partial') AND
+settled_at IS NULL` → 3 rows, oldest from 2026-07-27 20:10 UTC — 6 hours stuck with no reconciliation
+path at all, growing every cycle.
+
+**Fix (deployed):** (1) Added `paper_reconcile_run` heartbeat logging to `paper-reconcile/index.ts`
+(`startedAt`/`elapsed_ms`, `warning` severity past 4 minutes, logged on the no-op early return, the
+normal success path, and the fatal-error path) — same pattern as the 41st run's `reconcile-orders`
+fix. Deployed via `supabase functions deploy paper-reconcile`. (2) Registered the job live —
+`SELECT cron.schedule('paper-reconcile-cron', '2-59/5 * * * *', ...)` with **no** ON CONFLICT
+clause (`cron.schedule` already upserts by jobname internally; that clause was both invalid and
+redundant) — and inserted it into `expected_cron_jobs` so a future silent deregistration surfaces
+in `cron_health()` instead of requiring a manual trades-table query. (3) New migration
+`20260728_register_paper_reconcile_cron.sql` captures both DB changes with full root-cause
+context. (4) Corrected the same broken `ON CONFLICT` clause in the original
+`20260727_paper_reconcile_cron.sql` (now just `cron.schedule(...);` with an explanatory note) so a
+fresh migration replay on a clean database doesn't reintroduce the failure.
+
+**Verified against real production data:** `deno check supabase/functions/paper-reconcile/index.ts`
+— zero errors before and after. After registering the cron job, polled `compliance_log` live and
+caught the very next scheduled tick: `2026-07-28 02:17:00 UTC — "paper-reconcile: 3 checked, 0
+filled, 0 partial, 0 cancelled, 0 errors (149ms)"` — confirming both fixes work end-to-end: the job
+now runs on schedule, picked up all 3 previously-stranded paper trades on its first pass, and wrote
+the new heartbeat row. Also re-confirmed via `cron_health()` that `paper-reconcile-cron` now
+returns a row (`active: true`) where it previously returned none. **Reversibility:** easy — additive
+logging function, a cron registration (idempotent — dropping it just stops the schedule, `trades`
+rows are untouched), and a manifest row; `cron.unschedule('paper-reconcile-cron')` plus a manifest
+delete fully reverts.
+
+## 2026-07-28 (41st run) — Duplicate-positions alert traced to a 2-day-old stale-order settlement; found and fixed the real gap: `reconcile-orders` had no run-level compliance_log heartbeat, so a ~4min-late pass was invisible except by hand-reconstructing order timestamps
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 40th run's ~23:06 UTC
+cutoff through this run's ~01:10 UTC invocation (2026-07-28) — zero new rows.
+
+**Investigated (explained, no fix needed):** `health-check-hourly`'s 23:10:11 UTC pass fired a
+`duplicate_positions_detected` alert for `KXINX-26JUL27H1600-B7437` (>2 open filled rows for one
+user+ticker). Pulled every `trades` row for that ticker: 8 duplicate legs, all `strategy_id
+S-001-l-ea207ba1`, placed every 5 minutes from 2026-07-25 18:15–18:50 UTC — the exact
+"same-ticker re-stacking" failure mode the 7/26 S-001 dedup fix (see that date's entry below)
+closed by adding a cross-run `status IN (filled,open,partial)` check. These 8 legs predate that
+fix by a day, so they're historical debt, not a live recurrence. Confirmed no live bug: a query for
+any *current* (user, ticker) pair with >2 open filled rows returned zero. The alert only fired now
+because these legs were resting **live limit orders that hadn't filled on Kalshi for ~2 days**
+(status stuck `open`, invisible to the `duplicate_positions_detected` check which filters
+`status='filled'`) until `reconcile-orders-cron` finally saw them as `remaining_count=0` and
+flipped all 8 to `filled` in one pass at 23:09:50–51 UTC — which is what made them visible to both
+the duplicate-positions check (23:10:04) and `auto-settle` (which settled them at 23:10:15–16,
+right after) within the same ~30s window. Not a code bug: S-001 legs on hourly-bracket events can
+legitimately rest for the life of the event before filling or expiring.
+
+**Root cause found and fixed (LOW-MED — observability gap that turned a 10-minute root-cause into
+a much longer one): `reconcile-orders` was the one cron'd function in the system with zero
+run-level heartbeat in `compliance_log`.** Every other cron function (`auto-trade`, `auto-settle`,
+`market-data-fetcher`, `daily-digest` — the last one fixed for exactly this gap in an earlier run,
+see that entry's comment in `daily-digest/index.ts`) logs an `_run` summary row on every
+invocation. `reconcile-orders` only ever logged *per-order* rows (`order_filled`,
+`order_cancelled`, `reconcile_order_check_failed`) — there was no way to see, from `compliance_log`
+alone, that its 23:06:00 UTC scheduled dispatch didn't actually finish writing state until
+23:09:50 (a ~3m50s pass against a 5-minute cadence, close enough to risk overlapping the next
+cycle). Confirming this required cross-referencing `cron.job_run_details` dispatch times against
+scattered `order_filled` row timestamps by hand — exactly the kind of blind spot the `_run`-logging
+convention exists to prevent, and `reconcile-orders` was the one function that never got it.
+
+**Fix (deployed):** Added `startedAt`/elapsed-ms tracking and a `reconcile_orders_run`
+compliance_log summary row (`supabase/functions/reconcile-orders/index.ts`) on every code path —
+the no-op "no resting live orders" early return, the normal success path, and the existing fatal
+error path (which now also carries `elapsed_ms` in its metadata). Severity flips to `warning` if a
+pass exceeds 4 minutes, so a slow/lagging pass surfaces on its own instead of needing manual
+reconstruction. Also corrected a stale comment in the same file's header claiming auto-settle's
+pending view is "paper-only" — it covers `mode IN ('paper','live')` since the live-mode work
+landed; the wrong comment risked steering a future change toward building a redundant live-only
+settlement path.
+
+**Verified:** `deno check supabase/functions/reconcile-orders/index.ts` — 10 errors both before and
+after the change (`git stash` diff), confirming zero new type errors; the 10 are the same
+repo-wide pre-existing `SupabaseClient` generic-type / `getKalshiCredentials` `data: never`
+mismatches already documented in the 40th run's entry. Deployed via `supabase functions deploy
+reconcile-orders`. **Confirmed against real production data**, not just statically: the next
+scheduled `reconcile-orders-cron` tick (2026-07-28 01:36:04 UTC) wrote the new summary row —
+`"reconcile-orders: 2 checked, 0 filled, 0 partial, 0 cancelled, 0 errors (151ms)"` — proving the
+logging fires correctly on every path, including the common fast/nothing-to-do case. **Reversibility:**
+easy — single additive logging function plus one comment correction, no change to order-processing
+logic; git revert restores prior behavior exactly.
+
+## 2026-07-27 (40th run) — One-off 404 traced and ruled harmless; found and fixed a real bug: `cancel_order` fired an unauthenticated, unchecked Kalshi DELETE and lied to the DB about cancellation
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 39th run's
+~22:06 UTC cutoff through this run's ~23:06 UTC invocation — one new row: an `api_error` at
+23:05:44 UTC, `"Kalshi API returned non-JSON response on POST portfolio/orders/7dfb3f09-...
+(status 404)"`. Investigated: this is `kalshi-proxy`'s generic pass-through (`supabase/functions/
+kalshi-proxy/index.ts`), which forwards whatever method the caller sends. Grepped every caller —
+`src/lib/kalshiApi.ts` is the *only* consumer of `kalshi-proxy`, and its three wrappers
+(`kalshiProxyGet`/`Post`/`Delete`) never construct a POST to `portfolio/orders/{id}` — placeOrder
+POSTs to bare `portfolio/orders` (no id), cancelOrder correctly uses DELETE. `git log -p` on
+`cancelKalshiOrder` shows it was DELETE from the day it was added — never POST. Confirmed only one
+such row exists in `compliance_log` ever. The order itself (`7dfb3f09-...`, a 2-day-old resting
+S-001 leg) filled normally 5 minutes later via the ordinary GET-based `reconcile-orders` path with
+no downstream error. Edge-function request logs had already rolled past the timestamp by the time
+of investigation (high-volume Markets-page GET traffic exhausts the log buffer in seconds), so the
+exact origin (most likely a stray manual/dev-tools call against the proxy) couldn't be pinned down
+further — but it is not reproducible from any code path in the repo and caused zero harm. Not
+treating this as a system bug; no fix applied for it.
+
+**Root cause found and fixed (HIGH — live order cancellation was silently non-functional and
+could desync the DB from reality): while investigating the above, read every Kalshi-order code
+path and found `trading-agent/index.ts`'s `cancel_order` tool (used when the chat agent decides to
+cancel a live order) did, in live mode: (1) immediately mark the local `trades` row `status:
+'cancelled'` in the DB, unconditionally; (2) fire `fetch(`${KALSHI_BASE_URL}/portfolio/orders/
+${orderId}`, { method: "DELETE" })` with **no headers at all** — no HMAC signature, no API key.
+Kalshi requires signed auth on every private endpoint, so this call was guaranteed to be rejected
+(401/403) every single time, and the response was never checked (`await fetch(...)` with the
+result discarded). Net effect: **cancel_order has never actually cancelled a live order on Kalshi**
+— it only ever updated our own database, which then reports the position as closed/no-risk while
+the order keeps resting live on Kalshi's book and can fill at any time. `reconcile-orders` (the
+only other process watching order state) only polls `status IN ('open','partial')`, so once
+`cancel_order` marked a row `'cancelled'`, reconciliation would never look at that order again —
+a fill on Kalshi after a "cancel" would go completely unnoticed by the system. No evidence yet
+that this branch has actually fired in live mode (no `order_cancelled` compliance rows found with
+a `trade_id` from a live-mode order in the queried window), so no known live position is currently
+mis-tracked from this — but the very next live cancel the agent attempted would have hit it.
+
+**Fix (deployed):** Reordered `cancel_order`'s live-mode path so it signs and sends the Kalshi
+DELETE *first* (`getKalshiCredentials(supabase, userId)` + `generateAuthHeaders(... "DELETE",
+"/trade-api/v2/portfolio/orders/{id}" ...)` + `fetchWithRetry`, the same pattern `reconcile-orders`
+already uses for its authenticated GET) and only updates the local `trades` row to `'cancelled'`
+if Kalshi's response is `ok`. On a non-ok response, the DB row is left untouched and a new
+`order_cancel_failed`/`error` `compliance_log` row is written with the order id, Kalshi status, and
+raw body — so a future genuine cancel failure surfaces instead of silently lying. Paper mode is
+unchanged (DB is the only source of truth there, no Kalshi call needed).
+
+**Verified:** `deno check supabase/functions/trading-agent/index.ts` — 13 errors with the fix vs.
+12 on unmodified `dev` (confirmed via `git stash`/`deno check`/`git stash pop`); the one new error
+is the identical pre-existing `getKalshiCredentials(supabase, ...)` / `SupabaseClient` generic-type
+mismatch already present at this file's other `getKalshiCredentials` call site (line ~1215, the
+market-data service-key lookup) — a known repo-wide TS-strictness gap, not a new logic error.
+Deployed via `supabase functions deploy trading-agent`. **Not exercised end-to-end against a real
+live cancel this run** — doing so would require either a fabricated chat turn forcing the LLM to
+pick `cancel_order` (real token spend for a code path this audit can already verify statically) or
+cancelling a genuine live resting order (real trading action, out of scope for an unattended
+health-check run). The change is isolated to the `cancel_order` branch only and does not touch any
+path that fires on the current 5-minute trading cadence, so this carries no regression risk to
+today's active strategies. **Reversibility:** easy — single-function, single-branch change; git
+revert restores the prior (broken) behavior exactly.
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 38th run's
+~21:06 UTC cutoff through this run's ~22:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run).
+
+**Root cause found and fixed (MED — S-001 Surface Arb re-attempts a known-unaffordable ticker
+every cron cycle instead of backing off): breaking down the window's activity by `event_type`
+surfaced 12 `liquidity_fallback` warnings and 12 `order_skipped_insufficient_balance` warnings, both
+for the identical ticker/price/amount (`KXBTC-26JUL2817-B64875` @ 89c, then `-B64625` @ 88c after the
+hourly bracket rolled), one pair per 5-min `auto-trade-cron` cycle from 21:10 to 22:05 UTC — 11
+straight cycles, zero `order_submitted` in between. Reading `supabase/functions/auto-trade/index.ts`'s
+`runS001SurfaceArb`: its dedup query (added 2026-07-26, see the entry below this one in the log)
+only looks for `trades` rows with `status IN ('filled','open','partial')` to skip an event ticker
+already being worked. But `execute-trade`'s pre-flight balance check (`index.ts:661-694`) returns
+*before* ever placing an order when the account can't cover the leg's collateral, inserting a
+`status: "failed"` trade row and returning early — a row the dedup query can't see. Since the live
+account is genuinely balance-depleted (the same state the 34th-38th runs' `kalshi_low_balance`
+alerts have been tracking, confirmed still true this run — `health_check_run` shows it firing/
+suppressing as designed), and balance doesn't replenish on a 5-minute cadence, S-001 was re-detecting
+the same still-unresolved bracket-sum alert every cycle and re-spending a live Kalshi orderbook fetch
++ balance check on a ticker already known to fail — pure waste, not a financial-risk bug (no
+duplicate orders reached Kalshi; `accountDepleted` correctly stops the loop mid-cycle once hit,
+this was purely cross-cycle).
+
+**Fix (this run):** Added a second dedup query in `runS001SurfaceArb` — recent `status: "failed"`
+trades for this strategy with `notes LIKE 'Skipped pre-flight:%'` (the balance-check's own failure
+marker) within the last 15 minutes (3 cron cycles) — and folded their event tickers into the same
+`alreadyInMarket`-style skip check the loop already uses. 15 min is long enough to stop the thrash,
+short enough that S-001 resumes on the same ticker immediately once the account is funded. No retry/
+decision/balance logic touched — purely an additional skip condition, same pattern as the
+filled/open/partial dedup it sits next to.
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` initially showed 18 errors (17
+pre-existing + 1 new from an untyped `Set` spread); annotated `balanceSkippedTickers` as `Set<string>`
+and re-ran — 17 errors, matching the exact pre-existing baseline confirmed via `git stash`/`deno
+check`/`git stash pop` on unmodified `dev` (identical count and locations, zero new errors after the
+type fix). Deployed live via `supabase functions deploy auto-trade`. Watched the first post-deploy
+`auto-trade-cron` cycle (22:15 UTC): zero `liquidity_fallback` and zero
+`order_skipped_insufficient_balance` rows — S-001 correctly skipped the still-depleted ticker family
+(within the 15-min window) and moved on to evaluate a different bracket (`KXBTC-26JUL2719`, filtered
+out normally at `info` severity by the existing fee-hurdle check, unrelated to this fix) —
+`auto_trade_strategy_run`/`auto_trade_run` continuing at `info` severity with no regression.
+**Reversibility:** easy — single-function, additive dedup query + one skip condition; git revert;
+no schema or data changes, no existing dedup/balance/decision logic touched.
+
+## 2026-07-27 (38th run) — Clean error/critical window continues (5th run in a row); the 36th run's new `s001_leg_execution_failed` observability path fired for real and exposed a genuine live-trade-starvation bug in the rate limiter
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 37th run's
+~20:06 UTC cutoff through this run's ~21:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run). Breaking down all activity in the
+window by `event_type`/`severity` surfaced one `warning`-severity `s001_leg_execution_failed` row
+(20:10:09 UTC) — the exact path the 36th run added — reporting all 5 attempted S-001 legs failing
+with `"Rate limit exceeded. Maximum 3 trades per minute."` This isn't a new bug in that observability
+path; it's that path doing its job and surfacing something worth investigating.
+
+**Root cause found and fixed (MED-HIGH — live-trading rate limiter shares its counter with paper
+trading, letting paper activity silently starve live orders): `supabase/functions/execute-trade/index.ts`'s
+`checkRateLimit` calls `upsert_rate_limit` with a hardcoded `p_endpoint: "execute-trade"` regardless
+of trade mode, and the `rate_limits` table's unique constraint is `(user_id, endpoint, window_start)`
+— no mode column. Paper trades are allowed 15/min, live trades only 3/min, but both increment the
+*same* counter under the *same* key. Pulling the exact one-second window from `compliance_log`
+(20:10:06–20:10:09 UTC) for `user_id ea207ba1-…` showed 3 `order_submitted` (paper) rows immediately
+followed by 5 `rate_limit_exceeded` (live) rows for the same user — the 3 paper fills alone pushed
+the shared counter to 3+, so every one of the 5 live legs was rejected against the 3/min live cap
+before a single live order that minute had actually been attempted. `pg_get_functiondef` on
+`upsert_rate_limit` confirmed the RPC increments strictly on `(user_id, endpoint, window_start)` with
+no mode awareness, and `checkRateLimit` is the RPC's only caller in the codebase (grepped) — this is
+not a one-off, it's structural: any user running both paper and live strategies has their live
+execute-trade budget silently subject to depletion by unrelated paper activity, with no log line
+distinguishing "live actually got 3/3 live orders through" from "live got zero because paper used the
+budget first."
+
+**Fix (this run):** `checkRateLimit` now passes `p_endpoint: isPaper ? "execute-trade:paper" :
+"execute-trade:live"` — one string change, giving paper and live independent counters under the
+existing free-text `endpoint` column (no schema migration needed; old bare `"execute-trade"` rows
+simply age out with their per-minute `window_start`). No retry/decision logic touched — the 3/min and
+15/min caps themselves are unchanged, only which counter each mode increments.
+
+**Verified:** `deno check supabase/functions/execute-trade/index.ts` reproduces the same 20
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop`, identical count and locations before and after — zero new errors). Deployed live via
+`supabase functions deploy execute-trade`. Polled `rate_limits` post-deploy: a new
+`execute-trade:live` row appeared within one cron cycle, confirming the mode-scoped key is live and
+being written. Checked `compliance_log` from deploy through 21:12 UTC: zero `rate_limit_exceeded` and
+zero `s001_leg_execution_failed` rows, `auto_trade_strategy_run`/`auto_trade_run` continuing at
+`info` severity with no regression. One `health_check_alert` (`live_rate_limit_exceeded`) fired at
+21:10 UTC, but its fingerprint is a 2h lookback bucket and 2h cooldown — it's correctly reporting the
+*pre-fix* 20:10 UTC incident still inside that window, not a new post-deploy failure; confirmed no
+`rate_limit_exceeded` rows exist between the fix's deploy and this alert. **Reversibility:** easy —
+single-line key change, git revert; no schema or data changes, existing rate_limit caps untouched.
+
+## 2026-07-27 (37th run) — Clean error window continues (4th run in a row); S-002 Resolution Fade's 2h time-based position close had the same silent-error gap the 36th run closed for S-001's leg loop
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 36th run's
+~19:06 UTC cutoff through this run's ~20:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run).
+
+**Root cause found and fixed (MED — 4th instance of the observability gap the 34th-36th runs have
+been closing, this time in `auto-trade/index.ts`'s S-002 Resolution Fade time-exit loop):** The 2h
+time-based position close (`supabase/functions/auto-trade/index.ts:1436-1470`, sells a NO position
+within 2h of expiry) only recorded `closeResult.success` into `timeExitResults` as the bare string
+`"close_failed"` — `closeResult.error`/`closeResult.message` was read nowhere, and no dedicated
+`compliance_log` row was ever inserted for a close failure. That result string flows into the
+`auto_trade_strategy_run` row logged unconditionally at `info` severity (same sink as the S-001 gap
+the 36th run fixed), so a genuine execute-trade outage on this path — a live position stuck at
+expiry, unable to close — would have been indistinguishable from a routine unfilled limit order.
+
+**Fix (this run):** Added a `timeExitErrors: string[]` accumulator to the time-exit loop. Any close
+failure now captures `closeResult.error || closeResult.message || "unknown error"` per ticker. If at
+least one close fails, a dedicated `s002_time_exit_failed`/`warning` `compliance_log` row is inserted
+with the full error list in `metadata`, matching the standard the 34th-36th runs established
+(additive, no retry/decision logic touched).
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` reproduces the same 17
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop`, identical count before and after — zero new errors). Deployed live via `supabase
+functions deploy auto-trade`. Watched two post-deploy cron cycles (20:10, 20:15 UTC):
+`auto_trade_strategy_run` rows for Surface Arbitrage and Weather Edge are unchanged from pre-deploy
+behavior (S-001 correctly logged `s001_leg_execution_failed` on a real rate-limit hit, Weather Edge's
+routine `no_setup` message is untouched) — no regression on the paths currently exercised. **Caveat:**
+S-002 (`Resolution Fade`, `strategies.id = S-002-ea207ba1`) is itself `active: false` account-wide
+(`last_run_at` 2026-07-24, no runs since) — this is an existing account setting, not something this
+run changed — so the new `s002_time_exit_failed` path is deployed and correct but dormant until S-002
+is reactivated. Flagging this rather than claiming live verification of the new path itself, per the
+35th/36th run standard: this closes the gap for the *next* time S-002 runs and a close genuinely
+fails, it doesn't manufacture a failure to prove itself now. **Reversibility:** easy — single-file
+diff, git revert; no schema or data changes.
+
+## 2026-07-27 (36th run) — Clean error window continues (3rd run in a row); S-001 Surface Arb was silently discarding execute-trade leg errors into the same generic "no fill" message as a routine day
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 35th run's
+~18:09 UTC cutoff through this run's ~19:06 UTC invocation — zero new rows. Last `error`-severity
+row is still `d1514b15` (16:29:30 UTC, resolved by the 34th run). Also checked the last 6h of
+`health_check_alert`/`health_check_run` output: `kalshi_low_balance` is firing/suppressing as
+designed (live account genuinely low, per the 2026-07-25 balance-monitor feature) — correctly
+working monitoring, not a bug. All other activity in the window (`market_data_fetch`,
+`auto_trade_run`, `surface_scan_complete`, `auto_settle_run`, `futures_signal_run`) is `info`.
+
+**Root cause found and fixed (MED — 3rd instance of the observability gap the 34th/35th runs
+closed elsewhere, this time in `auto-trade/index.ts`'s S-001 Surface Arb leg loop):**
+`runS001SurfaceArb`'s per-leg `callExecuteTrade` result (`supabase/functions/auto-trade/index.ts:1315-1335`)
+only ever recorded `result.success` into `legResults` — `result.error`/`result.message` was read
+nowhere. When every leg in a cycle failed for a genuine reason (execute-trade 5xx, bad creds,
+malformed response — anything other than the already-tracked `insufficient_balance` case), the
+strategy's final `details` string fell into the same fixed sentence used for the routine "nothing
+qualified" day: `"Alerts found but all events failed fee hurdle, settled on Kalshi, or tickers
+already held"` — indistinguishable from normal operation in the `auto_trade_strategy_run`
+`compliance_log` row (which is logged at `info` severity unconditionally). Contrast: S-002 and
+S-005's callers already surface `result.error` on failure (via `captureMessage` + the returned
+`detail` string) — S-001 was the one caller of `callExecuteTrade` that dropped it entirely.
+
+**Fix (this run):** Added a `legErrors: string[]` accumulator scoped to the whole `alerts` loop.
+Any leg failure other than `insufficient_balance` (already tracked separately via
+`accountDepleted`, and already visible via the `kalshi_low_balance` health-check alert) now pushes
+`"${ticker}: ${error}"` onto it. If the run ends with zero legs filled AND at least one real leg
+error, (1) the returned `details` string says `"S-001 execute-trade failed on every attempted leg:
+..."` with the actual errors instead of the generic fee-hurdle sentence, and (2) a dedicated
+`s001_leg_execution_failed` `warning`-severity `compliance_log` row is inserted with the full error
+list in `metadata`, matching the standard the 34th/35th runs established (raw error surfaced,
+`warning` severity, additive — no retry/decision logic touched).
+
+**Verified:** `deno check supabase/functions/auto-trade/index.ts` reproduces the same 17
+pre-existing type errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git
+stash pop` — identical count and locations before and after, all pre-existing `_shared/tenant.ts`
+Supabase generic-type issues plus unrelated `cityWinLoss`/`lessonsByCity` implicit-`any` findings
+elsewhere in the file — zero new errors from this change). Deployed live via `supabase functions
+deploy auto-trade`. Watched the next scheduled `auto-trade-cron` run (5-min interval) post-deploy:
+`compliance_log` shows `"Surface Arbitrage": no_setup — Alerts found but all events failed fee
+hurdle..."` unchanged for the routine case (no regression — alerts existed but were filtered by
+the fee-hurdle check before ever reaching `callExecuteTrade`, so `legErrors` correctly stayed
+empty) and `auto_trade_run` completed `0 traded, 0 errors, 0 halted`. The new
+`s001_leg_execution_failed` path hasn't fired yet since no genuine leg failure occurred in the
+verification window — same standard as the 35th run's fix: this makes the *next* real failure
+visible, it doesn't manufacture one to prove itself. **Reversibility:** easy — single-file diff,
+git revert; no schema or data changes.
+
+## 2026-07-27 (35th run) — Clean error window continues; found and fixed the same silent-JSON-failure gap as the 34th run's kalshi-proxy fix, in the shared orderbook-read path
+
+**Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 34th run's
+post-deploy verification pass (17:08 UTC) through this run's ~18:09 UTC invocation — zero new
+rows. Most recent `error`-severity row is still `d1514b15` (16:29:30 UTC, the kalshi-proxy parse
+failure the 34th run fixed). All activity in the window was `info` (market-data-fetcher, futures
+signals, surface scan, compact-memory, auto-reflect) — no new failure.
+
+**Root cause found and fixed (MED — observability gap in the shared `fetchOrderbook` read path,
+same class as the 34th run's kalshi-proxy fix):** `supabase/functions/_shared/kalshi-market-data.ts`
+wraps its Kalshi orderbook fetch in a `try/catch` that discards the actual error on any exception
+(network failure, non-2xx before the body is read, or `response.json()` throwing on a malformed
+body) and returns a bare `{ ok: false, tickerGone: false, status: null }` — no raw message, no
+distinction from a normal 404. Both callers then treated a **genuine failure identically to an
+expected ticker delisting**: `execute-trade`'s `checkLiquidity` silently fell through to
+`retry_with_limit` with no log line at all when `tickerGone` was false, and `paper-reconcile`'s
+reconciliation loop incremented an `errors` counter with zero detail ("Transient read failure —
+leave unchanged, retry next cycle"). If Kalshi's orderbook endpoint had started failing or
+returning malformed bodies, there would have been no way to see it — exactly the invisible-failure
+pattern the 34th run's fix closed for `kalshi-proxy`, just one hop over in a different shared
+module neither call site of which had been touched by that fix.
+
+**Fix (this run):** `fetchOrderbook` now captures the caught exception's message onto the failure
+result as `error?: string` (additive field, existing `tickerGone`/`status` unchanged). Both call
+sites — `execute-trade/index.ts` (`checkLiquidity` and the paper-fill skip path) and
+`paper-reconcile/index.ts` (the reconcile loop's transient-failure branch) — now log a
+`orderbook_fetch_failed`/`warning` `compliance_log` row with the ticker, status, and raw error
+whenever the failure isn't a real delisting, instead of the failure being invisible (execute-trade
+liquidity check) or logged with no cause (paper-reconcile). No decision logic changed — same
+retry/fallback behavior, only visibility added.
+
+**Verified:** `deno check` on all three modified files reproduces the same 20 pre-existing type
+errors found on unmodified `dev` (confirmed via `git stash`/`deno check`/`git stash pop` — count
+identical before and after, all in `_shared/tenant.ts` Supabase generic-type resolution, zero new
+errors introduced). Deployed live via `supabase functions deploy execute-trade` and
+`supabase functions deploy paper-reconcile`. Called both live: `paper-reconcile` returned
+`{"ok":true,"checked":0,...,"errors":0,"message":"no resting paper orders"}` (clean run, no
+resting paper positions currently open to exercise the new log path against); `execute-trade`
+returned its normal validation error on an empty body (`Missing required fields...`), confirming
+the deploy is live and the non-crash path is intact. Checked `compliance_log` post-deploy through
+the next few scheduled runs (market-data-fetcher, futures-signal, surface-scanner, compact-memory,
+auto-reflect all completed at `info` severity, 18:06–18:09 UTC) — zero new errors, consistent with
+normal operation. The new log path itself hasn't fired yet since no orderbook fetch failure
+occurred in the verification window — this fix makes the *next* one visible, same standard as the
+34th run's fix. **Reversibility:** easy — three-file diff, git revert; no schema or data changes.
+
 ## 2026-07-27 (34th run) — First error in 45h: kalshi-proxy threw on a malformed Kalshi response with no visibility into the actual body; fixed to capture and degrade gracefully
 
 **Telegram error state:** Queried `compliance_log` for `error`/`critical` since the 33rd run's

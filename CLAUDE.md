@@ -160,7 +160,8 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Strategy leaderboard + chart: user ID suffix stripped from labels (2026-05-25) ✅
 
 ### In progress / partially done
-- Stripe: schema and webhook handler exist, no billing UI, no subscription enforcement in edge functions
+- Stripe: schema and webhook handler exist, no billing UI yet
+- Subscription tier enforcement: `checkEntitlement()` (`_shared/billing.ts`) is built and live on `dev` — real per-tier `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` limits (not display-only), wired into `auto-trade`, `execute-trade`, and `switch-trading-mode` (`7c5231a`, `4a4f8df`). **Not deployed to production** — production still runs the pre-enforcement version (all limits `999999`), gated on Onofre's explicit approval per the money/billing Hard Stop (95th health-check run, 2026-07-30).
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
@@ -172,7 +173,7 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 2. ~~Wire `user_id` into all edge function queries~~ — done (2026-05-25)
 3. ~~Finish encryption key management end-to-end~~ — done (2026-05-25)
 4. ~~Onboarding flow end-to-end~~ — done, fully wired (2026-05-25)
-5. Billing UI + subscription enforcement
+5. Billing UI (enforcement itself is done on `dev`, blocked on production deploy approval — see above)
 6. User feedback mechanism
 7. Community knowledge-sharing layer (the moat — highest strategic value)
 8. Public performance page (track record artifact for uncle capital unlock)

@@ -1,8 +1,41 @@
-// Strips characters that break XML tag structure and caps length.
-export function sanitizeMarketData(value: unknown): string {
-  return String(value ?? "")
-    .replace(/[<>]/g, "")
-    .slice(0, 300);
+/** Default cap. Short scalar context fields (prices, tickers) never approach it. */
+export const DEFAULT_FIELD_MAX_LEN = 300;
+
+/**
+ * Escapes characters that break XML tag structure and caps length.
+ *
+ * ESCAPE, don't strip. This function used to do `.replace(/[<>]/g, "")`, which
+ * silently destroyed the meaning of every memory rule it touched: agent_memory
+ * stores IF/THEN threshold rules and the comparison operator IS the rule. The
+ * lesson-generation prompt in auto-reflect explicitly asks the model to produce
+ * rules like "IF price>30¢ THEN REJECT" — so we were generating operators and
+ * then deleting them at injection time. Measured on live data: 5 of the 8
+ * highest-confidence memories contained < or >, and each reached the LLM
+ * mangled, e.g.
+ *   "IF true_p < 0.15 AND implied > 0.25 THEN REJECT"
+ *     -> "IF true_p  0.1 AND implied probability  50% THEN REJECT"
+ * Escaping preserves both XML safety and meaning: the payload can no longer
+ * close a <field> tag, and the model reads &lt;/&gt; as the operators they are.
+ *
+ * Order matters — & must be escaped first, or the ampersand of an entity we
+ * just emitted would itself be re-escaped into &amp;lt;.
+ */
+export function sanitizeMarketData(
+  value: unknown,
+  maxLen: number = DEFAULT_FIELD_MAX_LEN,
+): string {
+  const escaped = String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  if (escaped.length <= maxLen) return escaped;
+
+  // Truncation is a silent correctness bug when it hits a multi-record field:
+  // the S-001 memory block runs ~900 chars against the old flat 300-char cap,
+  // so 3 of 5 memories vanished with no signal anywhere. Mark the cut so it is
+  // visible in logged prompts instead of looking like the whole input.
+  return escaped.slice(0, maxLen) + `…[truncated ${escaped.length - maxLen} chars]`;
 }
 
 // Validates that the LLM's qualify response matches the expected format.

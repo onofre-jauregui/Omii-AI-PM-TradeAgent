@@ -40,16 +40,18 @@ interface StrategiesContextType {
 
 const StrategiesContext = createContext<StrategiesContextType | null>(null);
 
-function generateStrategyId(existing: Strategy[]): string {
-  // Find the next available number
-  const numbers = existing
-    .map(s => {
-      const match = s.id.match(/^S-(\d+)$/);
-      return match ? parseInt(match[1], 10) : 0;
-    })
-    .filter(n => n > 0);
-  const next = numbers.length > 0 ? Math.max(...numbers) + 1 : 1;
-  return `S-${String(next).padStart(3, "0")}`;
+function generateStrategyId(): string {
+  // Random per-user id, never a bare template id. The old sequential scheme
+  // matched /^S-(\d+)$/ against the user's own strategies — post-onboarding
+  // every id is suffixed (S-001-ab12cd34), so nothing matched, it always
+  // returned "S-001", and the insert died on a PK collision with the seeded
+  // system row. Combined with the unchecked insert error below, "New Strategy"
+  // rendered a card that silently vanished on the next load — the button has
+  // never once produced a persisted strategy. A bare random id also cannot
+  // collide with template ids, so it can never inherit a template's
+  // entitlement by name (see checkEntitlement's exact-match rule).
+  const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  return `custom-${rand}`;
 }
 
 export function StrategiesProvider({ children }: { children: ReactNode }) {
@@ -236,13 +238,19 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const addStrategy = useCallback(async (strategy: Omit<Strategy, "id">) => {
-    const id = generateStrategyId(strategies);
+    const id = generateStrategyId();
     const newStrat = { ...strategy, id };
+    // Optimistic render, but ROLLED BACK on failure — the old version never
+    // read the insert error, so a failed insert left a ghost card that
+    // vanished on the next load with no explanation.
     setStrategies(prev => [...prev, newStrat]);
 
     const { data: { session } } = await supabase.auth.getSession();
-    await supabase.from("strategies").insert({
+    const { error } = await supabase.from("strategies").insert({
       id,
+      // No template_id: a custom strategy has no template lineage until one is
+      // assigned, which means auto-trade's dispatcher skips it and entitlement
+      // fails closed for live — it exists as a draft, it cannot trade.
       name: strategy.name,
       description: strategy.description,
       instructions: strategy.instructions,
@@ -251,7 +259,13 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
       starting_balance: strategy.starting_balance || 1000,
       user_id: session?.user?.id ?? null,
     });
-  }, [strategies]);
+    if (error) {
+      setStrategies(prev => prev.filter(s => s.id !== id));
+      toast.error(`Strategy not saved: ${error.message}`);
+      return;
+    }
+    toast.success(`Strategy "${strategy.name}" saved.`);
+  }, []);
 
   const deleteStrategy = useCallback(async (id: string) => {
     setStrategies(prev => prev.filter(s => s.id !== id));

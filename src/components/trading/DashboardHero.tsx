@@ -492,7 +492,7 @@ export function DashboardHero({
         </div>
 
         {/* Equity sparkline */}
-        {stats.chartPoints.length > 2 && (
+        {!loading && stats.chartPoints.length > 2 && (
           <div className="my-3 -mx-1">
             <ResponsiveContainer width="100%" height={100}>
               <AreaChart data={stats.chartPoints} margin={{ top: 4, right: 4, left: 4, bottom: 0 }}>
@@ -528,23 +528,23 @@ export function DashboardHero({
         <div className="grid grid-cols-4 gap-2 mb-4">
           <QuickStat
             label="Win Rate"
-            value={winRate > 0 ? `${winRate}%` : "--"}
-            color={winRate > 0 ? (winRate >= 50 ? "profit" : "loss") : undefined}
-            progress={winRate > 0 ? winRate : undefined}
+            value={loading ? "--" : winRate > 0 ? `${winRate}%` : "--"}
+            color={!loading && winRate > 0 ? (winRate >= 50 ? "profit" : "loss") : undefined}
+            progress={!loading && winRate > 0 ? winRate : undefined}
           />
           <QuickStat
             label="Settled"
-            value={settledCount > 0 ? `${settledCount}` : "0"}
+            value={loading ? "--" : settledCount > 0 ? `${settledCount}` : "0"}
           />
           <QuickStat
             label="Open"
-            value={openPositions > 0 ? `${openPositions}` : "0"}
-            color={openPositions > 0 ? "primary" : undefined}
+            value={loading ? "--" : openPositions > 0 ? `${openPositions}` : "0"}
+            color={!loading && openPositions > 0 ? "primary" : undefined}
           />
           <QuickStat
             label="Today"
-            value={tradesToday > 0 ? `${tradesToday}` : "0"}
-            color={tradesToday > 0 ? "profit" : undefined}
+            value={loading ? "--" : tradesToday > 0 ? `${tradesToday}` : "0"}
+            color={!loading && tradesToday > 0 ? "profit" : undefined}
           />
         </div>
 

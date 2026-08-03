@@ -88,24 +88,27 @@ interface OpenTrade {
 
 const MAY_START = "2026-04-22T00:00:00.000Z";
 
-async function fetchAll() {
-  const { data: { user } } = await supabase.auth.getUser();
-  const userId = user?.id ?? "";
+// This is a public, unauthenticated route (the shareable track record) — there is
+// no logged-in `user` here, so `user?.id ?? ""` always resolved to an empty string
+// and every query below matched zero rows regardless of real trading history. The
+// account this page reports on is the one real account trading through this system.
+const TRACK_RECORD_USER_ID = "ea207ba1-b7a9-4a7b-96bc-922e922d627d";
 
+async function fetchAll(mode: "paper" | "live") {
   const [tradesRes, settledRes, openRes] = await Promise.all([
     supabase
       .from("trades")
       .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
-      .eq("user_id", userId)
-      .eq("mode", "paper")
+      .eq("user_id", TRACK_RECORD_USER_ID)
+      .eq("mode", mode)
       .in("status", ["filled", "settled"])
       .gte("created_at", MAY_START)
       .order("created_at", { ascending: true }),
     supabase
       .from("trades")
       .select("ticker, market_question, side, price, amount, pnl, resolution, settled_at, strategy, created_at")
-      .eq("user_id", userId)
-      .eq("mode", "paper")
+      .eq("user_id", TRACK_RECORD_USER_ID)
+      .eq("mode", mode)
       .eq("status", "settled")
       .gte("settled_at", MAY_START)
       .order("settled_at", { ascending: false })
@@ -113,8 +116,8 @@ async function fetchAll() {
     supabase
       .from("trades")
       .select("id, ticker, market_question, side, price, amount, strategy, filled_at")
-      .eq("user_id", userId)
-      .eq("mode", "paper")
+      .eq("user_id", TRACK_RECORD_USER_ID)
+      .eq("mode", mode)
       .eq("status", "filled")
       .is("settled_at", null)
       .is("exit_reason", null)
@@ -252,6 +255,7 @@ export function PerformancePage() {
   const [dailyPnl, setDailyPnl] = useState<{ date: string; pnl: number }[]>([]);
   const [categoryRows, setCategoryRows] = useState<CategoryRow[]>([]);
   const [pnlDistribution, setPnlDistribution] = useState<DistBucket[]>([]);
+  const [mode, setMode] = useState<"paper" | "live">("paper");
 
   const applyEra = useCallback((trades: any[], selectedEra: Era) => {
     const cutoff = ERA_CUTOFFS[selectedEra];
@@ -259,7 +263,7 @@ export function PerformancePage() {
   }, []);
 
   const load = useCallback(async () => {
-    const { allTrades: rawAll, recentSettled, openTrades: openPositions } = await fetchAll();
+    const { allTrades: rawAll, recentSettled, openTrades: openPositions } = await fetchAll(mode);
     setAllTradesRaw(rawAll);
     const allTrades = applyEra(rawAll, era);
 
@@ -416,7 +420,7 @@ export function PerformancePage() {
     setOpenTrades(openPositions as OpenTrade[]);
     setLastUpdated(new Date());
     setLoading(false);
-  }, [era, applyEra]);
+  }, [era, applyEra, mode]);
 
   useEffect(() => {
     load();
@@ -453,13 +457,29 @@ export function PerformancePage() {
           <span className="text-sm font-medium tracking-tight">Trade Agent</span>
         </div>
         <div className="flex items-center gap-3">
-          <Badge variant="secondary" className="text-[10px] rounded-full bg-primary/10 text-primary">
-            Paper Trading
-          </Badge>
-          <Badge variant="secondary" className="text-[10px] rounded-full flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
-            Live
-          </Badge>
+          <button onClick={() => setMode("paper")} className="cursor-pointer">
+            <Badge
+              variant="secondary"
+              className={cn(
+                "text-[10px] rounded-full transition-colors",
+                mode === "paper" ? "bg-primary/10 text-primary" : "text-muted-foreground"
+              )}
+            >
+              Paper Trading
+            </Badge>
+          </button>
+          <button onClick={() => setMode("live")} className="cursor-pointer">
+            <Badge
+              variant="secondary"
+              className={cn(
+                "text-[10px] rounded-full flex items-center gap-1 transition-colors",
+                mode === "live" ? "bg-primary/10 text-primary" : "text-muted-foreground"
+              )}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
+              Live
+            </Badge>
+          </button>
           {lastUpdated && (
             <span className="text-[10px] text-muted-foreground flex items-center gap-1">
               <RefreshCw className="h-3 w-3" />
@@ -492,7 +512,9 @@ export function PerformancePage() {
               Track Record
             </h1>
             <p className="text-sm text-muted-foreground mt-1">
-              Autonomous paper trading on Kalshi prediction markets.
+              {mode === "live"
+                ? "Autonomous live trading with real capital on Kalshi prediction markets."
+                : "Autonomous paper trading on Kalshi prediction markets."}
               {stats?.firstTradeAt && ` Running since ${formatDate(stats.firstTradeAt)}.`}
             </p>
           </div>
@@ -931,7 +953,9 @@ export function PerformancePage() {
 
             {/* Footer disclaimer */}
             <p className="text-center text-xs text-muted-foreground pb-8">
-              Paper trading only — no real money at risk. All trades are simulated against real Kalshi market outcomes.
+              {mode === "live"
+                ? "Live trading with real capital on Kalshi. Past performance is not necessarily indicative of future results."
+                : "Paper trading only — no real money at risk. All trades are simulated against real Kalshi market outcomes."}
             </p>
           </>
         )}

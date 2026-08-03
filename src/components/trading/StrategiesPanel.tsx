@@ -6,6 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter,
+  AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel,
+} from "@/components/ui/alert-dialog";
+import {
   Plus, Pencil, Trash2, BookOpen, Save, X,
   TrendingUp, TrendingDown, BarChart3, Target, DollarSign, Loader2, ArrowRight,
 } from "lucide-react";
@@ -201,6 +205,7 @@ export function StrategiesPanel({
   const { strategies, strategyStats, instanceExists, loading, updateStrategy, addStrategy, deleteStrategy } = useStrategies();
   const [detailStrategy, setDetailStrategy] = useState<Strategy | null>(null);
   const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
+  const [deletingStrategy, setDeletingStrategy] = useState<Strategy | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [newStrategy, setNewStrategy] = useState({
     name: "", description: "", instructions: "", active: false, starting_balance: 1000,
@@ -386,7 +391,7 @@ export function StrategiesPanel({
                   size="sm"
                   variant="secondary"
                   className="h-7 text-[11px] rounded-full px-3 gap-1 text-destructive"
-                  onClick={() => deleteStrategy(strat.id)}
+                  onClick={() => setDeletingStrategy(strat)}
                 >
                   <Trash2 className="h-3 w-3" /> Delete
                 </Button>
@@ -481,7 +486,10 @@ export function StrategiesPanel({
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
-                  <p className="text-xs text-muted-foreground">These instructions are injected into the AI agent's context when this strategy is active.</p>
+                  {/* Honest copy: instructions reach the CHAT agent's context only.
+                      The autonomous trading loop routes by strategy template and
+                      never reads this text — the previous copy claimed otherwise. */}
+                  <p className="text-xs text-muted-foreground">Guides the AI in the chat panel. Autonomous trading follows the strategy's template logic and risk settings — not this text.</p>
                   <Textarea
                     value={editingStrategy.instructions}
                     onChange={(e) => setEditingStrategy({ ...editingStrategy, instructions: e.target.value })}
@@ -534,7 +542,7 @@ export function StrategiesPanel({
             </div>
             <div className="space-y-1.5">
               <Label className="text-sm text-muted-foreground">Agent Instructions</Label>
-              <p className="text-xs text-muted-foreground">Tell the AI how to apply this strategy when trading.</p>
+              <p className="text-xs text-muted-foreground">Guides the AI in the chat panel. Custom strategies don't auto-trade yet — autonomous trading runs on the platform's strategy templates.</p>
               <Textarea
                 value={newStrategy.instructions}
                 onChange={(e) => setNewStrategy({ ...newStrategy, instructions: e.target.value })}
@@ -561,6 +569,31 @@ export function StrategiesPanel({
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Strategy deletion was previously immediate with no confirmation —
+          irreversible action, one misclick away. */}
+      <AlertDialog open={!!deletingStrategy} onOpenChange={(open) => { if (!open) setDeletingStrategy(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete "{deletingStrategy?.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes the strategy and its configuration. Trade history stays intact, but the agent will stop evaluating it. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deletingStrategy) deleteStrategy(deletingStrategy.id);
+                setDeletingStrategy(null);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

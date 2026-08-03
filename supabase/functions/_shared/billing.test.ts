@@ -148,6 +148,48 @@ describe("checkEntitlement", () => {
     expect(r.reason).toMatch(/S-005/);
   });
 
+  // Regression guard for the prefix-bypass: entitlement used to normalize with
+  // /^S-\d+/, so ANY strategy id prefixed with an entitled template — e.g. a
+  // user-named "S-002-drain-account" — inherited that template's live access.
+  // Matching is now exact; callers resolve instance ids to their DB row's
+  // template_id before calling.
+  it("denies a strategy that merely PREFIXES an entitled template id", () => {
+    const r = checkEntitlement({
+      subscription: activeStarter,
+      strategy: "S-002-drain-account",
+      mode: "live",
+    });
+    expect(r.allowed).toBe(false);
+  });
+
+  it("denies suffixed instance ids directly — callers must resolve template_id first", () => {
+    const r = checkEntitlement({
+      subscription: activeStarter,
+      strategy: "S-001-l-ea207ba1",
+      mode: "live",
+    });
+    expect(r.allowed).toBe(false);
+  });
+
+  it("fails closed: live mode with no resolvable template is denied", () => {
+    const r = checkEntitlement({
+      subscription: activeStarter,
+      strategy: undefined,
+      mode: "live",
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/template/i);
+  });
+
+  it("paper mode still passes without any template lineage", () => {
+    const r = checkEntitlement({
+      subscription: activeStarter,
+      strategy: undefined,
+      mode: "paper",
+    });
+    expect(r.allowed).toBe(true);
+  });
+
   it("allows S-005 on pro tier", () => {
     const proSub: SubscriptionRow = { ...activeStarter, tier: "pro" };
     const r = checkEntitlement({

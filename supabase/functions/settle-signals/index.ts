@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
@@ -17,6 +17,9 @@ import { sendTelegramAlert } from "../_shared/telegram.ts";
  *
  * Scheduled: every 15 minutes via pg_cron.
  */
+
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders
+const MARKET_FETCH_TIMEOUT_MS = 8_000; // same bound, applied to the per-ticker Kalshi market GET below
 
 function getKalshiBaseUrl(): string {
   return Deno.env.get("KALSHI_BASE_URL") || KALSHI_BASE_URL;
@@ -38,14 +41,37 @@ serve(async (req) => {
     // ── 1. Find unsettled signals whose markets have likely resolved ─────────
     // Use expires_at as a filter: only check signals past their expiration.
     // This avoids unnecessary Kalshi API calls for active markets.
-    const { data: unsettledSignals } = await supabase
+    // Gate on settled_at (not settlement_price): a permanently-unsettleable
+    // signal (Kalshi 404 — aged out of archive retention) gets settled_at
+    // stamped with settlement_price left null, so it's excluded from future
+    // batches instead of being re-selected every tick forever (see the
+    // "watch item" in the 2026-07-28 46th-run health-check entry — without
+    // this, the same oldest ~200 rows never rotate and the real backlog
+    // behind them never gets a chance to settle).
+    const { data: unsettledSignals, error: unsettledError } = await supabase
       .from("signals")
       .select("id, ticker, direction, mid_price, expires_at, system_version")
-      .is("settlement_price", null)
+      .is("settled_at", null)
       .lt("expires_at", new Date().toISOString())
       .limit(200); // batch size — next run catches the rest
 
+    if (unsettledError) {
+      throw new Error(`Failed to query unsettled signals: ${unsettledError.message}`);
+    }
+
     if (!unsettledSignals || unsettledSignals.length === 0) {
+      // Log even the no-op path: without this, an 8h+ stretch of zero
+      // compliance_log rows from this function is ambiguous between
+      // "legitimately no signals expired" and "silently broken before the
+      // try block" — health-check has to cross-reference cron.job_run_details
+      // to tell them apart (see the 2026-07-30 92nd-run health-check entry).
+      await supabase.from("compliance_log").insert({
+        event_type: "settle_signals_run",
+        severity: "info",
+        message: "Settle signals: 0 signals settled from 0 markets checked (no unsettled signals past expiration)",
+        metadata: { total_signals_checked: 0 },
+      }).then(undefined, () => {});
+
       return new Response(JSON.stringify({ settled: 0, reason: "No unsettled signals past expiration" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -63,29 +89,118 @@ serve(async (req) => {
     let settledCount = 0;
     const results: { ticker: string; status: string; settlement?: string }[] = [];
 
-    // Use system service credentials for Kalshi API
-    const { keyId: kalshiKeyId, privateKey: kalshiPrivateKey } = await getKalshiCredentials(supabase, null);
+    // Use system service credentials for Kalshi API.
+    // A stalled query here doesn't throw, so the outer try/catch below never
+    // fires — it would silently eat the entire 15-min settle-signals run,
+    // stalling shadow-PnL attribution for every unsettled signal with no
+    // alert. Same class of gap the 51st/52nd runs closed in health-check and
+    // reconcile-orders; bounded to the same 8s budget.
+    let kalshiKeyId: string | null, kalshiPrivateKey: string | null;
+    {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+          CREDENTIAL_FETCH_TIMEOUT_MS
+        );
+      });
+      try {
+        const creds = await Promise.race([getKalshiCredentials(supabase, null), timeout]);
+        kalshiKeyId = creds.keyId;
+        kalshiPrivateKey = creds.privateKey;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    // Wall-clock budget for the market-fetch loop. Without it, a 200-ticker
+    // batch of sequential fetches (8s timeout each) can run ~27 min worst-case
+    // against a 15-min cron — and the historical-reset tranches (see the
+    // unsettleable_404 recovery) push full batches through here deliberately.
+    // Same pattern as market-data-fetcher's RUN_BUDGET_MS: stop cleanly, let
+    // the next tick take the rest.
+    const RUN_BUDGET_MS = 40_000;
+    const runStartedAt = Date.now();
+    let budgetExhausted = false;
 
     for (const [ticker, signals] of tickerToSignals) {
+      if (Date.now() - runStartedAt > RUN_BUDGET_MS) {
+        budgetExhausted = true;
+        break;
+      }
       try {
-        // Fetch market details to check settlement status
+        // Fetch market details to check settlement status.
+        //
+        // marketPath (full path from host root) is what gets SIGNED — Kalshi
+        // verifies the signature against the full request path. But kalshiBase
+        // already ends in /trade-api/v2, so the fetch URL must append only the
+        // SHORT path. Concatenating marketPath onto kalshiBase produced
+        // /trade-api/v2/trade-api/v2/markets/... — a guaranteed 404 for every
+        // ticker, which this function then misread as "market aged out of
+        // archive retention" and stamped unsettleable_404 on 8,854 signals
+        // (100% of throughput since the status shipped). Same sign-long/
+        // fetch-short split as execute-trade's balance pre-flight and the
+        // health-check probe — those two got the fix; this was the last
+        // unfixed instance of the class.
         const marketPath = `/trade-api/v2/markets/${ticker}`;
         const timestamp = Date.now();
         const authHeaders = await generateAuthHeaders(kalshiKeyId, kalshiPrivateKey, "GET", marketPath, timestamp);
 
-        const marketResp = await fetch(`${kalshiBase}${marketPath}`, {
-          method: "GET",
-          headers: authHeaders,
-        });
+        // A stalled market GET here doesn't throw — it hangs this ticker's
+        // iteration until the platform's own execution timeout kills the
+        // whole 15-min run, stalling shadow-PnL settlement for every
+        // remaining ticker in the batch. Same class the 62nd-65th runs
+        // closed in kalshiFetch/fetchOrderbook/fetchKalshiOrder.
+        const marketController = new AbortController();
+        const marketTimeoutId = setTimeout(() => marketController.abort(), MARKET_FETCH_TIMEOUT_MS);
+        let marketResp: Response;
+        try {
+          marketResp = await fetch(`${kalshiBase}/markets/${ticker}`, {
+            method: "GET",
+            headers: authHeaders,
+            signal: marketController.signal,
+          });
+        } catch (fetchErr) {
+          if (fetchErr instanceof Error && fetchErr.name === "AbortError") {
+            throw new Error(`Kalshi GET market ${ticker} timed out after ${MARKET_FETCH_TIMEOUT_MS}ms`);
+          }
+          throw fetchErr;
+        } finally {
+          clearTimeout(marketTimeoutId);
+        }
 
         if (!marketResp.ok) {
+          const is404 = marketResp.status === 404;
+          // A 404 here is a definitive, already-handled outcome (see below), not an upstream
+          // failure — event_type must NOT be "api_error" or health-check's structured API-error
+          // sweep (API_ERROR_TYPES) pages Onofre with a 🔴 Telegram alert for expected, benign
+          // aged-out tickers every time a batch of them settles. Found 93rd run: an
+          // "api_error_kalshi:404" alert fired for exactly this. Non-404 failures (5xx/timeout)
+          // are genuinely transient/unexpected and keep the real "api_error" type so they still
+          // page.
           await supabase.from("compliance_log").insert({
-            event_type: "api_error",
+            event_type: is404 ? "unsettleable_404" : "api_error",
             severity: "warning",
             message: `settle-signals: Kalshi ${marketResp.status} fetching ${ticker}`,
             metadata: { provider: "kalshi", status: marketResp.status, endpoint: ticker },
           }).then(undefined, () => {});
-          results.push({ ticker, status: "api_error" });
+
+          if (is404) {
+            // Definitive "this ticker doesn't exist" — Kalshi's archive
+            // retention has aged it out, it will never return non-404.
+            // Stamp settled_at (settlement_price/shadow_pnl stay null, so
+            // ROI aggregates aren't polluted with fake settlements) so this
+            // ticker's signals stop consuming a batch slot on every future
+            // tick. Non-404 failures (5xx/timeout) are left untouched —
+            // those are plausibly transient and should be retried.
+            await supabase.from("signals").update({
+              settled_at: new Date().toISOString(),
+              settlement_status: "unsettleable_404",
+            }).eq("ticker", ticker).is("settled_at", null);
+            results.push({ ticker, status: "unsettleable_404" });
+          } else {
+            results.push({ ticker, status: "api_error" });
+          }
           continue;
         }
 
@@ -155,14 +270,21 @@ serve(async (req) => {
     await supabase.from("compliance_log").insert({
       event_type: "settle_signals_run",
       severity: "info",
-      message: `Settle signals: ${settledCount} signals settled from ${results.length} markets checked`,
-      metadata: { results, total_signals_checked: unsettledSignals.length },
+      message: `Settle signals: ${settledCount} signals settled from ${results.length} markets checked${
+        budgetExhausted ? ` (run budget hit — ${tickerToSignals.size - results.length} tickers deferred to next tick)` : ""
+      }`,
+      metadata: {
+        results,
+        total_signals_checked: unsettledSignals.length,
+        budget_exhausted: budgetExhausted,
+      },
     });
 
     return new Response(JSON.stringify({
       success: true,
       settled: settledCount,
       markets_checked: results.length,
+      budget_exhausted: budgetExhausted,
       results: results.slice(0, 20), // truncate for response size
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
 

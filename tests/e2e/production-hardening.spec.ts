@@ -1,12 +1,10 @@
 /**
  * Production hardening E2E tests.
  *
- * These tests verify the HITL gate UI, live mode banner, and core
- * security invariants without requiring real Supabase credentials.
- * All tests run against the dev server (unauthenticated paths only),
- * or against a mocked auth state where applicable.
- *
- * For full HITL flow testing (requires auth), run with TEST_AUTH_TOKEN set.
+ * These tests verify the live mode banner and core security invariants
+ * without requiring real Supabase credentials. All tests run against the
+ * dev server (unauthenticated paths only), or against a mocked auth state
+ * where applicable.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -69,13 +67,12 @@ test.describe("Auth page", () => {
   });
 });
 
-// ─── HITL UI invariants (component-level, no auth) ───────────────────────────
+// ─── Live mode UI invariants (component-level, no auth) ──────────────────────
 
-test.describe("HITL live mode UI", () => {
+test.describe("Live mode UI", () => {
   /**
-   * These tests verify that the live mode banner and HITL components
-   * exist in the bundle and have the correct markup structure.
-   * They don't require a logged-in session.
+   * Verifies the live mode banner exists in the bundle and has the
+   * correct markup structure. Doesn't require a logged-in session.
    */
 
   test("live mode banner component is in the JS bundle", async ({ page }) => {
@@ -95,28 +92,6 @@ test.describe("HITL live mode UI", () => {
       try {
         const r = await fetch("/src/components/trading/LiveModeBanner.tsx");
         if (r.ok) return (await r.text()).includes("LiveModeBanner");
-      } catch {}
-      return false;
-    });
-    expect(found).toBe(true);
-  });
-
-  test("HITL approvals component is in the JS bundle", async ({ page }) => {
-    await page.goto("/");
-    const found = await page.evaluate(async () => {
-      // Production: scan bundled scripts
-      const scripts = Array.from(document.querySelectorAll("script[src]"));
-      for (const s of scripts) {
-        try {
-          const r = await fetch((s as HTMLScriptElement).src);
-          const t = await r.text();
-          if (t.includes("hitl_approvals") || t.includes("HITLApprovalsCard")) return true;
-        } catch {}
-      }
-      // Dev (Vite): check source file directly
-      try {
-        const r = await fetch("/src/components/trading/HITLApprovalsCard.tsx");
-        if (r.ok) return (await r.text()).includes("HITLApprovalsCard");
       } catch {}
       return false;
     });

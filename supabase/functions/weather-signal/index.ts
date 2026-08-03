@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
+import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import {
   computeBucketProbabilities,
   computeEdge,
@@ -80,12 +81,6 @@ async function syncWeatherMarkets(
     const bucket = parseTempBucket(m.ticker, title);
     if (!bucket) continue; // can't determine range — skip
 
-    // Kalshi prices may come as dollars (0.65) or cents (65) depending on API version
-    const toCents = (v: any) => {
-      if (v == null) return null;
-      const n = Number(v);
-      return n > 1 ? Math.round(n) : Math.round(n * 100);
-    };
 
     const { error } = await supabase.from("weather_markets_cache").upsert(
       {
@@ -94,9 +89,11 @@ async function syncWeatherMarkets(
         forecast_date: forecastDate,
         bucket_low: bucket.low,
         bucket_high: bucket.high,
-        yes_bid: toCents(m.yes_bid_dollars ?? m.yes_bid),
-        yes_ask: toCents(m.yes_ask_dollars ?? m.yes_ask),
-        last_price: toCents(m.last_price_dollars ?? m.last_price),
+        // Canonical converter (never magnitude-guess — the old local toCents
+        // mis-parsed a literal 1c as 100c). See _shared/kalshi-prices.ts.
+        yes_bid: marketFieldCents(m, "yes_bid"),
+        yes_ask: marketFieldCents(m, "yes_ask"),
+        last_price: marketFieldCents(m, "last_price"),
         market_question: title || m.ticker,
         fetched_at: new Date().toISOString(),
       },

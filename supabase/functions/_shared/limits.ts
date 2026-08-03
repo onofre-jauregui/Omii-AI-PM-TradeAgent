@@ -12,7 +12,7 @@
  *
  * The pure clamp math lives in limits-math.ts (unit-tested without a DB); this
  * file adds the I/O that fetches those two inputs. It is separate because it
- * imports tenant.ts, whose Supabase-client esm.sh import Vitest can't resolve.
+ * imports tenant.ts, whose Supabase-client npm: import Vitest can't resolve.
  */
 
 import { getRiskSettings } from "./tenant.ts";

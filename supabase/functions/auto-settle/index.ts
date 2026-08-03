@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
@@ -27,6 +27,16 @@ import { computePnl, resolveKalshiMarketAction } from "../_shared/trading-logic.
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 
+// Same 8s bound as the CREDENTIAL_FETCH_TIMEOUT_MS/KALSHI_FETCH_TIMEOUT_MS
+// convention used across market-data-fetcher/auto-trade/settle-signals/etc —
+// a public market-status GET, not an LLM call.
+const MARKET_FETCH_TIMEOUT_MS = 8_000;
+
+// Same bound, applied to the fire-and-forget auto-reflect trigger below —
+// closes the last Tier-5 unguarded fetch in this file (health-check 76th
+// run's audit backlog).
+const AUTO_REFLECT_TRIGGER_TIMEOUT_MS = 8_000;
+
 interface KalshiMarket {
   ticker: string;
   status: string; // 'active' | 'settled' | 'closed' | ...
@@ -36,8 +46,10 @@ interface KalshiMarket {
 }
 
 async function fetchKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MARKET_FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch(`${KALSHI_BASE}/markets/${ticker}`);
+    const resp = await fetch(`${KALSHI_BASE}/markets/${ticker}`, { signal: controller.signal });
     if (!resp.ok) {
       console.warn(`Kalshi market ${ticker} fetch failed: ${resp.status}`);
       return null;
@@ -45,8 +57,16 @@ async function fetchKalshiMarket(ticker: string): Promise<KalshiMarket | null> {
     const data = await resp.json();
     return data?.market || null;
   } catch (e) {
-    console.error(`Kalshi fetch error for ${ticker}:`, e instanceof Error ? e.message : e);
+    const isTimeout = e instanceof Error && e.name === "AbortError";
+    console.error(
+      isTimeout
+        ? `Kalshi GET market ${ticker} timed out after ${MARKET_FETCH_TIMEOUT_MS}ms`
+        : `Kalshi fetch error for ${ticker}:`,
+      isTimeout ? "" : e instanceof Error ? e.message : e
+    );
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -140,6 +160,12 @@ serve(async (req) => {
             settled_at: new Date().toISOString(),
             resolution: "voided",
             pnl: 0,
+            // net_pnl was previously left unset on this path (only pnl was
+            // written), so a voided trade's fee-adjusted P&L stayed stale/null
+            // forever instead of reflecting the true zero-cost refund — any
+            // aggregate reading net_pnl (dashboard, performance page) undercounted
+            // or miscounted these trades. Refund-at-cost means no fees either.
+            net_pnl: 0,
           }).in("id", voidedTrades.map((t: any) => t.id));
           await supabase.from("compliance_log").insert({
             event_type: "trade_settled",
@@ -328,6 +354,7 @@ serve(async (req) => {
               .select("daily_pnl")
               .eq("user_id", t.user_id)
               .eq("date", today)
+              .eq("mode", t.mode)
               .maybeSingle();
 
             const dailyPnl = Number(stateRow?.daily_pnl ?? 0) + pnl;
@@ -338,11 +365,12 @@ serve(async (req) => {
                 {
                   user_id: t.user_id,
                   date: today,
+                  mode: t.mode,
                   is_trading_halted: true,
                   halt_reason: `Daily loss limit reached: $${Math.abs(dailyPnl).toFixed(2)} lost (limit: $${riskRow.max_daily_loss})`,
                   updated_at: new Date().toISOString(),
                 },
-                { onConflict: "user_id,date" }
+                { onConflict: "user_id,date,mode" }
               );
               await supabase.from("compliance_log").insert({
                 event_type: "auto_stop_loss_triggered",
@@ -440,11 +468,16 @@ serve(async (req) => {
     //    Moved outside the ticker loop to prevent concurrent duplicate runs
     //    when multiple tickers settle in the same batch.
     if (totalSettled > 0) {
+      const reflectController = new AbortController();
+      const reflectTimeoutId = setTimeout(() => reflectController.abort(), AUTO_REFLECT_TRIGGER_TIMEOUT_MS);
       fetch(`${supabaseUrl}/functions/v1/auto-reflect`, {
         method: "POST",
         headers: { Authorization: `Bearer ${supabaseKey}`, "Content-Type": "application/json" },
         body: "{}",
-      }).catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e));
+        signal: reflectController.signal,
+      })
+        .catch((e) => console.warn("auto-reflect trigger failed:", e instanceof Error ? e.message : e))
+        .finally(() => clearTimeout(reflectTimeoutId));
     }
 
     // 8. Run-level rollup compliance entry

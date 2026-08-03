@@ -1,7 +1,10 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+
+const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // matches market-data-fetcher's REQUEST_TIMEOUT_MS
+const BALANCE_FETCH_TIMEOUT_MS = 8_000; // same convention — Kalshi portfolio/balance GET
 
 /**
  * kalshi-ping: Validates a user's Kalshi API key by hitting GET /portfolio/balance.
@@ -27,7 +30,31 @@ serve(async (req) => {
   if (authErr || !user) return json({ ok: false, error: "Unauthorized" }, 401);
 
   const supabase = createClient(supabaseUrl, supabaseKey);
-  const { keyId, privateKey } = await getKalshiCredentials(supabase, user.id);
+
+  // Bare `await` here would hang the whole request forever on a stalled query —
+  // same class of unguarded-credential-fetch bug fixed in market-data-fetcher,
+  // health-check, reconcile-orders, and settle-signals. This endpoint is called
+  // synchronously from the onboarding wizard, so a hang here leaves the user's
+  // "verify Kalshi key" step spinning indefinitely with no error surfaced.
+  let keyId: string | null, privateKey: string | null;
+  try {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`credential fetch exceeded ${CREDENTIAL_FETCH_TIMEOUT_MS}ms`)),
+        CREDENTIAL_FETCH_TIMEOUT_MS
+      );
+    });
+    try {
+      ({ keyId, privateKey } = await Promise.race([getKalshiCredentials(supabase, user.id), timeout]));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("kalshi-ping: credential fetch failed or timed out:", msg);
+    return json({ ok: false, error: "Could not verify credentials right now — please try again." });
+  }
 
   if (!keyId || !privateKey) {
     return json({ ok: false, error: "No Kalshi API key found. Save your credentials in Settings first." });
@@ -38,7 +65,21 @@ serve(async (req) => {
     const timestamp = Date.now();
     const headers = await generateAuthHeaders(keyId, privateKey, "GET", path, timestamp);
 
-    const resp = await fetch(`https://api.elections.kalshi.com${path}`, { headers });
+    // Same unguarded-fetch class as the credential fetch above, just one line down —
+    // this is the Kalshi API call itself. A stalled response here left the
+    // onboarding wizard's "verify Kalshi key" step spinning forever with no timeout
+    // and no error ever surfaced to the user.
+    const balanceController = new AbortController();
+    const balanceTimeoutId = setTimeout(() => balanceController.abort(), BALANCE_FETCH_TIMEOUT_MS);
+    let resp: Response;
+    try {
+      resp = await fetch(`https://api.elections.kalshi.com${path}`, {
+        headers,
+        signal: balanceController.signal,
+      });
+    } finally {
+      clearTimeout(balanceTimeoutId);
+    }
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
       console.warn("kalshi-ping: Kalshi returned", resp.status, body.slice(0, 200));
@@ -49,6 +90,10 @@ serve(async (req) => {
     const balanceCents = data?.balance ?? 0;
     return json({ ok: true, balance_usd: balanceCents / 100 });
   } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      console.error(`kalshi-ping: balance fetch exceeded ${BALANCE_FETCH_TIMEOUT_MS}ms`);
+      return json({ ok: false, error: "Kalshi didn't respond in time — please try again." });
+    }
     const msg = e instanceof Error ? e.message : "Unknown error";
     console.error("kalshi-ping error:", msg);
     return json({ ok: false, error: msg });

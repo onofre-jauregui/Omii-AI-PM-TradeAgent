@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 import { Bot, ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -856,6 +857,7 @@ export default function ObservabilityPage() {
     "auto_reflect_run",
     "cache_stale",
     "api_error",
+    "unsettleable_404",  // settle-signals' expected/handled aged-out-ticker 404 — not a real error
     "market_data_fetch",
     "system_event",
     "futures_signal_run",
@@ -3356,13 +3358,27 @@ export default function ObservabilityPage() {
                       <button
                         disabled={clearingMemory}
                         onClick={async () => {
+                          // Previously `.catch(() => {})` swallowed every failure —
+                          // a network error, a 500, or an expired session all looked
+                          // identical to success, so the admin had no way to know
+                          // compact-memory hadn't actually run.
                           setClearingMemory(true);
-                          const { data: { session } } = await supabase.auth.getSession();
-                          await fetch(
-                            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
-                            { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
-                          ).catch(() => {});
-                          setClearingMemory(false);
+                          try {
+                            const { data: { session } } = await supabase.auth.getSession();
+                            const resp = await fetch(
+                              `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/compact-memory`,
+                              { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } }
+                            );
+                            if (!resp.ok) {
+                              const body = await resp.text().catch(() => "");
+                              throw new Error(`compact-memory returned ${resp.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+                            }
+                            toast.success("compact-memory ran successfully");
+                          } catch (e) {
+                            toast.error(`compact-memory failed: ${e instanceof Error ? e.message : "unknown error"}`);
+                          } finally {
+                            setClearingMemory(false);
+                          }
                           loadAll(viewUserId);
                           setSelectedFailureMode(null);
                         }}
