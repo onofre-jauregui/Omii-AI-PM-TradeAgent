@@ -39,9 +39,21 @@ CREATE POLICY signal_claims_owner_select ON public.signal_claims
 -- strategy that traded it, so historical consumption survives the cutover and
 -- no strategy re-trades a signal it already acted on. trades.source_signal_id
 -- is the linkage where it exists.
+--
+-- The join and the insert both cast explicitly: signals.id is UUID while
+-- trades.source_signal_id is TEXT, so an unqualified `s.id = t.source_signal_id`
+-- fails with 42883 (operator does not exist: uuid = text). Production caught
+-- this; staging did not, because the two databases have diverged on that
+-- column's type. Casting is correct on either shape.
+--
+-- The regexp guard keeps a non-UUID value in the TEXT column from aborting the
+-- whole migration on the ::uuid cast — those rows simply have no claim to
+-- backfill.
 INSERT INTO public.signal_claims (signal_id, strategy_id, user_id, claimed_at)
-SELECT t.source_signal_id, t.strategy_id, t.user_id, COALESCE(s.acted_on_at, t.created_at)
+SELECT t.source_signal_id::uuid, t.strategy_id, t.user_id, COALESCE(s.acted_on_at, t.created_at)
 FROM public.trades t
-JOIN public.signals s ON s.id = t.source_signal_id
-WHERE t.source_signal_id IS NOT NULL AND t.strategy_id IS NOT NULL
+JOIN public.signals s ON s.id::text = t.source_signal_id
+WHERE t.source_signal_id IS NOT NULL
+  AND t.strategy_id IS NOT NULL
+  AND t.source_signal_id ~ '^[0-9a-fA-F-]{36}$'
 ON CONFLICT (signal_id, strategy_id) DO NOTHING;
