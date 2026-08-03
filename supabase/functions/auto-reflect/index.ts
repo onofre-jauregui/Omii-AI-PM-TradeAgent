@@ -3,6 +3,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
 import { computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
+import { applyLessonDedupeFilters } from "../_shared/lesson-dedupe.ts";
 
 /**
  * auto-reflect v2: Automated learning loop — Bayesian memory, Sharpe-based
@@ -1030,13 +1031,26 @@ Return ONLY valid JSON, no markdown, no extra text:
               tickerBase,
             ].filter(Boolean);
 
-          const { data: existingMem } = await supabase
-            .from("agent_memory")
-            .select("id, confirmations, confidence")
-            .eq("is_active", true)
-            .eq("memory_type", "lesson")
-            .contains("tags", [tickerBase])
-            .gte("created_at", sevenDaysAgo)
+          // Dedupe must match the identity of the row we would otherwise INSERT:
+          // same owner, same strategy, same outcome, same ticker family. Matching on
+          // tickerBase alone merged across all four axes — on 2026-08-01 a $22 LIVE LOSS
+          // on KXBTC-26AUG0117-B62625 landed on memory ee7b6407 (tagged "win",
+          // confirmations 27) and bumped its confidence to 0.99 four seconds after
+          // settlement, so the agent booked a total loss as further proof of a winning
+          // rule and wrote no loss lesson at all. Scoping by outcome is what makes a loss
+          // incapable of reinforcing a win; user_id/strategy_id stop cross-tenant bleed.
+          const { data: existingMem } = await applyLessonDedupeFilters(
+            supabase
+              .from("agent_memory")
+              .select("id, confirmations, confidence"),
+            {
+              tickerBase,
+              outcome,
+              strategyId: trade.strategy_id ?? null,
+              userId: trade.user_id ?? null,
+            },
+            sevenDaysAgo,
+          )
             .limit(1)
             .maybeSingle();
 
@@ -1060,28 +1074,53 @@ Return ONLY valid JSON, no markdown, no extra text:
               last_updated_at: new Date().toISOString(),
             }).eq("id", existingMem.id);
           } else {
-            await supabase.from("agent_memory").insert({
-              memory_type: "lesson",
-              title: memoryTitle,
-              content: memoryContent,
-              source_type: "trade_outcome",
-              user_id: trade.user_id ?? null,
-              strategy_id: trade.strategy_id,
-              tags: [
-                ...memoryTags,
-                ...(trade.user_rating
-                  ? ["user_rated", `user_${trade.user_rating}`]
-                  : []),
-              ],
-              confidence: userFlaggedBad
-                ? 0.90
-                : userFlaggedGood
-                ? 0.88
-                : (outcome === "loss" ? 0.85 : 0.75),
-              confirmations: 1,
-              is_active: true,
-              summary: memoryContent.slice(0, 120),
-            });
+            // Checked write. This insert used to be fire-and-forget: a rejected row
+            // (CHECK violation, RLS, bad enum) vanished with no trace while the run
+            // still reported success, so the learning loop could silently stop
+            // recording lessons for days. The trade_lessons insert above already logs
+            // its failures — this one now does too.
+            const { error: memInsertError } = await supabase
+              .from("agent_memory").insert({
+                memory_type: "lesson",
+                title: memoryTitle,
+                content: memoryContent,
+                source_type: "trade_outcome",
+                user_id: trade.user_id ?? null,
+                strategy_id: trade.strategy_id,
+                tags: [
+                  ...memoryTags,
+                  ...(trade.user_rating
+                    ? ["user_rated", `user_${trade.user_rating}`]
+                    : []),
+                ],
+                confidence: userFlaggedBad
+                  ? 0.90
+                  : userFlaggedGood
+                  ? 0.88
+                  : (outcome === "loss" ? 0.85 : 0.75),
+                confirmations: 1,
+                is_active: true,
+                summary: memoryContent.slice(0, 120),
+              });
+            if (memInsertError) {
+              console.error(
+                `agent_memory insert failed for trade ${trade.id}: ${memInsertError.message}`,
+              );
+              await supabase.from("compliance_log").insert({
+                event_type: "agent_memory_insert_failed",
+                severity: "error",
+                message:
+                  `auto-reflect could not persist a ${outcome} lesson for ${trade.ticker}: ${memInsertError.message}`,
+                metadata: {
+                  trade_id: trade.id,
+                  ticker: trade.ticker,
+                  outcome,
+                  strategy_id: trade.strategy_id,
+                  code: memInsertError.code,
+                },
+                user_id: trade.user_id ?? null,
+              }).then(null, () => {});
+            }
           }
         }
 
