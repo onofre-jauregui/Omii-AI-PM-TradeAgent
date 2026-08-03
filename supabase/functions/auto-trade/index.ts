@@ -1296,16 +1296,10 @@ async function runS001SurfaceArb(
     ALLOWED_PREFIXES.some((pfx) => (a.event_ticker as string).startsWith(pfx))
   ).slice(0, 5);
 
-  if (alerts.length === 0) {
-    return {
-      strategy_id: strategy.id,
-      strategy_name: strategy.name,
-      mode,
-      status: "completed",
-      action: "no_setup",
-      details: "No fresh bracket-sum violations on KXINX/KXBTC (surface-scanner must run first)",
-    };
-  }
+  // No early return on an empty alert list: held positions still need their stop-loss
+  // sweep (step 2b), and the common case for a position going against us is precisely
+  // that its event has no fresh violation to re-alert on. The no_setup return moved
+  // below the sweep.
 
   // 2. Dedup: which tickers already have an active order or position under this strategy?
   //    "active" = filled, open (resting unfilled), or partial — matches the status set
@@ -1356,6 +1350,110 @@ async function runS001SurfaceArb(
     .is("exit_reason", null);
 
   const executeUrl = `${supabaseUrl}/functions/v1/execute-trade`;
+
+  // 2b. Stop-loss sweep — runs BEFORE the alert loop, over every held position,
+  // independent of whether a fresh alert exists for that event.
+  //
+  // This block used to live inside the alert loop (after step 4a), where it was
+  // provably unreachable: `filledPositions` is a strict subset of `openTrades`, so
+  // any event with a position to stop-loss had already set `alreadyInMarket` and hit
+  // the `continue` above. Two further gates compounded it — the event needed a
+  // surface_alert detected in the last 10 minutes, and it needed `tradeable.length > 0`,
+  // which an event you already hold usually fails. Net effect: no S-001 position has
+  // ever been stop-lossed. KXBTC-26AUG0117-B62625 (NO @ 84c, $22) was held from
+  // 2026-07-31 to full-loss settlement on 2026-08-01 with the guard silently inert.
+  //
+  // Hoisting it out of the loop is what makes it fire; it must not be moved back
+  // behind any alert-driven `continue`.
+  const stopLossExits: string[] = [];
+  {
+    const heldEventRoots = new Map<string, any[]>();
+    for (const pos of filledPositions || []) {
+      const t = pos.ticker as string;
+      const root = t.slice(0, t.lastIndexOf("-"));
+      if (!root) continue;
+      if (!heldEventRoots.has(root)) heldEventRoots.set(root, []);
+      heldEventRoots.get(root)!.push(pos);
+    }
+
+    for (const [eventRoot, positions] of heldEventRoots) {
+      let heldMarkets: any[] = [];
+      try {
+        const resp = await kalshiFetch(
+          `${KALSHI_API_BASE}/markets?event_ticker=${encodeURIComponent(eventRoot)}&status=open&limit=50`,
+          {},
+          kalshiCircuit,
+        );
+        if (!resp.ok) continue; // settled or unreachable — auto-settle owns the outcome
+        heldMarkets = (await resp.json())?.markets || [];
+      } catch {
+        continue; // circuit open or network error — retry next cycle, never block entries
+      }
+
+      for (const openPos of positions) {
+        const liveMarket = heldMarkets.find((m: any) => m.ticker === openPos.ticker);
+        if (!liveMarket) continue;
+        const currentNoBidCents = marketFieldCents(liveMarket, "no_bid") ?? 0;
+        const entryPriceCents: number = openPos.price ?? 0;
+        if (entryPriceCents <= 0 || currentNoBidCents <= 0) continue;
+        const lossPct = (entryPriceCents - currentNoBidCents) / entryPriceCents;
+        if (lossPct < 0.5) continue;
+
+        const closePrice = Math.max(1, currentNoBidCents + 1); // 1c above bid, floor at 1c
+        const closeResult = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
+          ticker: openPos.ticker,
+          marketId: openPos.ticker,
+          marketQuestion: openPos.market_question || openPos.ticker,
+          side: "no",
+          action: "sell",
+          price: closePrice,
+          amount: openPos.amount || AMOUNT_PER_LEG,
+          strategy: strategy.name,
+          strategyId: strategy.id,
+          orderType: "limit",
+          time_in_force: "day",
+          mode,
+          exit_reason: "stop_loss_50pct",
+          notes: `S-001 stop-loss: NO position down ${Math.round(lossPct * 100)}% (entry ${entryPriceCents}c, bid now ${currentNoBidCents}c) — closing to prevent full-settlement loss`,
+          user_id: strategy.user_id || null,
+          traceId: runId,
+          systemVersion: "v2",
+        });
+        // Only stamp exit_reason when the close actually went in. Stamping on a failed
+        // submission would make this position invisible to the next sweep (the
+        // filledPositions query filters exit_reason IS NULL) and strand it unprotected.
+        if (closeResult.success || mode === "paper") {
+          stopLossExits.push(openPos.ticker);
+          await supabase
+            .from("trades")
+            .update({ exit_reason: "stop_loss_50pct" })
+            .eq("id", openPos.id)
+            .then(null, () => {});
+        }
+        await supabase.from("compliance_log").insert({
+          event_type: "s001_stop_loss_triggered",
+          severity: "warning",
+          message: `S-001 stop-loss: ${openPos.ticker} sell @ ${closePrice}c (entry ${entryPriceCents}c, loss ${Math.round(lossPct * 100)}%, fill: ${closeResult.success})`,
+          metadata: { ticker: openPos.ticker, entry_cents: entryPriceCents, bid_cents: currentNoBidCents, loss_pct: Math.round(lossPct * 100), run_id: runId },
+          user_id: strategy.user_id || null,
+        }).then(null, () => {});
+      }
+    }
+  }
+
+  if (alerts.length === 0) {
+    return {
+      strategy_id: strategy.id,
+      strategy_name: strategy.name,
+      mode,
+      status: "completed",
+      action: stopLossExits.length > 0 ? "stop_loss_only" : "no_setup",
+      details: stopLossExits.length > 0
+        ? `No fresh bracket-sum violations; stop-lossed ${stopLossExits.length} held position(s): ${stopLossExits.join(", ")}`
+        : "No fresh bracket-sum violations on KXINX/KXBTC (surface-scanner must run first)",
+    };
+  }
+
   const allFilled: string[] = [];
   const legErrors: string[] = [];
   const seenEvents = new Set<string>();
@@ -1517,60 +1615,9 @@ async function runS001SurfaceArb(
 
     if (tradeable.length === 0) continue;
 
-    // 4b. Stop-loss check: scan open S-001 positions in this event and close any down >=50%.
-    // A NO position falling 50% from entry (e.g. bought at 40c, now bid 20c) signals the
-    // violation was a data artifact — exit before full-settlement loss locks in.
-    // Reuses the eventMarkets payload already fetched; no extra Kalshi API call needed.
-    {
-      const openS001InEvent = (filledPositions || []).filter(
-        (t: any) => (t.ticker as string).startsWith(eventTicker)
-      );
-      for (const openPos of openS001InEvent) {
-        const liveMarket = eventMarkets.find((m: any) => m.ticker === openPos.ticker);
-        if (!liveMarket) continue;
-        const currentNoBidCents = marketFieldCents(liveMarket, "no_bid") ?? 0;
-        const entryPriceCents: number = openPos.price ?? 0;
-        if (entryPriceCents > 0 && currentNoBidCents > 0) {
-          const lossPct = (entryPriceCents - currentNoBidCents) / entryPriceCents;
-          if (lossPct >= 0.5) {
-            const closePrice = Math.max(1, currentNoBidCents + 1); // 1c above bid, floor at 1c
-            const closeResult = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
-              ticker: openPos.ticker,
-              marketId: openPos.ticker,
-              marketQuestion: openPos.market_question || openPos.ticker,
-              side: "no",
-              action: "sell",
-              price: closePrice,
-              amount: openPos.amount || AMOUNT_PER_LEG,
-              strategy: strategy.name,
-              strategyId: strategy.id,
-              orderType: "limit",
-              time_in_force: "day",
-              mode,
-              exit_reason: "stop_loss_50pct",
-              notes: `S-001 stop-loss: NO position down ${Math.round(lossPct * 100)}% (entry ${entryPriceCents}c, bid now ${currentNoBidCents}c) — closing to prevent full-settlement loss`,
-              user_id: strategy.user_id || null,
-              traceId: runId,
-              systemVersion: "v2",
-            });
-            if (closeResult.success || mode === "paper") {
-              await supabase
-                .from("trades")
-                .update({ exit_reason: "stop_loss_50pct" })
-                .eq("id", openPos.id)
-                .then(null, () => {});
-            }
-            await supabase.from("compliance_log").insert({
-              event_type: "s001_stop_loss_triggered",
-              severity: "warning",
-              message: `S-001 stop-loss: ${openPos.ticker} sell @ ${closePrice}c (entry ${entryPriceCents}c, loss ${Math.round(lossPct * 100)}%, fill: ${closeResult.success})`,
-              metadata: { ticker: openPos.ticker, entry_cents: entryPriceCents, bid_cents: currentNoBidCents, loss_pct: Math.round(lossPct * 100), run_id: runId },
-              user_id: strategy.user_id || null,
-            }).then(null, () => {});
-          }
-        }
-      }
-    }
+    // Stop-loss for held positions runs in the sweep at step 2b, before this loop —
+    // it must not be re-added here, where the `alreadyInMarket` continue above makes
+    // it unreachable for exactly the positions it exists to protect.
 
     // 5. Execute NO buys on the top overpriced markets.
     //    The arb is structural: bracket must sum to 100c, market says it sums to >100c —
