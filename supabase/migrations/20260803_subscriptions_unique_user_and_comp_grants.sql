@@ -16,9 +16,25 @@
 --    only — held positions are never force-closed, so theirs settle normally.
 --
 -- Both statements are additive and idempotent; no drops, no data loss.
+--
+-- The constraint is added inside a guard because Postgres has no
+-- ADD CONSTRAINT IF NOT EXISTS: a bare ALTER fails with 42P07 on replay, which
+-- is exactly how this migration broke the first production run (the constraint
+-- had already been applied out-of-band). Every migration in this repo has to
+-- survive being re-applied — the pipeline records a version only after a
+-- successful apply, so any partial run replays the whole file.
 
-ALTER TABLE subscriptions
-  ADD CONSTRAINT subscriptions_user_id_key UNIQUE (user_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'subscriptions_user_id_key'
+      AND conrelid = 'public.subscriptions'::regclass
+  ) THEN
+    ALTER TABLE subscriptions
+      ADD CONSTRAINT subscriptions_user_id_key UNIQUE (user_id);
+  END IF;
+END $$;
 
 INSERT INTO subscriptions (user_id, tier, status) VALUES
   ('062d7d20-a1a8-4103-8e63-21139d061e85', 'starter', 'active'),
