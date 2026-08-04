@@ -187,7 +187,17 @@ export function DashboardHero({
   const load = useCallback(async () => {
     const myId = ++loadIdRef.current; // increment; stale loads will see myId !== loadIdRef.current
     try {
-      await loadInner(myId);
+      // Hard ceiling on the whole load. supabase-js attaches no timeout to its
+      // fetches, so a single stalled PostgREST socket inside Promise.allSettled
+      // never settles — allSettled cannot reject, so there is no throw to catch
+      // and the spinner stays up forever. A timeout converts "hangs silently"
+      // into "fails visibly", which the catch below can actually act on.
+      await Promise.race([
+        loadInner(myId),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("dashboard load timed out after 20s")), 20_000)
+        ),
+      ]);
     } catch (err) {
       // Never leave the hero pinned on a spinner. `loading:false` used to be
       // written in exactly one place — the final setStats, behind every await —
@@ -198,7 +208,18 @@ export function DashboardHero({
       // short-circuits the wallet ping.
       console.error("DashboardHero load failed:", err);
       if (myId !== loadIdRef.current) return;
-      setStats((prev) => ({ ...prev, loading: false, loadError: true }));
+      // statsMode MUST be stamped here. The rendered flag is
+      //   loading = stats.loading || stats.statsMode !== mode
+      // so clearing `stats.loading` alone still leaves the spinner up whenever
+      // statsMode is stale — which it always is on a mode switch, since only a
+      // successful commit ever writes it. Paper hung for exactly this reason:
+      // the last load in a burst failed, and the card had no way back.
+      setStats((prev) => ({
+        ...prev,
+        loading: false,
+        loadError: true,
+        statsMode: modeRef.current,
+      }));
     }
   }, [mode, userIdProp]);
 
@@ -533,6 +554,17 @@ export function DashboardHero({
 
         {/* Today velocity line */}
         <div className="flex items-center gap-3 mb-4 min-h-[20px]">
+          {/* A refresh that failed must say so and offer a way back. Silently
+              showing the previous load's numbers is how a stale figure gets
+              mistaken for a current one. */}
+          {stats.loadError && (
+            <button
+              onClick={() => load()}
+              className="inline-flex items-center gap-1 text-xs font-medium text-warning bg-warning/10 px-2 py-0.5 rounded-full"
+            >
+              Couldn't refresh — retry
+            </button>
+          )}
           {!loading && todayPnl !== 0 && (
             <span className={cn(
               "inline-flex items-center gap-1 text-xs font-medium tabular-nums px-2 py-0.5 rounded-full",
