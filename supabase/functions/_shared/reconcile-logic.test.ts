@@ -94,4 +94,35 @@ describe("decidePaperReconcile", () => {
     const second = decidePaperReconcile(false, 4, 10);
     expect(first).toBe(second);
   });
+
+  // Regression: 39 paper orders ($855) sat "open" for up to 8 days because a
+  // resolved market keeps answering its orderbook endpoint with HTTP 200 and an
+  // empty book. tickerGone stays false, nothing fills, and the old signature had
+  // no way to express "this can never fill" — so the cron re-checked all 39 every
+  // 5 minutes forever and their outcomes never entered the track record.
+  it("cancels an unfilled order once its market is finalized or settled", () => {
+    expect(decidePaperReconcile(false, 0, 10, "finalized")).toBe("cancel");
+    expect(decidePaperReconcile(false, 0, 10, "settled")).toBe("cancel");
+    expect(decidePaperReconcile(false, 0, 10, "FINALIZED")).toBe("cancel");
+  });
+
+  it("still fills ahead of cancelling when the book covers the order", () => {
+    // Order of evaluation matters: a real fill must win over the terminal-market
+    // branch, or a settle landing mid-run would discard a legitimate fill.
+    expect(decidePaperReconcile(false, 10, 10, "finalized")).toBe("fill");
+    expect(decidePaperReconcile(false, 4, 10, "settled")).toBe("partial");
+  });
+
+  it("leaves the order resting while its market can still trade", () => {
+    expect(decidePaperReconcile(false, 0, 10, "active")).toBe("none");
+    // 'closed' is deliberately NOT terminal — the market has stopped trading but
+    // has not resolved, and Kalshi settles shortly after close.
+    expect(decidePaperReconcile(false, 0, 10, "closed")).toBe("none");
+  });
+
+  it("treats an unknown market status as no reason to act", () => {
+    // A flaky or failed status lookup must never terminate an order.
+    expect(decidePaperReconcile(false, 0, 10, undefined)).toBe("none");
+    expect(decidePaperReconcile(false, 0, 10, "")).toBe("none");
+  });
 });

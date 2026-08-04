@@ -668,6 +668,43 @@ serve(async (req) => {
       });
     }
 
+    // ── 14. Resting orders that stopped advancing ─────────────────────
+    // paper-reconcile ran every 5 minutes for 8 days reporting "39 checked,
+    // 0 filled, 0 cancelled, 0 errors" while 39 paper orders ($855) sat frozen
+    // on markets Kalshi had already finalized. Every per-run number was healthy;
+    // only the AGE of the backlog gave it away. Same shape as the settle-signals
+    // stuck-batch (fixed 2026-07-28) — a loop that reports activity while making
+    // no progress. The terminal-market branch in decidePaperReconcile fixes the
+    // known cause; this catches whatever causes it next.
+    const restingCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: staleResting } = await supabase
+      .from("trades")
+      .select("id, mode, ticker, created_at")
+      .in("status", ["open", "partial"])
+      .is("settled_at", null)
+      .lt("created_at", restingCutoff);
+
+    if (staleResting && staleResting.length > 0) {
+      const oldest = staleResting.reduce((a: any, b: any) =>
+        new Date(a.created_at) < new Date(b.created_at) ? a : b
+      );
+      const ageHours = Math.floor(
+        (Date.now() - new Date(oldest.created_at).getTime()) / 3_600_000
+      );
+      pendingAlerts.push({
+        type: "resting_orders_not_advancing",
+        fingerprint: `resting_stale_${staleResting.length}`,
+        cooldownHours: 12,
+        message: `⏳ [TradeAgent] ${staleResting.length} order(s) resting >24h — oldest ${oldest.ticker} at ${ageHours}h. Reconcile is running but not advancing them; their outcomes never reach the track record.`,
+      });
+      await supabase.from("compliance_log").insert({
+        event_type: "resting_orders_not_advancing",
+        severity: "warning",
+        message: `${staleResting.length} order(s) have rested >24h without advancing; oldest ${oldest.ticker} (${ageHours}h)`,
+        metadata: { count: staleResting.length, oldest_ticker: oldest.ticker, oldest_age_hours: ageHours },
+      });
+    }
+
     // ── Deduplicate and send ──────────────────────────────────────────
     // For each pending alert, check compliance_log to see if the same fingerprint
     // was already sent within the cooldown window. Only send new or escalating alerts.

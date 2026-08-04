@@ -76,16 +76,37 @@ export function pickAvgPrice(order: any, side?: string | null): number | null {
  * Decide how a resting PAPER order should advance, given a fresh re-simulation
  * against the real orderbook (paper-reconcile). Mirrors decideReconcile's
  * forward-only/idempotent contract: a paper order only ever moves
- * open -> partial -> filled, or -> cancelled if the ticker is gone — never
- * backward, so repeated cron runs are no-ops once nothing has changed.
+ * open -> partial -> filled, or -> cancelled if the ticker is gone or its
+ * market has stopped trading — never backward, so repeated cron runs are no-ops
+ * once nothing has changed.
+ *
+ * The `marketStatus` branch is the paper twin of decideReconcile's
+ * market-finalized branch, and it exists for a defect this function shipped
+ * without: a resolved market keeps serving HTTP 200 on
+ * `/markets/{ticker}/orderbook` with an empty book. `tickerGone` is therefore
+ * never true, the re-simulation fills nothing, and the order returns "none"
+ * forever. Production carried 39 paper orders ($855) frozen this way for up to
+ * 8 days — every one on a market Kalshi had already marked `finalized` with a
+ * known result — while paper-reconcile-cron dutifully re-checked all 39 every
+ * five minutes and reported "0 filled, 0 cancelled, 0 errors". Those positions
+ * never reached settlement, so their outcomes never entered the track record.
+ *
+ * TERMINAL_MARKET is shared with the live path deliberately, so paper and live
+ * agree on what "this can never fill" means. `closed` is intentionally NOT
+ * terminal here: a closed market has stopped trading but not yet resolved, and
+ * Kalshi settles shortly after close — treating it as terminal would cancel
+ * orders the exchange may still settle, and would silently change live
+ * reconciliation behavior too.
  */
 export function decidePaperReconcile(
   tickerGone: boolean,
   filledContracts: number,
-  requestedContracts: number
+  requestedContracts: number,
+  marketStatus?: string
 ): ReconcileAction {
   if (tickerGone) return "cancel";
   if (filledContracts >= requestedContracts && requestedContracts > 0) return "fill";
   if (filledContracts > 0) return "partial";
+  if (TERMINAL_MARKET.has((marketStatus ?? "").toLowerCase())) return "cancel";
   return "none";
 }
