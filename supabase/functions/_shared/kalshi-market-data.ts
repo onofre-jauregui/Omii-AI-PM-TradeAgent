@@ -122,3 +122,40 @@ export async function fetchOrderbook(
     clearTimeout(timer);
   }
 }
+
+/**
+ * Current Kalshi lifecycle status for a market ("active", "closed", "settled",
+ * "finalized", ...), or undefined if it can't be determined.
+ *
+ * Needed because a resolved market keeps serving HTTP 200 on its orderbook
+ * endpoint with an empty book — so "can this order fill?" and "can this order
+ * ever fill?" are different questions, and only the market object answers the
+ * second. Callers treat undefined as "unknown, change nothing": a transient
+ * failure must never look like a reason to terminate an order.
+ *
+ * Public endpoint, no signing required.
+ *
+ * `reconcile-orders` keeps its own near-identical variant on purpose: that one
+ * routes through its `fetchWithRetry` wrapper because it guards the live-money
+ * path. Collapsing the two would silently drop those retries.
+ */
+export async function fetchMarketStatus(
+  kalshiBase: string,
+  ticker: string
+): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ORDERBOOK_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${kalshiBase}/markets/${ticker}`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const body = await response.json();
+    const status = body?.market?.status;
+    return typeof status === "string" ? status : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
