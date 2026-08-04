@@ -28,17 +28,41 @@ cp .env.example .env.local  # add your Supabase URL + anon key
 npm run dev
 ```
 
+## Repository Layout
+
+Every top-level surface, and what changes where:
+
+| Path | What lives there |
+|------|------------------|
+| `src/` | React frontend — `pages/` (routes), `components/` (UI, incl. `components/trading/`), `lib/` (Kalshi/Supabase clients, query helpers, strategy context), `hooks/`, `integrations/supabase/` (generated types) |
+| `supabase/functions/` | 33 Deno edge functions — the entire backend. Trading loop (`auto-trade`, `execute-trade`, `execute-basket`), signals (`signal-generator`, `surface-scanner`, `weather-signal`), settlement (`auto-settle`, `settle-signals`, `reconcile-orders`), learning (`auto-reflect`, `compact-memory`), ops (`health-check`, `kalshi-proxy`). Shared code in `_shared/`, unit tests in `tests/` |
+| `supabase/migrations/` | 69 SQL migrations, applied by CI (never `supabase db push` — see `CLAUDE.md`) |
+| `tests/e2e/` | Playwright end-to-end specs run against the deployed staging site |
+| `docs/` | All project documentation — start at [`docs/INDEX.md`](docs/INDEX.md) |
+| `public/` | Static assets and PWA icons |
+
 ## Documentation
 
-Full documentation is maintained in the project's Obsidian vault under `OMII AI Agency/Projects/TradeAgent/`:
+[`docs/INDEX.md`](docs/INDEX.md) is the currency dashboard — doc, version, last updated, status. Check it before trusting any doc is current.
 
-- **Product Overview** -- features, value proposition, how it works
-- **Technical Architecture** -- system design, data flow, edge functions
-- **Database Schema** -- all tables, relationships, RLS policies
-- **Agent Memory System** -- learning loop, confidence scoring, auto-reflect
-- **Risk Management** -- server-side controls, compliance logging
-- **Setup & Deployment** -- step-by-step installation and configuration
-- **API Reference** -- edge function endpoints, parameters, responses
+Frequently needed:
+
+- [`DESIGN-REPORT.md`](DESIGN-REPORT.md) — behavioral spec and feature inventory
+- [`docs/system-report.md`](docs/system-report.md) — architecture, data flow, edge functions
+- [`DECISIONS.md`](DECISIONS.md) — append-only log of architectural decisions and why
+- [`docs/REALMONEY-RUNBOOK.md`](docs/REALMONEY-RUNBOOK.md) — live-trading procedures
+- [`docs/runbooks/`](docs/runbooks/) — operational recovery procedures
+- [`docs/observability.md`](docs/observability.md) — tracing, compliance logging, alerting
+- [`CLAUDE.md`](CLAUDE.md) — deploy commands, credentials, branch strategy
+
+## Testing
+
+```bash
+npm test              # unit tests (Vitest)
+npm run test:e2e      # Playwright E2E
+npm run test:integration  # hits deployed functions as the E2E account, paper mode only
+npm run lint
+```
 
 ## License
 

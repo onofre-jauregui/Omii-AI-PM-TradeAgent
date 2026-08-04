@@ -5,15 +5,17 @@ Currency dashboard for the project's managed docs. Check here before trusting a 
 | Doc | Version | Updated | Status | Owner |
 |-----|---------|---------|--------|-------|
 | [DESIGN-REPORT.md](../DESIGN-REPORT.md) | 1 | 2026-07-30 | draft | Onofre |
-| [README.md](../README.md) | — | — | current | Onofre |
-| [CLAUDE.md](../CLAUDE.md) | — | 2026-07-30 | current | Onofre |
-| [DECISIONS.md](../DECISIONS.md) | — | 2026-07-30 | current (append-only log) | Onofre |
+| [README.md](../README.md) | — | 2026-08-04 | current | Onofre |
+| [CLAUDE.md](../CLAUDE.md) | — | 2026-08-04 | current | Onofre |
+| [DECISIONS.md](../DECISIONS.md) | — | 2026-08-04 | current (append-only log) | Onofre |
 | [GOALS.md](../GOALS.md) | — | 2026-04-27 | current | Onofre |
 | [PRODUCT.md](../PRODUCT.md) | — | — | current | Onofre |
 | [ROADMAP.md](../ROADMAP.md) | — | — | current | Onofre |
 | [TASKS.md](../TASKS.md) | — | — | current | Onofre |
 | [docs/system-report.md](system-report.md) | 2.0 | May 2026 | current | Onofre |
 | [docs/REALMONEY-RUNBOOK.md](REALMONEY-RUNBOOK.md) | — | — | current | Onofre |
+| [docs/runbooks/promotion-rollback.md](runbooks/promotion-rollback.md) | — | 2026-08-04 | current (§2a not yet exercised live) | Onofre |
+| [docs/runbooks/signal-recovery.md](runbooks/signal-recovery.md) | — | 2026-08-01 | current (not yet executed) | Onofre |
 | [docs/observability.md](observability.md) | — | — | current | Onofre |
 | [docs/backtesting.md](backtesting.md) | — | — | current | Onofre |
 | [docs/health-log.md](health-log.md) | — | ongoing | current (append-only log) | health-check agent |
