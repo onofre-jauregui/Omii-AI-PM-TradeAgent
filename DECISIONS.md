@@ -4,6 +4,23 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than trusting the writer
+
+**Decision:** Added health-check **check 13**, comparing every `(user, mode)` `risk_state` row against the true open-position count and paging on divergence >1, plus defensive `settled_at`/`exit_reason` filters on `updateRiskState`'s count.
+**Correction (same day):** PR #182 was opened claiming the counter was inflated ~2.6–6× (21/19/11 vs 8/3/6). **That was wrong** — the comparison used `status='filled'` only while the writer counts `filled + open + partial`, so resting orders were missed on one side. Settled trades already leave the count via their status transition, and no paper buy has ever carried `settled_at`/`exit_reason` while still filled/open/partial. The counter was accurate; the filters are defensive, not corrective.
+**Options:** A) Fix the writer only — rejected once the premise collapsed: there was nothing to fix. B) Integration test — rejected: the integration tier is not wired into CI (`ci.yml` runs `npm test` and `test:e2e:staging` only), so the guard would never fire. C) Production health-check assertion — chosen, and it is the part that retains value.
+**Why:** Nothing reconciles the written counter against reality, and `evaluateRisk` gates `max_open_positions` on it — a silent over-count blocks trading on a healthy account. A cron-run assertion in the real environment beats a test nobody runs. It would also have caught my own misdiagnosis in minutes.
+**Reversibility:** easy — both changes are additive; revert the two functions.
+**Trace:** PRs #182, #184.
+
+## 2026-08-03 — Promote 88 commits `dev → main` in one pass, with a replay-safe migration runner
+
+**Decision:** Promoted the full P0+P1 train (settle-signals 404 fix, dead position caps, entitlement prefix-bypass closure, signal-claims multi-tenancy, lock hardening, `risk_state.mode`, canonical Kalshi price converter, per-tier strategy caps) to production as a single promotion. PR #176's pipeline failed on the migration replay; #178 made the runner replay-safe; #179 landed green.
+**Options:** A) Split into several smaller promotions — rejected: the changes are interdependent (claims + lock + mode-scoped risk are one data-plane change) and partial deployment leaves worse states than either end. B) One promotion with a fixed replay runner — chosen. C) Wait for a maintenance window — rejected: the window was already optimal, see below.
+**Why:** Production was paper-only at the time — the sole live strategy (`S-001-l-ea207ba1`) had been inactive since 2026-08-02 — so every money-path change landed with no capital exposed, while closing an entitlement bypass that was live in production (any strategy named `S-002-*` inherited S-002's live entitlement).
+**Reversibility:** hard — migrations are not rolled back by the canary. See [`docs/runbooks/promotion-rollback.md`](docs/runbooks/promotion-rollback.md) for the compensating SQL, in particular the `risk_state` unique-constraint swap that breaks pre-promotion code.
+**Trace:** PRs #176, #178, #179.
+
 ## 2026-07-31 — Staging DB rebuilt by statement-level replay + production parity diff
 
 **Decision:** Rebuilt the staging database from scratch: reset the false migration ledger, replayed all 66 migration files statement-by-statement (dollar-quote-aware splitter, per-statement duplicate skip), self-healed objects that exist only in production (cloned `backtest_runs`, `profiles`, `trade_lessons`, `baskets`, `waitlist`, both weather-calibration tables, 4 `agent_*` views, and 65+ dashboard-era columns from prod catalogs). Acceptance = column-level parity diff vs production: **0 of 470 prod columns missing**. Ledger restored (66 versions) so CI's pending-loop resumes cleanly.

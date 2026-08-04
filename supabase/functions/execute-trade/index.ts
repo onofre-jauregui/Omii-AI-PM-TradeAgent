@@ -320,9 +320,10 @@ serve(async (req) => {
     // ── Atomic position cap — race-condition-proof enforcement ──
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
-    // Captured for the risk check below: risk_state.open_position_count is mode-blind
-    // (no mode column yet — PR6), so paper positions would otherwise block live trades.
-    // We override it with this mode-scoped count so the per-mode cap is honored.
+    // Captured for the risk check below. risk_state is mode-scoped now
+    // (20260801_risk_state_mode.sql), but this count is still the authoritative
+    // input to evaluateRisk: it is read inside the same request that places the
+    // order, whereas the stored column is only as fresh as the last write.
     let modeScopedOpenCount: number | null = null;
     if (userId && effective) {
       // effective.maxOpenPositions already applies the tier ceiling for live
@@ -805,12 +806,15 @@ serve(async (req) => {
     if (!kalshiResponse.ok) {
       // Log full Kalshi error internally — never expose raw API responses to the client
       const rawKalshiError = kalshiResult.message || kalshiResult.error || kalshiResult;
-      // JSON.stringify(undefined) returns the literal value undefined, not a string —
-      // when Kalshi's rejection body is empty, rawKalshiError resolves to undefined and
-      // kalshiErrorDetail.slice() below crashed the whole handler unhandled. String()
-      // guarantees a string for every input (matches the idiom used elsewhere in this
-      // file, e.g. the outer catch's `e instanceof Error ? e.message : String(e)`).
-      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : String(rawKalshiError);
+      // Kalshi v2 rejection bodies nest an object under `error` ({code, details,
+      // message}) — String() renders that as "[object Object]", which blinded the
+      // 2026-07-31 401 incident across the alert, compliance_log, and dead-letter
+      // queue. JSON.stringify preserves the payload; the ?? String() fallback covers
+      // undefined (empty rejection body), whose .slice() once crashed the handler.
+      const kalshiErrorDetail =
+        typeof rawKalshiError === "string"
+          ? rawKalshiError
+          : JSON.stringify(rawKalshiError) ?? String(rawKalshiError);
       console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
         ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
       });
@@ -1033,14 +1037,31 @@ async function updateRiskState(
 ) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count current open positions for accurate tracking, scoped to tenant AND
-  // mode — risk_state is one row per (user_id, date, mode) now.
+  // Count currently-open positions, scoped to tenant AND mode — risk_state is
+  // one row per (user_id, date, mode).
+  //
+  // The settled_at/exit_reason filters are defensive, not corrective. A settled
+  // trade already leaves this count via its status transition to 'settled', so
+  // they change nothing for present data (verified 2026-08-04: zero paper buys
+  // held settled_at or exit_reason while still in filled/open/partial). They
+  // close one state the system does model and this query would otherwise miss —
+  // an exited position tombstoned with exit_reason while still status='filled',
+  // the same shape health-check's duplicate-position check screens for. The
+  // value feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
+  // stale over-count there blocks trading rather than merely misreporting.
+  //
+  // Status set is deliberately broader than the authoritative cap query in the
+  // position-cap block above (which uses status='filled'): a resting open or
+  // partial buy is real committed exposure for risk-tracking purposes, even
+  // though the cap only counts positions actually held.
   const positionQuery = supabase
     .from("trades")
     .select("*", { count: "exact", head: true })
     .in("status", ["filled", "open", "partial"])
     .eq("mode", mode)
-    .eq("action", "buy");
+    .eq("action", "buy")
+    .is("settled_at", null)
+    .is("exit_reason", null);
   const { count: openPositionCount } = userId
     ? await positionQuery.eq("user_id", userId)
     : await positionQuery.is("user_id", null);
