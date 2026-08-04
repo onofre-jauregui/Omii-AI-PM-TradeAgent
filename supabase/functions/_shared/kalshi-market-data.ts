@@ -123,15 +123,31 @@ export async function fetchOrderbook(
   }
 }
 
+export type FetchMarketStatusResult =
+  /** Market exists; `status` is its Kalshi lifecycle state. */
+  | { ok: true; status: string }
+  /** Couldn't read a status. `marketGone` distinguishes "Kalshi says this market
+   *  does not exist" (404/410 — definitive) from "we couldn't tell" (timeout,
+   *  5xx, malformed body), which callers must treat as no reason to act. */
+  | { ok: false; marketGone: boolean };
+
 /**
- * Current Kalshi lifecycle status for a market ("active", "closed", "settled",
- * "finalized", ...), or undefined if it can't be determined.
+ * Read a market's Kalshi lifecycle status ("active", "closed", "settled",
+ * "finalized", ...).
  *
- * Needed because a resolved market keeps serving HTTP 200 on its orderbook
- * endpoint with an empty book — so "can this order fill?" and "can this order
- * ever fill?" are different questions, and only the market object answers the
- * second. Callers treat undefined as "unknown, change nothing": a transient
- * failure must never look like a reason to terminate an order.
+ * This endpoint — not the orderbook — is the authority on whether a market
+ * exists and whether it can still trade. Verified against live Kalshi
+ * (2026-08-04):
+ *
+ *   GET /markets/KXNONEXISTENT-99Z-T0            → 404
+ *   GET /markets/KXNONEXISTENT-99Z-T0/orderbook  → 200, empty book
+ *   GET /markets/KXBTC-26JUL2817-B64875          → 200, status "finalized"
+ *   GET /markets/KXBTC-26JUL2817-B64875/orderbook→ 200, empty book
+ *
+ * So the orderbook endpoint answers 200 for a fabricated ticker AND for a
+ * market that resolved a week ago — which is why paper-reconcile's original
+ * `tickerGone` check (keyed on an orderbook 404) could never fire in practice,
+ * and orders rested forever in both cases.
  *
  * Public endpoint, no signing required.
  *
@@ -142,19 +158,26 @@ export async function fetchOrderbook(
 export async function fetchMarketStatus(
   kalshiBase: string,
   ticker: string
-): Promise<string | undefined> {
+): Promise<FetchMarketStatusResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ORDERBOOK_FETCH_TIMEOUT_MS);
   try {
     const response = await fetch(`${kalshiBase}/markets/${ticker}`, {
       signal: controller.signal,
     });
-    if (!response.ok) return undefined;
+    if (!response.ok) {
+      return {
+        ok: false,
+        marketGone: response.status === 404 || response.status === 410,
+      };
+    }
     const body = await response.json();
     const status = body?.market?.status;
-    return typeof status === "string" ? status : undefined;
+    return typeof status === "string"
+      ? { ok: true, status }
+      : { ok: false, marketGone: false };
   } catch {
-    return undefined;
+    return { ok: false, marketGone: false };
   } finally {
     clearTimeout(timer);
   }
