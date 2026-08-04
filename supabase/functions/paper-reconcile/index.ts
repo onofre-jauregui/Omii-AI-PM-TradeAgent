@@ -79,16 +79,18 @@ serve(async (req) => {
     for (const [ticker, tickerTrades] of byTicker) {
       const orderbookResult = await fetchOrderbook(kalshiBase, ticker);
 
-      // Whether the market can still trade at all — one call per ticker, not per
-      // order. A resolved market still answers its orderbook endpoint with HTTP
-      // 200 and an empty book, so without this the loop below can only ever ask
-      // "does it fill now?" and never "can it ever fill?", and orders on settled
-      // markets rest forever (see decidePaperReconcile's marketStatus branch).
-      // undefined = unknown; the decision then falls through to "none" exactly
-      // as before, so a flaky status call can never cancel a live order.
-      const marketStatus = orderbookResult.ok
+      // Whether the market exists and can still trade — one call per ticker, not
+      // per order. The market endpoint, not the orderbook, is the authority on
+      // both: Kalshi answers 200 with an empty book for a resolved market AND
+      // for a ticker that never existed, so the orderbook alone can only ever
+      // say "does it fill right now?", never "can it ever fill?".
+      // Unknown (timeout/5xx) leaves both flags false, so the decision falls
+      // through to "none" — a flaky lookup can never cancel an order.
+      const statusResult = orderbookResult.ok
         ? await fetchMarketStatus(kalshiBase, ticker)
-        : undefined;
+        : null;
+      const marketStatus = statusResult?.ok ? statusResult.status : undefined;
+      const marketGone = statusResult?.ok === false && statusResult.marketGone;
 
       for (const trade of tickerTrades) {
         summary.checked++;
@@ -123,7 +125,7 @@ serve(async (req) => {
             Number(trade.amount)
           );
           const decision = decidePaperReconcile(
-            false,
+            marketGone,
             fill.filledContracts,
             fill.requestedContracts,
             marketStatus
@@ -135,8 +137,10 @@ serve(async (req) => {
               cancelled_at: new Date().toISOString(),
             });
             await logCompliance(supabase, trade.id, "paper_order_cancelled",
-              `Paper order on ${ticker} cancelled — market ${marketStatus} before the order could fill`,
-              { ticker, market_status: marketStatus });
+              marketGone
+                ? `Paper order on ${ticker} cancelled — Kalshi has no such market`
+                : `Paper order on ${ticker} cancelled — market ${marketStatus} before the order could fill`,
+              { ticker, market_status: marketStatus ?? null, market_gone: marketGone });
             summary.cancelled++;
           } else if (decision === "fill" || decision === "partial") {
             // A resting order that only now clears is a maker fill by definition —

@@ -76,9 +76,16 @@ export function pickAvgPrice(order: any, side?: string | null): number | null {
  * Decide how a resting PAPER order should advance, given a fresh re-simulation
  * against the real orderbook (paper-reconcile). Mirrors decideReconcile's
  * forward-only/idempotent contract: a paper order only ever moves
- * open -> partial -> filled, or -> cancelled if the ticker is gone or its
- * market has stopped trading — never backward, so repeated cron runs are no-ops
- * once nothing has changed.
+ * open -> partial -> filled, or -> cancelled if the market is gone or has
+ * stopped trading — never backward, so repeated cron runs are no-ops once
+ * nothing has changed.
+ *
+ * `marketGone` must come from the MARKET endpoint (404/410), not the orderbook.
+ * Kalshi answers the orderbook with HTTP 200 and an empty book even for a
+ * ticker that never existed — verified 2026-08-04 against
+ * `KXNONEXISTENT-99Z-T0` — so the original orderbook-404 source for this flag
+ * could never fire, and a bogus-ticker order rested forever alongside the
+ * settled-market ones.
  *
  * The `marketStatus` branch is the paper twin of decideReconcile's
  * market-finalized branch, and it exists for a defect this function shipped
@@ -99,12 +106,12 @@ export function pickAvgPrice(order: any, side?: string | null): number | null {
  * reconciliation behavior too.
  */
 export function decidePaperReconcile(
-  tickerGone: boolean,
+  marketGone: boolean,
   filledContracts: number,
   requestedContracts: number,
   marketStatus?: string
 ): ReconcileAction {
-  if (tickerGone) return "cancel";
+  if (marketGone) return "cancel";
   if (filledContracts >= requestedContracts && requestedContracts > 0) return "fill";
   if (filledContracts > 0) return "partial";
   if (TERMINAL_MARKET.has((marketStatus ?? "").toLowerCase())) return "cancel";
