@@ -59,7 +59,7 @@ serve(async (req) => {
     const { data: activeMemories } = await supabase
       .from("agent_memory")
       .select(
-        "id, title, is_active, alpha, beta, trade_sample_size, last_updated_at, quarantined_at",
+        "id, title, is_active, alpha, beta, trade_sample_size, last_updated_at, last_evidence_at, quarantined_at",
       )
       .eq("is_active", true);
 
@@ -67,7 +67,8 @@ serve(async (req) => {
     let memoriesQuarantined = 0;
 
     for (const mem of activeMemories || []) {
-      // Don't re-process if updated recently
+      // Don't re-process if updated recently. `last_updated_at` doubles as the
+      // cursor for which attributions have already been counted.
       const lastUpdate = new Date(
         mem.last_updated_at || mem.updated_at || "1970-01-01",
       ).getTime();
@@ -76,29 +77,47 @@ serve(async (req) => {
       // Find newly settled attributions since last update
       const { data: attributions } = await supabase
         .from("memory_attribution")
-        .select("trade_pnl")
+        .select("trade_pnl, settled_at")
         .eq("memory_id", mem.id)
         .not("settled_at", "is", null)
         .gt("settled_at", new Date(lastUpdate).toISOString());
 
-      if (!attributions || attributions.length === 0) continue;
-
       let alpha = Number(mem.alpha) || 1;
       let beta = Number(mem.beta) || 1;
       let sample = Number(mem.trade_sample_size) || 0;
+      let lastEvidenceAt: string | null = mem.last_evidence_at ?? null;
 
-      for (const attr of attributions) {
+      for (const attr of attributions ?? []) {
         const pnl = Number(attr.trade_pnl) || 0;
         if (pnl > 0) alpha += 1;
         else if (pnl < 0) beta += 1;
         sample += 1;
+        if (!lastEvidenceAt || attr.settled_at > lastEvidenceAt) {
+          lastEvidenceAt = attr.settled_at;
+        }
       }
+
+      // A memory that has never had a settled trade cited against it has nothing
+      // to score. Everything below is about how *old* its evidence is, which is
+      // undefined until there is some.
+      if (!lastEvidenceAt) continue;
 
       // Posterior mean
       const posteriorMean = alpha / (alpha + beta);
 
-      // Time decay on exposed confidence
-      const ageDays = (Date.now() - lastUpdate) / (24 * 60 * 60 * 1000);
+      // Time decay on exposed confidence.
+      //
+      // Age is measured from the last settled trade that cited this memory, not
+      // from `last_updated_at`. The old formula used last_updated_at, which this
+      // very loop rewrites to now() on each pass — so age was always ~0 and decay
+      // always ~1.000, and no memory has ever decayed regardless of how stale its
+      // evidence was. The `continue` above also used to skip any memory with no
+      // new attributions, which meant the memories most in need of decaying (the
+      // ones nothing has confirmed in months) were precisely the ones never
+      // recomputed. Both are why a rule proven on trades from March still enters
+      // today's prompt at full weight.
+      const evidenceAgeMs = Date.now() - new Date(lastEvidenceAt).getTime();
+      const ageDays = evidenceAgeMs / (24 * 60 * 60 * 1000);
       const decay = 0.5 ** (ageDays / DECAY_HALF_LIFE_DAYS);
 
       // Sample-size gate: don't expose until ≥5 trades
@@ -136,6 +155,7 @@ serve(async (req) => {
         trade_sample_size: sample,
         exposed_confidence: exposedConfidence,
         quarantined_at: quarantinedAt,
+        last_evidence_at: lastEvidenceAt,
         last_updated_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq("id", mem.id);
@@ -1199,30 +1219,23 @@ Return ONLY valid JSON, no markdown, no extra text:
     results.compaction = compactionResult;
 
     // ── 7. Backfill memory_attribution trade_pnl for settled trades ──
+    // One set-based statement (settle_memory_attributions), not a per-row loop.
+    // The loop it replaces selected `id, trade_id` and updated `.eq("id", …)`,
+    // but memory_attribution has no `id` column — its PK is (trade_id, memory_id).
+    // supabase-js returns that error instead of throwing and only `data` was
+    // destructured, so the result was null, the length guard skipped the loop, and
+    // the try/catch never fired: no error, no alert, and not one attribution ever
+    // settled. Since alpha/beta only move on settled attributions, the entire
+    // Bayesian confidence layer had never received a single piece of evidence.
+    // Backfilling on repair settled 78 of 99 rows (the other 21 cite open trades).
+    //
+    // The RPC also drops the old LIMIT 100, which capped settlement at 100/hour
+    // regardless of trade volume and would have starved the loop again at scale.
     try {
-      const { data: unsettledAttributions } = await supabase
-        .from("memory_attribution")
-        .select("id, trade_id")
-        .is("settled_at", null)
-        .limit(100);
-
-      if (unsettledAttributions && unsettledAttributions.length > 0) {
-        for (const attr of unsettledAttributions) {
-          const { data: trade } = await supabase
-            .from("trades")
-            .select("pnl, settled_at")
-            .eq("id", attr.trade_id)
-            .not("settled_at", "is", null)
-            .single();
-
-          if (trade) {
-            await supabase.from("memory_attribution").update({
-              trade_pnl: trade.pnl,
-              settled_at: trade.settled_at,
-            }).eq("id", attr.id);
-          }
-        }
-      }
+      const { data: settledCount, error: settleError } = await supabase
+        .rpc("settle_memory_attributions");
+      if (settleError) throw settleError;
+      results.attributions_settled = settledCount ?? 0;
     } catch (backfillErr) {
       // Bayesian confidence scores depend on settled PnL — silent failure here corrupts the learning loop.
       const msg = backfillErr instanceof Error
