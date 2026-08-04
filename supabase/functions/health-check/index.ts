@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { fetchMarketStatus } from "../_shared/kalshi-market-data.ts";
 import { countTradesInWindow } from "../_shared/limits.ts";
 
 /**
@@ -668,14 +669,24 @@ serve(async (req) => {
       });
     }
 
-    // ── 14. Resting orders that stopped advancing ─────────────────────
+    // ── 14. Resting orders on markets that can no longer trade ────────
     // paper-reconcile ran every 5 minutes for 8 days reporting "39 checked,
     // 0 filled, 0 cancelled, 0 errors" while 39 paper orders ($855) sat frozen
-    // on markets Kalshi had already finalized. Every per-run number was healthy;
-    // only the AGE of the backlog gave it away. Same shape as the settle-signals
-    // stuck-batch (fixed 2026-07-28) — a loop that reports activity while making
-    // no progress. The terminal-market branch in decidePaperReconcile fixes the
-    // known cause; this catches whatever causes it next.
+    // on markets Kalshi had already finalized. Every per-run number was healthy.
+    // Same shape as the settle-signals stuck-batch (fixed 2026-07-28) — a loop
+    // that reports activity while making no progress.
+    //
+    // The signal is the market's STATE, not the order's age. Age alone is a
+    // false alarm generator: a legitimate resting order on KXFED-27APR is
+    // months old by design, and an alert that fires on healthy orders every
+    // 12 hours gets muted, which is worse than no alert. An order is only
+    // wrong to still be resting if its market has stopped trading — exactly
+    // the condition paper-reconcile now acts on, so this check verifies the
+    // reconciler is doing its job rather than re-deriving its logic.
+    //
+    // Cost is bounded by DISTINCT tickers among stale resting orders (7 for a
+    // 13-order backlog), and only orders past a 24h grace period are considered
+    // so a market resolving between reconcile ticks never pages.
     const restingCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: staleResting } = await supabase
       .from("trades")
@@ -684,24 +695,42 @@ serve(async (req) => {
       .is("settled_at", null)
       .lt("created_at", restingCutoff);
 
-    if (staleResting && staleResting.length > 0) {
-      const oldest = staleResting.reduce((a: any, b: any) =>
-        new Date(a.created_at) < new Date(b.created_at) ? a : b
-      );
-      const ageHours = Math.floor(
-        (Date.now() - new Date(oldest.created_at).getTime()) / 3_600_000
-      );
+    const notAdvancing: { ticker: string; status: string; ageHours: number }[] = [];
+    const stateByTicker = new Map<string, string>();
+    for (const t of staleResting ?? []) {
+      const ticker = (t as any).ticker;
+      if (!ticker) continue;
+      if (!stateByTicker.has(ticker)) {
+        const result = await fetchMarketStatus(KALSHI_BASE_URL, ticker);
+        // Unknown (timeout/5xx) is not evidence of a problem — skip, don't page.
+        stateByTicker.set(
+          ticker,
+          result.ok ? result.status.toLowerCase() : result.marketGone ? "missing" : "unknown"
+        );
+      }
+      const state = stateByTicker.get(ticker)!;
+      if (state === "unknown" || state === "active" || state === "closed") continue;
+      notAdvancing.push({
+        ticker,
+        status: state,
+        ageHours: Math.floor((Date.now() - new Date((t as any).created_at).getTime()) / 3_600_000),
+      });
+    }
+
+    if (notAdvancing.length > 0) {
+      const worst = notAdvancing.reduce((a, b) => (a.ageHours > b.ageHours ? a : b));
+      const tickers = [...new Set(notAdvancing.map(o => o.ticker))].sort();
       pendingAlerts.push({
         type: "resting_orders_not_advancing",
-        fingerprint: `resting_stale_${staleResting.length}`,
+        fingerprint: `resting_dead_${tickers.join(",")}`,
         cooldownHours: 12,
-        message: `⏳ [TradeAgent] ${staleResting.length} order(s) resting >24h — oldest ${oldest.ticker} at ${ageHours}h. Reconcile is running but not advancing them; their outcomes never reach the track record.`,
+        message: `⏳ [TradeAgent] ${notAdvancing.length} order(s) still resting on markets that stopped trading — worst ${worst.ticker} (${worst.status}, ${worst.ageHours}h). Reconcile is running but not advancing them; their outcomes never reach the track record.`,
       });
       await supabase.from("compliance_log").insert({
         event_type: "resting_orders_not_advancing",
         severity: "warning",
-        message: `${staleResting.length} order(s) have rested >24h without advancing; oldest ${oldest.ticker} (${ageHours}h)`,
-        metadata: { count: staleResting.length, oldest_ticker: oldest.ticker, oldest_age_hours: ageHours },
+        message: `${notAdvancing.length} order(s) resting on non-tradeable markets; worst ${worst.ticker} (${worst.status}, ${worst.ageHours}h)`,
+        metadata: { count: notAdvancing.length, tickers, worst },
       });
     }
 
