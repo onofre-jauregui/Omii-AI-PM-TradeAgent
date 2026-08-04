@@ -320,9 +320,10 @@ serve(async (req) => {
     // ── Atomic position cap — race-condition-proof enforcement ──
     // Pre-flight checks in auto-trade are observability only; this layer is authoritative.
     // Any concurrent basket legs that overflow the cap are rejected here, not pre-screened.
-    // Captured for the risk check below: risk_state.open_position_count is mode-blind
-    // (no mode column yet — PR6), so paper positions would otherwise block live trades.
-    // We override it with this mode-scoped count so the per-mode cap is honored.
+    // Captured for the risk check below. risk_state is mode-scoped now
+    // (20260801_risk_state_mode.sql), but this count is still the authoritative
+    // input to evaluateRisk: it is read inside the same request that places the
+    // order, whereas the stored column is only as fresh as the last write.
     let modeScopedOpenCount: number | null = null;
     if (userId && effective) {
       // effective.maxOpenPositions already applies the tier ceiling for live
@@ -1033,14 +1034,28 @@ async function updateRiskState(
 ) {
   const today = new Date().toISOString().split("T")[0];
 
-  // Count current open positions for accurate tracking, scoped to tenant AND
-  // mode — risk_state is one row per (user_id, date, mode) now.
+  // Count currently-open positions, scoped to tenant AND mode — risk_state is
+  // one row per (user_id, date, mode).
+  //
+  // The settled_at/exit_reason filters are load-bearing: without them this
+  // counted every buy that had EVER filled, so the stored value only ever grew
+  // (production carried 21/19/11 against 8/3/6 genuinely open before this fix).
+  // A "current open positions" number that never decrements is not a count,
+  // it's a running total — and it feeds evaluateRisk's max_open_positions gate
+  // in _shared/risk.ts.
+  //
+  // Status set is deliberately broader than the authoritative cap query in the
+  // position-cap block above (which uses status='filled'): a resting open or
+  // partial buy is real committed exposure for risk-tracking purposes, even
+  // though the cap only counts positions actually held.
   const positionQuery = supabase
     .from("trades")
     .select("*", { count: "exact", head: true })
     .in("status", ["filled", "open", "partial"])
     .eq("mode", mode)
-    .eq("action", "buy");
+    .eq("action", "buy")
+    .is("settled_at", null)
+    .is("exit_reason", null);
   const { count: openPositionCount } = userId
     ? await positionQuery.eq("user_id", userId)
     : await positionQuery.is("user_id", null);

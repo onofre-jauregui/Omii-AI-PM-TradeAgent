@@ -613,6 +613,61 @@ serve(async (req) => {
       // RPC missing (migration not applied yet) — monitoring-path only, never block the sweep.
     }
 
+    // ── 13. risk_state.open_position_count integrity ──────────────────
+    // updateRiskState (execute-trade) counted every buy that had ever filled,
+    // with no settled_at/exit_reason filter, so the stored value only ever grew
+    // — production carried 21/19/11 against 8/3/6 genuinely open (2026-08-04).
+    // It feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
+    // counter that never decrements eventually false-blocks a healthy account.
+    // The writer is fixed; this check is the guard that the fix stays fixed,
+    // since the drift is silent and only visible by comparing the two counts.
+    const { data: todayRiskRows } = await supabase
+      .from("risk_state")
+      .select("user_id, mode, open_position_count")
+      .eq("date", new Date().toISOString().split("T")[0]);
+
+    const { data: trulyOpen } = await supabase
+      .from("trades")
+      .select("user_id, mode")
+      .in("status", ["filled", "open", "partial"])
+      .eq("action", "buy")
+      .is("settled_at", null)
+      .is("exit_reason", null);
+
+    const openByUserMode = new Map<string, number>();
+    for (const t of trulyOpen ?? []) {
+      const key = `${(t as any).user_id}::${(t as any).mode}`;
+      openByUserMode.set(key, (openByUserMode.get(key) ?? 0) + 1);
+    }
+
+    // Tolerance of 1: a trade can settle between the two reads above without
+    // that being drift. Anything larger is a real counter divergence.
+    const drifted = (todayRiskRows ?? []).filter((r: any) => {
+      const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
+      return Math.abs((r.open_position_count ?? 0) - actual) > 1;
+    });
+
+    if (drifted.length > 0) {
+      const detail = drifted
+        .map((r: any) => {
+          const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
+          return `${String(r.user_id).slice(0, 8)}/${r.mode}: stored ${r.open_position_count} vs open ${actual}`;
+        })
+        .join("; ");
+      pendingAlerts.push({
+        type: "risk_state_count_drift",
+        fingerprint: `risk_count_drift_${drifted.length}`,
+        cooldownHours: 12,
+        message: `📊 [TradeAgent] risk_state.open_position_count drifted from reality — ${detail}. The max_open_positions gate reads this value.`,
+      });
+      await supabase.from("compliance_log").insert({
+        event_type: "risk_state_count_drift",
+        severity: "warning",
+        message: `risk_state.open_position_count diverged for ${drifted.length} (user, mode) row(s): ${detail}`,
+        metadata: { drifted: drifted.length },
+      });
+    }
+
     // ── Deduplicate and send ──────────────────────────────────────────
     // For each pending alert, check compliance_log to see if the same fingerprint
     // was already sent within the cooldown window. Only send new or escalating alerts.
