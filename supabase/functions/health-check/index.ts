@@ -614,13 +614,13 @@ serve(async (req) => {
     }
 
     // ── 13. risk_state.open_position_count integrity ──────────────────
-    // updateRiskState (execute-trade) counted every buy that had ever filled,
-    // with no settled_at/exit_reason filter, so the stored value only ever grew
-    // — production carried 21/19/11 against 8/3/6 genuinely open (2026-08-04).
-    // It feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
-    // counter that never decrements eventually false-blocks a healthy account.
-    // The writer is fixed; this check is the guard that the fix stays fixed,
-    // since the drift is silent and only visible by comparing the two counts.
+    // risk_state.open_position_count is written by updateRiskState (execute-trade)
+    // and read by evaluateRisk's max_open_positions gate (_shared/risk.ts), so a
+    // stored value that drifts above reality blocks trading on a healthy account.
+    // Nothing reconciles the two, and the divergence is invisible without an
+    // explicit comparison — which is why this check exists rather than trusting
+    // the writer to stay correct. (Added 2026-08-04 alongside defensive filters
+    // on the writer; the counter was accurate at the time, and this keeps it so.)
     const { data: todayRiskRows } = await supabase
       .from("risk_state")
       .select("user_id, mode, open_position_count")

@@ -4,13 +4,14 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
-## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than only fixing the writer
+## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than trusting the writer
 
-**Decision:** Fixed `updateRiskState`'s missing `settled_at`/`exit_reason` filters (the counter was a running total, not a count — production held 21/19/11 against 8/3/6 genuinely open), and added health-check **check 13** comparing every `(user, mode)` `risk_state` row against the true open count, paging on divergence >1.
-**Options:** A) Fix the writer only — rejected: the same class of drift is invisible without an explicit comparison, which is exactly why it survived unnoticed. B) Add an integration test — rejected: the integration tier is not wired into CI (`ci.yml` runs `npm test` and `test:e2e:staging` only), so the guard would never fire. C) Writer fix + production health-check assertion — chosen.
-**Why:** The value feeds `evaluateRisk`'s `max_open_positions` gate. It was non-blocking only because `auto-trade` exempts `open_positions_limit` from its pre-flight and `execute-trade` overrides it with a request-time count — two accidental mitigations, not a design. A guard that runs in the real environment on a cron beats a test nobody runs.
+**Decision:** Added health-check **check 13**, comparing every `(user, mode)` `risk_state` row against the true open-position count and paging on divergence >1, plus defensive `settled_at`/`exit_reason` filters on `updateRiskState`'s count.
+**Correction (same day):** PR #182 was opened claiming the counter was inflated ~2.6–6× (21/19/11 vs 8/3/6). **That was wrong** — the comparison used `status='filled'` only while the writer counts `filled + open + partial`, so resting orders were missed on one side. Settled trades already leave the count via their status transition, and no paper buy has ever carried `settled_at`/`exit_reason` while still filled/open/partial. The counter was accurate; the filters are defensive, not corrective.
+**Options:** A) Fix the writer only — rejected once the premise collapsed: there was nothing to fix. B) Integration test — rejected: the integration tier is not wired into CI (`ci.yml` runs `npm test` and `test:e2e:staging` only), so the guard would never fire. C) Production health-check assertion — chosen, and it is the part that retains value.
+**Why:** Nothing reconciles the written counter against reality, and `evaluateRisk` gates `max_open_positions` on it — a silent over-count blocks trading on a healthy account. A cron-run assertion in the real environment beats a test nobody runs. It would also have caught my own misdiagnosis in minutes.
 **Reversibility:** easy — both changes are additive; revert the two functions.
-**Trace:** PR #182.
+**Trace:** PRs #182, #184.
 
 ## 2026-08-03 — Promote 88 commits `dev → main` in one pass, with a replay-safe migration runner
 

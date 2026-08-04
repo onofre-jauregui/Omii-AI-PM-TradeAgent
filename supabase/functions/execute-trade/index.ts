@@ -1040,12 +1040,15 @@ async function updateRiskState(
   // Count currently-open positions, scoped to tenant AND mode — risk_state is
   // one row per (user_id, date, mode).
   //
-  // The settled_at/exit_reason filters are load-bearing: without them this
-  // counted every buy that had EVER filled, so the stored value only ever grew
-  // (production carried 21/19/11 against 8/3/6 genuinely open before this fix).
-  // A "current open positions" number that never decrements is not a count,
-  // it's a running total — and it feeds evaluateRisk's max_open_positions gate
-  // in _shared/risk.ts.
+  // The settled_at/exit_reason filters are defensive, not corrective. A settled
+  // trade already leaves this count via its status transition to 'settled', so
+  // they change nothing for present data (verified 2026-08-04: zero paper buys
+  // held settled_at or exit_reason while still in filled/open/partial). They
+  // close one state the system does model and this query would otherwise miss —
+  // an exited position tombstoned with exit_reason while still status='filled',
+  // the same shape health-check's duplicate-position check screens for. The
+  // value feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
+  // stale over-count there blocks trading rather than merely misreporting.
   //
   // Status set is deliberately broader than the authoritative cap query in the
   // position-cap block above (which uses status='filled'): a resting open or
