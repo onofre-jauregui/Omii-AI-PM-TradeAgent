@@ -806,12 +806,15 @@ serve(async (req) => {
     if (!kalshiResponse.ok) {
       // Log full Kalshi error internally — never expose raw API responses to the client
       const rawKalshiError = kalshiResult.message || kalshiResult.error || kalshiResult;
-      // JSON.stringify(undefined) returns the literal value undefined, not a string —
-      // when Kalshi's rejection body is empty, rawKalshiError resolves to undefined and
-      // kalshiErrorDetail.slice() below crashed the whole handler unhandled. String()
-      // guarantees a string for every input (matches the idiom used elsewhere in this
-      // file, e.g. the outer catch's `e instanceof Error ? e.message : String(e)`).
-      const kalshiErrorDetail = typeof rawKalshiError === "string" ? rawKalshiError : String(rawKalshiError);
+      // Kalshi v2 rejection bodies nest an object under `error` ({code, details,
+      // message}) — String() renders that as "[object Object]", which blinded the
+      // 2026-07-31 401 incident across the alert, compliance_log, and dead-letter
+      // queue. JSON.stringify preserves the payload; the ?? String() fallback covers
+      // undefined (empty rejection body), whose .slice() once crashed the handler.
+      const kalshiErrorDetail =
+        typeof rawKalshiError === "string"
+          ? rawKalshiError
+          : JSON.stringify(rawKalshiError) ?? String(rawKalshiError);
       console.error(`execute-trade: Kalshi rejected order — status ${kalshiResponse.status}, detail: ${kalshiErrorDetail}`, {
         ticker: resolvedTicker, side, action, price, payload: kalshiOrderPayload,
       });
