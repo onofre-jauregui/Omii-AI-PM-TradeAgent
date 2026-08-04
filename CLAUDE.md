@@ -158,10 +158,10 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - Win streak: computed in auto-trade `computeWinStreak()`, passed as inert observability context into S-002 + S-005 qualify prompts — no decision rules tied to it (2026-05-25) ✅
 - surface-scanner cache age bug fixed: `Math.min` → `Math.max` so newest cache row is found (2026-05-25) ✅
 - Strategy leaderboard + chart: user ID suffix stripped from labels (2026-05-25) ✅
+- Subscription tier enforcement: `checkEntitlement()` (`_shared/billing.ts`) — real per-tier `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` limits (not display-only), wired into `auto-trade`, `execute-trade`, and `switch-trading-mode`. **Deployed to production** via the `dev → main` promotion PRs #176/#179 (2026-08-03, 89 commits) — confirmed by diffing deployed edge-function source against `dev`: zero drift on all 32 functions as of the 105th health-check run (2026-08-04) ✅
 
 ### In progress / partially done
 - Stripe: schema and webhook handler exist, no billing UI yet
-- Subscription tier enforcement: `checkEntitlement()` (`_shared/billing.ts`) is built and live on `dev` — real per-tier `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` limits (not display-only), wired into `auto-trade`, `execute-trade`, and `switch-trading-mode` (`7c5231a`, `4a4f8df`). **Not deployed to production** — production still runs the pre-enforcement version (all limits `999999`), gated on Onofre's explicit approval per the money/billing Hard Stop (95th health-check run, 2026-07-30).
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)
@@ -173,7 +173,7 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 2. ~~Wire `user_id` into all edge function queries~~ — done (2026-05-25)
 3. ~~Finish encryption key management end-to-end~~ — done (2026-05-25)
 4. ~~Onboarding flow end-to-end~~ — done, fully wired (2026-05-25)
-5. Billing UI (enforcement itself is done on `dev`, blocked on production deploy approval — see above)
+5. Billing UI (enforcement itself is done and live in production — see above)
 6. User feedback mechanism
 7. Community knowledge-sharing layer (the moat — highest strategic value)
 8. Public performance page (track record artifact for uncle capital unlock)
