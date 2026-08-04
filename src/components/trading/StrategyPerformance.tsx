@@ -103,8 +103,25 @@ export function StrategyPerformance({ mode }: { mode?: "paper" | "live" }) {
 
   return (
     <div className="space-y-6">
-      {/* Strategy Performance Chart */}
-      {chartData.length > 1 && (
+      {/* Strategy Performance Chart.
+          A chart may never render as a bare axis. The line series comes from
+          activeStrategies, so with none active recharts drew an empty 788x250
+          box — no data, no explanation — which reads as a broken graph rather
+          than an empty one. Gate on BOTH the date range and having at least one
+          series, and say why when there's nothing to plot. */}
+      {chartData.length > 1 && activeStrategies.length === 0 && (
+        <div className="rounded-2xl bg-card p-6 apple-shadow">
+          <div className="flex items-center gap-2 mb-2">
+            <Activity className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium text-muted-foreground">Strategy Performance</h3>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            No active strategies in this mode, so there's nothing to chart. Enable one in the
+            Strategies tab to start plotting its equity curve.
+          </p>
+        </div>
+      )}
+      {chartData.length > 1 && activeStrategies.length > 0 && (
         <div className="rounded-2xl bg-card p-6 apple-shadow">
           <div className="flex items-center gap-2 mb-4">
             <Activity className="h-4 w-4 text-muted-foreground" />

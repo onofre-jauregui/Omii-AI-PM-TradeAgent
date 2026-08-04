@@ -95,7 +95,10 @@ async function streamChat({
 }
 
 export function AgentPanel({ mode = "paper", onOpenMarket }: { mode?: "paper" | "live"; onOpenMarket?: (ticker: string) => void }) {
-  const { getActiveStrategies } = useStrategies();
+  // Memoised value, not getActiveStrategies() — calling that during render
+  // returned a fresh array each pass and made loadPositionSizes' effect below
+  // re-fire indefinitely (15+ duplicate strategy_config fetches per load).
+  const { activeStrategies } = useStrategies();
   const chat = useChat("agent");
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -123,7 +126,6 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   const [savingPositionSize, setSavingPositionSize] = useState<Record<string, boolean>>({});
   const [savedPositionSize, setSavedPositionSize] = useState<Record<string, boolean>>({});
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  const activeStrategies = getActiveStrategies();
 
   const chatMessages = chat.messages;
   const isLoading = chat.isLoading;

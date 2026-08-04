@@ -181,6 +181,21 @@ jobs:
         env:
           BASE_URL: https://kalshitradeagent.live
 
+      # The smoke suite above only visits logged-out pages. On 2026-08-04 a
+      # promotion cleared every gate in this pipeline while the live dashboard
+      # sat on a permanent spinner, because nothing here had ever signed in.
+      # This step does, and asserts the rendered numbers match the database.
+      # Blocking on purpose — a blank or lying dashboard must not reach main.
+      - name: Dashboard truth gate → staging
+        run: npm run test:e2e:dashboards
+        env:
+          BASE_URL: https://kalshitradeagent.live
+          # Only a test user's own login. The DB comparison runs through that
+          # user's RLS-scoped session inside the page, so CI never holds a
+          # service-role key.
+          E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+
   # ─── Job 5: Apply migrations → production DB (main push only) ─────────────
   # NOTE: requires one-time migration history repair on prod before enabling
   migrate-production:
