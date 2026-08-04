@@ -1,11 +1,10 @@
 # TASKS — Omii-AI-PM-TradeAgent
-*Last updated: 2026-07-30 | Ranked by revenue impact*
+*Last updated: 2026-08-04 | Ranked by revenue impact*
 
 ## In Progress
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
 | Billing UI | HIGH | M | Queued |
-| Deploy subscription enforcement to production | HIGH | S | Blocked — needs Onofre's approval (money/billing Hard Stop) |
 
 ## Queued
 | Task | Impact | Effort | Status |
@@ -24,4 +23,9 @@
 ## Completed (2026-07-30, 95th health-check run)
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
-| Subscription tier enforcement logic (`checkEntitlement()`, real per-tier limits) | HIGH | M | Completed — live on `dev`, not yet deployed to production |
+| Subscription tier enforcement logic (`checkEntitlement()`, real per-tier limits) | HIGH | M | Completed — live on `dev` |
+
+## Completed (2026-08-03, dev → main promotion PRs #176/#179)
+| Task | Impact | Effort | Status |
+|------|--------|--------|--------|
+| Deploy subscription enforcement to production | HIGH | S | Completed — confirmed zero drift on all 32 deployed functions as of the 105th health-check run (2026-08-04) |
