@@ -23,7 +23,7 @@
 ## Completed (2026-07-30, 95th health-check run)
 | Task | Impact | Effort | Status |
 |------|--------|--------|--------|
-| Subscription tier enforcement logic (`checkEntitlement()`, real per-tier limits) | HIGH | M | Completed — live on `dev` |
+| Subscription tier enforcement logic (`checkEntitlement()`, real per-tier limits) | HIGH | M | Completed — live in production since the 2026-08-03 promotion |
 
 ## Completed (2026-08-03, dev → main promotion PRs #176/#179)
 | Task | Impact | Effort | Status |

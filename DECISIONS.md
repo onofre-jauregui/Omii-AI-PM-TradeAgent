@@ -4,6 +4,22 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than only fixing the writer
+
+**Decision:** Fixed `updateRiskState`'s missing `settled_at`/`exit_reason` filters (the counter was a running total, not a count — production held 21/19/11 against 8/3/6 genuinely open), and added health-check **check 13** comparing every `(user, mode)` `risk_state` row against the true open count, paging on divergence >1.
+**Options:** A) Fix the writer only — rejected: the same class of drift is invisible without an explicit comparison, which is exactly why it survived unnoticed. B) Add an integration test — rejected: the integration tier is not wired into CI (`ci.yml` runs `npm test` and `test:e2e:staging` only), so the guard would never fire. C) Writer fix + production health-check assertion — chosen.
+**Why:** The value feeds `evaluateRisk`'s `max_open_positions` gate. It was non-blocking only because `auto-trade` exempts `open_positions_limit` from its pre-flight and `execute-trade` overrides it with a request-time count — two accidental mitigations, not a design. A guard that runs in the real environment on a cron beats a test nobody runs.
+**Reversibility:** easy — both changes are additive; revert the two functions.
+**Trace:** PR #182.
+
+## 2026-08-03 — Promote 88 commits `dev → main` in one pass, with a replay-safe migration runner
+
+**Decision:** Promoted the full P0+P1 train (settle-signals 404 fix, dead position caps, entitlement prefix-bypass closure, signal-claims multi-tenancy, lock hardening, `risk_state.mode`, canonical Kalshi price converter, per-tier strategy caps) to production as a single promotion. PR #176's pipeline failed on the migration replay; #178 made the runner replay-safe; #179 landed green.
+**Options:** A) Split into several smaller promotions — rejected: the changes are interdependent (claims + lock + mode-scoped risk are one data-plane change) and partial deployment leaves worse states than either end. B) One promotion with a fixed replay runner — chosen. C) Wait for a maintenance window — rejected: the window was already optimal, see below.
+**Why:** Production was paper-only at the time — the sole live strategy (`S-001-l-ea207ba1`) had been inactive since 2026-08-02 — so every money-path change landed with no capital exposed, while closing an entitlement bypass that was live in production (any strategy named `S-002-*` inherited S-002's live entitlement).
+**Reversibility:** hard — migrations are not rolled back by the canary. See [`docs/runbooks/promotion-rollback.md`](docs/runbooks/promotion-rollback.md) for the compensating SQL, in particular the `risk_state` unique-constraint swap that breaks pre-promotion code.
+**Trace:** PRs #176, #178, #179.
+
 ## 2026-07-31 — Staging DB rebuilt by statement-level replay + production parity diff
 
 **Decision:** Rebuilt the staging database from scratch: reset the false migration ledger, replayed all 66 migration files statement-by-statement (dollar-quote-aware splitter, per-statement duplicate skip), self-healed objects that exist only in production (cloned `backtest_runs`, `profiles`, `trade_lessons`, `baskets`, `waitlist`, both weather-calibration tables, 4 `agent_*` views, and 65+ dashboard-era columns from prod catalogs). Acceptance = column-level parity diff vs production: **0 of 470 prod columns missing**. Ledger restored (66 versions) so CI's pending-loop resumes cleanly.
