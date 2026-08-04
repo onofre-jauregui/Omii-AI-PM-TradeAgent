@@ -67,7 +67,10 @@ describe("pickAvgPrice", () => {
 });
 
 describe("decidePaperReconcile", () => {
-  it("cancels when the ticker is gone, regardless of fill state", () => {
+  // marketGone comes from the MARKET endpoint's 404/410, not the orderbook's —
+  // Kalshi serves a 200 empty book for tickers that never existed, so the old
+  // orderbook-sourced flag could never fire.
+  it("cancels when Kalshi has no such market, regardless of fill state", () => {
     expect(decidePaperReconcile(true, 0, 10)).toBe("cancel");
     expect(decidePaperReconcile(true, 10, 10)).toBe("cancel");
   });
