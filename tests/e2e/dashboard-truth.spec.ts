@@ -94,9 +94,14 @@ test.describe("dashboard truth", () => {
 
       page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
       page.on("request", (r) => {
-        const key = r.url().split("?")[0];
-        if (!/supabase\.co\/(rest|functions)/.test(key)) return;
-        requestCounts.set(key, (requestCounts.get(key) ?? 0) + 1);
+        const url = r.url();
+        if (!/supabase\.co\/(rest|functions)/.test(url)) return;
+        // Key on the FULL url including query. A render loop re-issues the
+        // identical request; a page legitimately issues many *different* ones
+        // against the same path — kalshi-proxy is called once per market series
+        // and /rest/v1/trades once per distinct dashboard query. Keying on path
+        // alone conflates the two and flags healthy fan-out as a storm.
+        requestCounts.set(url, (requestCounts.get(url) ?? 0) + 1);
       });
       page.on("response", (r) => {
         if (r.status() >= 400 && /supabase\.co\/(rest|functions)/.test(r.url())) {
@@ -133,10 +138,15 @@ test.describe("dashboard truth", () => {
       );
       expect(blankCharts, "chart rendered with no data and no empty state").toBe(0);
 
-      // 4. No render loop. The AgentPanel bug produced 15+ identical
-      //    strategy_config fetches; a storm is also what starved first paint.
+      // 4. No render loop. The AgentPanel bug re-issued the *identical*
+      //    strategy_config request 15+ times per load; that repetition, not
+      //    request volume, is the signature. Realtime events legitimately cause
+      //    a couple of refetches, hence the small allowance.
       const stormy = [...requestCounts.entries()].filter(([, n]) => n > MAX_REQUESTS_PER_ENDPOINT);
-      expect(stormy.map(([u, n]) => `${u} ×${n}`), "endpoint requested too many times").toEqual([]);
+      expect(
+        stormy.map(([u, n]) => `${u.replace(/^https:\/\/[^/]+/, "")} ×${n}`),
+        "identical request repeated — probable render loop",
+      ).toEqual([]);
 
       // 5. Clean console and network.
       expect(badResponses, "4xx/5xx on app requests").toEqual([]);
