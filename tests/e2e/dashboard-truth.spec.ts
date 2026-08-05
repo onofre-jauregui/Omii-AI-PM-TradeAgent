@@ -148,9 +148,21 @@ test.describe("dashboard truth", () => {
         "identical request repeated — probable render loop",
       ).toEqual([]);
 
-      // 5. Clean console and network.
+      // 5. Clean console and network — first-party only.
+      //
+      // Third-party breakage (analytics, tag manager) is worth knowing about but
+      // must not block a deploy: an outage at Google would otherwise wedge our
+      // own release pipeline. It is logged loudly instead. First-party errors
+      // still fail hard — those are ours.
       expect(badResponses, "4xx/5xx on app requests").toEqual([]);
-      expect(consoleErrors.filter((e) => !/favicon|third-party/i.test(e))).toEqual([]);
+      const thirdParty = /favicon|google|gtag|googletagmanager|doubleclick|analytics/i;
+      const ourErrors = consoleErrors.filter((e) => !thirdParty.test(e));
+      const theirErrors = consoleErrors.filter((e) => thirdParty.test(e));
+      if (theirErrors.length) {
+        console.warn(`[${mode}] ${theirErrors.length} third-party console error(s), not blocking:\n` +
+          theirErrors.map((e) => `  - ${e.slice(0, 160)}`).join("\n"));
+      }
+      expect(ourErrors, "first-party console errors").toEqual([]);
     });
   }
 
