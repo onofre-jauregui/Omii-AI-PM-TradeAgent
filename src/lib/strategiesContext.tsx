@@ -34,6 +34,9 @@ interface StrategiesContextType {
   updateStrategy: (id: string, updates: Partial<Strategy>) => void;
   addStrategy: (strategy: Omit<Strategy, "id">) => void;
   deleteStrategy: (id: string) => void;
+  /** Stable, memoised list of active strategies. Prefer this over
+   *  getActiveStrategies() in render paths — see the note at its definition. */
+  activeStrategies: Strategy[];
   getActiveStrategies: () => Strategy[];
   refreshStats: () => Promise<void>;
 }
@@ -272,9 +275,15 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
     await supabase.from("strategies").delete().eq("id", id);
   }, []);
 
-  const getActiveStrategies = useCallback(() => {
-    return strategies.filter(s => s.active);
-  }, [strategies]);
+  // Memoised VALUE, not just a memoised function. getActiveStrategies() returns
+  // a fresh array on every call, so a consumer that calls it during render
+  // (AgentPanel did) gets a new identity each pass — and any useCallback/
+  // useEffect keyed on that array re-fires forever, calling setState and
+  // re-rendering. That loop produced 15+ duplicate strategy_config fetches per
+  // page load. Consumers should prefer this value; the function is retained for
+  // callers that need it lazily.
+  const activeStrategies = useMemo(() => strategies.filter(s => s.active), [strategies]);
+  const getActiveStrategies = useCallback(() => activeStrategies, [activeStrategies]);
 
   const instanceExists = useMemo(() => {
     const map: Record<string, { paper: boolean; live: boolean }> = {};
@@ -289,7 +298,7 @@ export function StrategiesProvider({ children }: { children: ReactNode }) {
   return (
     <StrategiesContext.Provider value={{
       strategies, strategyStats, instanceExists, loading,
-      updateStrategy, addStrategy, deleteStrategy, getActiveStrategies, refreshStats,
+      updateStrategy, addStrategy, deleteStrategy, activeStrategies, getActiveStrategies, refreshStats,
     }}>
       {children}
     </StrategiesContext.Provider>

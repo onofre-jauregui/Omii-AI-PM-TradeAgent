@@ -124,8 +124,12 @@ export function AuthPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Email</Label>
+              {/* htmlFor/id pair: the label was visually present but never
+                  programmatically associated, so screen readers announced an
+                  unlabelled field and getByLabel() could not find it. */}
+              <Label htmlFor="auth-email" className="text-sm text-muted-foreground">Email</Label>
               <Input
+                id="auth-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -137,9 +141,10 @@ export function AuthPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-sm text-muted-foreground">Password</Label>
+              <Label htmlFor="auth-password" className="text-sm text-muted-foreground">Password</Label>
               <div className="relative">
                 <Input
+                  id="auth-password"
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
