@@ -32,11 +32,18 @@ const PAINT_TIMEOUT_MS = 15_000;
 const MAX_REQUESTS_PER_ENDPOINT = 4;
 
 async function signIn(page: Page) {
-  await page.goto("/auth");
-  await page.getByLabel(/email/i).fill(EMAIL!);
-  await page.getByLabel(/password/i).fill(PASSWORD!);
-  await page.getByRole("button", { name: /sign in|log in/i }).click();
-  await page.waitForURL((url) => !/\/auth/.test(url.pathname), { timeout: 30_000 });
+  // /auth redirects to /login. Target the inputs by type rather than by label:
+  // the gate must keep working when the form's copy or markup changes, and a
+  // login helper that breaks on a class rename produces false failures that
+  // erode trust in the gate itself.
+  await page.goto("/login");
+  await page.locator('input[type="email"]').first().fill(EMAIL!);
+  await page.locator('input[type="password"]').first().fill(PASSWORD!);
+  await page.getByRole("button", { name: /^sign in$/i }).click();
+  await page.waitForURL((url) => !/\/(login|auth)/.test(url.pathname), { timeout: 30_000 });
+  // Wait for the app shell, not just the URL — the route changes before the
+  // authenticated tree mounts.
+  await page.locator("main").first().waitFor({ timeout: 30_000 });
 }
 
 /**
