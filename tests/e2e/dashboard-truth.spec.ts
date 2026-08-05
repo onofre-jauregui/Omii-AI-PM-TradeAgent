@@ -51,8 +51,12 @@ async function signIn(page: Page) {
  * with. Runs inside the page so it reuses the signed-in session: RLS scopes it
  * to this user's own rows, and no service-role key is needed anywhere in CI.
  */
-async function dbRealisedPnl(page: Page, mode: "paper" | "live"): Promise<number> {
-  return page.evaluate(async (m) => {
+async function dbRealisedPnl(
+  page: Page,
+  mode: "paper" | "live",
+  apiKey: string,
+): Promise<number> {
+  return page.evaluate(async ({ m, apiKey }) => {
     const key = Object.keys(localStorage).find((k) => k.includes("auth-token"));
     if (!key) throw new Error("no supabase session in localStorage");
     const session = JSON.parse(localStorage.getItem(key)!);
@@ -60,20 +64,23 @@ async function dbRealisedPnl(page: Page, mode: "paper" | "live"): Promise<number
     const userId = session?.user?.id;
     if (!token || !userId) throw new Error("session missing access_token/user id");
 
-    const base = (window as unknown as { __SUPABASE_URL__?: string }).__SUPABASE_URL__
-      ?? key.replace(/^sb-/, "").replace(/-auth-token$/, "");
+    const base = key.replace(/^sb-/, "").replace(/-auth-token$/, "");
     const url = `https://${base}.supabase.co/rest/v1/trades` +
       `?select=pnl,net_pnl&status=eq.settled&mode=eq.${m}&user_id=eq.${userId}`;
 
+    // PostgREST wants BOTH: `apikey` is the project's publishable key (it is in
+    // the browser bundle already, so this is not a secret), and Authorization
+    // carries the user's JWT, which is what RLS scopes against. Sending the JWT
+    // as apikey returns 401.
     const res = await fetch(url, {
-      headers: { apikey: token, Authorization: `Bearer ${token}` },
+      headers: { apikey: apiKey, Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(`PostgREST ${res.status} reading trades`);
     const rows = (await res.json()) as Array<{ pnl: number | null; net_pnl: number | null }>;
     // Must mirror the frontend's own precedence (net_pnl ?? pnl), or the gate
     // fails for a reason that isn't a bug.
     return rows.reduce((sum, r) => sum + (r.net_pnl ?? r.pnl ?? 0), 0);
-  }, mode);
+  }, { m: mode, apiKey });
 }
 
 function parseMoney(text: string): number {
@@ -167,6 +174,15 @@ test.describe("dashboard truth", () => {
   }
 
   test("rendered P&L equals the database", async ({ page }) => {
+    // Reuse the apikey the app itself sends, rather than plumbing the project's
+    // publishable key through CI config. Self-configuring, and it cannot drift
+    // out of sync with whatever the deployed bundle is actually using.
+    let apiKey = "";
+    page.on("request", (r) => {
+      if (apiKey || !/supabase\.co\/rest\//.test(r.url())) return;
+      apiKey = r.headers()["apikey"] ?? "";
+    });
+
     await signIn(page);
 
     await page.getByRole("button", { name: /^paper$/i }).click();
@@ -174,7 +190,8 @@ test.describe("dashboard truth", () => {
     await expect(allTime).toBeVisible({ timeout: PAINT_TIMEOUT_MS });
 
     const rendered = parseMoney(await allTime.innerText());
-    const expected = await dbRealisedPnl(page, "paper");
+    expect(apiKey, "never observed an apikey header on a /rest/ request").toBeTruthy();
+    const expected = await dbRealisedPnl(page, "paper", apiKey);
 
     // A dashboard showing a confidently wrong number is worse than a blank one.
     expect(Math.abs(Math.abs(rendered) - Math.abs(expected)),
