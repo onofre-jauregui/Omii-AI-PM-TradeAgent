@@ -19,6 +19,7 @@ import { LiveModeBanner } from "@/components/trading/LiveModeBanner";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot, Lock, LayoutDashboard, Settings, LogOut } from "lucide-react";
+import { PAID_TIERS, tierPriceLabel } from "@/lib/pricing";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -30,6 +31,9 @@ import {
 
 type Tab = "dashboard" | "agent" | "markets" | "settings";
 type Mode = "paper" | "live";
+
+// Cheapest paid plan — what the live-trading upgrade prompt points a free user at.
+const ENTRY_PAID_TIER = PAID_TIERS[0];
 
 const TAB_LABELS: Record<Tab, string> = {
   dashboard: "Dashboard",
@@ -121,7 +125,7 @@ const Index = () => {
             </div>
             <h2 className="text-lg font-semibold text-foreground mb-2">Live trading is locked</h2>
             <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
-              Your current plan only supports paper trading. Upgrade to Starter ($99/mo) to enable live trading on Kalshi.
+              Your current plan only supports paper trading. Upgrade to {ENTRY_PAID_TIER.name} ({tierPriceLabel(ENTRY_PAID_TIER)}/mo) to enable live trading on Kalshi.
             </p>
             <div className="flex flex-col gap-2">
               <button

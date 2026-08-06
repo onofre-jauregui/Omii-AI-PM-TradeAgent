@@ -3,61 +3,14 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, CheckCircle, Loader2, ExternalLink, Settings } from "lucide-react";
+import { PAID_TIERS, FREE_TIER, tierFeatures, tierPriceLabel } from "@/lib/pricing";
 
 const CHECKOUT_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/create-checkout`;
 const MANAGE_BILLING_URL = `${import.meta.env.VITE_SUPABASE_URL ?? ""}/functions/v1/manage-billing`;
 
-interface Plan {
-  tier: "starter" | "pro" | "prop";
-  name: string;
-  price: number;
-  description: string;
-  features: string[];
-  highlight?: boolean;
-}
-
-const PLANS: Plan[] = [
-  {
-    tier: "starter",
-    name: "Starter",
-    price: 99,
-    description: "For traders who want real live executions.",
-    features: [
-      "25 trades / day",
-      "8 open positions",
-      "$100 max position",
-      "Live trading enabled",
-      "S-001 + S-002 strategies",
-    ],
-  },
-  {
-    tier: "pro",
-    name: "Pro",
-    price: 199,
-    description: "Full access — all strategies, bigger positions.",
-    highlight: true,
-    features: [
-      "100 trades / day",
-      "25 open positions",
-      "$500 max position",
-      "Live trading enabled",
-      "All strategies including S-005 Weather",
-    ],
-  },
-  {
-    tier: "prop",
-    name: "Prop",
-    price: 999,
-    description: "For serious operators deploying real capital.",
-    features: [
-      "1,000 trades / day",
-      "100 open positions",
-      "$5,000 max position",
-      "Live trading enabled",
-      "All strategies + priority execution",
-    ],
-  },
-];
+// Plans, prices and limits come from src/lib/pricing.ts — the same table the
+// landing page renders and the same numbers the server enforces.
+const PLANS = PAID_TIERS;
 
 export default function BillingPage() {
   const navigate = useNavigate();
@@ -191,8 +144,8 @@ export default function BillingPage() {
         <div className="rounded-xl border border-border bg-secondary/30 px-5 py-4 mb-8">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium">Free Trial — Paper Trading</p>
-              <p className="text-xs text-muted-foreground mt-0.5">5 trades/day · $25 max position · Paper mode only · No credit card required</p>
+              <p className="text-sm font-medium">{FREE_TIER.name} — {FREE_TIER.description}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{tierFeatures(FREE_TIER).join(" · ")}</p>
             </div>
             {(currentTier === "free" || !currentTier) && (
               <span className="text-xs bg-secondary text-muted-foreground px-2.5 py-1 rounded-full">Current</span>
@@ -203,12 +156,12 @@ export default function BillingPage() {
         {/* Paid plans */}
         <div className="grid md:grid-cols-3 gap-4">
           {PLANS.map((plan) => {
-            const isCurrent = currentTier === plan.tier && isActive;
-            const isUpgrading = upgrading === plan.tier;
+            const isCurrent = currentTier === plan.id && isActive;
+            const isUpgrading = upgrading === plan.id;
 
             return (
               <div
-                key={plan.tier}
+                key={plan.id}
                 className={`rounded-2xl border overflow-hidden flex flex-col ${
                   plan.highlight
                     ? "border-foreground/30 bg-foreground/5"
@@ -225,13 +178,13 @@ export default function BillingPage() {
                     <h3 className="font-semibold text-base">{plan.name}</h3>
                     <p className="text-muted-foreground text-xs mt-0.5">{plan.description}</p>
                     <div className="mt-4 flex items-baseline gap-1">
-                      <span className="text-3xl font-bold">${plan.price}</span>
+                      <span className="text-3xl font-bold">{tierPriceLabel(plan)}</span>
                       <span className="text-muted-foreground text-sm">/mo</span>
                     </div>
                   </div>
 
                   <ul className="space-y-2 flex-1 mb-6">
-                    {plan.features.map((f) => (
+                    {tierFeatures(plan).map((f) => (
                       <li key={f} className="flex items-start gap-2 text-xs text-muted-foreground">
                         <CheckCircle className="h-3.5 w-3.5 text-emerald-500 mt-0.5 shrink-0" />
                         {f}
@@ -247,7 +200,7 @@ export default function BillingPage() {
                     <Button
                       className="w-full rounded-full gap-2"
                       variant={plan.highlight ? "default" : "outline"}
-                      onClick={() => handleUpgrade(plan.tier)}
+                      onClick={() => handleUpgrade(plan.id)}
                       disabled={!!upgrading || loading}
                     >
                       {isUpgrading ? (
