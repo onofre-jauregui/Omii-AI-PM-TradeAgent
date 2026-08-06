@@ -51,7 +51,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
   const queryClient = useQueryClient();
   // Shared cache: newest 50 trades, stale-while-revalidate. Refreshes via the
   // single realtime channel in strategiesContext (no per-component channel here).
-  const { data, isLoading, isFetching, refetch } = useRecentTrades(filterMode);
+  const { data, isLoading, isFetching, isError, error, refetch } = useRecentTrades(filterMode);
   const trades = (data ?? []) as Trade[];
   const [ratingId, setRatingId] = useState<string | null>(null);
 
@@ -121,6 +121,15 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
             <div className="flex flex-col items-center justify-center py-20 gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               <span className="text-sm text-muted-foreground">Loading trades…</span>
+            </div>
+          ) : isError && trades.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-2 text-center px-6">
+              <Clock className="h-8 w-8 text-loss/50" />
+              <p className="text-sm text-loss">Couldn't load trades.</p>
+              <p className="text-xs text-muted-foreground/60">{error instanceof Error ? error.message : "Unknown error"}</p>
+              <Button variant="outline" size="sm" onClick={() => refetch()} className="mt-2 rounded-full">
+                Retry
+              </Button>
             </div>
           ) : trades.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 gap-2 text-center px-6">
