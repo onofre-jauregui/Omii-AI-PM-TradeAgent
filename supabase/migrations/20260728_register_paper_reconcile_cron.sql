@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- paper-reconcile-cron was never actually registered in cron.job.
 --
 -- Root cause (found during the 2026-07-28 health-check run, 42nd): the
@@ -41,4 +48,4 @@ SELECT cron.schedule(
 
 INSERT INTO public.expected_cron_jobs (jobname, note) VALUES
   ('paper-reconcile-cron', 'advance resting paper orders against real orderbook depth (2026-07-28: found never-registered, same class as reconcile-orders 6-day gap)')
-ON CONFLICT (jobname) DO NOTHING;
+ON CONFLICT (jobname) DO UPDATE SET note = excluded.note;

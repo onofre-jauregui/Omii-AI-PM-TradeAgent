@@ -10,11 +10,12 @@ CREATE TABLE IF NOT EXISTS hitl_approvals (
   trace_id TEXT
 );
 
-CREATE INDEX hitl_approvals_user_id_status_idx ON hitl_approvals(user_id, status);
-CREATE INDEX hitl_approvals_requested_at_idx ON hitl_approvals(requested_at DESC);
+CREATE INDEX IF NOT EXISTS hitl_approvals_user_id_status_idx ON hitl_approvals(user_id, status);
+CREATE INDEX IF NOT EXISTS hitl_approvals_requested_at_idx ON hitl_approvals(requested_at DESC);
 
 -- RLS
 ALTER TABLE hitl_approvals ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users see own approvals" ON hitl_approvals;
 CREATE POLICY "Users see own approvals" ON hitl_approvals
   FOR ALL USING (auth.uid() = user_id);
 GRANT ALL ON hitl_approvals TO service_role;
@@ -33,10 +34,11 @@ CREATE TABLE IF NOT EXISTS failed_trade_queue (
   trace_id TEXT
 );
 
-CREATE INDEX failed_trade_queue_user_id_status_idx ON failed_trade_queue(user_id, status);
-CREATE INDEX failed_trade_queue_failed_at_idx ON failed_trade_queue(failed_at DESC);
+CREATE INDEX IF NOT EXISTS failed_trade_queue_user_id_status_idx ON failed_trade_queue(user_id, status);
+CREATE INDEX IF NOT EXISTS failed_trade_queue_failed_at_idx ON failed_trade_queue(failed_at DESC);
 
 ALTER TABLE failed_trade_queue ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Users see own queue" ON failed_trade_queue;
 CREATE POLICY "Users see own queue" ON failed_trade_queue
   FOR ALL USING (auth.uid() = user_id);
 GRANT ALL ON failed_trade_queue TO service_role;

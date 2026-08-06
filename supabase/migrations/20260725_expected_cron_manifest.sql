@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- Expected-cron-job manifest — closes the "job never registered" blind spot.
 --
 -- Motive (2026-07-25): reconcile-orders-cron was written and documented in
@@ -33,7 +40,7 @@ INSERT INTO public.expected_cron_jobs (jobname, note) VALUES
   ('reconcile-orders-cron',      'advance resting live Kalshi orders (2026-07-19 gap)'),
   ('signal-generator-cron',      'signal-generator run'),
   ('surface-scanner-cron',       'surface-scan for arb opportunities')
-ON CONFLICT (jobname) DO NOTHING;
+ON CONFLICT (jobname) DO UPDATE SET note = excluded.note;
 
 CREATE OR REPLACE FUNCTION public.cron_health()
 RETURNS TABLE (

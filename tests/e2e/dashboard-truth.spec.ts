@@ -91,7 +91,19 @@ function parseMoney(text: string): number {
 }
 
 test.describe("dashboard truth", () => {
-  test.skip(!HAVE_CREDS, "E2E_USER_EMAIL / E2E_USER_PASSWORD not set");
+  // Locally, skipping when credentials are absent keeps a dev run green. In CI it
+  // is the opposite of what you want: this is a blocking gate, and a silent skip
+  // is indistinguishable from a pass. Renaming the GitHub secret would have
+  // quietly turned the only authenticated suite into a no-op.
+  test.beforeAll(() => {
+    if (!HAVE_CREDS && process.env.CI) {
+      throw new Error(
+        "E2E_USER_EMAIL / E2E_USER_PASSWORD are not set in CI. This suite is a blocking gate — " +
+          "refusing to pass by skipping. Set the repository secrets or remove the job deliberately.",
+      );
+    }
+  });
+  test.skip(!HAVE_CREDS && !process.env.CI, "E2E_USER_EMAIL / E2E_USER_PASSWORD not set (local run)");
 
   for (const mode of ["paper", "live"] as const) {
     test(`${mode} mode: dashboard paints real values, nothing silently blank`, async ({ page }) => {

@@ -20,6 +20,47 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # ─── Job 1d: Can the migration set rebuild the database from zero? ────────
+  # TradeAgent has no staging Supabase project, so until 2026-08-06 nothing
+  # exercised a migration before it reached production. This is the substitute:
+  # it replays every migration into a throwaway Postgres, twice, and asserts the
+  # resulting object counts. It costs nothing and needs no Supabase project.
+  #
+  # It is not a nicety. When this was first run, production had 35 public tables
+  # while the migration set created 30 — `profiles`, `trade_lessons`,
+  # `backtest_runs` and both weather-calibration tables existed only in the live
+  # database, along with `handle_new_user()`, the trigger that creates a profile
+  # row on signup. The schema could not have been rebuilt from this repo at all.
+  # It also surfaced 20 `cron.schedule(...) ON CONFLICT ...` clauses that are not
+  # valid SQL, which is why 20260504120000 half-applied and left production
+  # without `compaction_log`.
+  #
+  # Blocking on every push and PR: the second pass is what proves migrations are
+  # re-appliable, and CI replays whole files on retry.
+  rehearse-migrations:
+    name: Migrations rebuild the schema from zero
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: rehearsal
+          POSTGRES_DB: tradeagent_migration_rehearsal
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Rehearse
+        env:
+          REHEARSAL_DSN: postgresql://postgres:rehearsal@localhost:5432/tradeagent_migration_rehearsal
+        run: ./scripts/rehearse-migrations.sh
+
   # ─── Job 1b: Guard — schedule-triggered workflows must be live on main ────
   # GitHub Actions only ever evaluates a `schedule:` trigger from the repo's
   # *default* branch (`main` here) — a scheduled workflow merged to `dev` is
@@ -51,17 +92,93 @@ jobs:
           done
           exit 0
 
+  # ─── Job 1c: Is there a staging Supabase project at all? ──────────────────
+  # `secrets` is not available in a job-level `if:`, so the answer has to come
+  # out of a job as an output. Without this, the only two options were "deploy
+  # into whatever ref is configured" or "hard-fail every dev push" — and the
+  # first is what put TradeAgent inside the Sound Studio project for two months.
+  # Unset ⇒ jobs 2 and 3 skip with a visible warning; set ⇒ they run and the
+  # guard in job 2 decides whether the target is legitimately TradeAgent's.
+  staging-target:
+    name: Staging Supabase project configured?
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+        run: |
+          if [ -z "$PROJECT_REF" ]; then
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "::warning::No STAGING_SUPABASE_PROJECT_REF set — migrations and edge functions will NOT be deployed to any pre-production backend on this push. TradeAgent has no staging Supabase project; see DECISIONS.md (2026-08-06)."
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+            echo "Staging target configured: $PROJECT_REF"
+          fi
+
   # ─── Job 2: Apply migrations → staging DB (dev push only) ─────────────────
   migrate-staging:
     name: Apply migrations → staging DB
     runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    needs: [test, staging-target]
+    if: needs.staging-target.outputs.configured == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
+
+      # Prove the staging ref actually belongs to TradeAgent before writing to it.
+      #
+      # From 2026-05-30 to 2026-08-06, STAGING_SUPABASE_PROJECT_REF pointed at
+      # `yxhtmqexyozptyoooxht` — the *Omii Sound Studio* project. Every `dev` push
+      # applied TradeAgent migrations and deployed all 35 edge functions into a
+      # different product's database, ending with 43 TradeAgent tables sitting
+      # beside Sound Studio's own `sound_studio` schema, 13 TradeAgent cron jobs
+      # firing ~1,000 failed runs/day in there, a TradeAgent trigger on that
+      # project's `auth.users`, and two production LLM API keys stored as its
+      # function secrets. Nothing in CI noticed, because nothing in CI ever asked
+      # whose database it was writing to.
+      #
+      # Two independent assertions, because either alone is defeatable:
+      #   1. The target must look like TradeAgent — its `public` schema holds the
+      #      `expected_cron_jobs` marker table, or it is empty (a fresh project).
+      #   2. The target must hold no foreign product schema. This is the one that
+      #      would have caught the Sound Studio case on day one.
+      # Fail loud and stop. A wrong ref must never reach the migration loop.
+      - name: Guard — staging ref must be a TradeAgent project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+        run: |
+          if [ -z "$PROJECT_REF" ]; then
+            echo "::error::STAGING_SUPABASE_PROJECT_REF is unset. Refusing to guess a target."
+            exit 1
+          fi
+          # Schemas Supabase itself creates. Anything else in the list is another product.
+          KNOWN='public,auth,storage,realtime,graphql,graphql_public,extensions,vault,net,cron,pgbouncer,supabase_migrations,supabase_functions,pgsodium,pgsodium_masks,_realtime,_analytics'
+          RESULT=$(curl -sf -X POST \
+            "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
+            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema='public') AS public_objects, (SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='expected_cron_jobs') AS marker, (SELECT coalesce(string_agg(nspname, ','), '') FROM pg_namespace WHERE nspname NOT LIKE 'pg\\\\_%' AND nspname <> 'information_schema' AND nspname <> ALL (string_to_array('${KNOWN}', ','))) AS foreign_schemas\"}")
+
+          PUBLIC_OBJECTS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['public_objects'])")
+          MARKER=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['marker'])")
+          FOREIGN=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['foreign_schemas'])")
+
+          if [ -n "$FOREIGN" ]; then
+            echo "::error::Project ${PROJECT_REF} contains non-TradeAgent schema(s): ${FOREIGN}. This is another product's database — refusing to deploy TradeAgent into it. See DECISIONS.md (2026-08-06, Sound Studio eviction)."
+            exit 1
+          fi
+          if [ "$MARKER" != "1" ] && [ "$PUBLIC_OBJECTS" != "0" ]; then
+            echo "::error::Project ${PROJECT_REF} has ${PUBLIC_OBJECTS} object(s) in public but no 'expected_cron_jobs' marker table. It is neither a TradeAgent project nor an empty one — refusing to deploy."
+            exit 1
+          fi
+          echo "Guard passed: ${PROJECT_REF} is a TradeAgent project (public objects: ${PUBLIC_OBJECTS}, marker: ${MARKER})."
+
       - name: Apply pending migrations to staging
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -108,8 +225,8 @@ jobs:
   deploy-staging-functions:
     name: Deploy edge functions → staging Supabase
     runs-on: ubuntu-latest
-    needs: migrate-staging
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    needs: [staging-target, migrate-staging]
+    if: needs.staging-target.outputs.configured == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -157,10 +274,18 @@ jobs:
           done
 
   # ─── Job 4: E2E smoke tests → kalshitradeagent.live (dev push only) ───────
-  e2e-staging:
-    name: E2E smoke tests → kalshitradeagent.live
+  # NOT a staging test, despite what this job was called until 2026-08-06.
+  # `kalshitradeagent.live` and `kalshitradeagent.com` both serve a bundle whose
+  # VITE_SUPABASE_URL is https://uyfnezxmgwitpzsrnkst.supabase.co — the
+  # PRODUCTION project. The `.live` domain is a second frontend deploy against
+  # the same backend, not a separate environment, so everything below reads and
+  # writes production data. Named honestly so nobody treats a green run here as
+  # pre-production proof. It deliberately does not depend on the staging jobs:
+  # the frontend it exercises has never come from them.
+  e2e-production-smoke:
+    name: E2E smoke tests → kalshitradeagent.live (production backend)
     runs-on: ubuntu-latest
-    needs: deploy-staging-functions
+    needs: test
     if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
@@ -168,7 +293,7 @@ jobs:
         with: { node-version: 20, cache: npm }
       - run: npm ci
       - run: npx playwright install chromium --with-deps
-      - name: Wait for Vercel staging deploy (poll, max 3 min)
+      - name: Wait for Vercel deploy of the .live frontend (poll, max 3 min)
         run: |
           for i in $(seq 1 18); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://kalshitradeagent.live)
@@ -176,8 +301,17 @@ jobs:
             echo "Attempt $i: HTTP $STATUS — waiting 10s..."
             sleep 10
           done
-      - name: Run E2E against staging
-        run: npm run test:e2e:staging
+      - name: Run E2E smoke suite
+        run: npm run test:e2e:smoke
+        env:
+          BASE_URL: https://kalshitradeagent.live
+
+      # 13 tests covering security headers, credential leakage in served HTML,
+      # mobile layout at 375px and accessible button labels. They have existed
+      # since the production-hardening pass but no npm script targeted them and
+      # no job ran them, so they had never once executed in CI.
+      - name: Production hardening suite
+        run: npm run test:e2e:hardening
         env:
           BASE_URL: https://kalshitradeagent.live
 
@@ -186,7 +320,7 @@ jobs:
       # sat on a permanent spinner, because nothing here had ever signed in.
       # This step does, and asserts the rendered numbers match the database.
       # Blocking on purpose — a blank or lying dashboard must not reach main.
-      - name: Dashboard truth gate → staging
+      - name: Dashboard truth gate
         run: npm run test:e2e:dashboards
         env:
           BASE_URL: https://kalshitradeagent.live
@@ -221,10 +355,18 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
+          # Same ambiguous-date guard as migrate-staging — see that job for the
+          # incident. A date shared by more than one migration is not a usable key.
+          AMBIGUOUS_DATES=$(ls supabase/migrations/*.sql | xargs -n1 basename | sed 's/\.sql$//' \
+            | cut -d_ -f1 | sort | uniq -d)
           for f in $(ls supabase/migrations/*.sql | sort); do
             VERSION=$(basename "$f" .sql)
             LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
+            if echo "$AMBIGUOUS_DATES" | grep -qx "$LEGACY_VERSION"; then
+              LEGACY_VERSION=""
+            fi
+            if echo "$APPLIED" | grep -qw "$VERSION" \
+               || { [ -n "$LEGACY_VERSION" ] && echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; }; then
               echo "Already applied: $VERSION"
               continue
             fi

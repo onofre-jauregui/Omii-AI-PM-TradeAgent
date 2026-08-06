@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS public.rate_limits (
 
 ALTER TABLE public.rate_limits ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "service role only" ON public.rate_limits;
 CREATE POLICY "service role only" ON public.rate_limits
   USING (false);
 

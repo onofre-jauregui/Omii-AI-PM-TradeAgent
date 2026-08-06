@@ -1,6 +1,9 @@
+-- Lovable-era duplicate. strategies is already created by
+-- 20260402100000_strategies_table.sql, which sorts earlier. Guarded rather than
+-- deleted, for the same reason as 20260405165717.
 
 -- strategies table
-CREATE TABLE public.strategies (
+CREATE TABLE IF NOT EXISTS public.strategies (
   id TEXT NOT NULL PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
@@ -12,6 +15,7 @@ CREATE TABLE public.strategies (
 );
 
 ALTER TABLE public.strategies ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to strategies" ON public.strategies;
 CREATE POLICY "Allow all access to strategies" ON public.strategies FOR ALL USING (true) WITH CHECK (true);
 
 -- Add missing columns to trades

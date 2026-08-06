@@ -11,6 +11,7 @@
 ALTER TABLE public.memory_attribution ENABLE ROW LEVEL SECURITY;
 
 -- Read: only rows whose trade_id belongs to the current user.
+DROP POLICY IF EXISTS "memory_attribution_user_read" ON public.memory_attribution;
 CREATE POLICY "memory_attribution_user_read"
   ON public.memory_attribution
   FOR SELECT
@@ -26,6 +27,7 @@ CREATE POLICY "memory_attribution_user_read"
 -- ── weather_forecasts (global cache — public read, no user data) ─────────────
 ALTER TABLE public.weather_forecasts ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "weather_forecasts_public_read" ON public.weather_forecasts;
 CREATE POLICY "weather_forecasts_public_read"
   ON public.weather_forecasts
   FOR SELECT
@@ -35,6 +37,7 @@ CREATE POLICY "weather_forecasts_public_read"
 -- ── weather_markets_cache (global cache) ────────────────────────────────────
 ALTER TABLE public.weather_markets_cache ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "weather_markets_cache_public_read" ON public.weather_markets_cache;
 CREATE POLICY "weather_markets_cache_public_read"
   ON public.weather_markets_cache
   FOR SELECT
@@ -44,6 +47,7 @@ CREATE POLICY "weather_markets_cache_public_read"
 -- ── kalshi_markets_cache (global cache) ─────────────────────────────────────
 ALTER TABLE public.kalshi_markets_cache ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "kalshi_markets_cache_public_read" ON public.kalshi_markets_cache;
 CREATE POLICY "kalshi_markets_cache_public_read"
   ON public.kalshi_markets_cache
   FOR SELECT
