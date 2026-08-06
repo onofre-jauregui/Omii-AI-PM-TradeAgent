@@ -617,11 +617,20 @@ serve(async (req) => {
     // ── 13. risk_state.open_position_count integrity ──────────────────
     // risk_state.open_position_count is written by updateRiskState (execute-trade)
     // and read by evaluateRisk's max_open_positions gate (_shared/risk.ts), so a
-    // stored value that drifts above reality blocks trading on a healthy account.
-    // Nothing reconciles the two, and the divergence is invisible without an
-    // explicit comparison — which is why this check exists rather than trusting
-    // the writer to stay correct. (Added 2026-08-04 alongside defensive filters
-    // on the writer; the counter was accurate at the time, and this keeps it so.)
+    // stored value that drifts above reality blocks trading on a healthy account
+    // (or, if it drifts low, silently raises the effective cap). The auto-settle
+    // reconciliation added 2026-08-05 (health-check run 106) only refreshes the
+    // count for tenants who actually settled in that specific run's tick — a
+    // tenant whose count went stale via some other path (or whose settlement
+    // window this check simply beat to the punch) stays wrong until their next
+    // trade, which can be hours. Run 107 (2026-08-06) observed this directly:
+    // the 106th run's manual backfill was overwritten within one hourly tick and
+    // sat wrong for 9+ hours across three later ticks with zero trade activity
+    // for that tenant in between — confirming the row can go stale through a path
+    // this check doesn't need to identify to correct. Since this check already
+    // computes the true value on every run, it now self-heals any drift found
+    // instead of only alerting on it, bounding the exposure window to at most
+    // one hourly tick regardless of which writer caused it.
     const { data: todayRiskRows } = await supabase
       .from("risk_state")
       .select("user_id, mode, open_position_count")
@@ -649,23 +658,39 @@ serve(async (req) => {
     });
 
     if (drifted.length > 0) {
+      const today = new Date().toISOString().split("T")[0];
       const detail = drifted
         .map((r: any) => {
           const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
           return `${String(r.user_id).slice(0, 8)}/${r.mode}: stored ${r.open_position_count} vs open ${actual}`;
         })
         .join("; ");
+
+      // Self-heal: write the freshly-computed true count back, same shape as
+      // auto-settle's reconciliation UPDATE. Idempotent and safe to run every
+      // tick — it only touches rows already confirmed wrong above.
+      let healed = 0;
+      for (const r of drifted as any[]) {
+        const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
+        const healQuery = supabase.from("risk_state").update({
+          open_position_count: actual,
+          updated_at: new Date().toISOString(),
+        }).eq("date", today).eq("mode", r.mode);
+        const { error: healErr } = await (r.user_id ? healQuery.eq("user_id", r.user_id) : healQuery.is("user_id", null));
+        if (!healErr) healed++;
+      }
+
       pendingAlerts.push({
         type: "risk_state_count_drift",
         fingerprint: `risk_count_drift_${drifted.length}`,
         cooldownHours: 12,
-        message: `📊 [TradeAgent] risk_state.open_position_count drifted from reality — ${detail}. The max_open_positions gate reads this value.`,
+        message: `📊 [TradeAgent] risk_state.open_position_count drifted from reality — ${detail}. The max_open_positions gate reads this value. Auto-healed ${healed}/${drifted.length} row(s).`,
       });
       await supabase.from("compliance_log").insert({
         event_type: "risk_state_count_drift",
         severity: "warning",
-        message: `risk_state.open_position_count diverged for ${drifted.length} (user, mode) row(s): ${detail}`,
-        metadata: { drifted: drifted.length },
+        message: `risk_state.open_position_count diverged for ${drifted.length} (user, mode) row(s): ${detail}. Auto-healed ${healed}/${drifted.length}.`,
+        metadata: { drifted: drifted.length, healed },
       });
     }
 
