@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
-import { computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
+import { applyRiskBaselineFilter, computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
 import { applyLessonDedupeFilters } from "../_shared/lesson-dedupe.ts";
 
 /**
@@ -160,7 +160,7 @@ serve(async (req) => {
     const { data: strategies } = await supabase
       .from("strategies")
       .select(
-        "id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason, user_id",
+        "id, name, active, starting_balance, mode, suspended_until, updated_at, expected_hit_rate, max_acceptable_drawdown, suspension_reason, user_id, risk_baseline_reset_at",
       );
 
     const strategyResults: any[] = [];
@@ -221,13 +221,22 @@ serve(async (req) => {
       // 2026-05-19, frozen at strategy launch, never actually "rolling." Fetch the
       // most recent 30 (descending) then reverse in-memory so the cumulative
       // peak/drawdown math below still walks oldest-to-newest within that window.
-      const { data: rawTradesDesc } = await supabase
+      //
+      // risk_baseline_reset_at (applyRiskBaselineFilter): a fixed 30-trade window
+      // can BE a low-volume strategy's entire history, so a couple of bad trades
+      // from before a root-cause fix ships can never age out on their own —
+      // suspension blocks the new trades that would eventually push them out.
+      // When a human has deliberately reset the baseline after fixing the actual
+      // cause, only trades settled after that point are evaluated.
+      let tradesQuery = supabase
         .from("trades")
         .select("pnl, settled_at, status")
         .eq("status", "settled")
         .not("settled_at", "is", null)
         .eq("mode", strat.mode)
-        .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`)
+        .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`);
+      tradesQuery = applyRiskBaselineFilter(tradesQuery, strat.risk_baseline_reset_at);
+      const { data: rawTradesDesc } = await tradesQuery
         .order("settled_at", { ascending: false })
         .limit(30);
       const rawTrades = rawTradesDesc ? [...rawTradesDesc].reverse() : rawTradesDesc;
