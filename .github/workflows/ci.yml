@@ -51,116 +51,64 @@ jobs:
           done
           exit 0
 
-  # ─── Job 2: Apply migrations → staging DB (dev push only) ─────────────────
-  migrate-staging:
-    name: Apply migrations → staging DB
+  # ─── Job 2: Migration rehearsal on an ephemeral Postgres (every PR + push) ─
+  # Replaces the old "Apply migrations → staging DB" job. That job pointed at
+  # STAGING_SUPABASE_PROJECT_REF, a secret that resolves to empty because the
+  # staging Supabase project no longer exists — so it posted to /projects//... and
+  # exited 22. It had been passing vacuously for weeks: the loop only issues a
+  # request when a migration is pending, so with no schema changes it did nothing
+  # and reported success. The first real migration in weeks failed it (2026-08-06)
+  # and, because Jobs 3 and 4 both `needs:` it, took the staging deploy and the
+  # entire .live E2E gate down with it.
+  #
+  # An ephemeral database is strictly better: free, isolated, impossible to drift
+  # from the migration files, impossible to delete out from under CI, and replayed
+  # from zero every run — so it catches migrations that only work because of state
+  # a long-lived staging DB happened to accumulate.
+  #
+  # Runs on every PR and push, not just dev: a migration that cannot apply should
+  # fail on the PR that introduces it, not after it merges.
+  migration-rehearsal:
+    name: Migration rehearsal (ephemeral Postgres)
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - name: Apply pending migrations to staging
+      - name: Replay every migration into a throwaway database
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
-        run: |
-          # Apply any migrations not yet in the remote history table, via Management API.
-          # Fails the job hard on the first bad migration instead of silently recording it as
-          # applied — a prior version of this loop swallowed failures with `|| echo WARN`, which
-          # let staging drift ~40 migrations behind `main` undetected (see DECISIONS.md, 2026-07-27).
-          APPLIED=$(curl -sf -X POST \
-            "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
-            -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
-            | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
-          for f in $(ls supabase/migrations/*.sql | sort); do
-            # Full filename stem going forward, so same-day multi-file migrations get distinct
-            # keys. Also check the legacy date-only prefix so migrations already recorded under
-            # the old (buggy) scheme aren't re-applied wholesale by this fix.
-            VERSION=$(basename "$f" .sql)
-            LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
-              echo "Already applied: $VERSION"
-              continue
-            fi
-            echo "Applying: $VERSION"
-            SQL=$(python3 -c "import json,sys; print(json.dumps(open(sys.argv[1]).read()))" "$f")
-            curl -sf -X POST \
-              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
-              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"query\": $SQL}"
-            echo "OK: $VERSION"
-            # Only record history on confirmed success — `curl -sf` above already aborts the
-            # job (bash -e) on a non-2xx response, so reaching this line means it applied clean.
-            curl -sf -X POST \
-              "https://api.supabase.com/v1/projects/${PROJECT_REF}/database/query" \
-              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"query\":\"INSERT INTO supabase_migrations.schema_migrations(version,name,statements) VALUES('${VERSION}','$(basename $f)','{}') ON CONFLICT DO NOTHING\"}" > /dev/null
-          done
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: ./scripts/rehearse-migrations.sh
 
-  # ─── Job 3: Deploy edge functions → staging Supabase (dev push only) ──────
-  deploy-staging-functions:
-    name: Deploy edge functions → staging Supabase
-    runs-on: ubuntu-latest
-    needs: migrate-staging
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - name: Deploy all functions to staging
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: |
-          # Retry each function's deploy with backoff before failing loud, so a single
-          # transient deploy hiccup doesn't require a manual rerun.
-          #
-          # 2026-07-29 (72nd health check, run 30431158450): bundling used to import
-          # supabase-js from esm.sh at deploy time; a transient CDN 5xx there (observed
-          # 2026-07-28, run 30357821307: "Import ... failed: 522") aborted the whole job
-          # under `bash -e` and blocked staging/e2e for every function, not just the one
-          # that hit the blip. The original 3-attempt/flat-15s budget (~45s) was exhausted
-          # by manage-billing while esm.sh stayed unreachable for over 2 minutes straight
-          # (07:28:55-07:30:47). Widened to 5 attempts with exponential backoff
-          # (15/30/60/120s, ~3.75min budget) as a stopgap.
-          #
-          # 2026-07-29 (77th health check, run 30450872671): the widened budget was
-          # exhausted again — futures-signal failed after all 5 attempts (~7min) while
-          # esm.sh 522'd repeatedly. Root cause fixed at the source instead of widening
-          # further: every function now imports supabase-js via the `npm:` specifier
-          # (Deno's native npm-registry resolution) instead of esm.sh's CDN, so this CI
-          # step no longer depends on esm.sh's availability at all. This retry loop stays
-          # as defense-in-depth against any other transient deploy hiccup (npm registry,
-          # Supabase API), not as the primary fix.
-          for fn in $(ls supabase/functions/ | grep -v _shared | grep -v tests); do
-            delay=15
-            for attempt in 1 2 3 4 5; do
-              if npx supabase functions deploy "$fn" \
-                --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}; then
-                break
-              fi
-              if [ "$attempt" = 5 ]; then
-                echo "Deploy failed for $fn after 5 attempts"
-                exit 1
-              fi
-              echo "Deploy attempt $attempt failed for $fn, retrying in ${delay}s..."
-              sleep "$delay"
-              delay=$((delay * 2))
-            done
-          done
+  # ─── Job 3: Deploy edge functions → staging Supabase ──────────────────────
+  # REMOVED 2026-08-06. It deployed to STAGING_SUPABASE_PROJECT_REF, which no
+  # longer exists, so it could only ever fail or be skipped — and Job 4 `needs:`
+  # it, which is why the .live E2E gate never ran. Edge functions reach production
+  # through Job 6 on a main push, unchanged.
+  #
+  # Restoring a real staging backend means provisioning a second Supabase project
+  # (recurring cost, Onofre's call) or adopting Supabase branching. Until then
+  # kalshitradeagent.live is a dev-branch FRONTEND pointed at the production
+  # database — Job 4 is honest about testing that, rather than pretending a
+  # staging backend exists.
 
   # ─── Job 4: E2E smoke tests → kalshitradeagent.live (dev push only) ───────
   e2e-staging:
     name: E2E smoke tests → kalshitradeagent.live
     runs-on: ubuntu-latest
-    needs: deploy-staging-functions
+    needs: migration-rehearsal
     if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4

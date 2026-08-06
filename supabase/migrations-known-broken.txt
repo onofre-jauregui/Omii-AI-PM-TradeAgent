@@ -1,0 +1,68 @@
+# Migrations that do not apply to a clean database — the replay ratchet baseline.
+#
+# scripts/rehearse-migrations.sh replays every migration into a throwaway Postgres.
+# 24 of 71 fail. Each is listed here with the error it produces, so the rehearsal
+# can block NEW breakage without pretending this debt does not exist. A migration
+# not on this list must apply cleanly or CI fails.
+#
+# THE LIST ONLY SHRINKS. Adding a line means accepting that the schema cannot be
+# rebuilt from this repo — do it only with a reason written down, never to make a
+# red build green.
+#
+# What this backlog means, plainly: **this repository cannot rebuild its own
+# database.** If the Supabase project were deleted — which already happened to the
+# staging project, and to a sibling project's production in July — these files
+# would not reconstruct it. That is the risk this list makes visible.
+#
+# Four distinct causes, in priority order for repair:
+#
+# 1. SQL THAT IS INVALID EVERYWHERE (6 files) — `select cron.schedule(...) ON
+#    CONFLICT`, which is not valid Postgres in any environment. These statements
+#    have never executed, here or in production. Every cron job they claim to
+#    create was made another way, so the manifest in the health check is the only
+#    thing proving those jobs exist. Cheapest to fix and the most misleading to
+#    leave: the file reads as though it schedules a job and does nothing.
+#
+# 2. TABLES THAT EXIST ONLY BY DASHBOARD (8 files) — profiles, trade_lessons,
+#    backtest_runs, weather_bucket_calibration, and the storage schema were
+#    created by hand in the Supabase UI and never captured as a migration.
+#    Everything depending on them fails a rebuild. Fix by capturing each as a
+#    migration from the production catalog.
+#
+# 3. ORDERING / RE-CREATE CONFLICTS (7 files) — duplicate CREATE TABLE for
+#    api_keys and strategies, and three view redefinitions that change a column
+#    name in place (CREATE OR REPLACE VIEW cannot rename columns; needs DROP
+#    first). These applied in production only because production reached the
+#    required state by a path the files do not describe.
+#
+# 4. TYPE DRIFT (3 files) — `operator does not exist: text = uuid` and columns
+#    referenced before the migration that adds them. user_id is `text` in some
+#    tables and `uuid` in others; the join only works where production happens to
+#    match.
+#
+# Format: <filename> | <error> | <cause #>
+
+20260405165717_bf64e3a2-5426-4445-b413-c141ec73918a.sql | relation "api_keys" already exists | 3
+20260405165737_2b654ee0-6bdf-4419-9c39-bc25f0b18c3f.sql | relation "strategies" already exists | 3
+20260406_signal_surface_tables.sql | syntax error at or near "on" | 1
+20260407_baskets_crons_config.sql | syntax error at or near "on" | 1
+20260415_paper_trading_pipeline.sql | syntax error at or near "ON" | 1
+20260421_spread_history_and_signal_feedback.sql | relation "backtest_runs" does not exist | 2
+20260427_futures_signal_cron.sql | syntax error at or near "ON" | 1
+20260428_fix_auto_reflect_cron.sql | syntax error at or near "ON" | 1
+20260504120000_v2_instrumentation_and_lock.sql | syntax error at or near "ON" | 1
+20260504_v2_validation_queries.sql | column s.strategy_id does not exist | 4
+20260515_fix_settle_view.sql | cannot change name of view column "trades_pending" to "user_id" | 3
+20260520_admin_rls_bypass.sql | relation "public.profiles" does not exist | 2
+20260520_admin_role.sql | relation "public.profiles" does not exist | 2
+20260520_avatars_storage_policies.sql | schema "storage" does not exist | 2
+20260521_fix_pending_resolution_view.sql | cannot change name of view column "trades_pending" to "user_id" | 3
+20260521_kalshi_markets_cache.sql | syntax error at or near "ON" | 1
+20260523_notifications.sql | relation "public.profiles" does not exist | 2
+20260524_kalshi_username.sql | relation "public.profiles" does not exist | 2
+20260525_trade_lessons_user_id.sql | relation "public.trade_lessons" does not exist | 2
+20260706_trade_lessons_lesson_type_expand.sql | relation "trade_lessons" does not exist | 2
+20260717_trades_user_rating_idx.sql | column "user_rating" does not exist | 4
+20260719_realmoney_reconciliation.sql | cannot change name of view column "trades_pending" to "user_id" | 3
+20260731_signal_claims.sql | operator does not exist: text = uuid | 4
+20260803_enable_rls_weather_calibration_and_cron_manifest.sql | relation "public.weather_bucket_calibration" does not exist | 2
