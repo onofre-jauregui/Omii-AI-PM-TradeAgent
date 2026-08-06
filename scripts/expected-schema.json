@@ -17,10 +17,18 @@
   "         idx_signals_shadow_settled, idx_signals_system_version, idx_trades_source_signal,",
   "         idx_trades_system_version",
   "  index  risk_settings_user_unique \u2014 production has 11 user_ids with duplicate risk_settings rows,",
-  "         so this constraint cannot be added until they are deduplicated.",
-  "Objects production has that this branch does not \u2014 all land with the Phase 0 memory-isolation PR:",
-  "  column agent_memory.last_evidence_at | index idx_agent_memory_recall",
-  "  function settle_memory_attributions() | the four scoped agent_memory RLS policies"
+  "         so this constraint cannot be added until they are deduplicated."
+ ],
+ "_phase0_changes_2026_08_06": [
+  "Regenerated when the agent_memory tenant-isolation work merged. Deliberate deltas vs the",
+  "pre-Phase-0 fingerprint, each verified intended before this file was rewritten:",
+  "  + column   agent_memory.last_evidence_at (decay is computed from evidence, not last write)",
+  "  + column   strategies.risk_baseline_reset_at (from the strategy-suspension deadlock fix)",
+  "  + index    idx_agent_memory_recall     - index  idx_agent_memory_user (exact duplicate)",
+  "  + function settle_memory_attributions()",
+  "  - policy   agent_memory 'Users can manage own memories' \u2014 FOR ALL, USING (true), which OR'd",
+  "             past the four correctly-scoped agent_memory_{select,insert,update,delete} policies.",
+  "             Same defect class as 'Allow all access to api_keys'. anon now has no policy here."
  ],
  "columns": [
   "agent_memory.alpha :: numeric DEFAULT 1",
@@ -34,6 +42,7 @@
   "agent_memory.exposed_confidence :: numeric",
   "agent_memory.id :: uuid NOT NULL DEFAULT gen_random_uuid()",
   "agent_memory.is_active :: boolean NOT NULL DEFAULT true",
+  "agent_memory.last_evidence_at :: timestamp with time zone",
   "agent_memory.last_recalled_at :: timestamp with time zone",
   "agent_memory.last_updated_at :: timestamp with time zone",
   "agent_memory.market_context :: jsonb DEFAULT '{}'::jsonb",
@@ -267,6 +276,7 @@
   "strategies.max_acceptable_drawdown :: numeric DEFAULT 0.25",
   "strategies.mode :: text NOT NULL DEFAULT 'paper'::text",
   "strategies.name :: text NOT NULL",
+  "strategies.risk_baseline_reset_at :: timestamp with time zone",
   "strategies.run_interval_minutes :: integer",
   "strategies.starting_balance :: numeric NOT NULL DEFAULT 1000",
   "strategies.suspended_until :: timestamp with time zone",
@@ -581,11 +591,11 @@
   "idx_agent_memory_exposed",
   "idx_agent_memory_needs_summary",
   "idx_agent_memory_quarantined",
+  "idx_agent_memory_recall",
   "idx_agent_memory_strategy",
   "idx_agent_memory_system_version",
   "idx_agent_memory_tags",
   "idx_agent_memory_type",
-  "idx_agent_memory_user",
   "idx_agent_memory_user_id",
   "idx_api_keys_user_id",
   "idx_baskets_user_id",
@@ -679,7 +689,6 @@
   "weather_markets_cache_pkey"
  ],
  "policies": [
-  "agent_memory::Users can manage own memories",
   "agent_memory::admin_read_agent_memory",
   "agent_memory::agent_memory_delete",
   "agent_memory::agent_memory_insert",
@@ -745,6 +754,7 @@
   "rls_disabled_tables()",
   "seed_risk_settings_for_new_user()",
   "seed_strategy_config_for_new_strategy()",
+  "settle_memory_attributions()",
   "upsert_rate_limit(p_user_id uuid, p_endpoint text, p_window_start timestamp with time zone, p_limit integer)"
  ],
  "triggers": [
