@@ -74,13 +74,24 @@ serve(async (req) => {
 
     // ── Phase 1: SUMMARIZE — create 1-line summaries ──────────
 
-    const { data: unsummarized } = await supabase
+    const { data: unsummarizedBatch } = await supabase
       .from("agent_memory")
-      .select("id, title, content, memory_type, tags")
+      .select("id, user_id, title, content, memory_type, tags")
       .eq("is_active", true)
       .is("summary", null)
       .order("created_at", { ascending: true })
       .limit(20); // batch 20 at a time to control cost
+
+    // One tenant per batch. The summarize call sends every memory's raw content in
+    // a single prompt, so an unfiltered batch put up to 20 tenants' private trading
+    // lessons into one request — a cross-tenant disclosure to the model even though
+    // the summaries were written back to the right rows. Restricting the batch to
+    // the oldest pending row's owner keeps each request single-tenant; the rest are
+    // picked up on the next hourly run.
+    const batchOwnerId = unsummarizedBatch?.[0]?.user_id ?? null;
+    const unsummarized = (unsummarizedBatch ?? []).filter(
+      (m) => (m.user_id ?? null) === batchOwnerId,
+    );
 
     if (unsummarized && unsummarized.length > 0 && aiKey) {
       // Batch summarize with a single AI call; truncate content to keep input small
@@ -381,19 +392,32 @@ serve(async (req) => {
             ) / totalConfirmations
             : cluster.reduce((s, m) => s + (m.confidence || 0.5), 0) /
               cluster.length;
-          const [type, strategyId] = groupKey.split("::");
+          // Identity of the merged row comes from the cluster members, not from
+          // re-parsing groupKey. The old `const [type, strategyId] =
+          // groupKey.split("::")` read a 5-part key (`user_id::memory_type::
+          // strategy_id::lesson_type::category`) into 2 variables, so `type`
+          // received the user_id and `strategyId` received the memory_type. Every
+          // insert therefore violated both the memory_type CHECK and the
+          // strategy_id FK — and the error was discarded, so merging silently did
+          // nothing while still paying for the LLM merge call above on every run.
+          // Reading the members directly cannot drift from the key's encoding.
+          const [{ user_id: ownerId, memory_type: type, strategy_id: strategyId }] =
+            cluster;
 
-          // Create merged memory
-          const { data: merged } = await supabase
+          // Create merged memory. Carries the cluster's owner: without user_id the
+          // merged row is platform-global and readable by every tenant, which would
+          // have turned a fixed merge into a cross-tenant leak.
+          const { data: merged, error: mergeInsertError } = await supabase
             .from("agent_memory")
             .insert({
+              user_id: ownerId ?? null,
               memory_type: type,
               title: mergedTitle,
               content: mergedContent,
               summary: mergedSummary,
               source_type: "reflection",
               tags: allTags,
-              strategy_id: strategyId === "global" ? null : strategyId,
+              strategy_id: strategyId ?? null,
               confidence: Math.min(0.95, weightedConfidence),
               confirmations: totalConfirmations,
               contradictions: totalContradictions,
@@ -403,6 +427,24 @@ serve(async (req) => {
             })
             .select("id")
             .single();
+
+          if (mergeInsertError) {
+            console.error(
+              `merged agent_memory insert failed for group ${groupKey}: ${mergeInsertError.message}`,
+            );
+            await supabase.from("compliance_log").insert({
+              event_type: "memory_merge_insert_failed",
+              severity: "error",
+              message:
+                `compact-memory could not persist a merged memory for ${cluster.length} rows: ${mergeInsertError.message}`,
+              metadata: {
+                group_key: groupKey,
+                cluster_size: cluster.length,
+                code: mergeInsertError.code,
+              },
+              user_id: ownerId ?? null,
+            }).then(null, () => {});
+          }
 
           if (merged) {
             // Keep originals active — link them to the merged memory so the

@@ -4,6 +4,7 @@ import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.t
 import { marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { KALSHI_BASE_URL, getKalshiCredentials, generateAuthHeaders, fetchWithRetry } from "../_shared/kalshi-auth.ts";
 import { importMasterKey, decryptSecret } from "../_shared/encryption.ts";
+import { applyMemoryTenantFilter } from "../_shared/memory-scope.ts";
 
 const CREDENTIAL_FETCH_TIMEOUT_MS = 8_000; // same bound as market-data-fetcher/health-check/reconcile-orders/settle-signals/kalshi-ping/futures-signal/kalshi-proxy
 // Bare `await fetch()` to the LLM provider had no timeout — a stalled Anthropic
@@ -674,23 +675,20 @@ serve(async (req) => {
       authSettled,
       keyRowsSettled,
       savedModelSettled,
-      memorySettled,
       tradesSettled,
       unreflectedSettled,
     ] = await Promise.allSettled([
       authPromise,
       supabase.from("api_keys").select("provider, secret_ciphertext, secret_iv, encrypted_secret").in("provider", ["openrouter", "openai", "anthropic", "google"]),
       supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
-      // NOTE: risk_settings is fetched in the SECOND batch below, after userId
-      // resolves — it is per (user_id, mode) and an unscoped query here matches
-      // multiple rows and errors.
-      supabase.from("agent_memory")
-        .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
-        .eq("is_active", true)
-        .is("merged_into", null)
-        .order("confidence", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(30),
+      // NOTE: risk_settings and agent_memory are fetched in the SECOND batch
+      // below, after userId resolves — both are per-user. risk_settings is per
+      // (user_id, mode) and an unscoped query here matches multiple rows and
+      // errors. agent_memory failed more quietly: an unscoped prefetch here was
+      // overwritten by a scoped re-fetch only when userId resolved, so an
+      // unauthenticated call kept 30 rows drawn from every tenant and fed them
+      // into the system prompt. The prefetch was also pure waste on the
+      // authenticated path, since its result was always discarded.
       supabase.from("trades")
         .select("ticker, side, action, price, amount, pnl, strategy, settled_at")
         .eq("status", "settled")
@@ -712,18 +710,33 @@ serve(async (req) => {
     // Load profile + user_preference memories + risk_settings in parallel (userId now known).
     // risk_settings is per (user_id, mode); scope by both so we don't match multiple rows.
     const riskMode: "paper" | "live" = tradingMode === "live" ? "live" : "paper";
-    const [profileSettled, prefMemoriesSettled, riskSettled] = await Promise.allSettled([
+    const [profileSettled, prefMemoriesSettled, memorySettled, riskSettled] = await Promise.allSettled([
       userId
         ? supabase.from("profiles").select("display_name").eq("id", userId).maybeSingle()
         : Promise.resolve({ data: null, error: null }),
       userId
-        ? supabase.from("agent_memory")
-            .select("id, title, content, summary, tags, confidence, created_at")
-            .eq("is_active", true)
-            .eq("memory_type", "user_preference")
-            .or(`user_id.is.null,user_id.eq.${userId}`)
+        ? applyMemoryTenantFilter(
+            supabase.from("agent_memory")
+              .select("id, title, content, summary, tags, confidence, created_at")
+              .eq("is_active", true)
+              .eq("memory_type", "user_preference"),
+            { userId },
+          )
             .order("confidence", { ascending: false })
             .limit(20)
+        : Promise.resolve({ data: null, error: null }),
+      userId
+        ? applyMemoryTenantFilter(
+            supabase.from("agent_memory")
+              .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
+              .eq("is_active", true)
+              .is("merged_into", null)
+              .neq("memory_type", "user_preference"),
+            { userId },
+          )
+            .order("confidence", { ascending: false })
+            .order("created_at", { ascending: false })
+            .limit(30)
         : Promise.resolve({ data: null, error: null }),
       userId
         ? supabase.from("risk_settings").select("*").eq("user_id", userId).eq("mode", riskMode).maybeSingle()
@@ -741,22 +754,9 @@ serve(async (req) => {
     const userPrefMemories =
       prefMemoriesSettled.status === "fulfilled" ? (prefMemoriesSettled.value?.data ?? []) : [];
 
-    // Re-fetch trading memories scoped to this user (excludes user_preference — those are in userPrefMemories).
-    // The initial batch query above was unscoped; replace with the user-scoped result.
-    let topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
-    if (userId) {
-      const { data: scopedMemories } = await supabase
-        .from("agent_memory")
-        .select("id, memory_type, title, content, summary, tags, confidence, strategy_id, child_count, created_at")
-        .eq("is_active", true)
-        .is("merged_into", null)
-        .neq("memory_type", "user_preference")
-        .or(`user_id.is.null,user_id.eq.${userId}`)
-        .order("confidence", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(30);
-      if (scopedMemories) topMemories = scopedMemories;
-    }
+    // Trading memories for this user (excludes user_preference — those are in
+    // userPrefMemories). Unauthenticated calls get null, never another tenant's rows.
+    const topMemories = memorySettled.status === "fulfilled" ? (memorySettled.value?.data ?? null) : null;
     const recentFilledTrades = tradesSettled.status === "fulfilled" ? (tradesSettled.value?.data ?? null) : null;
     const unreflectedTrades = unreflectedSettled.status === "fulfilled" ? (unreflectedSettled.value?.data ?? null) : null;
 
@@ -1626,11 +1626,16 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               ? await stateQuery.eq("user_id", userId).maybeSingle()
               : await stateQuery.is("user_id", null).maybeSingle();
 
-            // Also return memory count so agent knows its memory state
-            const { count: memoryCount } = await supabase
-              .from("agent_memory")
-              .select("*", { count: "exact", head: true })
-              .eq("is_active", true);
+            // Also return memory count so agent knows its memory state.
+            // Scoped: an unscoped count reported every tenant's memories back to
+            // this user as if they were their own.
+            const { count: memoryCount } = await applyMemoryTenantFilter(
+              supabase
+                .from("agent_memory")
+                .select("*", { count: "exact", head: true })
+                .eq("is_active", true),
+              { userId },
+            );
 
             toolResult = JSON.stringify({
               recent_trades: recentTrades || [],
@@ -1708,10 +1713,18 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "recall_lessons") {
           try {
             const limit = args.limit || 10;
-            let query = supabase
-              .from("agent_memory")
-              .select("id, memory_type, title, content, tags, confidence, strategy_id, created_at")
-              .eq("is_active", true)
+            // Tenant scope first: this tool takes free-text from the model and
+            // ILIKEs it across title/content, so unscoped it was a search box
+            // over every tenant's memories. The tenant `or=` and the searchText
+            // `or=` below are separate params, which PostgREST ANDs (verified
+            // against this project) — the scope cannot be widened by the search.
+            let query = applyMemoryTenantFilter(
+              supabase
+                .from("agent_memory")
+                .select("id, memory_type, title, content, tags, confidence, strategy_id, created_at")
+                .eq("is_active", true),
+              { userId },
+            )
               .order("confidence", { ascending: false })
               .order("created_at", { ascending: false })
               .limit(limit);
@@ -1723,13 +1736,17 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
 
             const { data: memories } = await query;
 
-            // Update last_recalled_at for returned memories
+            // Update last_recalled_at — re-scoped rather than trusting the ids we
+            // just read, so this write can never touch a row the read couldn't.
             if (memories && memories.length > 0) {
               const ids = memories.map((m) => m.id);
-              await supabase
-                .from("agent_memory")
-                .update({ last_recalled_at: new Date().toISOString() })
-                .in("id", ids);
+              await applyMemoryTenantFilter(
+                supabase
+                  .from("agent_memory")
+                  .update({ last_recalled_at: new Date().toISOString() })
+                  .in("id", ids),
+                { userId },
+              );
             }
 
             toolResult = JSON.stringify({
@@ -1745,9 +1762,18 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── save_insight ──
         else if (fnName === "save_insight") {
           try {
+            // An unauthenticated caller has no owner to attribute the insight to,
+            // and `user_id: null` means platform-global — readable by every
+            // tenant. Refuse rather than publish.
+            if (!userId) {
+              throw new Error(
+                "save_insight requires an authenticated user — refusing to write an unowned (platform-global) memory",
+              );
+            }
             const { data: memory, error: memError } = await supabase
               .from("agent_memory")
               .insert({
+                user_id: userId,
                 memory_type: args.memoryType,
                 title: args.title,
                 content: args.content,
@@ -1775,12 +1801,26 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         // ── update_memory ──
         else if (fnName === "update_memory") {
           try {
-            const { data: existing } = await supabase
-              .from("agent_memory")
-              .select("*")
-              .eq("id", args.memoryId)
-              .single();
+            // `memoryId` comes from the model, which will happily pass any UUID it
+            // saw. Ownership is enforced here, on both the read and the write —
+            // this used to be a bare `.eq("id", …)`, so any user could read, edit,
+            // reweight, or deactivate any other tenant's memory by id.
+            //
+            // `includePlatform: false` is deliberate: confirming or contradicting a
+            // platform-global lesson would move it for every user. Platform memory
+            // earns its own confidence from attributed outcomes, not from one
+            // user's chat session.
+            const memoryOwnerScope = { userId, includePlatform: false } as const;
+            const { data: existing } = await applyMemoryTenantFilter(
+              supabase
+                .from("agent_memory")
+                .select("*")
+                .eq("id", args.memoryId),
+              memoryOwnerScope,
+            ).maybeSingle();
 
+            // Same message whether the memory is absent or owned by someone else —
+            // a distinct "not yours" would confirm the id exists.
             if (!existing) throw new Error("Memory not found");
 
             const updates: any = { updated_at: new Date().toISOString() };
@@ -1799,12 +1839,15 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
               updates.content = args.newContent;
             }
 
-            const { data: updated } = await supabase
-              .from("agent_memory")
-              .update(updates)
-              .eq("id", args.memoryId)
+            const { data: updated } = await applyMemoryTenantFilter(
+              supabase
+                .from("agent_memory")
+                .update(updates)
+                .eq("id", args.memoryId),
+              memoryOwnerScope,
+            )
               .select()
-              .single();
+              .maybeSingle();
 
             toolResult = JSON.stringify({
               success: true,
@@ -2097,6 +2140,13 @@ For user-initiated manual trades (not triggered by a strategy run), set strategy
         else if (fnName === "remember") {
           try {
             const { content, category } = args;
+            // Without an owner this row would be written as platform-global and
+            // injected into every other user's prompt as their own preference.
+            if (!userId) {
+              throw new Error(
+                "remember requires an authenticated user — refusing to write an unowned (platform-global) preference",
+              );
+            }
             const title = content.slice(0, 80);
             const { data: saved, error } = await supabase.from("agent_memory").insert({
               user_id: userId,
