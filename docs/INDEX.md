@@ -14,7 +14,7 @@ Every `Updated` date below is the file's last commit date (`git log -1 --date=sh
 | [PRODUCT.md](../PRODUCT.md) | — | 2026-07-10 | current | Onofre |
 | [ROADMAP.md](../ROADMAP.md) | — | 2026-04-27 | stale — predates live money | Onofre |
 | [TASKS.md](../TASKS.md) | — | 2026-08-04 | current | Onofre |
-| [docs/DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) | 1 | 2026-08-06 | current | Onofre |
+| [docs/DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) | 2 | 2026-08-06 | current | Onofre |
 | [docs/system-report.md](system-report.md) | 2.0 | 2026-07-23 | stale — predates the canary gate and drift checks | Onofre |
 | [docs/REALMONEY-RUNBOOK.md](REALMONEY-RUNBOOK.md) | — | 2026-08-06 | current | Onofre |
 | [docs/runbooks/promotion-rollback.md](runbooks/promotion-rollback.md) | — | 2026-08-04 | current (§2a not yet exercised live) | Onofre |

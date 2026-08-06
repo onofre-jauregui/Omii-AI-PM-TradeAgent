@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Prove that supabase/migrations/ alone rebuilds the database from zero.
 #
-# Runs every migration into a throwaway Postgres, twice, and asserts the
-# resulting object counts match scripts/expected-schema-counts.json. Never
-# connects to a hosted Supabase project and never writes anything durable.
+# Runs every migration into a throwaway Postgres, twice, and asserts the rebuilt
+# catalog matches scripts/expected-schema.json object-for-object. Never connects
+# to a hosted Supabase project and never writes anything durable.
 #
-#   ./scripts/rehearse-migrations.sh            # docker, auto lifecycle
-#   ./scripts/rehearse-migrations.sh --keep     # leave the database up to inspect
+#   ./scripts/rehearse-migrations.sh                     # docker, auto lifecycle
+#   ./scripts/rehearse-migrations.sh --keep              # leave the database up
+#   ./scripts/rehearse-migrations.sh --write-fingerprint # re-record expected-schema.json
 #   REHEARSAL_DSN=postgres://... ./scripts/rehearse-migrations.sh
 #
 # Why this exists: production had 35 public tables while the migration set created
@@ -14,17 +15,19 @@
 # Supabase project outright on 2026-07-20 and recovered only because its migrations
 # replayed clean. This is the check that keeps that true here.
 #
-# Exit codes:  0 rebuilt clean · 1 a migration failed or counts drifted · 2 preconditions unmet
+# Exit codes:  0 rebuilt clean · 1 a migration failed or the catalog drifted · 2 preconditions unmet
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS_DIR="$REPO_ROOT/supabase/migrations"
 SHIM="$REPO_ROOT/scripts/supabase-shim.sql"
-EXPECTED="$REPO_ROOT/scripts/expected-schema-counts.json"
+EXPECTED="$REPO_ROOT/scripts/expected-schema.json"
+FINGERPRINT_OUT="$(mktemp -t rehearsal-fingerprint)"
 CONTAINER="tradeagent-migration-rehearsal"
 PGIMAGE="${REHEARSAL_PG_IMAGE:-postgres:15-alpine}"
 KEEP=0
 SURVEY=0
+WRITE_FINGERPRINT=0
 for arg in "$@"; do
   case "$arg" in
     --keep)   KEEP=1 ;;
@@ -32,6 +35,10 @@ for arg in "$@"; do
     # first. Never a passing mode — it always exits non-zero if anything failed.
     # Exists so a large drift can be diagnosed in one run rather than N.
     --survey) SURVEY=1; KEEP=1 ;;
+    # Overwrite scripts/expected-schema.json with what this run produced. Only
+    # correct when the schema change is intentional — the diff belongs in the
+    # same commit and the same review as the migration that caused it.
+    --write-fingerprint) WRITE_FINGERPRINT=1 ;;
   esac
 done
 
@@ -41,7 +48,7 @@ dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
 
 [[ -f "$SHIM" ]]           || { red "missing shim: $SHIM"; exit 2; }
 [[ -d "$MIGRATIONS_DIR" ]] || { red "missing migrations dir: $MIGRATIONS_DIR"; exit 2; }
-[[ -f "$EXPECTED" ]]       || { red "missing expected counts: $EXPECTED"; exit 2; }
+[[ -f "$EXPECTED" || $WRITE_FINGERPRINT -eq 1 ]] || { red "missing fingerprint: $EXPECTED"; exit 2; }
 
 # Three ways to get a throwaway Postgres, in preference order:
 #   dsn    — REHEARSAL_DSN supplied. How CI runs it, against its own empty
@@ -84,6 +91,7 @@ else
 fi
 
 cleanup() {
+  rm -f "$FINGERPRINT_OUT"
   case "$MODE" in
     local)
       if [[ $KEEP -eq 0 ]]; then
@@ -172,40 +180,31 @@ if ! run_pass 2; then
 fi
 grn "pass 2: all $APPLIED migrations re-applied clean (idempotent)"
 
-read -r tables views functions policies indexes <<<"$(
-  "${PSQL[@]}" -tA -F' ' -c "
-    SELECT
-      (SELECT count(*) FROM pg_tables    WHERE schemaname = 'public'),
-      (SELECT count(*) FROM pg_views     WHERE schemaname = 'public'),
-      (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'),
-      (SELECT count(*) FROM pg_policies  WHERE schemaname = 'public'),
-      (SELECT count(*) FROM pg_indexes   WHERE schemaname = 'public');"
-)"
-
 echo
 dim "Rebuilt from zero in $((SECONDS - started))s"
 
-# Counts are asserted, not printed for someone to eyeball. A dropped table shows
-# up as a smaller number, and a smaller number nobody compares is not a check.
-python3 - "$EXPECTED" "$tables" "$views" "$functions" "$policies" "$indexes" <<'PY'
-import json, sys
-exp = json.load(open(sys.argv[1]))
-got = dict(zip(["tables", "views", "functions", "policies", "indexes"], map(int, sys.argv[2:7])))
-bad = []
-for k, want in exp.items():
-    if k.startswith("_"):
-        continue
-    if got.get(k) != want:
-        bad.append(f"  {k:10} expected {want:4}  got {got.get(k)}")
-for k, v in got.items():
-    print(f"  {k:10} {v}")
-if bad:
-    print("\nSCHEMA DRIFT — the rebuilt schema does not match the recorded target:", file=sys.stderr)
-    print("\n".join(bad), file=sys.stderr)
-    print("\nEither a migration was lost, or the target in scripts/expected-schema-counts.json\n"
-          "needs updating in the same commit as the schema change that moved it.", file=sys.stderr)
-    sys.exit(1)
-PY
+# The rebuilt catalog is compared to the committed fingerprint by NAME, not by
+# count. Counts are the wrong check: on 2026-08-06 this script reported
+# "36 tables · 7 views · 12 functions · 52 policies · 126 indexes — counts match"
+# while twelve RLS policies, three column types and four constraints differed
+# from production. Every total lined up; the schemas did not.
+"${PSQL[@]}" -tA --no-psqlrc -f "$REPO_ROOT/scripts/schema-fingerprint.sql" > "$FINGERPRINT_OUT"
+
+if [[ $WRITE_FINGERPRINT -eq 1 ]]; then
+  python3 -c 'import json,sys; json.dump(json.load(open(sys.argv[1])), open(sys.argv[2],"w"), indent=1, sort_keys=True)' \
+    "$FINGERPRINT_OUT" "$EXPECTED"
+  grn "wrote $EXPECTED"
+  exit 0
+fi
+
+if ! python3 "$REPO_ROOT/scripts/compare-schema-fingerprint.py" "$EXPECTED" "$FINGERPRINT_OUT"; then
+  red ""
+  red "The rebuilt schema does not match scripts/expected-schema.json."
+  red "Either a migration was lost, or the fingerprint needs regenerating in the"
+  red "same commit as the schema change that moved it:"
+  red "    ./scripts/rehearse-migrations.sh --write-fingerprint"
+  exit 1
+fi
 
 echo
-grn "Rebuilt from zero — $APPLIED migrations applied clean, twice, counts match."
+grn "Rebuilt from zero — $APPLIED migrations applied clean, twice, catalog matches."

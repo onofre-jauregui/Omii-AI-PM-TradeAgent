@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 updated: 2026-08-06
 status: current
 ---
@@ -14,7 +14,7 @@ This is not theoretical. A sibling OMII project's Supabase project was **deleted
 
 | | |
 |---|---|
-| **Schema** | Survives. `supabase/migrations/` rebuilds it from zero — 72 migrations, verified clean, in about 3 seconds. |
+| **Schema** | Survives. `supabase/migrations/` rebuilds it from zero — 73 migrations, verified clean, in about 3 seconds. |
 | **Edge functions** | Survive in `supabase/functions/`. Redeploy with the CLI. |
 | **Cron jobs** | Survive as `cron.schedule()` calls inside the migrations, and are cross-checked against `expected_cron_jobs`. |
 | **Row data** | **Does not survive** without a Supabase point-in-time restore. Trades, agent memory and encrypted API keys are gone. |
@@ -36,14 +36,16 @@ npm run db:rehearse
 It must finish with:
 
 ```
-Rebuilt from zero — 72 migrations applied clean, twice, counts match.
+Rebuilt from zero — 73 migrations applied clean, twice, catalog matches.
 ```
 
 If it does not, **stop**. The migration set is broken and rebuilding a live project will fail partway through, leaving a half-migrated database that is worse than an empty one. Fix the reported migration first.
 
 The script needs one of: a running local Postgres (`brew services start postgresql@17`), Docker, or `REHEARSAL_DSN` pointing at an empty local database. Exit codes: `0` clean, `1` a migration failed or the schema drifted, `2` preconditions unmet.
 
-Use `--keep` to leave the rebuilt database up for inspection, and `--survey` to apply everything and report *all* failures rather than stopping at the first.
+Use `--keep` to leave the rebuilt database up for inspection, `--survey` to apply everything and report *all* failures rather than stopping at the first, and `--write-fingerprint` to re-record `scripts/expected-schema.json` after an intentional schema change — always in the same commit as the migration that caused it, so the diff gets reviewed.
+
+The rebuilt catalog is compared to that fingerprint **by name**: every column with its type, default and nullability, every view, function, RLS policy, index, constraint and trigger. Counts were the original check and were not enough — on 2026-08-06 the count check reported "counts match" while twelve RLS policies, three column types and four constraints differed from production.
 
 ### 2. Create the new project and apply
 
@@ -77,4 +79,11 @@ That guard immediately found four classes of real defect on its first run:
 3. **`20260610_risk_settings_unique_user.sql` failed on every re-run**, adding a constraint with no existence guard.
 4. **`trades.source_signal_id` was declared `uuid` in git and is `text` in production**, so a rebuilt database would have broken the `signal_claims` backfill that applies a regex to it.
 
-**Known remaining drift:** production is missing `compaction_log` and `open_positions`, both created by migrations recorded as applied. Reconcile before relying on either.
+Switching the assertion from counts to a named catalog fingerprint then found four more, none of which the counts could see:
+
+5. **`Allow all access to api_keys` — `FOR ALL`, `TO public`, `USING (true)` — was still in the migration set.** Postgres OR's permissive policies, so it overrides `api_keys_user_isolation`: a database rebuilt from git would expose every user's encrypted Kalshi credentials to `anon` through PostgREST. Production had dropped it by hand and the drop was never recorded. The same applied to `risk_settings`, `strategies` and `compliance_log`.
+6. **`compliance_log`'s inline CHECK is a closed 14-value allowlist that excludes `health_check_alert`** — which `20260726_alert_dedup_race.sql` writes. Production replaced it with the category-gated `compliance_event_type_allowlist`; a rebuilt database would reject writes production accepts.
+7. **Three more column types diverged** — `signals.edge_cents` (`integer` in git, `numeric` in production), `trades.influenced_by_memory_ids` (`uuid[]` vs `text[]`) and `auto_trade_locks.run_id` (`uuid` vs `text`) — plus four defaults and two index names.
+8. **`risk_settings_user_unique` never took in production**, and production currently holds **11 `user_id`s with duplicate `risk_settings` rows**. Which row wins when risk caps are read is arbitrary. Deduplicating is a data change and is not done here.
+
+**Known remaining drift**, recorded in full under `_production_delta_2026_08_06` in `scripts/expected-schema.json`. Production is missing one table (`compaction_log`), one view (`open_positions`) and eight indexes, all from `20260504120000` aborting partway and `20260610` failing outright while both were recorded as applied. Reconcile before relying on any of them; `risk_settings_user_unique` additionally cannot be added until the 11 duplicate rows are resolved.

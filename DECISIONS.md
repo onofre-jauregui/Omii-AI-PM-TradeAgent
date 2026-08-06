@@ -4,9 +4,16 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-06 — Assert the rebuilt schema by catalog fingerprint, not object counts
+**Decision:** `rehearse-migrations.sh` compares the rebuilt catalog to `scripts/expected-schema.json` object-by-object — every column with type/default/nullability, plus views, functions, RLS policies, indexes, constraints and triggers — instead of comparing five totals.
+**Options:** (A) keep the count assertion; (B) full catalog fingerprint diffed by name; (C) diff the rebuild against production live on every CI run.
+**Why:** the count check passed while twelve RLS policies, three column types and four constraints differed from production — including `Allow all access to api_keys` (`FOR ALL`, `TO public`, `USING (true)`), which a rebuilt database would have carried on the table holding users' encrypted Kalshi keys. Totals lined up by coincidence. (C) was rejected because CI must not hold production credentials; the committed fingerprint gives the same signal and makes every schema change a reviewable diff.
+**Reversibility:** easy — the fingerprint is regenerated with `--write-fingerprint`.
+**Trace:** PR #201; `scripts/compare-schema-fingerprint.py`, `scripts/schema-fingerprint.sql`, `supabase/migrations/20260806000000_reconcile_schema_with_production.sql`
+
 ## 2026-08-06 — Prove the schema rebuilds from git with a local-Postgres rehearsal, instead of buying a staging project
 
-**Decision:** Added `scripts/rehearse-migrations.sh` + `scripts/supabase-shim.sql` + `scripts/expected-schema-counts.json`, wired as a **blocking CI job on every push and PR**. It replays every migration into a throwaway Postgres, twice, and asserts the resulting public-schema object counts. Captured everything the migration set was missing so it passes.
+**Decision:** Added `scripts/rehearse-migrations.sh` + `scripts/supabase-shim.sql` + `scripts/expected-schema.json`, wired as a **blocking CI job on every push and PR**. It replays every migration into a throwaway Postgres, twice, and asserts the rebuilt catalog matches object-for-object (originally object counts — see the entry above). Captured everything the migration set was missing so it passes.
 
 **Context:** TradeAgent has no staging Supabase project, so nothing exercised a migration before production. The first run showed the migration set could not rebuild the database at all: production had 35 public tables against the 30 the migrations create. `profiles`, `trade_lessons`, `backtest_runs` and both weather-calibration tables existed only in the live database, along with 6 columns, 5 indexes, 4 views, 2 dashboard RPCs, and `handle_new_user()` with its trigger on `auth.users` — without which a rebuilt database accepts signups and never creates the profile row onboarding depends on. It also found **20 `cron.schedule(...)` calls closed by an upsert clause that belongs to INSERT, not SELECT** — invalid SQL that could never apply to any database, which is why `20260504120000` aborted partway and left production without `compaction_log` and `open_positions` while being recorded as applied. Plus `20260610_risk_settings_unique_user.sql` failing on every re-run, and `trades.source_signal_id` declared `uuid` in git while production carries `text`.
 

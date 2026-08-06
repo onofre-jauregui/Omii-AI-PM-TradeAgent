@@ -38,12 +38,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_memory_system_version ON agent_memory (syst
 -- 2. Memory Attribution — which memories influenced which trades
 -- ─────────────────────────────────────────────────────────────────────────────
 
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS influenced_by_memory_ids uuid[] DEFAULT '{}';
+-- text[], not uuid[]: this migration aborted partway in production and the column
+-- was created by hand as text[]. The running code reads and writes that shape.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS influenced_by_memory_ids text[] DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS memory_attribution (
   trade_id uuid NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
   memory_id uuid NOT NULL REFERENCES agent_memory(id) ON DELETE CASCADE,
-  cited_at timestamptz NOT NULL DEFAULT now(),
+  cited_at timestamptz DEFAULT now(),
   trade_pnl numeric,        -- backfilled when trade settles
   settled_at timestamptz,   -- null until trade resolves
   PRIMARY KEY (trade_id, memory_id)
@@ -69,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_signals_shadow_settled ON signals (settled_at) WH
 -- Scoping: 'global', 'strategy:{strategy_id}', 'market:{market_type}'
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS scope text DEFAULT 'global';
 
-ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_updated_at timestamptz DEFAULT now();
+ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_updated_at timestamptz;
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS trade_sample_size int DEFAULT 0;
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS alpha numeric DEFAULT 1;   -- Beta prior: wins
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS beta numeric DEFAULT 1;    -- Beta prior: losses
@@ -134,9 +136,9 @@ CREATE INDEX IF NOT EXISTS idx_compaction_log_result ON compaction_log(result_me
 -- A table with single-row upsert is atomic and survives connection pooling.
 
 CREATE TABLE IF NOT EXISTS auto_trade_locks (
-  lock_name text PRIMARY KEY DEFAULT 'auto_trade',
+  lock_name text PRIMARY KEY,
   acquired_at timestamptz NOT NULL DEFAULT now(),
-  run_id uuid NOT NULL
+  run_id text NOT NULL
 );
 
 ALTER TABLE auto_trade_locks ENABLE ROW LEVEL SECURITY;

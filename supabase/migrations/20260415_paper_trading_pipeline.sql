@@ -38,11 +38,11 @@ ALTER TABLE public.signals
   ADD COLUMN IF NOT EXISTS yes_ask       integer,
   ADD COLUMN IF NOT EXISTS no_bid        integer,
   ADD COLUMN IF NOT EXISTS no_ask        integer,
-  ADD COLUMN IF NOT EXISTS edge_cents    integer,
+  ADD COLUMN IF NOT EXISTS edge_cents    numeric,   -- numeric, not integer: matches production
   ADD COLUMN IF NOT EXISTS source        text,
   ADD COLUMN IF NOT EXISTS true_probability  numeric(6,4),
   ADD COLUMN IF NOT EXISTS implied_probability numeric(6,4),
-  ADD COLUMN IF NOT EXISTS metadata      jsonb;
+  ADD COLUMN IF NOT EXISTS metadata      jsonb DEFAULT '{}'::jsonb;
 
 -- Indexes used by auto-trade strategy filters
 CREATE INDEX IF NOT EXISTS signals_source_created_idx
