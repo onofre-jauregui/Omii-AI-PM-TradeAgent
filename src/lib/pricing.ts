@@ -15,19 +15,16 @@
 export type PricingTierId = "free" | "starter" | "pro" | "prop";
 
 /**
- * Strategies that actually execute in `auto-trade` today, with their canonical
- * names from `supabase/migrations/20260406_replace_strategies.sql`.
+ * Strategy IDs `auto-trade` has an explicit handler for. Its dispatcher hard-
+ * rejects anything else, so this is the set a customer can actually run.
  *
- * S-004 (Liquidity Provision) is deliberately absent: it is listed in the server's
- * `allowedStrategies` entitlement but has no implementation in auto-trade and no
- * rows in the `strategies` table, so no plan may advertise it. Entitling a
- * strategy is not the same as shipping one — pricing copy tracks what runs.
+ * Pricing copy never names these. Strategy identifiers are internal — a
+ * prospect cannot evaluate "S-002 Resolution Fade", the roster changes without
+ * a pricing change, and naming one we later retire turns the page into a
+ * liability. Plans advertise how many strategies a tier unlocks; the count is
+ * derived below so it cannot drift from what the engine will run.
  */
-export const LIVE_STRATEGIES: Record<string, string> = {
-  "S-001": "Surface Arbitrage",
-  "S-002": "Resolution Fade",
-  "S-005": "Weather Edge",
-};
+export const LIVE_STRATEGIES = ["S-001", "S-002", "S-005"];
 
 export interface PricingTier {
   id: PricingTierId;
@@ -40,8 +37,12 @@ export interface PricingTier {
   maxOpenPositions: number;
   maxPositionUsd: number;
   liveTradingEnabled: boolean;
-  /** Human-readable summary of `allowedStrategies` for this tier */
-  strategiesLabel: string;
+  /**
+   * How many of `LIVE_STRATEGIES` this tier unlocks. Must equal the size of the
+   * tier's server-side `allowedStrategies` intersected with what auto-trade can
+   * actually run — `pricing.test.ts` enforces it.
+   */
+  strategyCount: number;
   /** Non-numeric differentiators, appended after the limit bullets */
   extras: string[];
   /** Exactly one tier carries this; both surfaces badge the same plan */
@@ -58,7 +59,7 @@ export const PRICING_TIERS: PricingTier[] = [
     maxOpenPositions: 3,
     maxPositionUsd: 25,
     liveTradingEnabled: false,
-    strategiesLabel: "Every live strategy, paper only",
+    strategyCount: 3,
     extras: ["Agent chat + memory", "Performance analytics", "No credit card required"],
     highlight: false,
   },
@@ -71,7 +72,7 @@ export const PRICING_TIERS: PricingTier[] = [
     maxOpenPositions: 8,
     maxPositionUsd: 100,
     liveTradingEnabled: true,
-    strategiesLabel: "S-001 Surface Arbitrage + S-002 Resolution Fade",
+    strategyCount: 2,
     extras: ["Everything in Free", "Strategies run automatically 24/7"],
     highlight: false,
   },
@@ -84,7 +85,7 @@ export const PRICING_TIERS: PricingTier[] = [
     maxOpenPositions: 25,
     maxPositionUsd: 500,
     liveTradingEnabled: true,
-    strategiesLabel: "Adds S-005 Weather Edge — every live strategy",
+    strategyCount: 3,
     extras: ["Everything in Starter", "Priority support", "Early access to new strategies"],
     highlight: true,
   },
@@ -97,13 +98,25 @@ export const PRICING_TIERS: PricingTier[] = [
     maxOpenPositions: 100,
     maxPositionUsd: 5000,
     liveTradingEnabled: true,
-    strategiesLabel: "Every live strategy + priority execution",
-    extras: ["Everything in Pro", "Dedicated support channel"],
+    strategyCount: 3,
+    extras: ["Everything in Pro", "Priority execution", "Dedicated support channel"],
     highlight: false,
   },
 ];
 
 const usd = (n: number) => `$${n.toLocaleString("en-US")}`;
+
+/**
+ * How a tier's strategy access reads on a pricing card. Deliberately generic —
+ * see the note on LIVE_STRATEGIES for why identifiers stay out of pricing copy.
+ */
+export function strategiesLabel(tier: PricingTier): string {
+  const all = tier.strategyCount === LIVE_STRATEGIES.length;
+  const noun = tier.strategyCount === 1 ? "strategy" : "strategies";
+  return all
+    ? `All ${tier.strategyCount} automated ${noun}`
+    : `${tier.strategyCount} automated ${noun}`;
+}
 
 /**
  * The bullet list shown for a tier. Derived from the limit fields so every number
@@ -116,7 +129,7 @@ export function tierFeatures(tier: PricingTier): string[] {
     `${tier.maxOpenPositions} open positions`,
     `${usd(tier.maxPositionUsd)} max position`,
     tier.liveTradingEnabled ? "Live trading enabled" : "Paper trading only",
-    tier.strategiesLabel,
+    strategiesLabel(tier),
     ...tier.extras,
   ];
 }

@@ -400,7 +400,7 @@ const FAQ_ITEMS = [
   },
   {
     q: "What are the strategies?",
-    a: "Three live strategies: S-001 Surface Arbitrage (bracket-sum mispricing), S-002 Resolution Fade, and S-005 Weather Edge (NWS forecast vs. market divergence). All run with automatic 12-hour exit limits and per-trade size caps. More strategies are in development.",
+    a: "Three automated strategies run today, spanning structural mispricing arbitrage and forecast-vs-market divergence. Each one runs with automatic 12-hour exit limits and per-trade size caps, and you control which are active and how much capital each gets. More strategies are in development.",
   },
   {
     q: "When does live trading open?",

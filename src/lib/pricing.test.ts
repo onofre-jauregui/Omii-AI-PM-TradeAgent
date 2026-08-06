@@ -29,33 +29,36 @@ describe("UI pricing table vs server tier definitions", () => {
     expect(tier.liveTradingEnabled).toBe(server.limits.liveTradingEnabled);
   });
 
-  it("never advertises a strategy the tier is not entitled to", () => {
+  it("advertises exactly the number of strategies the tier can actually run", () => {
     for (const tier of PRICING_TIERS) {
-      const allowed = TIER_DEFINITIONS[tier.id].limits.allowedStrategies;
-      for (const id of namedStrategies(tier.strategiesLabel)) {
-        expect(allowed, `${tier.id} advertises ${id}`).toContain(id);
+      const runnable = TIER_DEFINITIONS[tier.id].limits.allowedStrategies.filter((s) =>
+        LIVE_STRATEGIES.includes(s)
+      );
+      expect(tier.strategyCount, `${tier.id} strategy count`).toBe(runnable.length);
+    }
+  });
+
+  it("entitles no strategy auto-trade cannot run", () => {
+    // S-004 was entitled here while having no handler in auto-trade, so both
+    // pricing surfaces sold a strategy that was impossible to run. Re-adding an
+    // unimplemented strategy to allowedStrategies fails here.
+    for (const tier of Object.values(TIER_DEFINITIONS)) {
+      for (const id of tier.limits.allowedStrategies) {
+        expect(LIVE_STRATEGIES, `${tier.tier} entitles ${id}`).toContain(id);
       }
     }
   });
 
-  it("never advertises a strategy that has no execution path", () => {
-    // S-004 is entitled server-side but unimplemented in auto-trade — selling it
-    // would be a placeholder claim. This fails the moment copy names it again.
+  it("keeps strategy identifiers out of customer-facing copy", () => {
     for (const tier of PRICING_TIERS) {
-      for (const id of namedStrategies(tier.strategiesLabel)) {
-        expect(Object.keys(LIVE_STRATEGIES), `${tier.id} advertises ${id}`).toContain(id);
-      }
+      const copy = [tier.name, tier.description, ...tierFeatures(tier)].join(" ");
+      expect(namedStrategies(copy), `${tier.id} names internal strategy IDs`).toEqual([]);
     }
   });
 
-  it("gives Pro a strategy Starter does not have", () => {
-    const starter = PRICING_TIERS.find((t) => t.id === "starter")!;
-    const pro = PRICING_TIERS.find((t) => t.id === "pro")!;
-    const starterAllowed = TIER_DEFINITIONS[starter.id].limits.allowedStrategies;
-    const proAllowed = TIER_DEFINITIONS[pro.id].limits.allowedStrategies;
-    const upgrade = proAllowed.filter((s) => !starterAllowed.includes(s) && s in LIVE_STRATEGIES);
-    expect(upgrade.length).toBeGreaterThan(0);
-    for (const id of upgrade) expect(pro.strategiesLabel).toContain(id);
+  it("gives Pro more strategies than Starter", () => {
+    const count = (id: string) => PRICING_TIERS.find((t) => t.id === id)!.strategyCount;
+    expect(count("pro")).toBeGreaterThan(count("starter"));
   });
 
   it("advertises no capability the free tier does not have", () => {

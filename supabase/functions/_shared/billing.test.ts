@@ -19,7 +19,9 @@ describe("TIER_DEFINITIONS", () => {
     const free = TIER_DEFINITIONS.free;
     expect(free.limits.liveTradingEnabled).toBe(false);
     // Free tier allows all strategies in paper mode — live trading is gated by liveTradingEnabled
-    expect(free.limits.allowedStrategies).toContain("S-004");
+    expect(free.limits.allowedStrategies).toEqual(
+      expect.arrayContaining(["S-001", "S-002", "S-005"])
+    );
   });
 
   it("pricing is monotonically increasing", () => {
@@ -113,7 +115,7 @@ describe("checkEntitlement", () => {
     const r = checkEntitlement({
       subscription: activeStarter,
       mode: "live",
-      strategy: "S-004",
+      strategy: "S-002",
       positionUsd: 50,
     });
     expect(r.allowed).toBe(true);
@@ -203,7 +205,7 @@ describe("checkEntitlement", () => {
   it("allows a position within the tier's max size", () => {
     const r = checkEntitlement({
       subscription: activeStarter,
-      strategy: "S-004",
+      strategy: "S-002",
       mode: "live",
       positionUsd: 100, // starter cap is exactly $100
     });
@@ -213,7 +215,7 @@ describe("checkEntitlement", () => {
   it("blocks a position over the tier's max size", () => {
     const r = checkEntitlement({
       subscription: activeStarter,
-      strategy: "S-004",
+      strategy: "S-002",
       mode: "live",
       positionUsd: 10_000, // starter cap is $100
     });
