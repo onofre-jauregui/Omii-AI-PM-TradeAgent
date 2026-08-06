@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "./risk";
+import {
+  evaluateRisk,
+  evaluateCapitalCap,
+  evaluateBasketConcentration,
+  computeConcentrationCapPct,
+  type RiskSettings,
+  type RiskState,
+} from "./risk";
 
 const baseSettings: RiskSettings = {
   max_position_size: 500,
@@ -237,5 +244,103 @@ describe("evaluateCapitalCap", () => {
     const r = evaluateCapitalCap(0, 600, 500);
     expect(r.passed).toBe(false);
     expect(r.code).toBe("capital_cap");
+  });
+});
+
+describe("computeConcentrationCapPct", () => {
+  it("is conservative under 30 settled trades", () => {
+    expect(computeConcentrationCapPct(0)).toBe(10);
+    expect(computeConcentrationCapPct(29)).toBe(10);
+  });
+
+  it("widens between 30 and 100 settled trades", () => {
+    expect(computeConcentrationCapPct(30)).toBe(15);
+    expect(computeConcentrationCapPct(99)).toBe(15);
+  });
+
+  it("reaches the full 25% only once a real sample exists", () => {
+    expect(computeConcentrationCapPct(100)).toBe(25);
+    expect(computeConcentrationCapPct(10_000)).toBe(25);
+  });
+});
+
+describe("evaluateRisk with currentEquityUsd context", () => {
+  it("sizes concentration off current equity, not a stale high peak", () => {
+    // Peak is $1000 (pre-drawdown), but real current equity is only $100 —
+    // a $30 order is 30% of current equity and should be rejected even
+    // though it's only 3% of the stale peak.
+    const result = evaluateRisk(
+      30,
+      "live",
+      baseSettings,
+      { ...baseState, peak_portfolio_value: 1000 },
+      { currentEquityUsd: 100, settledTradeCount: 100 }
+    );
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("concentration_limit");
+  });
+
+  it("falls back to peak_portfolio_value when currentEquityUsd is omitted", () => {
+    const result = evaluateRisk(300, "live", baseSettings, {
+      ...baseState,
+      peak_portfolio_value: 1000,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("concentration_limit");
+  });
+
+  it("graduates the cap tighter for a thin settled-trade sample", () => {
+    // 15 / 100 equity = 15%, would pass the old flat 25% but fails a thin-sample 10% cap
+    const result = evaluateRisk(
+      15,
+      "live",
+      baseSettings,
+      { ...baseState, peak_portfolio_value: 1000 },
+      { currentEquityUsd: 100, settledTradeCount: 5 }
+    );
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("concentration_limit");
+  });
+
+  it("allows the same order once the sample graduates the cap to 25%", () => {
+    const result = evaluateRisk(
+      15,
+      "live",
+      baseSettings,
+      { ...baseState, peak_portfolio_value: 1000 },
+      { currentEquityUsd: 100, settledTradeCount: 200 }
+    );
+    expect(result.passed).toBe(true);
+  });
+});
+
+describe("evaluateBasketConcentration", () => {
+  it("passes through unscaled when the basket total is under the cap", () => {
+    const r = evaluateBasketConcentration([10, 10, 5], 100, 25);
+    expect(r.scaled).toBe(false);
+    expect(r.amounts).toEqual([10, 10, 5]);
+  });
+
+  it("scales every leg proportionally when the basket total exceeds the cap", () => {
+    // Cap = 25% of $100 = $25. Legs sum to $50 → scale factor 0.5.
+    const r = evaluateBasketConcentration([20, 20, 10], 100, 25);
+    expect(r.scaled).toBe(true);
+    expect(r.capUsd).toBe(25);
+    expect(r.amounts).toEqual([10, 10, 5]);
+    expect(r.amounts.reduce((s, a) => s + a, 0)).toBeLessThanOrEqual(r.capUsd);
+  });
+
+  it("drops legs that scale below the minimum viable size", () => {
+    // Cap = 10% of $100 = $10. Legs [21, 22] sum to $43 → scale factor ~0.23,
+    // each leg lands under the $5 floor and should be dropped (0), not sent tiny.
+    const r = evaluateBasketConcentration([21, 22], 100, 10, 5);
+    expect(r.scaled).toBe(true);
+    expect(r.amounts.every((a) => a === 0 || a >= 5)).toBe(true);
+  });
+
+  it("treats a zero or negative total as nothing to scale", () => {
+    const r = evaluateBasketConcentration([], 100, 25);
+    expect(r.scaled).toBe(false);
+    expect(r.amounts).toEqual([]);
   });
 });

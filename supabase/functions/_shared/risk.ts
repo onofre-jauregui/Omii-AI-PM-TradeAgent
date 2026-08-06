@@ -65,7 +65,7 @@ export interface RiskEvaluationResult {
  *  6. concentration limit   (live only)
  */
 export const DEFAULT_RISK_SETTINGS: RiskSettings = {
-  max_position_size: 20,
+  max_position_size: 50,
   max_open_positions: 3,
   max_daily_loss: 100,
   max_drawdown_pct: 10,
@@ -74,11 +74,35 @@ export const DEFAULT_RISK_SETTINGS: RiskSettings = {
   allocated_capital: 1000,
 };
 
+/**
+ * Graduates the single-order concentration ceiling with proven track record
+ * instead of a static 25% forever. A strategy with a handful of settled trades
+ * hasn't earned the same leash as one with a large, calibrated sample —
+ * `expected_hit_rate` is only as trustworthy as the sample it's built on.
+ * Thresholds are deliberately coarse; this is a governor, not a precision dial.
+ */
+export function computeConcentrationCapPct(settledTradeCount: number): number {
+  if (settledTradeCount < 30) return 10;
+  if (settledTradeCount < 100) return 15;
+  return 25;
+}
+
+export interface RiskContext {
+  /** Real current Kalshi equity (cash + open positions), fetched fresh at
+   *  decision time. Falls back to riskState.peak_portfolio_value when omitted
+   *  — callers that don't pass this get the pre-existing peak-based behavior. */
+  currentEquityUsd?: number | null;
+  /** Settled trade count for this strategy+mode, used to graduate the
+   *  concentration cap. Omitted = pre-existing flat 25% behavior. */
+  settledTradeCount?: number;
+}
+
 export function evaluateRisk(
   amount: number,
   mode: "paper" | "live",
   settings: RiskSettings | null,
-  riskState: RiskState | null
+  riskState: RiskState | null,
+  context?: RiskContext
 ): RiskEvaluationResult {
   // null settings = legacy / no-limits mode — pass unconditionally (no row in risk_settings yet)
   if (!settings) return { passed: true };
@@ -142,15 +166,22 @@ export function evaluateRisk(
     }
   }
 
-  // 6. Single-order concentration: no trade > 25% of peak portfolio — live only.
+  // 6. Single-order concentration — live only. Sized against real CURRENT equity
+  // when the caller supplies it (context.currentEquityUsd); falls back to the
+  // high-water-mark peak otherwise. Peak-based sizing understates how much of
+  // the account a trade actually commits after a drawdown (the peak never
+  // drops), so current equity is preferred whenever it's available.
   // Paper portfolios start at $500; the cap would block most early simulation trades.
-  if (mode === "live" && riskState.peak_portfolio_value > 0) {
-    const concentrationPct = (amount / riskState.peak_portfolio_value) * 100;
-    if (concentrationPct > 25) {
+  const concentrationBasis = context?.currentEquityUsd ?? riskState.peak_portfolio_value;
+  const concentrationCapPct =
+    context?.settledTradeCount === undefined ? 25 : computeConcentrationCapPct(context.settledTradeCount);
+  if (mode === "live" && concentrationBasis > 0) {
+    const concentrationPct = (amount / concentrationBasis) * 100;
+    if (concentrationPct > concentrationCapPct) {
       return {
         passed: false,
         code: "concentration_limit",
-        reason: `Order amount $${amount} exceeds 25% portfolio concentration limit (portfolio: $${riskState.peak_portfolio_value}).`,
+        reason: `Order amount $${amount} exceeds ${concentrationCapPct}% portfolio concentration limit (equity: $${concentrationBasis}).`,
       };
     }
   }
@@ -192,4 +223,49 @@ export function evaluateCapitalCap(
     };
   }
   return { passed: true };
+}
+
+export interface BasketConcentrationResult {
+  /** true if legs had to be scaled down to fit the cap */
+  scaled: boolean;
+  /** the dollar cap the basket was measured against */
+  capUsd: number;
+  /** same length/order as the input legAmounts; a leg scaled below minLegUsd is 0 (drop it) */
+  amounts: number[];
+}
+
+/**
+ * Caps a MULTI-LEG BASKET's total exposure, not just each leg in isolation.
+ *
+ * evaluateRisk()'s concentration check runs per order — fine for independent
+ * bets, wrong for a strategy like S-001 that fires several legs against
+ * brackets on the SAME underlying event in one cycle. Those legs are
+ * correlated: each can individually clear a 25%-of-equity check while the
+ * basket as a whole commits far more than 25% to one outcome. This scales
+ * every leg down proportionally so the basket's TOTAL respects the same
+ * concentration ceiling evaluateRisk() would apply to a single order.
+ *
+ * Pure — no I/O. The caller supplies current equity and the same
+ * concentrationCapPct it would pass to evaluateRisk (see
+ * computeConcentrationCapPct) so the two stay consistent.
+ */
+export function evaluateBasketConcentration(
+  legAmounts: number[],
+  currentEquityUsd: number,
+  concentrationCapPct: number,
+  minLegUsd = 5
+): BasketConcentrationResult {
+  const capUsd = (currentEquityUsd * concentrationCapPct) / 100;
+  const total = legAmounts.reduce((sum, a) => sum + a, 0);
+
+  if (total <= 0 || total <= capUsd) {
+    return { scaled: false, capUsd, amounts: legAmounts };
+  }
+
+  const scaleFactor = capUsd / total;
+  const amounts = legAmounts
+    .map((a) => Math.floor(a * scaleFactor))
+    .map((a) => (a < minLegUsd ? 0 : a));
+
+  return { scaled: true, capUsd, amounts };
 }
