@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Signal Generator + Surface Scanner tables
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -86,11 +93,13 @@ create index if not exists surface_alerts_created_at_idx on surface_alerts (crea
 alter table signals enable row level security;
 alter table surface_alerts enable row level security;
 
+DROP POLICY IF EXISTS "Service role full access on signals" ON signals;
 create policy "Service role full access on signals"
   on signals for all
   using (true)
   with check (true);
 
+DROP POLICY IF EXISTS "Service role full access on surface_alerts" ON surface_alerts;
 create policy "Service role full access on surface_alerts"
   on surface_alerts for all
   using (true)
@@ -111,7 +120,7 @@ select cron.schedule(
     body := '{}'::jsonb
   );
   $$
-) on conflict (jobname) do update set schedule = excluded.schedule;
+);
 
 -- Register signal-generator cron: run every 15 minutes
 select cron.schedule(
@@ -127,4 +136,4 @@ select cron.schedule(
     body := '{"limit": 50}'::jsonb
   );
   $$
-) on conflict (jobname) do update set schedule = excluded.schedule;
+);

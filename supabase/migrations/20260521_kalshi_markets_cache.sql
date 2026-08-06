@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- kalshi_markets_cache: single source of truth for Kalshi market data.
 -- market-data-fetcher writes here every 5 min using authenticated requests.
 -- All consumers (surface-scanner, signal-generator, weather-signal) read here
@@ -32,4 +39,4 @@ SELECT cron.schedule(
     body    := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);

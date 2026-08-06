@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ============================================================================
 -- 20260415_paper_trading_pipeline.sql
 --
@@ -55,7 +62,8 @@ ALTER TABLE public.trades
 -- auto-settle reads from agent_trades_pending_resolution to find unsettled
 -- paper trades. Filters to filled buy trades with no settled_at yet.
 
-CREATE OR REPLACE VIEW public.agent_trades_pending_resolution AS
+DROP VIEW IF EXISTS public.agent_trades_pending_resolution CASCADE;
+CREATE VIEW public.agent_trades_pending_resolution AS
 SELECT
   ticker,
   COUNT(*)                         AS trades_pending,
@@ -119,7 +127,7 @@ SELECT cron.schedule(
     body    := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);
 
 -- auto-settle: every 10 minutes. Polls Kalshi for settled markets and
 -- computes P&L on paper trades. Short interval so track record updates fast.
@@ -137,4 +145,4 @@ SELECT cron.schedule(
     body    := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);

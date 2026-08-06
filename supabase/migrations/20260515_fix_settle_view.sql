@@ -4,7 +4,8 @@
 -- Now each (ticker, user_id) pair is an independent row so auto-settle
 -- processes each user's positions independently.
 
-CREATE OR REPLACE VIEW public.agent_trades_pending_resolution AS
+DROP VIEW IF EXISTS public.agent_trades_pending_resolution CASCADE;
+CREATE VIEW public.agent_trades_pending_resolution AS
 SELECT
   ticker,
   user_id,

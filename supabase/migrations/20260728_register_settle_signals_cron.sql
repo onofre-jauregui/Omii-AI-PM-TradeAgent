@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- settle-signals-cron was never actually registered, and the columns it
 -- writes to never existed on `signals` — despite both being part of a
 -- migration (20260504120000_v2_instrumentation_and_lock.sql) that
@@ -64,4 +71,4 @@ SELECT cron.schedule(
 
 INSERT INTO public.expected_cron_jobs (jobname, note) VALUES
   ('settle-signals-cron', 'shadow-PnL settlement for skipped signals — qualifier ROI input (2026-07-28: found never-registered + missing columns, migration recorded applied 2026-05-04 but silently failed, same class as reconcile-orders/paper-reconcile gaps)')
-ON CONFLICT (jobname) DO NOTHING;
+ON CONFLICT (jobname) DO UPDATE SET note = excluded.note;

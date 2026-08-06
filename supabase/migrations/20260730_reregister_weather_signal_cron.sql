@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- Re-register weather-signal-cron — it does not exist in cron.job at all.
 --
 -- Motive (2026-07-30 production-readiness audit): 20260706_cron_staleness_detection.sql
@@ -45,4 +52,4 @@ INSERT INTO public.expected_cron_jobs (jobname, note) VALUES
   ('weather-signal-cron',   'S-005 weather-edge signal generation (found completely deregistered 2026-07-30 — see migration comment)'),
   ('paper-reconcile-cron',  'advance resting paper Kalshi-simulated orders'),
   ('settle-signals-cron',   'shadow P&L for all signals, traded or not — feeds the LLM-qualifier ROI loop')
-ON CONFLICT (jobname) DO NOTHING;
+ON CONFLICT (jobname) DO UPDATE SET note = excluded.note;

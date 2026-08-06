@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Auto-Reflect v2 — Instrumentation, Advisory Lock, and System Version Tagging
 -- 2026-05-04
@@ -90,7 +97,12 @@ WHERE expected_hit_rate IS NULL OR max_acceptable_drawdown IS NULL;
 -- 6. Signal↔Trade Linkage — kill the 2-hour heuristic
 -- ─────────────────────────────────────────────────────────────────────────────
 
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS source_signal_id uuid REFERENCES signals(id);
+-- TEXT, not uuid. Production has carried this as text since it was added, and
+-- 20260731_signal_claims.sql is written against text — it applies the ~ regex
+-- operator to the column and casts explicitly with ::uuid. Declaring uuid here
+-- meant a database rebuilt from git would not match production and would break
+-- that backfill. No FK for the same reason: production has none.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS source_signal_id text;
 CREATE INDEX IF NOT EXISTS idx_trades_source_signal ON trades(source_signal_id);
 
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS direction_correct bool;
@@ -128,6 +140,7 @@ CREATE TABLE IF NOT EXISTS auto_trade_locks (
 );
 
 ALTER TABLE auto_trade_locks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Service role full access on auto_trade_locks" ON auto_trade_locks;
 CREATE POLICY "Service role full access on auto_trade_locks"
   ON auto_trade_locks FOR ALL USING (true) WITH CHECK (true);
 
@@ -149,7 +162,7 @@ SELECT cron.schedule(
     body := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 10. Settle-signals cron — every 15 minutes

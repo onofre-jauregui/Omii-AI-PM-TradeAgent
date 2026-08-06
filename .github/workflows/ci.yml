@@ -20,6 +20,47 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # ─── Job 1d: Can the migration set rebuild the database from zero? ────────
+  # TradeAgent has no staging Supabase project, so until 2026-08-06 nothing
+  # exercised a migration before it reached production. This is the substitute:
+  # it replays every migration into a throwaway Postgres, twice, and asserts the
+  # resulting object counts. It costs nothing and needs no Supabase project.
+  #
+  # It is not a nicety. When this was first run, production had 35 public tables
+  # while the migration set created 30 — `profiles`, `trade_lessons`,
+  # `backtest_runs` and both weather-calibration tables existed only in the live
+  # database, along with `handle_new_user()`, the trigger that creates a profile
+  # row on signup. The schema could not have been rebuilt from this repo at all.
+  # It also surfaced 20 `cron.schedule(...) ON CONFLICT ...` clauses that are not
+  # valid SQL, which is why 20260504120000 half-applied and left production
+  # without `compaction_log`.
+  #
+  # Blocking on every push and PR: the second pass is what proves migrations are
+  # re-appliable, and CI replays whole files on retry.
+  rehearse-migrations:
+    name: Migrations rebuild the schema from zero
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: rehearsal
+          POSTGRES_DB: tradeagent_migration_rehearsal
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Rehearse
+        env:
+          REHEARSAL_DSN: postgresql://postgres:rehearsal@localhost:5432/tradeagent_migration_rehearsal
+        run: ./scripts/rehearse-migrations.sh
+
   # ─── Job 1b: Guard — schedule-triggered workflows must be live on main ────
   # GitHub Actions only ever evaluates a `schedule:` trigger from the repo's
   # *default* branch (`main` here) — a scheduled workflow merged to `dev` is
@@ -265,6 +306,15 @@ jobs:
         env:
           BASE_URL: https://kalshitradeagent.live
 
+      # 13 tests covering security headers, credential leakage in served HTML,
+      # mobile layout at 375px and accessible button labels. They have existed
+      # since the production-hardening pass but no npm script targeted them and
+      # no job ran them, so they had never once executed in CI.
+      - name: Production hardening suite
+        run: npm run test:e2e:hardening
+        env:
+          BASE_URL: https://kalshitradeagent.live
+
       # The smoke suite above only visits logged-out pages. On 2026-08-04 a
       # promotion cleared every gate in this pipeline while the live dashboard
       # sat on a permanent spinner, because nothing here had ever signed in.
@@ -305,10 +355,18 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"query":"SELECT version FROM supabase_migrations.schema_migrations"}' \
             | python3 -c "import sys,json; print(' '.join(r['version'] for r in json.load(sys.stdin)))" 2>/dev/null || echo "")
+          # Same ambiguous-date guard as migrate-staging — see that job for the
+          # incident. A date shared by more than one migration is not a usable key.
+          AMBIGUOUS_DATES=$(ls supabase/migrations/*.sql | xargs -n1 basename | sed 's/\.sql$//' \
+            | cut -d_ -f1 | sort | uniq -d)
           for f in $(ls supabase/migrations/*.sql | sort); do
             VERSION=$(basename "$f" .sql)
             LEGACY_VERSION=$(echo "$VERSION" | cut -d_ -f1)
-            if echo "$APPLIED" | grep -qw "$VERSION" || echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; then
+            if echo "$AMBIGUOUS_DATES" | grep -qx "$LEGACY_VERSION"; then
+              LEGACY_VERSION=""
+            fi
+            if echo "$APPLIED" | grep -qw "$VERSION" \
+               || { [ -n "$LEGACY_VERSION" ] && echo "$APPLIED" | grep -qw "$LEGACY_VERSION"; }; then
               echo "Already applied: $VERSION"
               continue
             fi
