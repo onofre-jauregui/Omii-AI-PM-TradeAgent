@@ -13,6 +13,9 @@ export interface Strategy {
   active: boolean;
   mode: "paper" | "live";
   starting_balance: number;
+  suspended_until?: string | null;
+  suspension_reason?: string | null;
+  risk_baseline_reset_at?: string | null;
 }
 
 export interface StrategyStats {

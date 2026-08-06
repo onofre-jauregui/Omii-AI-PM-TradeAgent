@@ -471,13 +471,16 @@ export async function fetchKalshiMarketsByCategory(
   // Resolve our display name to Kalshi's API category name
   const apiCategory = CATEGORY_API_NAME[category] ?? category;
 
-  // Fetch up to 12 active series for this category — more than this adds latency with little benefit
+  // Fetch a small set of active series for this category. Each series becomes a
+  // parallel markets call, so this count IS the fan-out width — keeping it low is
+  // what keeps a category switch fast. 6 series × a few markets each is plenty for
+  // the initial view; "Show more" pages through what came back.
   let seriesList: KalshiSeries[] = [];
   try {
     const data = await kalshiProxyGet("series", {
       status: "active",
       category: apiCategory,
-      limit: "12",
+      limit: "6",
     });
     seriesList = (data.series ?? []).map((s: any) => ({
       ticker: s.ticker ?? "",

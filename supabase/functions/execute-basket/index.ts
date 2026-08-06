@@ -4,7 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { resolveTenant, tenantInsertFields, getRiskSettings } from "../_shared/tenant.ts";
 import { evaluateCapitalCap } from "../_shared/risk.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
-import { determineBasketStatus, resolveFlattenOutcome } from "../_shared/basket-logic.ts";
+import { determineBasketStatus, resolveFlattenOutcome, didLegFill } from "../_shared/basket-logic.ts";
 
 /**
  * execute-basket: Multi-leg ordered trade execution with stateful lifecycle.
@@ -190,7 +190,7 @@ serve(async (req) => {
         const legResult = await legResp.json();
         legResults.push({ leg_index: i, ...legResult });
 
-        if (legResult.success) {
+        if (didLegFill(legResult)) {
           filledTradeIds.push(legResult.trade?.id);
 
           // Update basket progress
@@ -212,6 +212,18 @@ serve(async (req) => {
             const priceDiff = Math.abs(legResult.trade.filled_price - leg.price);
             currentEdgeCents = Math.max(0, currentEdgeCents - priceDiff);
           }
+        } else if (legResult.success) {
+          // execute-trade returned no error, but the leg never actually
+          // filled (status "open" — a resting order with zero real
+          // contracts). A basket needs actual fills to proceed; a merely
+          // resting leg is the same as a failure for basket-progress
+          // purposes, even though it's not itself an error. Link it to the
+          // basket for traceability even though it doesn't count as filled.
+          if (legResult.trade?.id) {
+            await supabase.from("trades").update({ basket_id: basketId }).eq("id", legResult.trade.id);
+          }
+          abortReason = `Leg ${i + 1} did not fill (status: ${legResult.trade?.status ?? "unknown"}) — no real liquidity at the requested price`;
+          break;
         } else {
           // Leg failed — abort and flatten
           abortReason = `Leg ${i + 1} failed: ${legResult.error || "execution error"}`;
@@ -339,7 +351,11 @@ async function flattenFilledLegs(
 
   for (let i = 0; i < legResults.length; i++) {
     const result = legResults[i];
-    if (!result.success || !result.trade) continue;
+    // Only flatten legs that actually hold a position (filled/partial) — a
+    // leg that merely returned success:true with an unfilled "open" status
+    // has no real position to close; submitting an opposite-side order for
+    // it would create a brand-new naked position rather than closing one.
+    if (!didLegFill(result)) continue;
 
     const originalLeg = legs[i];
     if (!originalLeg) continue;
