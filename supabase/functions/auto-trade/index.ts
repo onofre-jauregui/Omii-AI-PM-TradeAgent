@@ -290,11 +290,14 @@ async function countOpenPositions(
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // Prefer stored expiration_time; fall back to ticker parsing for older trades
+  // Prefer stored expiration_time; fall back to ticker parsing for older trades.
+  // Includes resting open/partial orders, not just filled — matches execute-trade's
+  // authoritative modeScopedOpenCount so this pre-flight signal doesn't undercount
+  // and let auto-trade keep attempting legs execute-trade will reject anyway.
   let query = supabase
     .from("trades")
     .select("ticker, expiration_time, strategy_id")
-    .eq("status", "filled")
+    .in("status", ["filled", "open", "partial"])
     .is("exit_reason", null)
     .is("settled_at", null);
 

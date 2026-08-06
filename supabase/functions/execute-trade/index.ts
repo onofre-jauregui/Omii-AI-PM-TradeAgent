@@ -331,13 +331,18 @@ serve(async (req) => {
       // of truth, replacing the prior inline min() computation.
       const maxPos = effective.maxOpenPositions;
       // Count open positions in THIS mode only — paper positions must not consume
-      // the live cap (and vice-versa).
+      // the live cap (and vice-versa). Includes resting `open`/`partial` orders,
+      // not just `filled` — a resting order reserves the same slot a filled one
+      // does (mirrors the allocated_capital cap below, which already counts all
+      // three statuses). Before this fix, live orders could rest in `open`/
+      // `partial` uncounted, letting max_open_positions be silently exceeded
+      // while the dollar-based allocated_capital cap enforced correctly.
       const { count: openCount } = await supabase
         .from("trades")
         .select("id", { count: "exact", head: true })
         .eq("user_id", userId)
         .eq("mode", tradeMode)
-        .eq("status", "filled")
+        .in("status", ["filled", "open", "partial"])
         .is("settled_at", null)
         .is("exit_reason", null);
       modeScopedOpenCount = openCount ?? 0;
