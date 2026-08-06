@@ -4,6 +4,20 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-06 — Evict TradeAgent from the Omii Sound Studio Supabase project; TradeAgent has no staging backend
+
+**Decision:** Removed every TradeAgent artifact from Supabase project `yxhtmqexyozptyoooxht` ("Omii Sound Studio") — 13 cron jobs, 35 edge functions, 7 secrets, 43 `public` objects, 9 `public` functions, a trigger on that project's `auth.users`, and all 70 rows of migration history. Added a CI guard that refuses to deploy into any project containing a non-TradeAgent schema, and stopped labelling production "staging".
+
+**Context:** `STAGING_SUPABASE_PROJECT_REF` pointed at Sound Studio's project. From 2026-05-30, every `dev` push applied TradeAgent migrations and deployed all 35 functions into another product's database. Found there: 13 crons firing ~1,000 failed runs/day (all failing at `net.http_post` with a NULL url, so nothing ever executed), a `seed_risk_settings_for_new_user` trigger on `auth.users` making Sound Studio signups write into TradeAgent tables, and `ANTHROPIC_API_KEY` + `OPENROUTER_API_KEY` stored **byte-identical to production**. `API_KEY_ENCRYPTION_KEY` differed, so production users' encrypted Kalshi keys were never exposed.
+
+**Options:** A) Repoint the secret at a new dedicated staging project and leave the artifacts to rot — rejected: leaves a live trigger on another product's `auth.users` and two production keys in place, and costs money that hasn't been approved. B) Evict fully now, leave staging unconfigured, gate CI to skip loudly — chosen. C) Evict and hard-fail every `dev` push until staging exists — rejected: turns a config gap into a red pipeline on unrelated work.
+
+**Why:** The trigger on `auth.users` was the deciding detail. Dropping TradeAgent's tables without dropping it first would have broken every Sound Studio signup, and leaving it in place meant another product's user table stayed coupled to this repo's schema. Skipping loudly beats failing loudly here because the absent staging project is a pending money decision, not a defect in the code being pushed.
+
+**Reversibility:** hard for the data (43 tables dropped; a JSON snapshot of the 5 non-empty tables — 92 rows of throwaway staging data — is kept, and the schema itself replays from this repo's migrations). Easy for the CI changes.
+
+**Trace:** verified post-eviction — `sound_studio` still 24 tables / 18,012 rows unchanged, `auth.users` still 63, `public` 0 objects, 0 functions, 0 crons, 0 TradeAgent secrets.
+
 ## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than trusting the writer
 
 **Decision:** Added health-check **check 13**, comparing every `(user, mode)` `risk_state` row against the true open-position count and paging on divergence >1, plus defensive `settled_at`/`exit_reason` filters on `updateRiskState`'s count.

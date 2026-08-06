@@ -13,7 +13,7 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "playwright test",
-    "test:e2e:staging": "BASE_URL=https://kalshitradeagent.live playwright test",
+    "test:e2e:smoke": "BASE_URL=https://kalshitradeagent.live playwright test",
     "db:types": "supabase gen types typescript --project-id uyfnezxmgwitpzsrnkst > src/integrations/supabase/types.ts",
     "test:e2e:dashboards": "playwright test tests/e2e/dashboard-truth.spec.ts",
     "verify:dashboards": "BASE_URL=https://kalshitradeagent.com playwright test tests/e2e/dashboard-truth.spec.ts"
