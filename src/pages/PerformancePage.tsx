@@ -88,41 +88,49 @@ interface OpenTrade {
 
 const MAY_START = "2026-04-22T00:00:00.000Z";
 
-// This is a public, unauthenticated route (the shareable track record) — there is
-// no logged-in `user` here, so `user?.id ?? ""` always resolved to an empty string
-// and every query below matched zero rows regardless of real trading history. The
-// account this page reports on is the one real account trading through this system.
-const TRACK_RECORD_USER_ID = "ea207ba1-b7a9-4a7b-96bc-922e922d627d";
+// This is a public, unauthenticated route (the shareable track record), so it reads
+// `public_track_record` rather than `trades`. Querying `trades` with the anon key
+// returns `[]` no matter what the account has done — RLS is
+// `USING (user_id = auth.uid())` and auth.uid() is NULL for an anonymous request —
+// which rendered "0 trades" over a real 800-trade history. The view carries the
+// account predicate and a display-column allowlist; see
+// supabase/migrations/20260806_public_track_record_view.sql.
+const TRACK_RECORD_VIEW = "public_track_record";
 
 async function fetchAll(mode: "paper" | "live") {
   const [tradesRes, settledRes, openRes] = await Promise.all([
     supabase
-      .from("trades")
-      .select("strategy_id, strategy, side, action, price, amount, pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
-      .eq("user_id", TRACK_RECORD_USER_ID)
+      .from(TRACK_RECORD_VIEW)
+      .select("strategy_id, strategy, side, action, price, amount, pnl, net_pnl, status, settled_at, resolution, created_at, ticker, market_question, mode")
       .eq("mode", mode)
-      .in("status", ["filled", "settled"])
       .gte("created_at", MAY_START)
       .order("created_at", { ascending: true }),
     supabase
-      .from("trades")
-      .select("ticker, market_question, side, price, amount, pnl, resolution, settled_at, strategy, created_at")
-      .eq("user_id", TRACK_RECORD_USER_ID)
+      .from(TRACK_RECORD_VIEW)
+      .select("ticker, market_question, side, price, amount, pnl, net_pnl, resolution, settled_at, strategy, created_at")
       .eq("mode", mode)
       .eq("status", "settled")
       .gte("settled_at", MAY_START)
       .order("settled_at", { ascending: false })
       .limit(25),
     supabase
-      .from("trades")
+      .from(TRACK_RECORD_VIEW)
       .select("id, ticker, market_question, side, price, amount, strategy, filled_at")
-      .eq("user_id", TRACK_RECORD_USER_ID)
       .eq("mode", mode)
       .eq("status", "filled")
       .is("settled_at", null)
       .is("exit_reason", null)
       .order("filled_at", { ascending: false }),
   ]);
+
+  // Fail loud. These used to be `res.data ?? []`, so a permission error, a dropped
+  // view, or a network failure all rendered as a confident "$0.00 · 0 trades" —
+  // indistinguishable from an agent that has never traded, on the one page whose
+  // entire job is to prove that it has.
+  const failure = [tradesRes, settledRes, openRes].find((r) => r.error);
+  if (failure?.error) {
+    throw new Error(`Track record unavailable: ${failure.error.message}`);
+  }
 
   return {
     allTrades: tradesRes.data ?? [],
@@ -247,6 +255,9 @@ export function PerformancePage() {
   const [recentTrades, setRecentTrades] = useState<RecentTrade[]>([]);
   const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
   const [loading, setLoading] = useState(true);
+  // Surfaced in place of the stats. A track record that cannot load must say so —
+  // silently painting zeros is a claim that the agent has never traded.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [era, setEra] = useState<Era>("mtd");
   const [allTradesRaw, setAllTradesRaw] = useState<any[]>([]);
@@ -255,7 +266,11 @@ export function PerformancePage() {
   const [dailyPnl, setDailyPnl] = useState<{ date: string; pnl: number }[]>([]);
   const [categoryRows, setCategoryRows] = useState<CategoryRow[]>([]);
   const [pnlDistribution, setPnlDistribution] = useState<DistBucket[]>([]);
-  const [mode, setMode] = useState<"paper" | "live">("paper");
+  // Paper only, and not switchable. Live-mode results are real-money performance
+  // and are not published — `public_track_record` excludes them server-side, so a
+  // live toggle here could only ever render an empty page while advertising that
+  // real-money numbers exist behind it.
+  const mode = "paper" as const;
 
   const applyEra = useCallback((trades: any[], selectedEra: Era) => {
     const cutoff = ERA_CUTOFFS[selectedEra];
@@ -422,18 +437,32 @@ export function PerformancePage() {
     setLoading(false);
   }, [era, applyEra, mode]);
 
+  // `load` throws on a query error rather than returning empty rows. Catch it here
+  // so the failure becomes visible copy instead of an unhandled rejection that
+  // leaves the page spinning forever — the same failure mode as the 2026-08-04
+  // dashboard outage.
+  const loadSafely = useCallback(async () => {
+    try {
+      await load();
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Track record unavailable.");
+      setLoading(false);
+    }
+  }, [load]);
+
   useEffect(() => {
-    load();
-    const interval = setInterval(load, 60_000);
+    loadSafely();
+    const interval = setInterval(loadSafely, 60_000);
     const channel = supabase
       .channel("perf-rt")
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, loadSafely)
       .subscribe();
     return () => {
       clearInterval(interval);
       supabase.removeChannel(channel);
     };
-  }, [load]);
+  }, [loadSafely]);
 
   const currentPnl = equityData.length > 0 ? equityData[equityData.length - 1].pnl : 0;
   const isPositive = currentPnl >= 0;
@@ -457,29 +486,9 @@ export function PerformancePage() {
           <span className="text-sm font-medium tracking-tight">Trade Agent</span>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => setMode("paper")} className="cursor-pointer">
-            <Badge
-              variant="secondary"
-              className={cn(
-                "text-[10px] rounded-full transition-colors",
-                mode === "paper" ? "bg-primary/10 text-primary" : "text-muted-foreground"
-              )}
-            >
-              Paper Trading
-            </Badge>
-          </button>
-          <button onClick={() => setMode("live")} className="cursor-pointer">
-            <Badge
-              variant="secondary"
-              className={cn(
-                "text-[10px] rounded-full flex items-center gap-1 transition-colors",
-                mode === "live" ? "bg-primary/10 text-primary" : "text-muted-foreground"
-              )}
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
-              Live
-            </Badge>
-          </button>
+          <Badge variant="secondary" className="text-[10px] rounded-full bg-primary/10 text-primary">
+            Paper Trading
+          </Badge>
           {lastUpdated && (
             <span className="text-[10px] text-muted-foreground flex items-center gap-1">
               <RefreshCw className="h-3 w-3" />
@@ -490,8 +499,10 @@ export function PerformancePage() {
             <button
               onClick={() => {
                 const pnl = stats.realizedPnl >= 0 ? `+$${stats.realizedPnl.toFixed(2)}` : `-$${Math.abs(stats.realizedPnl).toFixed(2)}`;
-                const text = `My AI trading agent on Kalshi is ${stats.realizedPnl >= 0 ? "up" : "down"} ${pnl} with a ${stats.winRate}% win rate across ${stats.settledTrades} trades. Running 24/7 on @KalshiHQ — check the live track record:`;
-                const url = encodeURIComponent("https://omii-trade-agent.vercel.app/performance");
+                // Says "paper" explicitly: these are simulated results, and a post
+                // that omits that reads as a real-money claim to everyone who sees it.
+                const text = `My AI trading agent is ${stats.realizedPnl >= 0 ? "up" : "down"} ${pnl} paper trading on Kalshi — ${stats.winRate}% win rate across ${stats.settledTrades} settled trades, running 24/7 on @KalshiHQ. Full track record:`;
+                const url = encodeURIComponent("https://kalshitradeagent.com/performance");
                 window.open(`https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${url}`, "_blank");
               }}
               className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-md hover:bg-muted"
@@ -512,9 +523,7 @@ export function PerformancePage() {
               Track Record
             </h1>
             <p className="text-sm text-muted-foreground mt-1">
-              {mode === "live"
-                ? "Autonomous live trading with real capital on Kalshi prediction markets."
-                : "Autonomous paper trading on Kalshi prediction markets."}
+              Autonomous paper trading on Kalshi prediction markets.
               {stats?.firstTradeAt && ` Running since ${formatDate(stats.firstTradeAt)}.`}
             </p>
           </div>
@@ -538,7 +547,14 @@ export function PerformancePage() {
           </div>
         </div>
 
-        {loading ? (
+        {loadError ? (
+          <div className="rounded-2xl bg-card p-8 apple-shadow text-center">
+            <p className="text-sm font-medium text-foreground mb-1">Track record unavailable</p>
+            <p className="text-xs text-muted-foreground">
+              {loadError} — these figures are not zero, they could not be loaded. Retrying every minute.
+            </p>
+          </div>
+        ) : loading ? (
           <div className="flex items-center justify-center py-24">
             <RefreshCw className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
@@ -953,9 +969,7 @@ export function PerformancePage() {
 
             {/* Footer disclaimer */}
             <p className="text-center text-xs text-muted-foreground pb-8">
-              {mode === "live"
-                ? "Live trading with real capital on Kalshi. Past performance is not necessarily indicative of future results."
-                : "Paper trading only — no real money at risk. All trades are simulated against real Kalshi market outcomes."}
+              Paper trading only — no real money at risk. All trades are simulated against real Kalshi market outcomes.
             </p>
           </>
         )}
