@@ -122,3 +122,63 @@ export async function fetchOrderbook(
     clearTimeout(timer);
   }
 }
+
+export type FetchMarketStatusResult =
+  /** Market exists; `status` is its Kalshi lifecycle state. */
+  | { ok: true; status: string }
+  /** Couldn't read a status. `marketGone` distinguishes "Kalshi says this market
+   *  does not exist" (404/410 — definitive) from "we couldn't tell" (timeout,
+   *  5xx, malformed body), which callers must treat as no reason to act. */
+  | { ok: false; marketGone: boolean };
+
+/**
+ * Read a market's Kalshi lifecycle status ("active", "closed", "settled",
+ * "finalized", ...).
+ *
+ * This endpoint — not the orderbook — is the authority on whether a market
+ * exists and whether it can still trade. Verified against live Kalshi
+ * (2026-08-04):
+ *
+ *   GET /markets/KXNONEXISTENT-99Z-T0            → 404
+ *   GET /markets/KXNONEXISTENT-99Z-T0/orderbook  → 200, empty book
+ *   GET /markets/KXBTC-26JUL2817-B64875          → 200, status "finalized"
+ *   GET /markets/KXBTC-26JUL2817-B64875/orderbook→ 200, empty book
+ *
+ * So the orderbook endpoint answers 200 for a fabricated ticker AND for a
+ * market that resolved a week ago — which is why paper-reconcile's original
+ * `tickerGone` check (keyed on an orderbook 404) could never fire in practice,
+ * and orders rested forever in both cases.
+ *
+ * Public endpoint, no signing required.
+ *
+ * `reconcile-orders` keeps its own near-identical variant on purpose: that one
+ * routes through its `fetchWithRetry` wrapper because it guards the live-money
+ * path. Collapsing the two would silently drop those retries.
+ */
+export async function fetchMarketStatus(
+  kalshiBase: string,
+  ticker: string
+): Promise<FetchMarketStatusResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ORDERBOOK_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${kalshiBase}/markets/${ticker}`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        marketGone: response.status === 404 || response.status === 410,
+      };
+    }
+    const body = await response.json();
+    const status = body?.market?.status;
+    return typeof status === "string"
+      ? { ok: true, status }
+      : { ok: false, marketGone: false };
+  } catch {
+    return { ok: false, marketGone: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}

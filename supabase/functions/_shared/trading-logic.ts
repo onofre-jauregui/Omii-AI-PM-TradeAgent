@@ -107,6 +107,48 @@ export function computeWinStreakFromTrades(
   return streak;
 }
 
+// ─── Per-strategy run cadence ─────────────────────────────────────────────────
+//
+// The auto-trade cron already ticks every 5 min in production (bumped from
+// hourly so the signal pipeline's 5-min refresh isn't wasted). That schedule
+// change shipped without this gate, which means every strategy with no
+// explicit run_interval_minutes is currently being evaluated every 5 min
+// instead of the originally-intended hourly default — this gate restores
+// that default so only strategies that explicitly opt into a faster cadence
+// actually get one.
+
+/** Grace subtracted from the interval so an N-minute cadence fires on the first
+ *  cron tick at/after N minutes instead of skipping a cycle to timing jitter.
+ *  Set to half the auto-trade cron cycle (cron runs every 5 min → 2.5). */
+export const CADENCE_GRACE_MIN = 2.5;
+
+/** Effective cadence for a strategy with no explicit run_interval_minutes.
+ *  The auto-trade cron ticks every 5 min; an un-throttled strategy must still
+ *  run hourly (the pre-cadence behavior), so NULL maps to 60 min here rather
+ *  than "run every tick" — otherwise every default strategy would trade every
+ *  5 min now that the cron granularity has dropped below an hour. */
+export const DEFAULT_CADENCE_MIN = 60;
+
+/**
+ * Decide whether a strategy is due to run this cycle.
+ * - intervalMin null/0/negative → default hourly cadence (DEFAULT_CADENCE_MIN).
+ * - lastRunAt null/unparseable → never recorded a run: run now (fail open).
+ * - otherwise run once the elapsed time reaches (interval - grace).
+ * nowMs is injectable for deterministic testing.
+ */
+export function shouldRunByCadence(
+  intervalMin: number | null | undefined,
+  lastRunAt: string | null | undefined,
+  nowMs: number
+): boolean {
+  const effectiveInterval = !intervalMin || intervalMin <= 0 ? DEFAULT_CADENCE_MIN : intervalMin;
+  if (!lastRunAt) return true;
+  const lastMs = new Date(lastRunAt).getTime();
+  if (Number.isNaN(lastMs)) return true;
+  const elapsedMin = (nowMs - lastMs) / 60_000;
+  return elapsedMin >= effectiveInterval - CADENCE_GRACE_MIN;
+}
+
 // ─── S-002 Longshot Bias Filters ──────────────────────────────────────────────
 
 /**

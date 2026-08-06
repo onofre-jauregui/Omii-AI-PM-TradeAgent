@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Auto-Reflect v2 — Instrumentation, Advisory Lock, and System Version Tagging
 -- 2026-05-04
@@ -31,12 +38,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_memory_system_version ON agent_memory (syst
 -- 2. Memory Attribution — which memories influenced which trades
 -- ─────────────────────────────────────────────────────────────────────────────
 
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS influenced_by_memory_ids uuid[] DEFAULT '{}';
+-- text[], not uuid[]: this migration aborted partway in production and the column
+-- was created by hand as text[]. The running code reads and writes that shape.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS influenced_by_memory_ids text[] DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS memory_attribution (
   trade_id uuid NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
   memory_id uuid NOT NULL REFERENCES agent_memory(id) ON DELETE CASCADE,
-  cited_at timestamptz NOT NULL DEFAULT now(),
+  cited_at timestamptz DEFAULT now(),
   trade_pnl numeric,        -- backfilled when trade settles
   settled_at timestamptz,   -- null until trade resolves
   PRIMARY KEY (trade_id, memory_id)
@@ -62,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_signals_shadow_settled ON signals (settled_at) WH
 -- Scoping: 'global', 'strategy:{strategy_id}', 'market:{market_type}'
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS scope text DEFAULT 'global';
 
-ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_updated_at timestamptz DEFAULT now();
+ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_updated_at timestamptz;
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS trade_sample_size int DEFAULT 0;
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS alpha numeric DEFAULT 1;   -- Beta prior: wins
 ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS beta numeric DEFAULT 1;    -- Beta prior: losses
@@ -90,7 +99,12 @@ WHERE expected_hit_rate IS NULL OR max_acceptable_drawdown IS NULL;
 -- 6. Signal↔Trade Linkage — kill the 2-hour heuristic
 -- ─────────────────────────────────────────────────────────────────────────────
 
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS source_signal_id uuid REFERENCES signals(id);
+-- TEXT, not uuid. Production has carried this as text since it was added, and
+-- 20260731_signal_claims.sql is written against text — it applies the ~ regex
+-- operator to the column and casts explicitly with ::uuid. Declaring uuid here
+-- meant a database rebuilt from git would not match production and would break
+-- that backfill. No FK for the same reason: production has none.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS source_signal_id text;
 CREATE INDEX IF NOT EXISTS idx_trades_source_signal ON trades(source_signal_id);
 
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS direction_correct bool;
@@ -122,12 +136,13 @@ CREATE INDEX IF NOT EXISTS idx_compaction_log_result ON compaction_log(result_me
 -- A table with single-row upsert is atomic and survives connection pooling.
 
 CREATE TABLE IF NOT EXISTS auto_trade_locks (
-  lock_name text PRIMARY KEY DEFAULT 'auto_trade',
+  lock_name text PRIMARY KEY,
   acquired_at timestamptz NOT NULL DEFAULT now(),
-  run_id uuid NOT NULL
+  run_id text NOT NULL
 );
 
 ALTER TABLE auto_trade_locks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Service role full access on auto_trade_locks" ON auto_trade_locks;
 CREATE POLICY "Service role full access on auto_trade_locks"
   ON auto_trade_locks FOR ALL USING (true) WITH CHECK (true);
 
@@ -149,7 +164,7 @@ SELECT cron.schedule(
     body := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 10. Settle-signals cron — every 15 minutes

@@ -68,6 +68,25 @@ This is the moat. Not the code. The compounding collective intelligence that a s
 - **Apply migrations:** `source ~/.omii_env && curl -s -X POST "https://api.supabase.com/v1/projects/uyfnezxmgwitpzsrnkst/database/query" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN_KTA" -H "Content-Type: application/json" -d '{"query": "..."}'`
 - **Never use** `npx supabase db push` — migration history is out of sync with remote.
 
+## Dashboard verification — mandatory gate
+
+**No change to this system is done until the UI dashboards have been opened in a real browser against the deployed target and confirmed to show correct, live values.** This applies to every change — frontend, edge function, migration, cron, and direct database writes — because all of them can silently break what the operator sees.
+
+A green backend is not evidence the dashboard works. On 2026-08-04 a promotion passed lint, 307 unit tests, staging E2E, a production deploy, and a 30-minute canary while the live dashboard sat on a permanent loading spinner. The E2E suite only ever tested logged-out pages, so nothing in the pipeline had ever looked at the dashboard it was meant to protect.
+
+**What must be checked, every time:**
+1. **It paints.** The hero card shows real numbers within ~10s. A spinner that never resolves is a production outage, not a slow load.
+2. **The numbers are true.** Rendered P&L matches the database — and for live mode, matches Kalshi's settlement ledger. A dashboard confidently displaying a wrong number is worse than a blank one.
+3. **Nothing is silently empty.** Every chart either plots data or states why it can't. A bare axis with no series reads as broken.
+4. **Both modes.** Paper and Live take different code paths; Live additionally awaits the Kalshi wallet ping. Checking one proves nothing about the other.
+5. **The console and network are clean.** No uncaught errors, no 4xx/5xx on app requests, and no endpoint requested more than a couple of times per load — a request storm is how the spinner-hang manifests.
+
+**How:** `npm run verify:dashboards` (Playwright, authenticated, asserts rendered values against the DB). It runs as a blocking CI gate on every push, and must be run by hand after any change CI can't observe — a direct SQL write, a manual edge-function deploy, a cron change.
+
+**Failure modes this exists to catch** (all three have happened here): a permanent spinner from an unguarded `await` before the only `loading:false`; a chart rendering an empty box because its series list was empty; and correct-looking figures read from a column that was corrupt.
+
+This is part of the VERIFIED gate in `~/.claude/STANDARDS.md` — "runs in its real environment" includes the screen.
+
 ## Branch strategy — hard rule
 
 **feature → dev → main. No exceptions.**

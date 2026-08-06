@@ -95,7 +95,10 @@ async function streamChat({
 }
 
 export function AgentPanel({ mode = "paper", onOpenMarket }: { mode?: "paper" | "live"; onOpenMarket?: (ticker: string) => void }) {
-  const { getActiveStrategies } = useStrategies();
+  // Memoised value, not getActiveStrategies() — calling that during render
+  // returned a fresh array each pass and made loadPositionSizes' effect below
+  // re-fire indefinitely (15+ duplicate strategy_config fetches per load).
+  const { activeStrategies } = useStrategies();
   const chat = useChat("agent");
   const [models, setModels] = useState<AIModel[]>(FALLBACK_MODELS);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -123,7 +126,6 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   const [savingPositionSize, setSavingPositionSize] = useState<Record<string, boolean>>({});
   const [savedPositionSize, setSavedPositionSize] = useState<Record<string, boolean>>({});
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  const activeStrategies = getActiveStrategies();
 
   const chatMessages = chat.messages;
   const isLoading = chat.isLoading;
@@ -131,9 +133,20 @@ Tone: direct and data-driven. Lead with numbers. Flag risks. No filler.`
   const loadModels = useCallback(async () => {
     setLoadingModels(true);
     try {
+      // Session JWT, not the publishable key. The publishable key was rejected
+      // with a 401 on every dashboard load — the model picker silently fell back
+      // to FALLBACK_MODELS and the user's own configured model was never listed.
+      // This function decrypts that user's AI provider key, so it needs the real
+      // caller identity regardless; sending an anon key here was never correct.
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      if (!accessToken) {
+        setLoadingModels(false);
+        return; // signed out — nothing to personalise, keep the fallback list
+      }
       const [modelsRes, prefRow] = await Promise.all([
         fetch(LIST_MODELS_URL, {
-          headers: { Authorization: `Bearer ${(import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string)?.trim()}` },
+          headers: { Authorization: `Bearer ${accessToken}` },
         }),
         supabase.from("api_keys").select("key_id").eq("provider", "model_agent").maybeSingle(),
       ]);

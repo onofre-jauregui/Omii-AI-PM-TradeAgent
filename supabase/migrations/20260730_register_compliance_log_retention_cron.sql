@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- compliance-log-retention-daily was applied directly against the remote DB
 -- (2026-07-07 health-check run, see .claude/improvement-log.md) via the
 -- Supabase Management API, not through a committed migration — same class of
@@ -39,4 +46,4 @@ SELECT cron.schedule(
 
 INSERT INTO public.expected_cron_jobs (jobname, note) VALUES
   ('compliance-log-retention-daily', 'daily prune of info/warning compliance_log rows older than 30 days (2026-07-07: applied live via Management API during the first-ever health-check run, never captured into git until now — 98th run)')
-ON CONFLICT (jobname) DO NOTHING;
+ON CONFLICT (jobname) DO UPDATE SET note = excluded.note;

@@ -4,6 +4,60 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-06 — Assert the rebuilt schema by catalog fingerprint, not object counts
+**Decision:** `rehearse-migrations.sh` compares the rebuilt catalog to `scripts/expected-schema.json` object-by-object — every column with type/default/nullability, plus views, functions, RLS policies, indexes, constraints and triggers — instead of comparing five totals.
+**Options:** (A) keep the count assertion; (B) full catalog fingerprint diffed by name; (C) diff the rebuild against production live on every CI run.
+**Why:** the count check passed while twelve RLS policies, three column types and four constraints differed from production — including `Allow all access to api_keys` (`FOR ALL`, `TO public`, `USING (true)`), which a rebuilt database would have carried on the table holding users' encrypted Kalshi keys. Totals lined up by coincidence. (C) was rejected because CI must not hold production credentials; the committed fingerprint gives the same signal and makes every schema change a reviewable diff.
+**Reversibility:** easy — the fingerprint is regenerated with `--write-fingerprint`.
+**Trace:** PR #201; `scripts/compare-schema-fingerprint.py`, `scripts/schema-fingerprint.sql`, `supabase/migrations/20260806000000_reconcile_schema_with_production.sql`
+
+## 2026-08-06 — Prove the schema rebuilds from git with a local-Postgres rehearsal, instead of buying a staging project
+
+**Decision:** Added `scripts/rehearse-migrations.sh` + `scripts/supabase-shim.sql` + `scripts/expected-schema.json`, wired as a **blocking CI job on every push and PR**. It replays every migration into a throwaway Postgres, twice, and asserts the rebuilt catalog matches object-for-object (originally object counts — see the entry above). Captured everything the migration set was missing so it passes.
+
+**Context:** TradeAgent has no staging Supabase project, so nothing exercised a migration before production. The first run showed the migration set could not rebuild the database at all: production had 35 public tables against the 30 the migrations create. `profiles`, `trade_lessons`, `backtest_runs` and both weather-calibration tables existed only in the live database, along with 6 columns, 5 indexes, 4 views, 2 dashboard RPCs, and `handle_new_user()` with its trigger on `auth.users` — without which a rebuilt database accepts signups and never creates the profile row onboarding depends on. It also found **20 `cron.schedule(...)` calls closed by an upsert clause that belongs to INSERT, not SELECT** — invalid SQL that could never apply to any database, which is why `20260504120000` aborted partway and left production without `compaction_log` and `open_positions` while being recorded as applied. Plus `20260610_risk_settings_unique_user.sql` failing on every re-run, and `trades.source_signal_id` declared `uuid` in git while production carries `text`.
+
+**Options:** A) Dedicated staging Supabase project (~$10/mo + migration replay + secret seeding) — rejected for now: it proves migrations against one more environment but costs money and still needs the schema to be replayable first. B) Supabase branching — same dependency, billed per branch-hour. C) Local-Postgres rehearsal in CI — chosen. Free, runs in 3s, needs no project, and is the only option that also functions as disaster recovery.
+
+**Why:** The canary gate already auto-rolls-back edge functions and the Vercel frontend; nothing rolls back a schema change. A migration was the one un-recoverable failure mode, and the repo could not rebuild its own database — a sibling OMII project lost its Supabase project outright on 2026-07-20 and survived only because its migrations replayed clean. The rehearsal closes both gaps at once. Second pass added because CI replays whole files on retry, so idempotence has to be tested, not assumed.
+
+**Also fixed:** the migration runner's date-only `LEGACY_VERSION` fallback marked every migration sharing a date as already-applied — 17 dates carry more than one file, `20260520` carries five. It now suppresses the fallback for ambiguous dates. `20260504_v2_validation_queries.sql` moved to `docs/analysis/`: it was never a migration, never applied, and creates a view over a column that does not exist.
+
+**Reversibility:** easy — the scripts and the CI job are additive; the migration edits are guards and no-ops against production (verified: all 24 captured objects already exist there).
+
+**Trace:** `docs/DISASTER-RECOVERY.md`. Known remaining drift: production is missing `compaction_log` and `open_positions`.
+
+## 2026-08-06 — Evict TradeAgent from the Omii Sound Studio Supabase project; TradeAgent has no staging backend
+
+**Decision:** Removed every TradeAgent artifact from Supabase project `yxhtmqexyozptyoooxht` ("Omii Sound Studio") — 13 cron jobs, 35 edge functions, 7 secrets, 43 `public` objects, 9 `public` functions, a trigger on that project's `auth.users`, and all 70 rows of migration history. Added a CI guard that refuses to deploy into any project containing a non-TradeAgent schema, and stopped labelling production "staging".
+
+**Context:** `STAGING_SUPABASE_PROJECT_REF` pointed at Sound Studio's project. From 2026-05-30, every `dev` push applied TradeAgent migrations and deployed all 35 functions into another product's database. Found there: 13 crons firing ~1,000 failed runs/day (all failing at `net.http_post` with a NULL url, so nothing ever executed), a `seed_risk_settings_for_new_user` trigger on `auth.users` making Sound Studio signups write into TradeAgent tables, and `ANTHROPIC_API_KEY` + `OPENROUTER_API_KEY` stored **byte-identical to production**. `API_KEY_ENCRYPTION_KEY` differed, so production users' encrypted Kalshi keys were never exposed.
+
+**Options:** A) Repoint the secret at a new dedicated staging project and leave the artifacts to rot — rejected: leaves a live trigger on another product's `auth.users` and two production keys in place, and costs money that hasn't been approved. B) Evict fully now, leave staging unconfigured, gate CI to skip loudly — chosen. C) Evict and hard-fail every `dev` push until staging exists — rejected: turns a config gap into a red pipeline on unrelated work.
+
+**Why:** The trigger on `auth.users` was the deciding detail. Dropping TradeAgent's tables without dropping it first would have broken every Sound Studio signup, and leaving it in place meant another product's user table stayed coupled to this repo's schema. Skipping loudly beats failing loudly here because the absent staging project is a pending money decision, not a defect in the code being pushed.
+
+**Reversibility:** hard for the data (43 tables dropped; a JSON snapshot of the 5 non-empty tables — 92 rows of throwaway staging data — is kept, and the schema itself replays from this repo's migrations). Easy for the CI changes.
+
+**Trace:** verified post-eviction — `sound_studio` still 24 tables / 18,012 rows unchanged, `auth.users` still 63, `public` 0 objects, 0 functions, 0 crons, 0 TradeAgent secrets.
+
+## 2026-08-04 — Guard `risk_state.open_position_count` in health-check rather than trusting the writer
+
+**Decision:** Added health-check **check 13**, comparing every `(user, mode)` `risk_state` row against the true open-position count and paging on divergence >1, plus defensive `settled_at`/`exit_reason` filters on `updateRiskState`'s count.
+**Correction (same day):** PR #182 was opened claiming the counter was inflated ~2.6–6× (21/19/11 vs 8/3/6). **That was wrong** — the comparison used `status='filled'` only while the writer counts `filled + open + partial`, so resting orders were missed on one side. Settled trades already leave the count via their status transition, and no paper buy has ever carried `settled_at`/`exit_reason` while still filled/open/partial. The counter was accurate; the filters are defensive, not corrective.
+**Options:** A) Fix the writer only — rejected once the premise collapsed: there was nothing to fix. B) Integration test — rejected: the integration tier is not wired into CI (`ci.yml` runs `npm test` and `test:e2e:staging` only), so the guard would never fire. C) Production health-check assertion — chosen, and it is the part that retains value.
+**Why:** Nothing reconciles the written counter against reality, and `evaluateRisk` gates `max_open_positions` on it — a silent over-count blocks trading on a healthy account. A cron-run assertion in the real environment beats a test nobody runs. It would also have caught my own misdiagnosis in minutes.
+**Reversibility:** easy — both changes are additive; revert the two functions.
+**Trace:** PRs #182, #184.
+
+## 2026-08-03 — Promote 88 commits `dev → main` in one pass, with a replay-safe migration runner
+
+**Decision:** Promoted the full P0+P1 train (settle-signals 404 fix, dead position caps, entitlement prefix-bypass closure, signal-claims multi-tenancy, lock hardening, `risk_state.mode`, canonical Kalshi price converter, per-tier strategy caps) to production as a single promotion. PR #176's pipeline failed on the migration replay; #178 made the runner replay-safe; #179 landed green.
+**Options:** A) Split into several smaller promotions — rejected: the changes are interdependent (claims + lock + mode-scoped risk are one data-plane change) and partial deployment leaves worse states than either end. B) One promotion with a fixed replay runner — chosen. C) Wait for a maintenance window — rejected: the window was already optimal, see below.
+**Why:** Production was paper-only at the time — the sole live strategy (`S-001-l-ea207ba1`) had been inactive since 2026-08-02 — so every money-path change landed with no capital exposed, while closing an entitlement bypass that was live in production (any strategy named `S-002-*` inherited S-002's live entitlement).
+**Reversibility:** hard — migrations are not rolled back by the canary. See [`docs/runbooks/promotion-rollback.md`](docs/runbooks/promotion-rollback.md) for the compensating SQL, in particular the `risk_state` unique-constraint swap that breaks pre-promotion code.
+**Trace:** PRs #176, #178, #179.
+
 ## 2026-07-31 — Staging DB rebuilt by statement-level replay + production parity diff
 
 **Decision:** Rebuilt the staging database from scratch: reset the false migration ledger, replayed all 66 migration files statement-by-statement (dollar-quote-aware splitter, per-statement duplicate skip), self-healed objects that exist only in production (cloned `backtest_runs`, `profiles`, `trade_lessons`, `baskets`, `waitlist`, both weather-calibration tables, 4 `agent_*` views, and 65+ dashboard-era columns from prod catalogs). Acceptance = column-level parity diff vs production: **0 of 470 prod columns missing**. Ledger restored (66 versions) so CI's pending-loop resumes cleanly.

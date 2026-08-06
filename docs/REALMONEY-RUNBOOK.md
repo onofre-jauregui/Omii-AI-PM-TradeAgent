@@ -70,9 +70,15 @@ npm run build
 ```
 
 ### 5. Deploy the frontend  ⛔ HARD STOP (production)
-Staging first (`kalshitradeagent.live`, dev branch) → verify on a real login → then merge to
+`kalshitradeagent.live` (dev branch) first → verify on a real login → then merge to
 `main` + promote on Vercel. Confirm the production domain serves the new build (`vercel ls`,
 alias if needed). Hard-refresh once — the PWA service worker is `autoUpdate`, so it self-heals.
+
+> **`.live` is not a staging environment.** Its bundle points at the production Supabase
+> project (`uyfnezxmgwitpzsrnkst`), the same one `.com` uses. It is a second frontend over
+> the *same* backend, so a "verify on a real login" here reads and writes production data.
+> It catches frontend regressions before `.com` moves; it proves nothing about a migration
+> or an edge function. TradeAgent has no staging backend — see DECISIONS.md (2026-08-06).
 
 ---
 

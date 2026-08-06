@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { generateAuthHeaders, getKalshiCredentials, KALSHI_BASE_URL, fetchLiveEquityUsd } from "../_shared/kalshi-auth.ts";
 import { corsHeadersExtended as corsHeaders, preflight } from "../_shared/cors.ts";
 import { evaluateRisk, evaluateCapitalCap, type RiskSettings, type RiskState } from "../_shared/risk.ts";
 import { resolveTenant, getRiskStateToday, setRiskHalt } from "../_shared/tenant.ts";
@@ -331,13 +331,18 @@ serve(async (req) => {
       // of truth, replacing the prior inline min() computation.
       const maxPos = effective.maxOpenPositions;
       // Count open positions in THIS mode only — paper positions must not consume
-      // the live cap (and vice-versa).
+      // the live cap (and vice-versa). Includes resting `open`/`partial` orders,
+      // not just `filled` — a resting order reserves the same slot a filled one
+      // does (mirrors the allocated_capital cap below, which already counts all
+      // three statuses). Before this fix, live orders could rest in `open`/
+      // `partial` uncounted, letting max_open_positions be silently exceeded
+      // while the dollar-based allocated_capital cap enforced correctly.
       const { count: openCount } = await supabase
         .from("trades")
         .select("id", { count: "exact", head: true })
         .eq("user_id", userId)
         .eq("mode", tradeMode)
-        .eq("status", "filled")
+        .in("status", ["filled", "open", "partial"])
         .is("settled_at", null)
         .is("exit_reason", null);
       modeScopedOpenCount = openCount ?? 0;
@@ -385,11 +390,36 @@ serve(async (req) => {
       }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
+    // Real current equity + settled-trade sample size for the concentration
+    // check's graduated cap (see _shared/risk.ts). Fetched once here and reused
+    // below when seeding/updating risk_state's peak — a real balance read, not
+    // the peak-portfolio proxy. Fails open (null) on any credential/network
+    // issue, which evaluateRisk treats as "fall back to peak_portfolio_value".
+    let currentEquityUsd: number | null = null;
+    let settledTradeCount = 0;
+    if (tradeMode === "live" && userId) {
+      currentEquityUsd = await fetchLiveEquityUsd(supabase, userId, {
+        generateAuthHeaders,
+        KALSHI_BASE_URL: getKalshiBaseUrl(),
+      });
+      const settledCountQuery = supabase
+        .from("trades")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("mode", "live")
+        .eq("status", "settled");
+      const { count: settledCount } = strategyId
+        ? await settledCountQuery.eq("strategy_id", strategyId)
+        : await settledCountQuery;
+      settledTradeCount = settledCount ?? 0;
+    }
+
     let riskCheck = evaluateRisk(
       amount,
       tradeMode as "paper" | "live",
       settings as RiskSettings | null,
-      riskState as RiskState | null
+      riskState as RiskState | null,
+      { currentEquityUsd, settledTradeCount }
     );
 
     // Aggregate live-exposure cap (allocated_capital). Needs a DB sum, so it runs
@@ -978,7 +1008,11 @@ serve(async (req) => {
     }
 
     // Update risk state for this tenant
-    await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live");
+    // Reuse the equity figure already fetched above for the concentration check
+    // — previously this call passed no riskSettings/equity, so peak_portfolio_value
+    // was always seeded from the $500 fallback on the live path regardless of the
+    // account's actual configured capital or real balance.
+    await updateRiskState(supabase, userId, 0, tradeMode as "paper" | "live", settings, currentEquityUsd);
 
     return new Response(JSON.stringify({
       success: true,
@@ -1033,19 +1067,23 @@ async function updateRiskState(
   userId: string | null,
   _pnlChange: number,  // kept for API compat — daily_pnl now computed from settled trades directly
   mode: "paper" | "live",
-  riskSettings?: any   // used to seed peak_portfolio_value on first trade of day
+  riskSettings?: any,  // used to seed peak_portfolio_value on first trade of day
+  currentEquityUsd?: number | null  // real Kalshi equity (live only) — see fetchLiveEquityUsd
 ) {
   const today = new Date().toISOString().split("T")[0];
 
   // Count currently-open positions, scoped to tenant AND mode — risk_state is
   // one row per (user_id, date, mode).
   //
-  // The settled_at/exit_reason filters are load-bearing: without them this
-  // counted every buy that had EVER filled, so the stored value only ever grew
-  // (production carried 21/19/11 against 8/3/6 genuinely open before this fix).
-  // A "current open positions" number that never decrements is not a count,
-  // it's a running total — and it feeds evaluateRisk's max_open_positions gate
-  // in _shared/risk.ts.
+  // The settled_at/exit_reason filters are defensive, not corrective. A settled
+  // trade already leaves this count via its status transition to 'settled', so
+  // they change nothing for present data (verified 2026-08-04: zero paper buys
+  // held settled_at or exit_reason while still in filled/open/partial). They
+  // close one state the system does model and this query would otherwise miss —
+  // an exited position tombstoned with exit_reason while still status='filled',
+  // the same shape health-check's duplicate-position check screens for. The
+  // value feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
+  // stale over-count there blocks trading rather than merely misreporting.
   //
   // Status set is deliberately broader than the authoritative cap query in the
   // position-cap block above (which uses status='filled'): a resting open or
@@ -1084,7 +1122,17 @@ async function updateRiskState(
 
   if (current) {
     const currentPeak = current.peak_portfolio_value || 0;
-    const newPeak = actualDailyPnl > currentPeak ? actualDailyPnl : currentPeak;
+    // Prefer real Kalshi equity (cash + open positions) when we have it — comparing
+    // it against the existing peak is an apples-to-apples portfolio-value comparison.
+    // The old fallback compared actualDailyPnl (a P&L delta, typically a few dollars)
+    // directly against a portfolio-scale peak, so on a small account the peak was
+    // functionally frozen at its seed value forever — it could never lose that
+    // comparison. Only fall back to that when no real equity reading is available
+    // (paper mode, or a failed live balance fetch).
+    const newPeak =
+      currentEquityUsd != null
+        ? Math.max(currentPeak, currentEquityUsd)
+        : actualDailyPnl > currentPeak ? actualDailyPnl : currentPeak;
     const updateQuery = supabase.from("risk_state").update({
       daily_pnl: actualDailyPnl,
       daily_trades: current.daily_trades + 1,
@@ -1099,9 +1147,9 @@ async function updateRiskState(
       await updateQuery.is("user_id", null);
     }
   } else {
-    // Seed peak_portfolio_value from user's allocated capital so the drawdown
-    // and concentration checks have a meaningful baseline from day one.
-    const seedPeak = riskSettings?.allocated_capital ?? 500;
+    // Seed peak_portfolio_value from real equity when available (live), else the
+    // user's allocated capital, else the last-resort 500 default.
+    const seedPeak = currentEquityUsd ?? riskSettings?.allocated_capital ?? 500;
     await supabase.from("risk_state").insert({
       user_id: userId,
       date: today,

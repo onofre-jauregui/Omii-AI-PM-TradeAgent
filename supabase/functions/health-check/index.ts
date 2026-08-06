@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
+import { fetchMarketStatus } from "../_shared/kalshi-market-data.ts";
 import { countTradesInWindow } from "../_shared/limits.ts";
 
 /**
@@ -614,13 +615,22 @@ serve(async (req) => {
     }
 
     // ── 13. risk_state.open_position_count integrity ──────────────────
-    // updateRiskState (execute-trade) counted every buy that had ever filled,
-    // with no settled_at/exit_reason filter, so the stored value only ever grew
-    // — production carried 21/19/11 against 8/3/6 genuinely open (2026-08-04).
-    // It feeds evaluateRisk's max_open_positions gate in _shared/risk.ts, so a
-    // counter that never decrements eventually false-blocks a healthy account.
-    // The writer is fixed; this check is the guard that the fix stays fixed,
-    // since the drift is silent and only visible by comparing the two counts.
+    // risk_state.open_position_count is written by updateRiskState (execute-trade)
+    // and read by evaluateRisk's max_open_positions gate (_shared/risk.ts), so a
+    // stored value that drifts above reality blocks trading on a healthy account
+    // (or, if it drifts low, silently raises the effective cap). The auto-settle
+    // reconciliation added 2026-08-05 (health-check run 106) only refreshes the
+    // count for tenants who actually settled in that specific run's tick — a
+    // tenant whose count went stale via some other path (or whose settlement
+    // window this check simply beat to the punch) stays wrong until their next
+    // trade, which can be hours. Run 107 (2026-08-06) observed this directly:
+    // the 106th run's manual backfill was overwritten within one hourly tick and
+    // sat wrong for 9+ hours across three later ticks with zero trade activity
+    // for that tenant in between — confirming the row can go stale through a path
+    // this check doesn't need to identify to correct. Since this check already
+    // computes the true value on every run, it now self-heals any drift found
+    // instead of only alerting on it, bounding the exposure window to at most
+    // one hourly tick regardless of which writer caused it.
     const { data: todayRiskRows } = await supabase
       .from("risk_state")
       .select("user_id, mode, open_position_count")
@@ -648,23 +658,104 @@ serve(async (req) => {
     });
 
     if (drifted.length > 0) {
+      const today = new Date().toISOString().split("T")[0];
       const detail = drifted
         .map((r: any) => {
           const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
           return `${String(r.user_id).slice(0, 8)}/${r.mode}: stored ${r.open_position_count} vs open ${actual}`;
         })
         .join("; ");
+
+      // Self-heal: write the freshly-computed true count back, same shape as
+      // auto-settle's reconciliation UPDATE. Idempotent and safe to run every
+      // tick — it only touches rows already confirmed wrong above.
+      let healed = 0;
+      for (const r of drifted as any[]) {
+        const actual = openByUserMode.get(`${r.user_id}::${r.mode}`) ?? 0;
+        const healQuery = supabase.from("risk_state").update({
+          open_position_count: actual,
+          updated_at: new Date().toISOString(),
+        }).eq("date", today).eq("mode", r.mode);
+        const { error: healErr } = await (r.user_id ? healQuery.eq("user_id", r.user_id) : healQuery.is("user_id", null));
+        if (!healErr) healed++;
+      }
+
       pendingAlerts.push({
         type: "risk_state_count_drift",
         fingerprint: `risk_count_drift_${drifted.length}`,
         cooldownHours: 12,
-        message: `📊 [TradeAgent] risk_state.open_position_count drifted from reality — ${detail}. The max_open_positions gate reads this value.`,
+        message: `📊 [TradeAgent] risk_state.open_position_count drifted from reality — ${detail}. The max_open_positions gate reads this value. Auto-healed ${healed}/${drifted.length} row(s).`,
       });
       await supabase.from("compliance_log").insert({
         event_type: "risk_state_count_drift",
         severity: "warning",
-        message: `risk_state.open_position_count diverged for ${drifted.length} (user, mode) row(s): ${detail}`,
-        metadata: { drifted: drifted.length },
+        message: `risk_state.open_position_count diverged for ${drifted.length} (user, mode) row(s): ${detail}. Auto-healed ${healed}/${drifted.length}.`,
+        metadata: { drifted: drifted.length, healed },
+      });
+    }
+
+    // ── 14. Resting orders on markets that can no longer trade ────────
+    // paper-reconcile ran every 5 minutes for 8 days reporting "39 checked,
+    // 0 filled, 0 cancelled, 0 errors" while 39 paper orders ($855) sat frozen
+    // on markets Kalshi had already finalized. Every per-run number was healthy.
+    // Same shape as the settle-signals stuck-batch (fixed 2026-07-28) — a loop
+    // that reports activity while making no progress.
+    //
+    // The signal is the market's STATE, not the order's age. Age alone is a
+    // false alarm generator: a legitimate resting order on KXFED-27APR is
+    // months old by design, and an alert that fires on healthy orders every
+    // 12 hours gets muted, which is worse than no alert. An order is only
+    // wrong to still be resting if its market has stopped trading — exactly
+    // the condition paper-reconcile now acts on, so this check verifies the
+    // reconciler is doing its job rather than re-deriving its logic.
+    //
+    // Cost is bounded by DISTINCT tickers among stale resting orders (7 for a
+    // 13-order backlog), and only orders past a 24h grace period are considered
+    // so a market resolving between reconcile ticks never pages.
+    const restingCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: staleResting } = await supabase
+      .from("trades")
+      .select("id, mode, ticker, created_at")
+      .in("status", ["open", "partial"])
+      .is("settled_at", null)
+      .lt("created_at", restingCutoff);
+
+    const notAdvancing: { ticker: string; status: string; ageHours: number }[] = [];
+    const stateByTicker = new Map<string, string>();
+    for (const t of staleResting ?? []) {
+      const ticker = (t as any).ticker;
+      if (!ticker) continue;
+      if (!stateByTicker.has(ticker)) {
+        const result = await fetchMarketStatus(KALSHI_BASE_URL, ticker);
+        // Unknown (timeout/5xx) is not evidence of a problem — skip, don't page.
+        stateByTicker.set(
+          ticker,
+          result.ok ? result.status.toLowerCase() : result.marketGone ? "missing" : "unknown"
+        );
+      }
+      const state = stateByTicker.get(ticker)!;
+      if (state === "unknown" || state === "active" || state === "closed") continue;
+      notAdvancing.push({
+        ticker,
+        status: state,
+        ageHours: Math.floor((Date.now() - new Date((t as any).created_at).getTime()) / 3_600_000),
+      });
+    }
+
+    if (notAdvancing.length > 0) {
+      const worst = notAdvancing.reduce((a, b) => (a.ageHours > b.ageHours ? a : b));
+      const tickers = [...new Set(notAdvancing.map(o => o.ticker))].sort();
+      pendingAlerts.push({
+        type: "resting_orders_not_advancing",
+        fingerprint: `resting_dead_${tickers.join(",")}`,
+        cooldownHours: 12,
+        message: `⏳ [TradeAgent] ${notAdvancing.length} order(s) still resting on markets that stopped trading — worst ${worst.ticker} (${worst.status}, ${worst.ageHours}h). Reconcile is running but not advancing them; their outcomes never reach the track record.`,
+      });
+      await supabase.from("compliance_log").insert({
+        event_type: "resting_orders_not_advancing",
+        severity: "warning",
+        message: `${notAdvancing.length} order(s) resting on non-tradeable markets; worst ${worst.ticker} (${worst.status}, ${worst.ageHours}h)`,
+        metadata: { count: notAdvancing.length, tickers, worst },
       });
     }
 

@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- Fix auto-reflect cron: was silently skipping because it looked up
 -- 'service_role_key' in vault, but the vault stores it as 'SUPABASE_SERVICE_ROLE_KEY'.
 -- Match the pattern used by all other working crons (futures-signal, auto-trade, etc.)
@@ -15,4 +22,4 @@ SELECT cron.schedule(
     timeout_milliseconds := 55000
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = EXCLUDED.schedule, command = EXCLUDED.command;
+);

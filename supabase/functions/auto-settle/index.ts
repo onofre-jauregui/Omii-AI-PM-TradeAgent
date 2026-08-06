@@ -118,6 +118,18 @@ serve(async (req) => {
     let totalSettled = 0;
     let totalStillPending = 0;
     const results: any[] = [];
+    // risk_state.open_position_count is only recomputed by execute-trade's
+    // updateRiskState() — this settlement path never touched it, so a position
+    // that exits here (the normal way most paper positions close, since no new
+    // trade call happens) left the stored count stale until that user's next
+    // trade. Track every (user_id, mode) pair this run actually settles so we
+    // can refresh the count for exactly those tenants below (health-check's
+    // 13th check, `risk_state_count_drift`, flagged this — 2026-08-05).
+    const settledTenants = new Map<string, { userId: string | null; mode: string }>();
+    const trackSettledTenant = (userId: string | null, mode: string | null | undefined) => {
+      if (!mode) return;
+      settledTenants.set(`${userId ?? "null"}|${mode}`, { userId: userId ?? null, mode });
+    };
 
     // 2. For each (ticker, user_id) pair, fetch Kalshi and settle if resolved.
     // The view now groups by both columns so each user's positions are independent.
@@ -152,7 +164,7 @@ serve(async (req) => {
       if (marketAction === "void") {
         const { data: voidedTrades } = await supabase
           .from("trades")
-          .select("id")
+          .select("id, user_id, mode")
           .in("id", tradeIds);
         if (voidedTrades && voidedTrades.length > 0) {
           await supabase.from("trades").update({
@@ -167,6 +179,7 @@ serve(async (req) => {
             // or miscounted these trades. Refund-at-cost means no fees either.
             net_pnl: 0,
           }).in("id", voidedTrades.map((t: any) => t.id));
+          for (const vt of voidedTrades) trackSettledTenant(vt.user_id, vt.mode);
           await supabase.from("compliance_log").insert({
             event_type: "trade_settled",
             severity: "info",
@@ -229,6 +242,8 @@ serve(async (req) => {
           });
           continue;
         }
+
+        trackSettledTenant(t.user_id, t.mode);
 
         // Langfuse score: link qualify decision to trade outcome
         if (t.trace_id && outcome !== "void") {
@@ -436,7 +451,7 @@ serve(async (req) => {
     const expiryCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const { data: expiredByTime } = await supabase
       .from("trades")
-      .select("id, ticker")
+      .select("id, ticker, user_id, mode")
       .in("status", ["filled", "open", "partial"])
       .eq("mode", "paper")
       .is("settled_at", null)
@@ -462,6 +477,35 @@ serve(async (req) => {
         },
       });
       totalSettled += expiredByTime.length;
+      for (const et of expiredByTime) trackSettledTenant(et.user_id, et.mode);
+    }
+
+    // 6b. Reconcile risk_state.open_position_count for every (user_id, mode)
+    //     touched by settlement above. execute-trade's updateRiskState() only
+    //     fires on the NEXT trade that tenant places, so without this the
+    //     stored count only ever drifts upward after a position closes here —
+    //     exactly the pattern health-check's 13th check (`risk_state_count_drift`)
+    //     surfaced (2026-08-05): the column is documented as "the authoritative
+    //     input to evaluateRisk" but was silently wrong between trades.
+    for (const { userId, mode } of settledTenants.values()) {
+      const positionQuery = supabase
+        .from("trades")
+        .select("*", { count: "exact", head: true })
+        .in("status", ["filled", "open", "partial"])
+        .eq("mode", mode)
+        .eq("action", "buy")
+        .is("settled_at", null)
+        .is("exit_reason", null);
+      const { count: openPositionCount } = userId
+        ? await positionQuery.eq("user_id", userId)
+        : await positionQuery.is("user_id", null);
+
+      const today = new Date().toISOString().split("T")[0];
+      const updateQuery = supabase.from("risk_state").update({
+        open_position_count: openPositionCount || 0,
+        updated_at: new Date().toISOString(),
+      }).eq("date", today).eq("mode", mode);
+      await (userId ? updateQuery.eq("user_id", userId) : updateQuery.is("user_id", null));
     }
 
     // 7. Trigger auto-reflect once per settle run (not once per ticker).

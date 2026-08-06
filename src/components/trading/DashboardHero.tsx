@@ -46,6 +46,10 @@ interface HeroStats {
   settledCount: number;
   chartPoints: ChartPoint[];
   loading: boolean;
+  /** Set when a load threw. The card renders its last-known numbers with a
+   *  retry affordance instead of an eternal spinner — a failed refresh must be
+   *  visible and recoverable, never silent. */
+  loadError?: boolean;
   /** The mode these stats were computed for. Used to reject cross-mode renders
    *  so the live tab never briefly shows paper numbers (or vice versa). */
   statsMode?: "paper" | "live";
@@ -182,6 +186,44 @@ export function DashboardHero({
 
   const load = useCallback(async () => {
     const myId = ++loadIdRef.current; // increment; stale loads will see myId !== loadIdRef.current
+    try {
+      // Hard ceiling on the whole load. supabase-js attaches no timeout to its
+      // fetches, so a single stalled PostgREST socket inside Promise.allSettled
+      // never settles — allSettled cannot reject, so there is no throw to catch
+      // and the spinner stays up forever. A timeout converts "hangs silently"
+      // into "fails visibly", which the catch below can actually act on.
+      await Promise.race([
+        loadInner(myId),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("dashboard load timed out after 20s")), 20_000)
+        ),
+      ]);
+    } catch (err) {
+      // Never leave the hero pinned on a spinner. `loading:false` used to be
+      // written in exactly one place — the final setStats, behind every await —
+      // so any throw between here and there (a rejected auth.getSession, a
+      // stalled PostgREST socket, a hung kalshi-ping body) hid the whole
+      // dashboard permanently with no error and no retry. That is what took
+      // production down on 2026-08-04, live mode only, because paper mode
+      // short-circuits the wallet ping.
+      console.error("DashboardHero load failed:", err);
+      if (myId !== loadIdRef.current) return;
+      // statsMode MUST be stamped here. The rendered flag is
+      //   loading = stats.loading || stats.statsMode !== mode
+      // so clearing `stats.loading` alone still leaves the spinner up whenever
+      // statsMode is stale — which it always is on a mode switch, since only a
+      // successful commit ever writes it. Paper hung for exactly this reason:
+      // the last load in a burst failed, and the card had no way back.
+      setStats((prev) => ({
+        ...prev,
+        loading: false,
+        loadError: true,
+        statsMode: modeRef.current,
+      }));
+    }
+  }, [mode, userIdProp]);
+
+  const loadInner = useCallback(async (myId: number) => {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const todayISO = todayStart.toISOString();
@@ -198,13 +240,19 @@ export function DashboardHero({
     const kalshiBalanceFetch: Promise<number | null> = mode === "live"
       ? (Date.now() - lastKalshiPingRef.current < KALSHI_PING_TTL_MS
           ? Promise.resolve(lastKalshiBalanceRef.current)
-          : supabase.auth.getSession().then(({ data: { session } }) => {
+          : supabase.auth.getSession().then(({ data }) => {
+              const session = data?.session;
               if (!session) return lastKalshiBalanceRef.current;
               const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/kalshi-ping`;
               const ctrl = new AbortController();
+              // Hold the abort until the BODY is parsed, not just until headers
+              // arrive. Clearing it at the header stage left r.json() completely
+              // unguarded, so a stalled response body hung forever — and
+              // kalshi-ping worst-cases around 16s server-side (8s credential
+              // race + 8s Kalshi fetch) with an unguarded auth.getUser() on top.
               const pingTimeout = setTimeout(() => ctrl.abort(), 8000);
               return fetch(url, { headers: { Authorization: `Bearer ${session.access_token}` }, signal: ctrl.signal })
-                .then(r => { clearTimeout(pingTimeout); return r.ok ? r.json() : null; })
+                .then(r => (r.ok ? r.json() : null))
                 .then(j => {
                   const bal = j?.balance_usd != null ? Number(j.balance_usd) : null;
                   if (bal != null) {
@@ -213,15 +261,21 @@ export function DashboardHero({
                   }
                   return bal ?? lastKalshiBalanceRef.current; // keep last-good on transient failure
                 })
-                .catch(() => { clearTimeout(pingTimeout); return lastKalshiBalanceRef.current; });
-            }))
+                .catch(() => lastKalshiBalanceRef.current)
+                .finally(() => clearTimeout(pingTimeout));
+            })
+            // getSession() itself can reject, and the destructure of a missing
+            // `data` throws — neither was caught, so the rejection propagated
+            // out of the awaited wallet fetch and killed the entire render.
+            // The wallet is decoration; it must never gate the dashboard.
+            .catch(() => lastKalshiBalanceRef.current))
       : Promise.resolve(null);
 
     const [settledRes, openRes, placedTodayRes, strategiesRes, lastPlacedRes] = await Promise.allSettled([
       // PnL comes from SETTLED trades only — filled trades have pnl=0 until resolution
       supabase
         .from("trades")
-        .select("pnl, settled_at, mode")
+        .select("pnl, net_pnl, settled_at, mode")
         .eq("status", "settled")
         .eq("user_id", userId ?? "")
         .gte("settled_at", MAY_START)
@@ -258,11 +312,17 @@ export function DashboardHero({
       // Most recently SETTLED trade — "Last settled" chip. Mode-scoped so the live tab
       // doesn't surface a paper settlement while live P&L reads empty.
       (() => {
+        // NOT NULL is load-bearing: Postgres orders DESC with NULLS FIRST, so a
+        // single settled row carrying a null settled_at wins limit(1) and the
+        // "Last settled" chip silently disappears, replaced by the misleading
+        // "Agent scanning — first trades appear within 30 min". Exactly what the
+        // 2026-08-04 repair pass produced when it nulled settled_at on 146 rows.
         let q = supabase
           .from("trades")
           .select("settled_at")
           .eq("user_id", userId ?? "")
           .eq("status", "settled")
+          .not("settled_at", "is", null)
           .order("settled_at", { ascending: false })
           .limit(1);
         if (mode) q = q.eq("mode", mode);
@@ -288,7 +348,12 @@ export function DashboardHero({
     const modeTrades = mode ? settledTrades.filter(t => t.mode === mode) : settledTrades;
 
     // Total P&L from all settled trades
-    const totalPnl = modeTrades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+    // net_pnl is the fee-inclusive, Kalshi-reconciled figure (reconcile-ledger).
+    // Falling back to gross pnl keeps rows predating reconciliation readable.
+    // Reading gross here is what made the wallet card disagree with the exchange.
+    const realised = (t: { pnl?: number | null; net_pnl?: number | null }) =>
+      (t.net_pnl ?? t.pnl ?? 0);
+    const totalPnl = modeTrades.reduce((s, t) => s + realised(t), 0);
     const portfolioValue = startingBalance + totalPnl;
     const totalReturnPct = startingBalance > 0
       ? parseFloat(((totalPnl / startingBalance) * 100).toFixed(1))
@@ -296,11 +361,11 @@ export function DashboardHero({
 
     // Today's P&L — trades that settled today
     const settledToday = modeTrades.filter(t => t.settled_at && t.settled_at >= todayISO);
-    const todayPnl = settledToday.reduce((s, t) => s + (t.pnl ?? 0), 0);
+    const todayPnl = settledToday.reduce((s, t) => s + realised(t), 0);
 
     // Win rate across all settled trades
-    const winners = modeTrades.filter(t => (t.pnl ?? 0) > 0).length;
-    const losers = modeTrades.filter(t => (t.pnl ?? 0) < 0).length;
+    const winners = modeTrades.filter(t => realised(t) > 0).length;
+    const losers = modeTrades.filter(t => realised(t) < 0).length;
     const winRate = winners + losers > 0 ? Math.round((winners / (winners + losers)) * 100) : 0;
 
     // Markets closing within 24h that the user has an open position in
@@ -318,7 +383,7 @@ export function DashboardHero({
     for (const t of modeTrades) {
       const day = (t.settled_at ?? "").slice(0, 10);
       if (!day) continue;
-      byDay[day] = (byDay[day] ?? 0) + (t.pnl ?? 0);
+      byDay[day] = (byDay[day] ?? 0) + realised(t);
     }
 
     // Win streak = consecutive calendar days with positive net P&L, working
@@ -381,17 +446,30 @@ export function DashboardHero({
       settledCount: modeTrades.length,
       chartPoints,
       loading: false,
+      loadError: false,
       statsMode: mode,
     });
   }, [mode, userIdProp]);
 
   useEffect(() => {
     load();
+    // Debounced, mirroring strategiesContext. Unthrottled, this fired a full
+    // reload (5 PostgREST queries + a kalshi-ping) per row event: the
+    // 2026-08-04 ledger reconciliation wrote ~177 rows in a burst and produced
+    // ~900 requests. Only the newest load may commit (loadIdRef), and every
+    // superseded one returns early WITHOUT clearing `loading` — so a burst
+    // reliably ended on a load that was throttled or aborted, leaving the
+    // spinner up for good. reconcile-ledger-hourly reproduces that burst every
+    // hour at :20, so this is a permanent hazard, not a one-off.
+    let debounce: ReturnType<typeof setTimeout> | undefined;
     const ch = supabase
       .channel("dashboard-hero-rt")
-      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, load)
+      .on("postgres_changes", { event: "*", schema: "public", table: "trades" }, () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => { load(); }, 500);
+      })
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => { clearTimeout(debounce); supabase.removeChannel(ch); };
   }, [load]);
 
   // Lazy-load Kalshi markets after initial render — primes cache, then re-runs load()
@@ -476,6 +554,17 @@ export function DashboardHero({
 
         {/* Today velocity line */}
         <div className="flex items-center gap-3 mb-4 min-h-[20px]">
+          {/* A refresh that failed must say so and offer a way back. Silently
+              showing the previous load's numbers is how a stale figure gets
+              mistaken for a current one. */}
+          {stats.loadError && (
+            <button
+              onClick={() => load()}
+              className="inline-flex items-center gap-1 text-xs font-medium text-warning bg-warning/10 px-2 py-0.5 rounded-full"
+            >
+              Couldn't refresh — retry
+            </button>
+          )}
           {!loading && todayPnl !== 0 && (
             <span className={cn(
               "inline-flex items-center gap-1 text-xs font-medium tabular-nums px-2 py-0.5 rounded-full",
