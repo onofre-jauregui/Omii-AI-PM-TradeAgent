@@ -53,6 +53,15 @@ ALTER TABLE public.risk_state ADD CONSTRAINT risk_state_user_date_key UNIQUE (us
 -- the unbounded state. Seed conservative defaults on signup + backfill existing
 -- users who never completed onboarding. Onboarding/RiskControlsPanel overwrite
 -- these with the user's chosen values later.
+--
+-- Both inserts below conflict-target nothing on purpose. They were written when
+-- risk_settings had a UNIQUE on (user_id) alone; 20260723_risk_settings_mode_scoping
+-- and 20260807_risk_settings_dedupe_and_constraint_reconcile later replaced it with
+-- UNIQUE (user_id, mode), which leaves a bare `ON CONFLICT (user_id)` here with no
+-- constraint to infer — `42P10: there is no unique or exclusion constraint matching
+-- the ON CONFLICT specification`. Migrations replay, so an old one has to stay valid
+-- against the schema its successors leave behind. Omitting the inference is
+-- constraint-agnostic and keeps the intent exactly: seed, never overwrite.
 CREATE OR REPLACE FUNCTION public.seed_risk_settings_for_new_user()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -65,7 +74,7 @@ BEGIN
     max_drawdown_pct, allocated_capital, max_daily_trades
   )
   VALUES (NEW.id::text, 20, 3, 100, 10, 500, 30)
-  ON CONFLICT (user_id) DO NOTHING;
+  ON CONFLICT DO NOTHING;
   RETURN NEW;
 END;
 $$;
@@ -84,4 +93,4 @@ SELECT u.id::text, 20, 3, 100, 10, 500, 30
 FROM auth.users u
 LEFT JOIN public.risk_settings r ON r.user_id = u.id::text
 WHERE r.user_id IS NULL
-ON CONFLICT (user_id) DO NOTHING;
+ON CONFLICT DO NOTHING;

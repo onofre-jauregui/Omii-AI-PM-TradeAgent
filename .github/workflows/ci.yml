@@ -179,6 +179,17 @@ jobs:
           fi
           echo "Guard passed: ${PROJECT_REF} is a TradeAgent project (public objects: ${PUBLIC_OBJECTS}, marker: ${MARKER})."
 
+      # Replay the pending set into staging inside a transaction that always rolls
+      # back, so a migration that cannot apply here fails before anything is
+      # committed rather than half-way through the run. See the script header for
+      # the two Supabase-specific failures that motivated it — neither was
+      # reachable from the shim-backed rehearsal above.
+      - name: Preflight — do the pending migrations replay onto staging?
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
+        run: ./scripts/preflight-migrations.sh
+
       - name: Apply pending migrations to staging
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -360,6 +371,17 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
+      # The gate that would have kept 2026-08-07's promotion out of a half-applied
+      # state: production took 20260316000000_capture_dashboard_era_tables, then
+      # died on 20260406_auto_reflect_cron, stranding the database one migration
+      # into a thirty-six-migration run with the edge-function deploy blocked
+      # behind it. Rolled back, so it commits nothing.
+      - name: Preflight — do the pending migrations replay onto production?
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
+        run: ./scripts/preflight-migrations.sh
+
       - name: Apply pending migrations to production
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
