@@ -769,6 +769,7 @@
   "agent_signal_health",
   "agent_strategy_performance",
   "agent_trades_pending_resolution",
-  "open_positions"
+  "open_positions",
+  "public_track_record"
  ]
 }
