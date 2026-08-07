@@ -326,9 +326,14 @@ function WaitlistForm() {
     setStatus("loading");
     try {
       const supabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? "";
+      const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "";
       const resp = await fetch(`${supabaseUrl}/functions/v1/waitlist-signup`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+        },
         body: JSON.stringify({ email: email.trim() }),
       });
       const json = await resp.json();
