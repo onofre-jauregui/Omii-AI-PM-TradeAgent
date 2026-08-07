@@ -17,6 +17,7 @@
     "test:e2e:dashboards": "playwright test tests/e2e/dashboard-truth.spec.ts",
     "test:e2e:hardening": "playwright test tests/e2e/production-hardening.spec.ts",
     "test:e2e:pricing": "playwright test tests/e2e/pricing.spec.ts",
+    "test:e2e:tab-persistence": "playwright test tests/e2e/dashboard-tab-persistence.spec.ts",
     "verify:dashboards": "BASE_URL=https://kalshitradeagent.com playwright test tests/e2e/dashboard-truth.spec.ts",
     "verify:memory-isolation": "./scripts/verify-agent-memory-isolation.sh",
     "db:rehearse": "./scripts/rehearse-migrations.sh",
