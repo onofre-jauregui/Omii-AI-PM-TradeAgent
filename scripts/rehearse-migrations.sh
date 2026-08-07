@@ -22,7 +22,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS_DIR="$REPO_ROOT/supabase/migrations"
 SHIM="$REPO_ROOT/scripts/supabase-shim.sql"
 EXPECTED="$REPO_ROOT/scripts/expected-schema.json"
-FINGERPRINT_OUT="$(mktemp -t rehearsal-fingerprint)"
+# The XXXXXX suffix is required by GNU coreutils' mktemp; BSD/macOS mktemp accepts
+# a bare -t prefix, so a template without it works locally and fails on every
+# ubuntu-latest runner with "too few X's in template" — which is why this job had
+# never once passed in CI.
+FINGERPRINT_OUT="$(mktemp -t rehearsal-fingerprint.XXXXXX)"
 CONTAINER="tradeagent-migration-rehearsal"
 PGIMAGE="${REHEARSAL_PG_IMAGE:-postgres:15-alpine}"
 KEEP=0

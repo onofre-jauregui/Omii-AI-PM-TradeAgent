@@ -4,6 +4,13 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-07 — Close paid checkout behind a two-sided flag; paid CTAs collect waitlist intent
+
+**Decision:** Every paid CTA across the app now joins the waitlist instead of opening Stripe. Two independent gates: `BILLING_LIVE` in `src/lib/pricing.ts` (browser copy and CTA routing) and `BILLING_ENABLED` in `create-checkout` (server, refuses with 403 before auth or any Stripe call). Billing-page joins post `plan_interest` to `waitlist-signup`, so tier demand is recorded rather than discarded.
+**Options:** A) Hide the pricing cards entirely — rejected: the prices are the qualifying signal, and hiding them loses the demand data. B) Leave checkout wired and let Stripe reject — rejected, this was the status quo: the live Stripe account has zero products and zero prices (verified against the live key on 2026-08-06), so every click showed a raw API error on a page that had just promised a plan. C) Frontend flag only — rejected: a constant in a browser bundle stops nobody who POSTs the endpoint. D) Both gates — chosen.
+**Why:** Live accounts should not open before the paper track record justifies them, and a checkout that cannot succeed is worse than one that is honestly closed. The server gate is what actually holds; the client flag is what makes the page truthful.
+**Reversibility:** easy — flip `BILLING_LIVE` to `true` and set `BILLING_ENABLED=true`, but only after the three recurring prices exist in live Stripe. Neither flag alone opens checkout.
+**Trace:** branch `fix/pricing-alignment`; guards in `src/lib/pricing.test.ts` → `closed-billing gate`.
 ## 2026-08-06 — Assert the rebuilt schema by catalog fingerprint, not object counts
 **Decision:** `rehearse-migrations.sh` compares the rebuilt catalog to `scripts/expected-schema.json` object-by-object — every column with type/default/nullability, plus views, functions, RLS policies, indexes, constraints and triggers — instead of comparing five totals.
 **Options:** (A) keep the count assertion; (B) full catalog fingerprint diffed by name; (C) diff the rebuild against production live on every CI run.

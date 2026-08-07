@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { TrendingUp, Zap, Users, DollarSign, Server, Brain, BarChart3, ArrowUpRight } from "lucide-react";
+import { PAID_TIERS, tierPriceLabel } from "@/lib/pricing";
+
+// Break-even is quoted against the real published prices. This paragraph used to
+// hardcode a $29 Starter and a $49 alternative — neither price has ever existed —
+// which put a fabricated unit-economics number in front of the one reader who
+// makes pricing decisions from it.
+const ENTRY_PAID_TIER = PAID_TIERS[0];
+const HIGHLIGHT_TIER = PAID_TIERS.find((t) => t.highlight) ?? PAID_TIERS[PAID_TIERS.length - 1];
 
 // ─── Fixed infrastructure costs ───────────────────────────────────────────────
 const INFRA = [
@@ -330,7 +338,7 @@ export default function CostReport() {
               <h3 className="font-semibold text-sm mb-2">Bottom Line</h3>
               <div className="space-y-1.5 text-sm text-muted-foreground leading-relaxed">
                 <p>The cost structure is <span className="text-foreground font-medium">fixed-dominant</span> — {fmt(infraTotal, 0)}/mo in infrastructure covers the first ~100 users with no increase. LLM at gpt-4o-mini pricing is essentially negligible.</p>
-                <p>At a <span className="text-foreground font-medium">$29/mo Starter plan</span>, you turn profitable at {Math.ceil(totalMonthly / 29)} paying users. At $49/mo you break even at 1 user.</p>
+                <p>At the <span className="text-foreground font-medium">{tierPriceLabel(ENTRY_PAID_TIER)}/mo {ENTRY_PAID_TIER.name} plan</span>, you break even at {Math.ceil(totalMonthly / ENTRY_PAID_TIER.monthlyPriceUsd)} paying {Math.ceil(totalMonthly / ENTRY_PAID_TIER.monthlyPriceUsd) === 1 ? "user" : "users"}; at {tierPriceLabel(HIGHLIGHT_TIER)}/mo {HIGHLIGHT_TIER.name}, {Math.ceil(totalMonthly / HIGHLIGHT_TIER.monthlyPriceUsd)}.</p>
                 <p>The only scaling risk is surface-scanner invocations. Moving from 30s → 2min intervals frees enough headroom for 500+ users with zero additional infrastructure cost.</p>
               </div>
             </div>

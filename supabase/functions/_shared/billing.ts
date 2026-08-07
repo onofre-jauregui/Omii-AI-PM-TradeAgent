@@ -57,13 +57,21 @@ export interface TierDefinition {
 }
 
 /**
- * Strategy availability across tiers. S-003 is intentionally not included
- * because the Fed paper shows Kalshi macro markets are efficient.
+ * Strategy availability across tiers. This list holds only strategies that
+ * auto-trade has an explicit handler for — its dispatcher hard-rejects anything
+ * else, so entitling an unimplemented strategy grants nothing and misleads the
+ * pricing surfaces that read from these definitions.
  *
- * S-005 (weather) is the new evidence-backed strategy and is included from
- * the Pro tier upward (it's the differentiated value add).
+ * S-003 is intentionally absent because the Fed paper shows Kalshi macro markets
+ * are efficient. S-004 (Liquidity Provision) was removed on 2026-08-06: it was
+ * entitled here but had no handler in auto-trade and no rows in `strategies`,
+ * so it was sold on both pricing surfaces while being impossible to run. Add it
+ * back the same day a handler ships, not before.
+ *
+ * S-005 (weather) is the evidence-backed strategy and is included from the Pro
+ * tier upward (it's the differentiated value add).
  */
-const ALL_STRATEGIES = ["S-001", "S-002", "S-004", "S-005"];
+const ALL_STRATEGIES = ["S-001", "S-002", "S-005"];
 
 export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
   free: {
@@ -91,7 +99,7 @@ export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
       maxMarketsWatched: 200,
       maxActiveStrategies: 5,
       liveTradingEnabled: true,
-      allowedStrategies: ["S-001", "S-002", "S-004"],
+      allowedStrategies: ["S-001", "S-002"],
     },
   },
   pro: {

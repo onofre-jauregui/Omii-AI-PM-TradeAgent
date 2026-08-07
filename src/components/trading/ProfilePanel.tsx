@@ -6,6 +6,7 @@ import { Wallet, Loader2, Zap, Camera, AlertCircle, CheckCircle, Circle } from "
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { BILLING_LIVE, tierLabel } from "@/lib/pricing";
 import { AvatarCropModal } from "./AvatarCropModal";
 
 interface Props {
@@ -118,9 +119,6 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
     setSaving(false);
   };
 
-  const tierLabel = (tier: string) =>
-    ({ free: "Free Trial", starter: "Starter", pro: "Pro", prop: "Prop" }[tier] ?? tier);
-
   return (
     <>
       {cropSrc && (
@@ -185,7 +183,7 @@ export function ProfilePanel({ mode = "paper", userEmail, userId }: Props) {
             </div>
             {(!subscription || subscription.tier === "free" || subscription.status !== "active") && (
               <Button variant="outline" size="sm" className="w-full rounded-full gap-1.5 text-xs mt-1" onClick={() => navigate("/billing")}>
-                <Zap className="h-3 w-3" /> Upgrade plan
+                <Zap className="h-3 w-3" /> {BILLING_LIVE ? "Upgrade plan" : "Join the waitlist"}
               </Button>
             )}
           </div>
