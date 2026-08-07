@@ -9,16 +9,32 @@
 --
 -- Checks pg_available_extensions rather than catching an exception, so a genuine
 -- failure to install an extension that IS available still raises.
+--
+-- Already-installed is checked FIRST, against pg_extension, because on Supabase
+-- `CREATE EXTENSION IF NOT EXISTS` is not the no-op its name promises: the
+-- platform attaches an after-create hook (extension-custom-scripts/pg_cron/
+-- after-create.sql) that re-runs the privilege grants regardless, and its
+-- `revoke all on table cron.job from postgres` aborts with
+-- `2BP01: dependent privileges exist` once those privileges have been granted
+-- onward. That is what took down the production migration step of the
+-- dev → main promotion on 2026-08-07 — this migration is recorded in
+-- supabase_migrations under the ambiguous legacy key `20260406`, which the
+-- runner's ambiguous-date guard (correctly) refuses to trust, so it replays on
+-- every push to main and failed the moment the hook did.
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
-    CREATE EXTENSION IF NOT EXISTS pg_cron WITH SCHEMA extensions;
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'pg_cron already installed - skipping CREATE EXTENSION';
+  ELSIF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
+    CREATE EXTENSION pg_cron WITH SCHEMA extensions;
   ELSE
     RAISE NOTICE 'pg_cron unavailable here - expecting scripts/supabase-shim.sql to provide the cron schema';
   END IF;
 
-  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_net') THEN
-    CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net') THEN
+    RAISE NOTICE 'pg_net already installed - skipping CREATE EXTENSION';
+  ELSIF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_net') THEN
+    CREATE EXTENSION pg_net WITH SCHEMA extensions;
   ELSE
     RAISE NOTICE 'pg_net unavailable here - expecting scripts/supabase-shim.sql to provide the net schema';
   END IF;

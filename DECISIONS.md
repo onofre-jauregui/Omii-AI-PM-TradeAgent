@@ -4,6 +4,14 @@ Append-only log of critical architectural decisions. Newest first.
 
 ---
 
+## 2026-08-07 — Dry-run pending migrations against the real project before applying any
+
+**Decision:** `scripts/preflight-migrations.sh` replays the whole pending set into the target Supabase project inside one transaction that always ends in `ROLLBACK`, and runs as a required step before the apply loop in both `migrate-staging` and `migrate-production`. On failure it re-runs each file in isolation to name the culprit, and distinguishes a genuinely broken migration from an ordering conflict that only appears when several are present.
+**Options:** A) Rely on `rehearse-migrations.sh` alone — rejected: it replays into stock Postgres behind `scripts/supabase-shim.sql`, so it cannot see platform behaviour (Supabase's `CREATE EXTENSION` after-create hook) or intermediate-schema conflicts (an old `ON CONFLICT (user_id)` whose constraint a later migration replaced). Both classes reached production today. B) Wrap the apply loop itself in one transaction — rejected: the Management API is one transaction per request, so this would mean one giant request with no per-migration history recording and no partial progress on a long run. C) Dry-run first, then apply — chosen. D) Diff the rebuilt schema against production in CI — rejected earlier (2026-08-06) because CI must not hold production credentials for a read it can get from the committed fingerprint; this preflight is different, as the production apply step already holds them by necessity.
+**Why:** the promotion of #219 applied `20260316000000_capture_dashboard_era_tables` to production and then died on `20260406_auto_reflect_cron`, leaving the database one migration into a thirty-six-migration run with the edge-function deploy and canary gate stranded behind it. A half-applied production database is the expensive failure; a red pre-flight is the cheap one. The rehearsal proves the set rebuilds a database from nothing, the preflight proves it can be replayed onto the database it will actually be replayed onto — neither substitutes for the other.
+**Reversibility:** easy — delete the two steps; the apply loop is unchanged.
+**Trace:** branch `fix/pg-cron-extension-guard`; `scripts/preflight-migrations.sh`, `.github/workflows/ci.yml` (`Preflight — do the pending migrations replay onto …?`). Verified by reverting the pg_cron guard and confirming preflight fails with `2BP01` naming the exact file.
+
 ## 2026-08-07 — Close paid checkout behind a two-sided flag; paid CTAs collect waitlist intent
 
 **Decision:** Every paid CTA across the app now joins the waitlist instead of opening Stripe. Two independent gates: `BILLING_LIVE` in `src/lib/pricing.ts` (browser copy and CTA routing) and `BILLING_ENABLED` in `create-checkout` (server, refuses with 403 before auth or any Stripe call). Billing-page joins post `plan_interest` to `waitlist-signup`, so tier demand is recorded rather than discarded.
