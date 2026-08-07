@@ -18,6 +18,10 @@ const NAV_ITEMS = [
 export function BottomNav({ activeTab, onNavigate, mode, tier }: BottomNavProps) {
   return (
     <nav
+      // Marks the strip that overlays the bottom of the viewport. The service
+      // worker update banner in main.tsx measures this to sit above the nav
+      // instead of on top of it.
+      data-bottom-nav=""
       className="fixed bottom-0 left-0 right-0 z-50 frosted-glass border-t border-border"
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
     >
