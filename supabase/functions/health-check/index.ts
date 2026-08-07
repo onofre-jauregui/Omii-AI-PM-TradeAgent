@@ -566,12 +566,23 @@ serve(async (req) => {
     // over 24h) instead of re-deriving it, so this can't drift from the real block.
     for (const { user_id } of liveKeys ?? []) {
       try {
-        const { data: riskRow } = await supabase
+        const { data: riskRow, error: riskErr } = await supabase
           .from("risk_settings")
           .select("max_daily_trades")
           .eq("user_id", user_id)
           .eq("mode", "live")
           .maybeSingle();
+        if (riskErr) {
+          // maybeSingle() errors on 2+ rows for this (user_id, mode) — a real
+          // constraint violation, not "no row configured". The outer try/catch
+          // would otherwise swallow this along with genuine transient failures.
+          await supabase.from("compliance_log").insert({
+            event_type: "risk_settings_read_error",
+            severity: "error",
+            message: `risk_settings lookup failed for user ${user_id} mode live: ${riskErr.message}`,
+            metadata: { user_id, mode: "live", error: riskErr.message },
+          }).then(null, () => {});
+        }
         const maxDailyTrades = riskRow?.max_daily_trades ?? 30;
         const liveTradeCount = await countTradesInWindow(supabase, user_id, "live");
         if (liveTradeCount >= maxDailyTrades) {

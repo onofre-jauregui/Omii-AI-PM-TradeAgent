@@ -748,6 +748,17 @@ serve(async (req) => {
     const keyRows = keyRowsSettled.status === "fulfilled" ? (keyRowsSettled.value?.data ?? []) : [];
     const savedModelData = savedModelSettled.status === "fulfilled" ? (savedModelSettled.value?.data ?? null) : null;
     const riskSettings = riskSettled.status === "fulfilled" ? (riskSettled.value?.data ?? null) : null;
+    if (riskSettled.status === "fulfilled" && riskSettled.value?.error) {
+      // maybeSingle() errors on 2+ rows for this (user_id, mode) — a real
+      // constraint violation, not "no row configured". The allSettled/?? chain
+      // above would otherwise fall through to null silently either way.
+      await supabase.from("compliance_log").insert({
+        event_type: "risk_settings_read_error",
+        severity: "error",
+        message: `risk_settings lookup failed for user ${userId} mode ${riskMode}: ${riskSettled.value.error.message}`,
+        metadata: { user_id: userId, mode: riskMode, error: riskSettled.value.error.message },
+      }).then(null, () => {});
+    }
 
     const displayName: string | null =
       profileSettled.status === "fulfilled" ? (profileSettled.value?.data?.display_name ?? null) : null;
