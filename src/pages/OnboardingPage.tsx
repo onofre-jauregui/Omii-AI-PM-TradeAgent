@@ -1,11 +1,16 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { buildSeededStrategies } from "@/lib/onboardingSeed";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle, Loader2, AlertCircle, ArrowRight, Zap } from "lucide-react";
+import { BILLING_LIVE, PAID_TIERS } from "@/lib/pricing";
+
+/** Cheapest paid plan — the tier a live-trading prompt names when billing is open. */
+const ENTRY_PAID_TIER = PAID_TIERS[0];
 
 const SUPABASE_URL    = import.meta.env.VITE_SUPABASE_URL ?? "";
 const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
@@ -200,32 +205,9 @@ export default function OnboardingPage() {
       );
       if (profileErr) throw profileErr;
 
-      const uid8 = user.id.replace(/-/g, "").slice(0, 8);
-      const { error: stratErr } = await supabase.from("strategies").upsert(
-        [
-          {
-            id: `S-001-${uid8}`, template_id: "S-001", name: "Surface Arbitrage",
-            description: "Exploits bracket-sum mispricing in KXINX/KXBTC/KXETH markets.",
-            instructions: "Read surface_alerts for bracket_sum_violation. Buy NO on the most overpriced YES legs (yesAsk descending). Max 3 legs per event at $15/leg. Mark alert is_exploited after fill. No LLM gate — structural edge.",
-            active: true, mode: "paper", starting_balance: 500, user_id: user.id,
-          },
-          {
-            // S-002 seeded inactive — negative EV in current market conditions.
-            // User can enable it manually from the Strategies panel after reviewing track record.
-            id: `S-002-${uid8}`, template_id: "S-002", name: "Resolution Fade",
-            description: "Fade overreaction price moves in markets 2–7 days from resolution.",
-            instructions: "Use fetch_signals filtered to time_value_score >= 0.7 and edge_score >= 0.4. Fade sentiment-driven extremes with $20–$40 limit orders. Exit when price reverts 10¢ toward prior range.",
-            active: false, mode: "paper", starting_balance: 1000, user_id: user.id,
-          },
-          {
-            id: `S-005-${uid8}`, template_id: "S-005", name: "Weather Edge",
-            description: "Trades NWS forecast vs Kalshi implied temperature divergence.",
-            instructions: "Compare NWS probability-of-precipitation and temperature forecasts to Kalshi Weather markets. Trade when divergence exceeds 15¢. Size $15–$30.",
-            active: true, mode: "paper", starting_balance: 1000, user_id: user.id,
-          },
-        ],
-        { onConflict: "id" }
-      );
+      const { error: stratErr } = await supabase
+        .from("strategies")
+        .upsert(buildSeededStrategies(user.id), { onConflict: "id" });
       if (stratErr) throw stratErr;
 
       // Seed risk_settings so auto-trade doesn't fall back to the system default (10 positions).
@@ -599,10 +581,14 @@ export default function OnboardingPage() {
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm">Live Trading</span>
-                  <span className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded-full font-medium">Requires Starter plan</span>
+                  <span className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded-full font-medium">
+                    {BILLING_LIVE ? `Requires ${ENTRY_PAID_TIER.name} plan` : "Waitlist only"}
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Real orders placed on your Kalshi account. Requires an active API key and a paid subscription.
+                  {BILLING_LIVE
+                    ? "Real orders placed on your Kalshi account. Requires an active API key and a paid subscription."
+                    : "Real orders placed on your Kalshi account. Live accounts are in closed access — we'll add you to the waitlist and keep the agent on paper until a spot opens."}
                 </p>
               </button>
             </div>
@@ -617,22 +603,31 @@ export default function OnboardingPage() {
             </div>
             <h1 className="text-2xl font-semibold tracking-tight mb-2">Your agent is running.</h1>
             <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
-              Two strategies are active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
+              One strategy is active in paper mode. The agent scans Kalshi markets every few minutes — first trades typically appear within 10–30 minutes.
             </p>
             <div className="space-y-2 text-left mb-8">
               {[
-                ["S-001", "Surface Arbitrage", "Exploits bracket mispricing in S&P 500, BTC, and ETH markets — structural edge, direction-agnostic"],
-                ["S-005", "Weather Edge",      "Trades NWS forecast vs Kalshi implied temperature divergence"],
-              ].map(([id, name, desc]) => (
-                <div key={id} className="rounded-xl bg-secondary/50 px-4 py-3 flex items-start gap-3">
+                ["S-001", "Surface Arbitrage", "Exploits bracket mispricing in S&P 500, BTC, and ETH markets — structural edge, direction-agnostic", true],
+                ["S-002", "Resolution Fade",   "Fades overreaction near resolution. Off by default — negative expectancy in current conditions.", false],
+                ["S-005", "Weather Edge",      "NWS forecast vs Kalshi implied temperature. Off by default — negative expectancy in current conditions.", false],
+              ].map(([id, name, desc, on]) => (
+                <div key={id as string} className="rounded-xl bg-secondary/50 px-4 py-3 flex items-start gap-3">
                   <span className="text-[10px] font-mono bg-primary/10 text-primary px-1.5 py-0.5 rounded mt-0.5 shrink-0">{id}</span>
                   <div>
-                    <p className="text-sm font-medium">{name}</p>
+                    <p className="text-sm font-medium flex items-center gap-2">
+                      {name}
+                      <span className={`text-[10px] font-normal px-1.5 py-0.5 rounded ${on ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground"}`}>
+                        {on ? "Active" : "Off"}
+                      </span>
+                    </p>
                     <p className="text-xs text-muted-foreground leading-relaxed">{desc}</p>
                   </div>
                 </div>
               ))}
             </div>
+            <p className="text-xs text-muted-foreground mb-8 leading-relaxed">
+              You can enable the others from the Strategies panel once you&rsquo;ve reviewed their track record.
+            </p>
             <Button
               className="w-full rounded-full gap-2"
               onClick={() => navigate("/")}

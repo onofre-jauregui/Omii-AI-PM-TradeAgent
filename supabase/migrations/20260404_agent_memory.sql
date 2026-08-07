@@ -1,5 +1,5 @@
 -- Agent Memory table for persistent learning across sessions
-CREATE TABLE agent_memory (
+CREATE TABLE IF NOT EXISTS agent_memory (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   memory_type TEXT NOT NULL DEFAULT 'lesson'
     CHECK (memory_type IN ('lesson', 'pattern', 'mistake', 'success', 'market_note', 'strategy_insight')),
@@ -21,21 +21,25 @@ CREATE TABLE agent_memory (
   user_id TEXT
 );
 
-CREATE INDEX idx_agent_memory_type ON agent_memory(memory_type);
-CREATE INDEX idx_agent_memory_strategy ON agent_memory(strategy_id);
-CREATE INDEX idx_agent_memory_tags ON agent_memory USING GIN(tags);
-CREATE INDEX idx_agent_memory_active ON agent_memory(is_active, confidence DESC);
-CREATE INDEX idx_agent_memory_created ON agent_memory(created_at DESC);
-CREATE INDEX idx_agent_memory_user ON agent_memory(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_type ON agent_memory(memory_type);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_strategy ON agent_memory(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_tags ON agent_memory USING GIN(tags);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_active ON agent_memory(is_active, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_created ON agent_memory(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_user ON agent_memory(user_id);
 
 ALTER TABLE agent_memory ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "agent_memory_select" ON agent_memory;
 CREATE POLICY "agent_memory_select" ON agent_memory FOR SELECT USING (user_id IS NULL OR user_id = auth.uid()::text);
+DROP POLICY IF EXISTS "agent_memory_insert" ON agent_memory;
 CREATE POLICY "agent_memory_insert" ON agent_memory FOR INSERT WITH CHECK (true);
+DROP POLICY IF EXISTS "agent_memory_update" ON agent_memory;
 CREATE POLICY "agent_memory_update" ON agent_memory FOR UPDATE USING (true);
+DROP POLICY IF EXISTS "agent_memory_delete" ON agent_memory;
 CREATE POLICY "agent_memory_delete" ON agent_memory FOR DELETE USING (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Trade reflections table — links trades to their post-hoc analysis
-CREATE TABLE trade_reflections (
+CREATE TABLE IF NOT EXISTS trade_reflections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   trade_id UUID NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
   expected_outcome TEXT NOT NULL,
@@ -50,12 +54,16 @@ CREATE TABLE trade_reflections (
   user_id TEXT
 );
 
-CREATE INDEX idx_trade_reflections_trade ON trade_reflections(trade_id);
-CREATE INDEX idx_trade_reflections_quality ON trade_reflections(decision_quality);
-CREATE INDEX idx_trade_reflections_user ON trade_reflections(user_id);
+CREATE INDEX IF NOT EXISTS idx_trade_reflections_trade ON trade_reflections(trade_id);
+CREATE INDEX IF NOT EXISTS idx_trade_reflections_quality ON trade_reflections(decision_quality);
+CREATE INDEX IF NOT EXISTS idx_trade_reflections_user ON trade_reflections(user_id);
 
 ALTER TABLE trade_reflections ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "trade_reflections_select" ON trade_reflections;
 CREATE POLICY "trade_reflections_select" ON trade_reflections FOR SELECT USING (user_id IS NULL OR user_id = auth.uid()::text);
+DROP POLICY IF EXISTS "trade_reflections_insert" ON trade_reflections;
 CREATE POLICY "trade_reflections_insert" ON trade_reflections FOR INSERT WITH CHECK (true);
+DROP POLICY IF EXISTS "trade_reflections_update" ON trade_reflections;
 CREATE POLICY "trade_reflections_update" ON trade_reflections FOR UPDATE USING (true);
+DROP POLICY IF EXISTS "trade_reflections_delete" ON trade_reflections;
 CREATE POLICY "trade_reflections_delete" ON trade_reflections FOR DELETE USING (user_id IS NULL OR user_id = auth.uid()::text);

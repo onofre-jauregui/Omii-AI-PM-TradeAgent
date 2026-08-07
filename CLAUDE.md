@@ -180,7 +180,7 @@ This is part of the VERIFIED gate in `~/.claude/STANDARDS.md` — "runs in its r
 - Subscription tier enforcement: `checkEntitlement()` (`_shared/billing.ts`) — real per-tier `maxTradesPerDay`/`maxOpenPositions`/`maxPositionUsd` limits (not display-only), wired into `auto-trade`, `execute-trade`, and `switch-trading-mode`. **Deployed to production** via the `dev → main` promotion PRs #176/#179 (2026-08-03, 89 commits) — confirmed by diffing deployed edge-function source against `dev`: zero drift on all 32 functions as of the 105th health-check run (2026-08-04) ✅
 
 ### In progress / partially done
-- Stripe: schema and webhook handler exist, no billing UI yet
+- Stripe: schema, webhook handler, and billing UI exist — **checkout is deliberately closed.** Paid access is waitlist-only behind two gates: `BILLING_LIVE` in `src/lib/pricing.ts` (client copy + CTA routing) and `BILLING_ENABLED` in `create-checkout` (server, 403 before auth or any Stripe call). The live Stripe account has zero products and zero prices as of 2026-08-06, so the prices must be created there before either gate opens.
 
 ### Not started
 - Community knowledge-sharing layer (`is_platform_shared`, platform memory promotion pipeline, opt-out enforcement)

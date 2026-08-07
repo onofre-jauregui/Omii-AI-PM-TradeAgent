@@ -9,9 +9,20 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
  * Request body: { tier: "starter" | "pro" | "prop" }
  * Response: { url: string } — redirect the user to this Stripe-hosted URL.
  *
+ * CLOSED BY DEFAULT. Paid access is waitlist-only, so this function refuses every
+ * request unless `BILLING_ENABLED=true` is set in Supabase secrets. The billing
+ * page has a matching `BILLING_LIVE` constant that renders a waitlist CTA instead
+ * of an upgrade button, but that constant ships in a browser bundle and stops
+ * nobody who calls this endpoint directly — this gate is the one that holds.
+ *
+ * Before flipping BILLING_ENABLED: the live Stripe account must actually have the
+ * three recurring prices. As of 2026-08-06 it has zero products and zero prices,
+ * so a checkout session cannot be created regardless of what this flag says.
+ *
  * Required Supabase secrets:
- *   STRIPE_SECRET_KEY, STRIPE_STARTER_PRICE_ID, STRIPE_PRO_PRICE_ID, STRIPE_PROP_PRICE_ID
+ *   STRIPE_SECRET_KEY, STRIPE_PRICE_STARTER, STRIPE_PRICE_PRO, STRIPE_PRICE_PROP
  *   FRONTEND_URL (your Vercel domain, used for success/cancel redirect)
+ *   BILLING_ENABLED ("true" to open checkout; absent or anything else keeps it shut)
  */
 const STRIPE_FETCH_TIMEOUT_MS = 8_000; // same convention as kalshi-ping/health-check's BALANCE_FETCH_TIMEOUT_MS
 
@@ -22,6 +33,15 @@ serve(async (req) => {
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   const stripeKey = Deno.env.get("STRIPE_SECRET_KEY");
   const frontendUrl = Deno.env.get("FRONTEND_URL") || "https://kalshitradeagent.com";
+
+  // Refuse before touching auth, Stripe, or the database — a closed checkout
+  // should cost nothing and leak nothing about who asked.
+  if (Deno.env.get("BILLING_ENABLED") !== "true") {
+    return json({
+      error: "Paid plans are in closed access. Join the waitlist and we'll email you when your spot opens.",
+      waitlist: true,
+    }, 403);
+  }
 
   if (!supabaseUrl || !supabaseKey) return json({ error: "Missing server credentials" }, 500);
   if (!stripeKey) return json({ error: "Stripe not configured. Set STRIPE_SECRET_KEY in Supabase secrets." }, 500);

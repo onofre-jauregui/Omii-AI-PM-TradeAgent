@@ -42,42 +42,49 @@ CREATE INDEX IF NOT EXISTS idx_compliance_user_id     ON public.compliance_log (
 
 -- Trades
 DROP POLICY IF EXISTS "Allow all access to trades" ON public.trades;
+DROP POLICY IF EXISTS "trades_user_isolation" ON public.trades;
 CREATE POLICY "trades_user_isolation" ON public.trades
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Strategies
 DROP POLICY IF EXISTS "Allow all access to strategies" ON public.strategies;
+DROP POLICY IF EXISTS "strategies_user_isolation" ON public.strategies;
 CREATE POLICY "strategies_user_isolation" ON public.strategies
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Compliance log
 DROP POLICY IF EXISTS "Allow all access to compliance_log" ON public.compliance_log;
+DROP POLICY IF EXISTS "compliance_user_isolation" ON public.compliance_log;
 CREATE POLICY "compliance_user_isolation" ON public.compliance_log
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Risk state
 DROP POLICY IF EXISTS "Allow all access to risk_state" ON public.risk_state;
+DROP POLICY IF EXISTS "risk_state_user_isolation" ON public.risk_state;
 CREATE POLICY "risk_state_user_isolation" ON public.risk_state
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Risk settings
 DROP POLICY IF EXISTS "Allow all access to risk_settings" ON public.risk_settings;
+DROP POLICY IF EXISTS "risk_settings_user_isolation" ON public.risk_settings;
 CREATE POLICY "risk_settings_user_isolation" ON public.risk_settings
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- API keys (most sensitive — strict isolation)
 DROP POLICY IF EXISTS "Allow all access to api_keys" ON public.api_keys;
+DROP POLICY IF EXISTS "api_keys_user_isolation" ON public.api_keys;
 CREATE POLICY "api_keys_user_isolation" ON public.api_keys
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);
 
 -- Strategy snapshots
 DROP POLICY IF EXISTS "Allow all access to strategy_snapshots" ON public.strategy_snapshots;
+DROP POLICY IF EXISTS "snapshots_user_isolation" ON public.strategy_snapshots;
 CREATE POLICY "snapshots_user_isolation" ON public.strategy_snapshots
   FOR ALL USING (user_id IS NULL OR user_id = auth.uid()::text)
   WITH CHECK (user_id IS NULL OR user_id = auth.uid()::text);

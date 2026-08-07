@@ -14,7 +14,12 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      // PW_CHANNEL=chrome runs the suite against a locally installed Chrome
+      // instead of Playwright's bundled build. Unset everywhere by default, so
+      // CI is unaffected; it exists because the bundled download fails on some
+      // machines and "can't install a browser" should not mean "can't run the
+      // gate that has to pass before merging."
+      use: { ...devices["Desktop Chrome"], ...(process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {}) },
     },
   ],
   webServer: process.env.BASE_URL ? undefined : {

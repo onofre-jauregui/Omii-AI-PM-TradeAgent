@@ -118,11 +118,13 @@ CREATE INDEX IF NOT EXISTS stripe_events_user_idx ON public.stripe_events (user_
 ALTER TABLE public.subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stripe_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "subscriptions_user_isolation" ON public.subscriptions;
 CREATE POLICY "subscriptions_user_isolation" ON public.subscriptions
   FOR ALL USING (user_id = auth.uid()::text)
   WITH CHECK (user_id = auth.uid()::text);
 
 -- stripe_events has no user-facing policy; only service role can read/write
+DROP POLICY IF EXISTS "stripe_events_service_only" ON public.stripe_events;
 CREATE POLICY "stripe_events_service_only" ON public.stripe_events
   FOR ALL USING (false) WITH CHECK (false);
 

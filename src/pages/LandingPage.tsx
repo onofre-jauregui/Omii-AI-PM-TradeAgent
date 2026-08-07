@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
+import { PRICING_TIERS, tierFeatures, tierPriceLabel } from "@/lib/pricing";
 
 // ── Scroll-reveal hook ────────────────────────────────────────────────────────
 function useInView(threshold = 0.12) {
@@ -399,7 +400,7 @@ const FAQ_ITEMS = [
   },
   {
     q: "What are the strategies?",
-    a: "Currently two live strategies: bracket-sum arbitrage (S-001) and cross-market correlation (S-005). Both run with automatic 12-hour exit limits and per-trade size caps. More strategies are in development.",
+    a: "Three automated strategies run today, spanning structural mispricing arbitrage and forecast-vs-market divergence. Each one runs with automatic 12-hour exit limits and per-trade size caps, and you control which are active and how much capital each gets. More strategies are in development.",
   },
   {
     q: "When does live trading open?",
@@ -478,59 +479,19 @@ const FEATURES = [
 ];
 
 // ── Pricing tiers ─────────────────────────────────────────────────────────────
-const TIERS = [
-  {
-    name: "Free",
-    price: "$0",
-    period: "",
-    badge: null,
-    description: "Build your track record with zero risk.",
-    features: [
-      "Full paper trading — no real money",
-      "Build and run any strategy",
-      "Agent chat + memory",
-      "Performance analytics",
-      "No position size limits",
-    ],
-    cta: "Start free",
-    ctaLink: "/login",
-    highlight: false,
-  },
-  {
-    name: "Starter",
-    price: "$99",
-    period: "/mo",
-    badge: "Most popular",
-    description: "Live trading on a regulated exchange. You set the limits.",
-    features: [
-      "Everything in Free",
-      "Live trading on Kalshi",
-      "S-001 + S-002 strategies",
-      "No position size cap — your risk controls",
-      "Strategies run automatically 24/7",
-    ],
-    cta: "Join waitlist",
-    ctaLink: "#waitlist",
-    highlight: true,
-  },
-  {
-    name: "Pro",
-    price: "$199",
-    period: "/mo",
-    badge: null,
-    description: "Full access. Every strategy, every tool.",
-    features: [
-      "Everything in Starter",
-      "All strategies including S-005",
-      "Build and deploy custom strategies",
-      "Priority support",
-      "Early access to new strategies",
-    ],
-    cta: "Join waitlist",
-    ctaLink: "#waitlist",
-    highlight: false,
-  },
-];
+// Prices, limits and bundles come from src/lib/pricing.ts — the same table the
+// in-app billing page renders and the same numbers the server enforces. Only the
+// call-to-action differs here: live trading is still closed-waitlist access, so
+// paid tiers point at the waitlist form rather than Stripe checkout.
+const TIERS = PRICING_TIERS.map((tier) => ({
+  ...tier,
+  price: tierPriceLabel(tier),
+  period: tier.monthlyPriceUsd > 0 ? "/mo" : "",
+  badge: tier.highlight ? "Most popular" : null,
+  features: tierFeatures(tier),
+  cta: tier.monthlyPriceUsd > 0 ? "Join waitlist" : "Start free",
+  ctaLink: tier.monthlyPriceUsd > 0 ? "#waitlist" : "/login",
+}));
 
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function LandingPage() {
@@ -973,7 +934,7 @@ export default function LandingPage() {
 
       {/* ── Pricing ── */}
       <section id="pricing" style={{ padding: "120px 24px" }}>
-        <div className="mx-auto" style={{ maxWidth: 980 }}>
+        <div className="mx-auto" style={{ maxWidth: 1180 }}>
           <Reveal className="text-center" style={{ marginBottom: 64 }}>
             <h2
               style={{
@@ -992,9 +953,9 @@ export default function LandingPage() {
             </p>
           </Reveal>
 
-          <div className="grid gap-5 md:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-4">
             {TIERS.map((tier, i) => (
-              <Reveal key={tier.name} delay={i * 80}>
+              <Reveal key={tier.id} delay={i * 80}>
                 <div
                   className="relative flex flex-col"
                   style={{

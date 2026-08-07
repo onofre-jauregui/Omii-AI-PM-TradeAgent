@@ -7,6 +7,7 @@ import { checkEntitlement, resolveLimits, type SubscriptionRow } from "../_share
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
+import { applyMemoryTenantFilter } from "../_shared/memory-scope.ts";
 import { kalshiPriceToCents, marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
@@ -221,8 +222,21 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
 async function fetchUserRiskSettings(supabase: any, userId: string, mode: "paper" | "live" = "paper"): Promise<any> {
   const cacheKey = `${userId}:${mode}`;
   if (riskSettingsCache.has(cacheKey)) return riskSettingsCache.get(cacheKey);
-  const { data } = await supabase.from("risk_settings").select("*")
+  const { data, error } = await supabase.from("risk_settings").select("*")
     .eq("user_id", userId).eq("mode", mode).maybeSingle();
+  if (error) {
+    // maybeSingle() errors on 2+ rows for this (user_id, mode) — a real
+    // constraint violation, not "no row configured". Falling back to
+    // DEFAULT_RISK_SETTINGS either way is the safe behavior (never blocks
+    // trading on an infra error), but doing it silently means a live-money
+    // risk gate downgrades to defaults with nobody able to see it happened.
+    await supabase.from("compliance_log").insert({
+      event_type: "risk_settings_read_error",
+      severity: "error",
+      message: `risk_settings lookup failed for user ${userId} mode ${mode}: ${error.message}`,
+      metadata: { user_id: userId, mode, error: error.message },
+    }).then(null, () => {});
+  }
   const settings = data ?? DEFAULT_RISK_SETTINGS;
   riskSettingsCache.set(cacheKey, settings);
   return settings;
@@ -1494,13 +1508,16 @@ async function runS001SurfaceArb(
   // check with no LLM gate, no memory check, nothing. Fetch memory/lessons once
   // per cron cycle (shared across every leg below), mirroring S-002's pattern
   // (auto-trade/index.ts ~1573-1589) exactly rather than inventing a new one.
-  const { data: s001Memories } = await supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
+  const { data: s001Memories } = await applyMemoryTenantFilter(
+    supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence, exposed_confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("quarantined_at", null)
+      .is("merged_into", null),
+    { userId: strategy.user_id ?? null },
+  )
     .order("confidence", { ascending: false })
     .limit(5);
   const s001MemBlock = (s001Memories ?? [])
@@ -2015,13 +2032,16 @@ async function runS002LongshotBias(
   }
 
   // Fetch agent_memory and lessons once — shared across all candidates this cycle.
-  const { data: s002Memories } = await supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
+  const { data: s002Memories } = await applyMemoryTenantFilter(
+    supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence, exposed_confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("quarantined_at", null)
+      .is("merged_into", null),
+    { userId: strategy.user_id ?? null },
+  )
     .order("confidence", { ascending: false })
     .limit(5);
   const s002MemBlock = (s002Memories ?? [])
@@ -2481,37 +2501,39 @@ async function runS005WeatherEdge(
   const lessonsByCity = new Map<string, any[]>();
   const cityWinLoss = new Map<string, { wins: number; losses: number; totalPnl: number }>();
 
-  // Bayesian agent_memory: high-confidence distilled lessons for this strategy.
-  // Market-scoped: prioritize memories whose tags overlap with the candidate cities
-  // so irrelevant geography doesn't crowd out the relevant signal (Gap 6 fix).
-  const tagFilter = cityTags.length > 0
-    ? cityTags.map((c: string) => `tags.cs.{${c}}`).join(",")
-    : null;
-
-  const memBaseQuery = supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
-    .order("confidence", { ascending: false })
-    .limit(5);
-
-  let { data: strategyMemories } = tagFilter
-    ? await memBaseQuery.or(tagFilter)
-    : await memBaseQuery;
-
-  // Fallback: if tag filter returned nothing, use top 5 by confidence globally
-  if (!strategyMemories || strategyMemories.length === 0) {
-    const fallback = await supabase
-      .from("agent_memory")
-      .select("id, title, content, confidence, exposed_confidence")
-      .eq("strategy_id", strategy.id)
-      .eq("is_active", true)
-      .is("merged_into", null)
+  // Bayesian agent_memory: high-confidence distilled lessons for this strategy,
+  // scoped to the strategy's owner plus platform rows. Market-scoped on top of
+  // that: prioritize memories whose tags overlap with the candidate cities so
+  // irrelevant geography doesn't crowd out the relevant signal (Gap 6 fix).
+  //
+  // The city filter is `tags && {city…}` rather than an OR of `tags.cs.{city}`
+  // terms — identical semantics for single-element containment, and one filter
+  // instead of two. (Repeated `or=` params do AND in PostgREST — verified against
+  // this project — so composing them would also be correct, just less direct.)
+  const scopedMemoryQuery = () =>
+    applyMemoryTenantFilter(
+      supabase
+        .from("agent_memory")
+        .select("id, title, content, confidence, exposed_confidence")
+        .eq("strategy_id", strategy.id)
+        .eq("is_active", true)
+        .is("quarantined_at", null)
+        .is("merged_into", null),
+      { userId: strategy.user_id ?? null },
+    )
       .order("confidence", { ascending: false })
       .limit(5);
+
+  let { data: strategyMemories } = cityTags.length > 0
+    ? await scopedMemoryQuery().overlaps("tags", cityTags)
+    : await scopedMemoryQuery();
+
+  // Fallback: if the city filter returned nothing, take this strategy's top 5 by
+  // confidence. Still owner-scoped, and still excludes quarantined memories —
+  // the fallback used to drop `quarantined_at IS NULL`, so a lesson the Bayesian
+  // layer had explicitly retired could reach the qualify prompt through here.
+  if (!strategyMemories || strategyMemories.length === 0) {
+    const fallback = await scopedMemoryQuery();
     strategyMemories = fallback.data;
   }
 

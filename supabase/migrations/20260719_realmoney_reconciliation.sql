@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Real-money trading — fill reconciliation + live settlement (W3)
 --
@@ -12,7 +19,8 @@
 -- real-money fills settle at market resolution the same way paper does. Still
 -- action='buy' only (computePnl handles buys; sell-side settlement is a separate
 -- enhancement and matches the existing paper behavior).
-CREATE OR REPLACE VIEW public.agent_trades_pending_resolution AS
+DROP VIEW IF EXISTS public.agent_trades_pending_resolution CASCADE;
+CREATE VIEW public.agent_trades_pending_resolution AS
 SELECT
   ticker,
   user_id,
@@ -48,4 +56,4 @@ SELECT cron.schedule(
     body    := '{}'::jsonb
   );
   $$
-) ON CONFLICT (jobname) DO UPDATE SET schedule = excluded.schedule;
+);
