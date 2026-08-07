@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
-import { applyRiskBaselineFilter, computeMaxDrawdownPct } from "../_shared/strategy-health.ts";
+import { applyRiskBaselineFilter, computeMaxDrawdownPct, evaluateAutoResume } from "../_shared/strategy-health.ts";
 import { applyLessonDedupeFilters } from "../_shared/lesson-dedupe.ts";
 
 /**
@@ -186,12 +186,80 @@ serve(async (req) => {
     const strategyResults: any[] = [];
 
     // ── 2a. Auto-re-enable strategies past their suspension window ──
+    //
+    // Expiry of the timer is necessary but not sufficient. A strategy that loses
+    // money on average will suspend, wait out the window, resume, and lose again
+    // indefinitely — so the resume is gated on expectancy over the same rolling
+    // window §2b evaluates. A negative-expectancy strategy is held with
+    // suspended_until cleared, which means no timer can lift it and re-enabling
+    // becomes a deliberate human act. See evaluateAutoResume in strategy-health.ts.
     let strategiesResumed = 0;
+    let strategiesHeld = 0;
     const now = new Date();
     for (const strat of strategies || []) {
       if (strat.active) continue;
       if (!strat.suspended_until) continue;
       if (new Date(strat.suspended_until) > now) continue;
+
+      // Same window, mode-scoping, legacy-name fallback and baseline reset as §2b —
+      // a resume decision must read the metric the suspension decision will read.
+      let resumeQuery = supabase
+        .from("trades")
+        .select("pnl")
+        .eq("status", "settled")
+        .not("settled_at", "is", null)
+        .eq("mode", strat.mode)
+        .or(`strategy_id.eq.${strat.id},strategy.eq.${strat.name}`);
+      resumeQuery = applyRiskBaselineFilter(resumeQuery, strat.risk_baseline_reset_at);
+      const { data: resumeTrades } = await resumeQuery
+        .order("settled_at", { ascending: false })
+        .limit(30);
+
+      const verdict = evaluateAutoResume(
+        (resumeTrades ?? []).map((t: any) => Number(t.pnl) || 0),
+      );
+
+      if (!verdict.resume) {
+        await supabase.from("strategies").update({
+          active: false,
+          suspended_until: null,
+          suspension_reason: "negative_expectancy_hold",
+          updated_at: now.toISOString(),
+        }).eq("id", strat.id);
+
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_resume_blocked",
+          severity: "warning",
+          message:
+            `Strategy "${strat.name}" held off instead of auto-resuming: expectancy ` +
+            `$${verdict.expectancy.toFixed(2)}/trade over ${verdict.sampleSize} settled trades. ` +
+            `Re-enable manually once the cause is fixed — that sets risk_baseline_reset_at ` +
+            `so evaluation starts from the fix.`,
+          metadata: {
+            strategy_id: strat.id,
+            prior_suspension_reason: strat.suspension_reason,
+            expectancy: verdict.expectancy,
+            sample_size: verdict.sampleSize,
+          },
+          user_id: strat.user_id ?? null,
+        });
+
+        // Fingerprinted per strategy with a 24h cooldown so the transition alerts
+        // once, not on every reflect cycle for as long as the strategy stays held.
+        await alertOnce(
+          supabase,
+          "strategy_resume_blocked",
+          strat.id,
+          24,
+          `⏸️ <b>[TradeAgent] ${strat.name} held off</b>\n` +
+            `Auto-resume blocked: expectancy $${verdict.expectancy.toFixed(2)}/trade over ` +
+            `${verdict.sampleSize} settled trades (${strat.mode}). It will not restart on a timer — ` +
+            `re-enable it from the Strategies panel once the cause is fixed.`,
+        ).catch(() => {});
+
+        strategiesHeld++;
+        continue;
+      }
 
       await supabase.from("strategies").update({
         active: true,
@@ -204,10 +272,15 @@ serve(async (req) => {
         event_type: "strategy_resumed",
         severity: "info",
         message:
-          `Strategy "${strat.name}" auto-resumed after suspension window ended.`,
+          `Strategy "${strat.name}" auto-resumed after suspension window ended ` +
+          `(expectancy $${verdict.expectancy.toFixed(2)}/trade over ${verdict.sampleSize} settled trades, ` +
+          `${verdict.reason}).`,
         metadata: {
           strategy_id: strat.id,
           suspension_reason: strat.suspension_reason,
+          expectancy: verdict.expectancy,
+          sample_size: verdict.sampleSize,
+          resume_reason: verdict.reason,
         },
       });
 
@@ -457,6 +530,7 @@ serve(async (req) => {
       strategies_checked: (strategies || []).length,
       active_evaluated: activeStrategies.length,
       resumed: strategiesResumed,
+      held_negative_expectancy: strategiesHeld,
       details: strategyResults,
     };
 
@@ -1273,7 +1347,7 @@ Return ONLY valid JSON, no markdown, no extra text:
       event_type: "auto_reflect_run",
       severity: "info",
       message:
-        `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${
+        `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${strategiesHeld} held (negative expectancy), ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${
           compactionResult?.summarized || 0
         } summarized`,
       metadata: results,
