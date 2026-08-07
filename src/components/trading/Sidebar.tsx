@@ -64,6 +64,11 @@ export function Sidebar({ activeTab, onNavigate }: SidebarProps) {
             <button
               key={id}
               onClick={() => onNavigate(id)}
+              // Active state was carried by background colour alone, which no
+              // screen reader and no test can read. aria-current is the
+              // accessible "you are here" and is what the tab persistence E2E
+              // asserts against.
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm transition-all duration-200",
                 active
@@ -97,6 +102,11 @@ export function Sidebar({ activeTab, onNavigate }: SidebarProps) {
             <button
               key={id}
               onClick={() => onNavigate(id)}
+              // Active state was carried by background colour alone, which no
+              // screen reader and no test can read. aria-current is the
+              // accessible "you are here" and is what the tab persistence E2E
+              // asserts against.
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-sm transition-all duration-200",
                 active

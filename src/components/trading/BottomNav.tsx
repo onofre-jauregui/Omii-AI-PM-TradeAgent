@@ -28,6 +28,11 @@ export function BottomNav({ activeTab, onNavigate, mode, tier }: BottomNavProps)
             <button
               key={id}
               onClick={() => onNavigate(id)}
+              // The active tab was signalled only by colour and a pill indicator,
+              // which neither a screen reader nor a test can read. aria-current is
+              // the accessible name for "you are here" and is what the tab
+              // persistence E2E asserts against.
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[44px]",
                 "transition-all duration-150 active:scale-95",
