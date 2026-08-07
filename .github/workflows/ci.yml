@@ -301,6 +301,12 @@ jobs:
             echo "Attempt $i: HTTP $STATUS — waiting 10s..."
             sleep 10
           done
+      # Scoped to smoke.spec.ts on purpose. `test:e2e:smoke` used to be a bare
+      # `playwright test`, so this step ran every spec in tests/e2e/ — including
+      # the two that need a login, whose credentials are only passed to their own
+      # steps below. The signed-in specs therefore failed here, in a step that
+      # never had the secrets, and took the whole job down before the steps that
+      # do have them ever ran. Each step now runs exactly what its name says.
       - name: Run E2E smoke suite
         run: npm run test:e2e:smoke
         env:
@@ -314,6 +320,18 @@ jobs:
         run: npm run test:e2e:hardening
         env:
           BASE_URL: https://kalshitradeagent.live
+
+      # Walks the rendered pricing on both surfaces — the landing page logged out
+      # and /billing under a real session — against src/lib/pricing.ts. The unit
+      # test proves the table matches server enforcement; only this proves the
+      # deployed page renders that table, which is how two false limit claims
+      # sat on the landing page for months.
+      - name: Pricing surfaces suite
+        run: npm run test:e2e:pricing
+        env:
+          BASE_URL: https://kalshitradeagent.live
+          E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
 
       # The smoke suite above only visits logged-out pages. On 2026-08-04 a
       # promotion cleared every gate in this pipeline while the live dashboard
