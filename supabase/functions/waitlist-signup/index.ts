@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { corsHeaders, preflight } from "../_shared/cors.ts";
+import { makeCorsHeaders, preflight } from "../_shared/cors.ts";
 
 // The SendGrid call below had no timeout and is awaited before the signup response
 // returns — a stalled SendGrid request hung the user-facing waitlist form itself, up to
@@ -9,7 +9,15 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 const FETCH_TIMEOUT_MS = 8_000;
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") return preflight();
+  // Pass the request so the allow-list reflects THIS caller's origin. Calling
+  // preflight()/corsHeaders with no request pins Access-Control-Allow-Origin to
+  // the first entry in the list (kalshitradeagent.com), so every other allowed
+  // origin — staging, the vercel.app previews, localhost — is refused by the
+  // browser. That is why the waitlist form could never be exercised anywhere
+  // except production, which is precisely how a 100%-failing form went
+  // unnoticed for eleven weeks.
+  const cors = makeCorsHeaders(req.headers.get("origin"));
+  if (req.method === "OPTIONS") return preflight(req);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -17,7 +25,7 @@ serve(async (req) => {
 
   const { email, plan_interest } = await req.json().catch(() => ({}));
   if (!email || typeof email !== "string" || !email.includes("@")) {
-    return json({ ok: false, error: "Valid email required" }, 400);
+    return json({ ok: false, error: "Valid email required" }, 400, cors);
   }
 
   const supabase = createClient(supabaseUrl, supabaseKey);
@@ -32,7 +40,7 @@ serve(async (req) => {
 
   if (insertErr && !insertErr.message.includes("duplicate")) {
     console.error("waitlist-signup insert error:", insertErr);
-    return json({ ok: false, error: "Could not save. Please try again." }, 500);
+    return json({ ok: false, error: "Could not save. Please try again." }, 500, cors);
   }
 
   // Send confirmation email via SendGrid (non-blocking — don't fail signup if email fails)
@@ -46,7 +54,7 @@ serve(async (req) => {
     );
   }
 
-  return json({ ok: true });
+  return json({ ok: true }, 200, cors);
 });
 
 async function sendConfirmation(apiKey: string, to: string): Promise<void> {
@@ -103,9 +111,13 @@ async function sendConfirmation(apiKey: string, to: string): Promise<void> {
   }
 }
 
-function json(body: unknown, status = 200): Response {
+function json(
+  body: unknown,
+  status = 200,
+  cors: Record<string, string> = makeCorsHeaders(null),
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 }
