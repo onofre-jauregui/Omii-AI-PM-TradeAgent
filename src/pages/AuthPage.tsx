@@ -3,6 +3,7 @@ import { Bot, Loader2, Eye, EyeOff, ChevronLeft } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
+import { clearUiState } from "@/lib/uiState";
 
 function GoogleIcon() {
   return (
@@ -28,6 +29,9 @@ export function AuthPage() {
   const handleGoogleLogin = async () => {
     setLoading(true);
     setError(null);
+    // A sign-in is an initiation — the app should open on the paper Dashboard,
+    // not whatever tab the last session left behind.
+    clearUiState();
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: window.location.origin + returnTo },
@@ -42,6 +46,7 @@ export function AuthPage() {
     setMessage(null);
 
     if (mode === "login") {
+      clearUiState();
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
         setError(error.message);
