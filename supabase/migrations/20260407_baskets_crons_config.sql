@@ -1,3 +1,10 @@
+-- NOTE (2026-08-06): each cron.schedule() call below used to be closed by a
+-- trailing upsert clause. That clause belongs to INSERT, not SELECT, so it was
+-- invalid SQL and this file could never apply cleanly to any database, Supabase
+-- included — it was recorded as applied without ever running to completion.
+-- pg_cron's schedule() already replaces a job of the same name, so removing the
+-- clause preserves the intent exactly. Found by scripts/rehearse-migrations.sh.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 1. baskets table — multi-leg order state machine
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +47,7 @@ create index if not exists baskets_strategy_idx on baskets (strategy_id);
 create index if not exists baskets_created_at_idx on baskets (created_at desc);
 
 alter table baskets enable row level security;
+DROP POLICY IF EXISTS "Service role full access on baskets" ON baskets;
 create policy "Service role full access on baskets"
   on baskets for all using (true) with check (true);
 
@@ -86,6 +94,7 @@ create table if not exists strategy_config (
 );
 
 alter table strategy_config enable row level security;
+DROP POLICY IF EXISTS "Service role full access on strategy_config" ON strategy_config;
 create policy "Service role full access on strategy_config"
   on strategy_config for all using (true) with check (true);
 
@@ -121,7 +130,7 @@ select cron.schedule(
     body := '{}'::jsonb
   );
   $$
-) on conflict (jobname) do update set schedule = excluded.schedule;
+);
 
 -- Signal generator: every 15 seconds
 select cron.schedule(
@@ -137,7 +146,7 @@ select cron.schedule(
     body := '{"limit": 50}'::jsonb
   );
   $$
-) on conflict (jobname) do update set schedule = excluded.schedule;
+);
 
 -- Auto-trade: every 5 minutes
 -- (the agent loop itself takes 30–90 seconds to run per strategy)
@@ -154,7 +163,7 @@ select cron.schedule(
     body := '{}'::jsonb
   );
   $$
-) on conflict (jobname) do update set schedule = excluded.schedule;
+);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 4. Apply migration to live DB

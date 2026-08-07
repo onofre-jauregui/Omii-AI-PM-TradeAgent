@@ -1,3 +1,15 @@
+-- Moved out of supabase/migrations/ on 2026-08-06.
+--
+-- This was never a migration. It is a set of analysis queries for a human to run
+-- after 14 days of v2 paper trading, including bare SELECTs with no DDL effect.
+-- It also never applied: it creates `qualifier_roi_v2` over a `signals.strategy_id`
+-- column that does not exist, and production has neither the view nor the column.
+-- It was nonetheless recorded as applied, under the date-only key `20260504` that
+-- 20260504120000_v2_instrumentation_and_lock.sql had already claimed - the CI
+-- version-key collision this pass also fixes.
+--
+-- Kept as documentation. Run by hand against a database that has the columns.
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Auto-Reflect v2 — Validation Gates (run after 14 days of v2 paper trading)
 -- 2026-05-04

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS public.compliance_log (
 );
 
 ALTER TABLE public.compliance_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to compliance_log" ON public.compliance_log;
 CREATE POLICY "Allow all access to compliance_log" ON public.compliance_log
   FOR ALL USING (true) WITH CHECK (true);
 
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS public.risk_state (
 );
 
 ALTER TABLE public.risk_state ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to risk_state" ON public.risk_state;
 CREATE POLICY "Allow all access to risk_state" ON public.risk_state
   FOR ALL USING (true) WITH CHECK (true);
 
@@ -76,6 +78,7 @@ CREATE TABLE IF NOT EXISTS public.risk_settings (
 );
 
 ALTER TABLE public.risk_settings ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to risk_settings" ON public.risk_settings;
 CREATE POLICY "Allow all access to risk_settings" ON public.risk_settings
   FOR ALL USING (true) WITH CHECK (true);
 
@@ -98,11 +101,13 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
 );
 
 ALTER TABLE public.api_keys ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to api_keys" ON public.api_keys;
 CREATE POLICY "Allow all access to api_keys" ON public.api_keys
   FOR ALL USING (true) WITH CHECK (true);
 
 -- Positions view (computed from trades)
-CREATE OR REPLACE VIEW public.open_positions AS
+DROP VIEW IF EXISTS public.open_positions CASCADE;
+CREATE VIEW public.open_positions AS
 WITH filled_trades AS (
   SELECT
     ticker,
@@ -139,5 +144,15 @@ position_calc AS (
 SELECT * FROM position_calc WHERE net_contracts > 0;
 
 -- Enable realtime on new tables
-ALTER PUBLICATION supabase_realtime ADD TABLE public.compliance_log;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.risk_state;
+DO $pub$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.compliance_log;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$pub$;
+DO $pub$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.risk_state;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$pub$;

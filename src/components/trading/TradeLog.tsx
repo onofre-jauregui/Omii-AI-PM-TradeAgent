@@ -51,7 +51,7 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
   const queryClient = useQueryClient();
   // Shared cache: newest 50 trades, stale-while-revalidate. Refreshes via the
   // single realtime channel in strategiesContext (no per-component channel here).
-  const { data, isLoading, isFetching, refetch } = useRecentTrades(filterMode);
+  const { data, isLoading, isFetching, isError, error, refetch } = useRecentTrades(filterMode);
   const trades = (data ?? []) as Trade[];
   const [ratingId, setRatingId] = useState<string | null>(null);
 
@@ -74,7 +74,14 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
       }
       const isGood = newRating === "good";
       const pnlStr = trade.pnl != null ? `P&L: ${trade.pnl >= 0 ? "+" : ""}$${trade.pnl.toFixed(2)}` : "P&L: pending";
-      await supabase.from("agent_memory").insert({
+      // agent_memory RLS now requires user_id = auth.uid() on insert. The old
+      // `user_id: user?.id ?? null` wrote a platform-global row when the session
+      // had no user — visible to every tenant — and is now rejected outright.
+      if (!user?.id) {
+        toast.error("Sign in to save feedback");
+        return;
+      }
+      const { error: memoryError } = await supabase.from("agent_memory").insert({
         memory_type: isGood ? "success" : "mistake",
         title: `User rated ${trade.strategy ?? "manual"} trade ${isGood ? "good" : "bad"}: ${trade.side.toUpperCase()} ${trade.ticker ?? trade.market_id}`,
         content: `User marked this trade as ${isGood ? "a good decision" : "a bad decision"}. Market: "${trade.market_question}". Side: ${trade.side.toUpperCase()} @ ${trade.filled_price ?? trade.price}¢. Amount: $${trade.amount}. ${pnlStr}. Strategy: ${trade.strategy ?? "manual"}. ${isGood ? "Reinforce this type of setup." : "Avoid or be more selective with this type of setup."}`,
@@ -83,8 +90,16 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
         strategy_id: trade.strategy ?? null,
         confidence: 0.7,
         tags: ["user_feedback", trade.strategy ?? "manual", trade.side, isGood ? "good_trade" : "bad_trade"],
-        user_id: user?.id ?? null,
+        user_id: user.id,
       });
+      // supabase-js returns errors rather than throwing, so the catch below never
+      // saw a rejected insert: the toast said "Feedback saved" whether or not the
+      // lesson reached the agent.
+      if (memoryError) {
+        patchTrade(trade.id, { user_rating: newRating });
+        toast.error("Rating saved, but the agent didn't record the lesson");
+        return;
+      }
       patchTrade(trade.id, { user_rating: newRating });
       toast.success(`Feedback saved — agent will ${isGood ? "look for more setups like this" : "be more selective here"}`);
     } catch {
@@ -121,6 +136,15 @@ export function TradeLog({ filterMode }: { filterMode?: "paper" | "live" }) {
             <div className="flex flex-col items-center justify-center py-20 gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               <span className="text-sm text-muted-foreground">Loading trades…</span>
+            </div>
+          ) : isError && trades.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 gap-2 text-center px-6">
+              <Clock className="h-8 w-8 text-loss/50" />
+              <p className="text-sm text-loss">Couldn't load trades.</p>
+              <p className="text-xs text-muted-foreground/60">{error instanceof Error ? error.message : "Unknown error"}</p>
+              <Button variant="outline" size="sm" onClick={() => refetch()} className="mt-2 rounded-full">
+                Retry
+              </Button>
             </div>
           ) : trades.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 gap-2 text-center px-6">

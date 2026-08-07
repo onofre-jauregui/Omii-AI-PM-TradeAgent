@@ -1,5 +1,5 @@
 
-CREATE TABLE public.trades (
+CREATE TABLE IF NOT EXISTS public.trades (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   market_id TEXT NOT NULL,
   market_question TEXT NOT NULL,
@@ -18,7 +18,13 @@ CREATE TABLE public.trades (
 ALTER TABLE public.trades ENABLE ROW LEVEL SECURITY;
 
 -- Public access for now since no auth is implemented yet
+DROP POLICY IF EXISTS "Allow all access to trades" ON public.trades;
 CREATE POLICY "Allow all access to trades" ON public.trades
   FOR ALL USING (true) WITH CHECK (true);
 
-ALTER PUBLICATION supabase_realtime ADD TABLE public.trades;
+DO $pub$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.trades;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$pub$;

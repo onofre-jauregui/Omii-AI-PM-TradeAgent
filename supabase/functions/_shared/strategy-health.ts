@@ -28,3 +28,28 @@ export function computeMaxDrawdownPct(
 
   return maxDdPct;
 }
+
+/**
+ * Applies a strategy's risk-baseline reset to the trailing-trade-window query
+ * used by Sharpe/drawdown/hit-rate/consecutive-loss evaluation.
+ *
+ * That window is a fixed count (last 30 settled trades), not time-scoped, so
+ * for a low-volume strategy it can BE the strategy's entire history — a couple
+ * of bad trades from before a root-cause fix ships can never age out on their
+ * own, because staying suspended blocks the new trades that would eventually
+ * push them out of the window (2026-08 S-001-live lockup: auto-resumed and
+ * immediately re-suspended on the same 40.7%-drawdown reading for 4+ days).
+ *
+ * risk_baseline_reset_at is set only by a deliberate human override of an
+ * active suspension (never by routine 24h auto-resume — that would let a
+ * persistently bad strategy escape evaluation forever). NULL means no reset
+ * has occurred: evaluate the full window, unchanged from today's behavior.
+ */
+export function applyRiskBaselineFilter<T>(
+  query: T,
+  riskBaselineResetAt: string | null | undefined,
+): T {
+  if (!riskBaselineResetAt) return query;
+  // deno-lint-ignore no-explicit-any
+  return (query as any).gte("settled_at", riskBaselineResetAt) as T;
+}

@@ -14,6 +14,9 @@ import {
   s001EntryPriceCheck,
   s001BreakEvenWinRatePct,
   S001_MAX_ENTRY_PRICE_CENTS,
+  shouldRunByCadence,
+  CADENCE_GRACE_MIN,
+  DEFAULT_CADENCE_MIN,
 } from "../_shared/trading-logic";
 import { parseQualifyResponse } from "../_shared/prompt-safety";
 
@@ -309,5 +312,64 @@ describe("S-001 entry-price ceiling", () => {
     for (let i = 1; i < rates.length; i++) {
       expect(rates[i]).toBeGreaterThan(rates[i - 1]);
     }
+  });
+});
+
+// ─── Per-strategy run cadence ───────────────────────────────────────────────
+
+describe("shouldRunByCadence", () => {
+  const NOW = Date.parse("2026-08-06T12:00:00Z");
+  const minsAgo = (m: number) => new Date(NOW - m * 60_000).toISOString();
+
+  it("null/0 interval → hourly default cadence (DEFAULT_CADENCE_MIN), not every tick", () => {
+    // Cron now ticks every 5 min, so NULL must throttle to hourly rather than run
+    // on every tick — otherwise default strategies would trade 12x more.
+    expect(shouldRunByCadence(null, minsAgo(1), NOW)).toBe(false);   // 1 min in → skip
+    expect(shouldRunByCadence(undefined, minsAgo(5), NOW)).toBe(false); // 5 min in → skip
+    expect(shouldRunByCadence(0, minsAgo(30), NOW)).toBe(false);     // 30 min in → skip
+    expect(shouldRunByCadence(null, minsAgo(60), NOW)).toBe(true);   // 60 min → run
+    expect(DEFAULT_CADENCE_MIN).toBe(60);
+  });
+
+  it("never run before (last_run_at null) → runs regardless of interval", () => {
+    expect(shouldRunByCadence(240, null, NOW)).toBe(true);
+    expect(shouldRunByCadence(240, undefined, NOW)).toBe(true);
+    expect(shouldRunByCadence(null, null, NOW)).toBe(true); // default cadence, never run
+  });
+
+  it("unparseable last_run_at → runs (fail open, never wedge a strategy)", () => {
+    expect(shouldRunByCadence(240, "not-a-date", NOW)).toBe(true);
+  });
+
+  it("5m cadence fires on every 5-min cron tick despite jitter", () => {
+    expect(shouldRunByCadence(5, minsAgo(4.9), NOW)).toBe(true);
+    expect(shouldRunByCadence(5, minsAgo(5), NOW)).toBe(true);
+    expect(shouldRunByCadence(5, minsAgo(2), NOW)).toBe(false);
+  });
+
+  it("15m cadence skips the intermediate 5-min ticks", () => {
+    expect(shouldRunByCadence(15, minsAgo(5), NOW)).toBe(false);
+    expect(shouldRunByCadence(15, minsAgo(10), NOW)).toBe(false);
+    expect(shouldRunByCadence(15, minsAgo(12.5), NOW)).toBe(true);
+    expect(shouldRunByCadence(15, minsAgo(15), NOW)).toBe(true);
+  });
+
+  it("hourly (60m) strategy fires despite cron jitter", () => {
+    expect(shouldRunByCadence(60, minsAgo(57.5), NOW)).toBe(true);
+    expect(shouldRunByCadence(60, minsAgo(60), NOW)).toBe(true);
+    expect(shouldRunByCadence(60, minsAgo(55), NOW)).toBe(false);
+  });
+
+  it("4h (240m) strategy skips intermediate cycles", () => {
+    expect(shouldRunByCadence(240, minsAgo(60), NOW)).toBe(false);
+    expect(shouldRunByCadence(240, minsAgo(180), NOW)).toBe(false);
+    expect(shouldRunByCadence(240, minsAgo(237.5), NOW)).toBe(true);
+    expect(shouldRunByCadence(240, minsAgo(240), NOW)).toBe(true);
+  });
+
+  it("boundary: elapsed exactly interval - grace → runs", () => {
+    expect(shouldRunByCadence(120, minsAgo(120 - CADENCE_GRACE_MIN), NOW)).toBe(true);
+    expect(shouldRunByCadence(120, minsAgo(120 - CADENCE_GRACE_MIN - 0.1), NOW)).toBe(false);
+    expect(CADENCE_GRACE_MIN).toBe(2.5);
   });
 });

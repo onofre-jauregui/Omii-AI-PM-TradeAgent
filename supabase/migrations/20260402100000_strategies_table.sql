@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS public.strategies (
 );
 
 ALTER TABLE public.strategies ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to strategies" ON public.strategies;
 CREATE POLICY "Allow all access to strategies" ON public.strategies
   FOR ALL USING (true) WITH CHECK (true);
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS public.strategy_snapshots (
 );
 
 ALTER TABLE public.strategy_snapshots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Allow all access to strategy_snapshots" ON public.strategy_snapshots;
 CREATE POLICY "Allow all access to strategy_snapshots" ON public.strategy_snapshots
   FOR ALL USING (true) WITH CHECK (true);
 
@@ -50,5 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_strategy_snapshots_strategy_time
 CREATE INDEX IF NOT EXISTS idx_trades_strategy_id
   ON public.trades (strategy_id);
 
-ALTER PUBLICATION supabase_realtime ADD TABLE public.strategies;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.strategy_snapshots;
+DO $pub$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.strategies;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$pub$;
+DO $pub$
+BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.strategy_snapshots;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END
+$pub$;

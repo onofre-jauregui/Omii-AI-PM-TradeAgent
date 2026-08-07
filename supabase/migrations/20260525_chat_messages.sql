@@ -1,4 +1,4 @@
-CREATE TABLE public.conversations (
+CREATE TABLE IF NOT EXISTS public.conversations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id TEXT NOT NULL,
   title TEXT,
@@ -6,12 +6,13 @@ CREATE TABLE public.conversations (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   message_count INTEGER DEFAULT 0
 );
-CREATE INDEX idx_conversations_user_id ON public.conversations(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON public.conversations(user_id, updated_at DESC);
 ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "users_own_conversations" ON public.conversations;
 CREATE POLICY "users_own_conversations" ON public.conversations
   FOR ALL USING (user_id = auth.uid()::text);
 
-CREATE TABLE public.chat_messages (
+CREATE TABLE IF NOT EXISTS public.chat_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
   user_id TEXT NOT NULL,
@@ -19,7 +20,8 @@ CREATE TABLE public.chat_messages (
   content TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_chat_messages_conversation ON public.chat_messages(conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON public.chat_messages(conversation_id, created_at ASC);
 ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "users_own_messages" ON public.chat_messages;
 CREATE POLICY "users_own_messages" ON public.chat_messages
   FOR ALL USING (user_id = auth.uid()::text);

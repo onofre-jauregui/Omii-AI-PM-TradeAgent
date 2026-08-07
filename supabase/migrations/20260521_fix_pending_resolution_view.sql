@@ -2,7 +2,8 @@
 -- auto-settle for all users after multi-tenancy migration.
 -- Service role bypasses RLS, so no user filter is needed here — each user's
 -- data is still isolated at the RLS layer for frontend queries.
-CREATE OR REPLACE VIEW public.agent_trades_pending_resolution AS
+DROP VIEW IF EXISTS public.agent_trades_pending_resolution CASCADE;
+CREATE VIEW public.agent_trades_pending_resolution AS
 SELECT
   ticker,
   user_id,

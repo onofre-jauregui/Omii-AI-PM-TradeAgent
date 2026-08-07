@@ -1,155 +1,210 @@
 #!/usr/bin/env bash
+# Prove that supabase/migrations/ alone rebuilds the database from zero.
 #
-# Replay every migration into a throwaway Postgres and fail loudly on the first
-# one that does not apply.
+# Runs every migration into a throwaway Postgres, twice, and asserts the rebuilt
+# catalog matches scripts/expected-schema.json object-for-object. Never connects
+# to a hosted Supabase project and never writes anything durable.
 #
-# Why this exists: CI used to apply migrations to a hosted "staging" Supabase
-# project. That project no longer exists, the STAGING_SUPABASE_PROJECT_REF secret
-# resolves to empty, and the job had been passing vacuously — it only issues a
-# request when there is a pending migration, so a broken pipeline looked green
-# for as long as nobody changed the schema. The first real migration in weeks
-# failed it (2026-08-06) and took the staging deploy and the entire .live E2E gate
-# down with it, because both `needs:` this job.
+#   ./scripts/rehearse-migrations.sh                     # docker, auto lifecycle
+#   ./scripts/rehearse-migrations.sh --keep              # leave the database up
+#   ./scripts/rehearse-migrations.sh --write-fingerprint # re-record expected-schema.json
+#   REHEARSAL_DSN=postgres://... ./scripts/rehearse-migrations.sh
 #
-# An ephemeral database is strictly better here: it costs nothing, cannot drift
-# from the migration files, cannot be deleted out from under CI, and replays from
-# zero every run — so it catches the exact class of bug a long-lived staging DB
-# hides, where a migration only applies because of state some earlier manual fix
-# left behind.
+# Why this exists: production had 35 public tables while the migration set created
+# 30, so the schema could not be rebuilt from git at all. CommStack lost its
+# Supabase project outright on 2026-07-20 and recovered only because its migrations
+# replayed clean. This is the check that keeps that true here.
 #
-# Usage:
-#   scripts/rehearse-migrations.sh                  # uses $DATABASE_URL
-#   DATABASE_URL=postgres://... scripts/rehearse-migrations.sh
-#
-# Exit codes: 0 all migrations applied · 1 a migration failed (name + SQL error
-# printed) · 2 preconditions not met.
+# Exit codes:  0 rebuilt clean · 1 a migration failed or the catalog drifted · 2 preconditions unmet
+set -euo pipefail
 
-set -Eeuo pipefail
-
-DATABASE_URL="${DATABASE_URL:-postgres://postgres:postgres@localhost:5432/postgres}"
-MIGRATIONS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/supabase/migrations"
-SHIM="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/supabase/shim.sql"
-
-command -v psql >/dev/null 2>&1 || { echo "psql not found on PATH"; exit 2; }
-[ -d "$MIGRATIONS_DIR" ] || { echo "no migrations dir at $MIGRATIONS_DIR"; exit 2; }
-[ -f "$SHIM" ]           || { echo "no shim at $SHIM"; exit 2; }
-
-psql_run() { psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q "$@"; }
-
-echo "→ waiting for postgres"
-for i in $(seq 1 30); do
-  psql "$DATABASE_URL" -c 'select 1' >/dev/null 2>&1 && break
-  [ "$i" = 30 ] && { echo "postgres never became ready at $DATABASE_URL"; exit 2; }
-  sleep 1
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MIGRATIONS_DIR="$REPO_ROOT/supabase/migrations"
+SHIM="$REPO_ROOT/scripts/supabase-shim.sql"
+EXPECTED="$REPO_ROOT/scripts/expected-schema.json"
+FINGERPRINT_OUT="$(mktemp -t rehearsal-fingerprint)"
+CONTAINER="tradeagent-migration-rehearsal"
+PGIMAGE="${REHEARSAL_PG_IMAGE:-postgres:15-alpine}"
+KEEP=0
+SURVEY=0
+WRITE_FINGERPRINT=0
+for arg in "$@"; do
+  case "$arg" in
+    --keep)   KEEP=1 ;;
+    # Apply every migration and report ALL failures instead of stopping at the
+    # first. Never a passing mode — it always exits non-zero if anything failed.
+    # Exists so a large drift can be diagnosed in one run rather than N.
+    --survey) SURVEY=1; KEEP=1 ;;
+    # Overwrite scripts/expected-schema.json with what this run produced. Only
+    # correct when the schema change is intentional — the diff belongs in the
+    # same commit and the same review as the migration that caused it.
+    --write-fingerprint) WRITE_FINGERPRINT=1 ;;
+  esac
 done
 
-echo "→ applying Supabase shim"
-psql_run -f "$SHIM"
+red()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
+dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
 
-# pg_cron and pg_net are Supabase-managed and cannot be installed in a stock
-# container; supabase/shim.sql already provides the cron.* and net.* surface the
-# migrations call. Strip only those CREATE EXTENSION lines — every other
-# statement in every migration is applied verbatim, so a genuine syntax error or
-# a reference to a missing table still fails here exactly as it would in Supabase.
-strip_unavailable_extensions() {
-  sed -E '/[Cc][Rr][Ee][Aa][Tt][Ee] +[Ee][Xx][Tt][Ee][Nn][Ss][Ii][Oo][Nn].*(pg_cron|pg_net)/d' "$1"
+[[ -f "$SHIM" ]]           || { red "missing shim: $SHIM"; exit 2; }
+[[ -d "$MIGRATIONS_DIR" ]] || { red "missing migrations dir: $MIGRATIONS_DIR"; exit 2; }
+[[ -f "$EXPECTED" || $WRITE_FINGERPRINT -eq 1 ]] || { red "missing fingerprint: $EXPECTED"; exit 2; }
+
+# Three ways to get a throwaway Postgres, in preference order:
+#   dsn    — REHEARSAL_DSN supplied. How CI runs it, against its own empty
+#            `postgres` service container. Used as-is; nothing is created.
+#   local  — a running local cluster. A scratch DATABASE is created and dropped.
+#   docker — spin up a container. Fallback when there is no local cluster.
+MODE=""
+SCRATCH_DB="${REHEARSAL_DB:-tradeagent_migration_rehearsal}"
+
+# The shim shadows the platform's own auth schema and helper functions, so
+# pointing this at a hosted project would corrupt it. Refuse before anything runs.
+if [[ -n "${REHEARSAL_DSN:-}" ]]; then
+  case "$REHEARSAL_DSN" in
+    *supabase.co*|*supabase.com*|*pooler.supabase*)
+      red "REHEARSAL_DSN points at a hosted Supabase project. This script applies"
+      red "scripts/supabase-shim.sql, a local test fixture that would shadow the"
+      red "platform's own auth schema. Refusing."
+      exit 2 ;;
+  esac
+  MODE=dsn
+  command -v psql >/dev/null 2>&1 || { red "psql not found"; exit 2; }
+  PSQL=(psql "$REHEARSAL_DSN" -v ON_ERROR_STOP=1 -q --no-psqlrc)
+elif command -v psql >/dev/null 2>&1 && pg_isready -q 2>/dev/null; then
+  MODE=local
+  # This branch runs DROP DATABASE. Refuse any name that isn't an obvious throwaway.
+  case "$SCRATCH_DB" in
+    *rehearsal*) ;;
+    *) red "REHEARSAL_DB must contain 'rehearsal' — refusing to touch '$SCRATCH_DB'"; exit 2 ;;
+  esac
+  PSQL=(psql -d "$SCRATCH_DB" -v ON_ERROR_STOP=1 -q --no-psqlrc)
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  MODE=docker
+  PSQL=(docker exec -i "$CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q --no-psqlrc)
+else
+  red "no throwaway Postgres available. Do one of:"
+  red "  · start a local cluster   (brew services start postgresql@17)"
+  red "  · start Docker"
+  red "  · set REHEARSAL_DSN to an empty local database"
+  exit 2
+fi
+
+cleanup() {
+  rm -f "$FINGERPRINT_OUT"
+  case "$MODE" in
+    local)
+      if [[ $KEEP -eq 0 ]]; then
+        psql -d postgres -q -c "DROP DATABASE IF EXISTS \"$SCRATCH_DB\" WITH (FORCE);" >/dev/null 2>&1 || true
+      else
+        dim "scratch database kept: psql -d $SCRATCH_DB"
+      fi ;;
+    docker)
+      if [[ $KEEP -eq 0 ]]; then
+        docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+      else
+        dim "container kept: docker exec -it $CONTAINER psql -U postgres"
+      fi ;;
+  esac
 }
+trap cleanup EXIT
 
-# A ratchet, not a clean sheet. 24 of the 71 committed migrations do not apply to
-# an empty database — see supabase/migrations-known-broken.txt for each one, the
-# error, and why. Those are recorded as the baseline so this job can block the
-# NEXT broken migration without first requiring a schema-archaeology project.
-# Anything not on the list must apply cleanly.
-KNOWN_BROKEN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/supabase/migrations-known-broken.txt"
-is_known_broken() {
-  [ -f "$KNOWN_BROKEN" ] || return 1
-  grep -v '^#' "$KNOWN_BROKEN" | grep -q "^$1 *|"
-}
+case "$MODE" in
+  local)
+    dim "rehearsing into local database $SCRATCH_DB"
+    psql -d postgres -q -c "DROP DATABASE IF EXISTS \"$SCRATCH_DB\" WITH (FORCE);"
+    psql -d postgres -q -c "CREATE DATABASE \"$SCRATCH_DB\";" ;;
+  docker)
+    dim "rehearsing into a fresh $PGIMAGE container"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$CONTAINER" -e POSTGRES_PASSWORD=rehearsal -e POSTGRES_HOST_AUTH_METHOD=trust "$PGIMAGE" >/dev/null
+    for _ in $(seq 1 60); do
+      docker exec "$CONTAINER" pg_isready -U postgres -q 2>/dev/null && break
+      sleep 1
+    done
+    docker exec "$CONTAINER" pg_isready -U postgres -q || { red "postgres never became ready"; exit 2; } ;;
+  dsn)
+    dim "rehearsing into the supplied REHEARSAL_DSN" ;;
+esac
 
-total=0
-applied=0
-expected_failures=0
-new_failures=0
-fixed=()
-
-for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
-  name="$(basename "$f")"
-  total=$((total + 1))
-  if strip_unavailable_extensions "$f" | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q >/dev/null 2>/tmp/rehearse_err; then
-    applied=$((applied + 1))
-    if is_known_broken "$name"; then
-      # Good news that must not pass silently — a fixed migration has to leave the
-      # baseline, or the list rots into a permanent excuse.
-      fixed+=("$name")
-    fi
-  elif is_known_broken "$name"; then
-    expected_failures=$((expected_failures + 1))
-    echo "  skip $name (known broken)"
-  else
-    new_failures=$((new_failures + 1))
-    echo ""
-    echo "✗ MIGRATION FAILED: $name"
-    echo "──────────────────────────────────────────────────────────────"
-    grep -m1 '^ERROR' /tmp/rehearse_err | sed 's/^/  /' || sed 's/^/  /' /tmp/rehearse_err
-    echo "──────────────────────────────────────────────────────────────"
-    echo ""
-    echo "This migration does not apply to a clean database, and it is not on the"
-    echo "known-broken baseline. Fix it before merging — if it only works against"
-    echo "production, production is carrying state that no migration creates, and a"
-    echo "rebuild from these files cannot reproduce it."
-    exit 1
+# One pass = shim + every migration in sorted order. Output is captured rather
+# than streamed so a clean run is one line per migration and only a failure dumps
+# its stderr.
+run_pass() {
+  local pass="$1" applied=0 name output
+  if ! output="$("${PSQL[@]}" -f - < "$SHIM" 2>&1)"; then
+    red "FAIL  supabase-shim.sql"; red "$output"; return 1
   fi
-done
+  local failed=0
+  for migration in "$MIGRATIONS_DIR"/*.sql; do
+    name="$(basename "$migration")"
+    if output="$("${PSQL[@]}" -f - < "$migration" 2>&1)"; then
+      applied=$((applied + 1))
+    elif [[ $SURVEY -eq 1 ]]; then
+      failed=$((failed + 1))
+      red "FAIL  $name"
+      grep -E '^psql:.*(ERROR|FATAL)' <<<"$output" | head -3 | sed 's/^/        /' >&2
+    else
+      red "FAIL  $name  (pass $pass, after $applied clean)"
+      red "$output"
+      return 1
+    fi
+  done
+  APPLIED=$applied
+  if [[ $SURVEY -eq 1 && $failed -gt 0 ]]; then
+    red ""
+    red "survey: $failed migration(s) failed, $applied applied clean"
+    return 1
+  fi
+  return 0
+}
 
-echo ""
-echo "→ $applied of $total migrations applied clean ($expected_failures known-broken skipped)"
+started=$SECONDS
 
-if [ ${#fixed[@]} -gt 0 ]; then
-  echo ""
-  echo "✗ THESE MIGRATIONS NOW APPLY CLEANLY BUT ARE STILL ON THE BASELINE:"
-  printf '    %s\n' "${fixed[@]}"
-  echo ""
-  echo "Remove them from supabase/migrations-known-broken.txt. The list only shrinks;"
-  echo "leaving a fixed migration on it hides the next real regression behind it."
+if ! run_pass 1; then
+  red ""
+  red "The migration set does NOT rebuild the database from zero."
+  red "Fix the migration above before relying on docs/DISASTER-RECOVERY.md."
+  exit 1
+fi
+grn "pass 1: $APPLIED migrations applied clean from an empty database"
+
+# Second pass into the SAME database. Every migration must be re-appliable, since
+# CI's runner replays a whole file when a partial apply is retried and nothing
+# records statement-level progress.
+if ! run_pass 2; then
+  red ""
+  red "A migration is not idempotent — it applies once but fails on replay."
+  red "CI re-applies whole files on retry, so this breaks recovery."
+  exit 1
+fi
+grn "pass 2: all $APPLIED migrations re-applied clean (idempotent)"
+
+echo
+dim "Rebuilt from zero in $((SECONDS - started))s"
+
+# The rebuilt catalog is compared to the committed fingerprint by NAME, not by
+# count. Counts are the wrong check: on 2026-08-06 this script reported
+# "36 tables · 7 views · 12 functions · 52 policies · 126 indexes — counts match"
+# while twelve RLS policies, three column types and four constraints differed
+# from production. Every total lined up; the schemas did not.
+"${PSQL[@]}" -tA --no-psqlrc -f "$REPO_ROOT/scripts/schema-fingerprint.sql" > "$FINGERPRINT_OUT"
+
+if [[ $WRITE_FINGERPRINT -eq 1 ]]; then
+  python3 -c 'import json,sys; json.dump(json.load(open(sys.argv[1])), open(sys.argv[2],"w"), indent=1, sort_keys=True)' \
+    "$FINGERPRINT_OUT" "$EXPECTED"
+  grn "wrote $EXPECTED"
+  exit 0
+fi
+
+if ! python3 "$REPO_ROOT/scripts/compare-schema-fingerprint.py" "$EXPECTED" "$FINGERPRINT_OUT"; then
+  red ""
+  red "The rebuilt schema does not match scripts/expected-schema.json."
+  red "Either a migration was lost, or the fingerprint needs regenerating in the"
+  red "same commit as the schema change that moved it:"
+  red "    ./scripts/rehearse-migrations.sh --write-fingerprint"
   exit 1
 fi
 
-# The rehearsal is only worth as much as what it asserts afterwards. A migration
-# set can apply perfectly and still not create a table the app queries every day —
-# that is exactly how a phantom table hides, because PostgREST answers a query
-# against a missing table with an empty result rather than an error.
-echo "→ checking every table the frontend queries actually exists"
-queried=$(grep -rhoE '\.from\("[a-z0-9_]+"\)' src/ 2>/dev/null \
-  | sed -E 's/.*\.from\("([a-z0-9_]+)"\).*/\1/' | sort -u)
-
-# Storage buckets, not relations. `supabase.storage` is frequently on the line
-# above the `.from(...)` call, so no line-based grep can tell the two apart —
-# hence an explicit list. Add a bucket here when one is introduced.
-STORAGE_BUCKETS="avatars"
-queried=$(echo "$queried" | grep -vxF "$STORAGE_BUCKETS" || true)
-existing=$(psql "$DATABASE_URL" -At -c \
-  "select tablename from pg_tables where schemaname='public'
-   union select viewname from pg_views where schemaname='public'" | sort -u)
-
-# Relations that exist in production but that no migration creates — the same
-# dashboard-created debt as cause #2 in migrations-known-broken.txt. Listed here
-# so a genuinely phantom relation (missing in production too, i.e. a dead feature)
-# still fails the build. Verified present in production before being added.
-DASHBOARD_ONLY="profiles"
-
-missing=$(comm -23 <(echo "$queried") <(echo "$existing") | grep -vxF "$DASHBOARD_ONLY" || true)
-if [ -n "$missing" ]; then
-  echo ""
-  echo "✗ PHANTOM RELATIONS — queried by src/ but created by no migration:"
-  echo "$missing" | sed 's/^/    /'
-  echo ""
-  echo "Every read against these silently returns an empty list in the browser,"
-  echo "so the feature is dead without a single error — PostgREST answers a query"
-  echo "against a missing relation with [] rather than an error. Add the migration,"
-  echo "or remove the query."
-  exit 1
-fi
-
-echo "→ all $(echo "$queried" | wc -w | tr -d ' ') queried relations exist (excluding known dashboard-only: $DASHBOARD_ONLY)"
-echo ""
-echo "✓ rehearsal passed"
+echo
+grn "Rebuilt from zero — $APPLIED migrations applied clean, twice, catalog matches."

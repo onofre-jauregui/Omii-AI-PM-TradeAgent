@@ -7,6 +7,7 @@ import { checkEntitlement, resolveLimits, type SubscriptionRow } from "../_share
 import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
+import { applyMemoryTenantFilter } from "../_shared/memory-scope.ts";
 import { kalshiPriceToCents, marketFieldCents } from "../_shared/kalshi-prices.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
@@ -20,6 +21,8 @@ import {
   s005IsAutoQualified,
   buildQualifyEndpoint,
   buildQualifyHeaders,
+  shouldRunByCadence,
+  DEFAULT_CADENCE_MIN,
 } from "../_shared/trading-logic.ts";
 
 /**
@@ -288,11 +291,14 @@ async function countOpenPositions(
 ): Promise<PositionCount> {
   const cutoff = new Date(Date.now() + thresholdDays * 24 * 60 * 60 * 1000).toISOString();
 
-  // Prefer stored expiration_time; fall back to ticker parsing for older trades
+  // Prefer stored expiration_time; fall back to ticker parsing for older trades.
+  // Includes resting open/partial orders, not just filled — matches execute-trade's
+  // authoritative modeScopedOpenCount so this pre-flight signal doesn't undercount
+  // and let auto-trade keep attempting legs execute-trade will reject anyway.
   let query = supabase
     .from("trades")
     .select("ticker, expiration_time, strategy_id")
-    .eq("status", "filled")
+    .in("status", ["filled", "open", "partial"])
     .is("exit_reason", null)
     .is("settled_at", null);
 
@@ -610,9 +616,9 @@ serve(async (req) => {
     // Guard: only run strategies whose owner has completed onboarding — prevents seeded/fake
     // accounts from consuming compute and generating trades under a foreign user_id.
     const [{ data: systemStrategies }, { data: userStrategies }, { data: onboardedProfiles }] = await Promise.all([
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
         .eq("active", true).is("user_id", null).order("id"),
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
         .eq("active", true).not("user_id", "is", null).order("id"),
       supabase.from("profiles").select("id").eq("onboarding_completed", true),
     ]);
@@ -817,6 +823,29 @@ serve(async (req) => {
         });
         continue;
       }
+
+      // ── Per-strategy run cadence ──────────────────────────────────────────
+      // The cron ticks every 5 min. A user can set run_interval_minutes to throttle
+      // a strategy anywhere from every 5 min up to daily; NULL falls back to the
+      // hourly DEFAULT_CADENCE_MIN so un-throttled strategies keep pre-cadence
+      // behavior. last_run_at is stamped on every run that passes this gate so it
+      // has a reference point for the next cycle.
+      if (!shouldRunByCadence((strategy as any).run_interval_minutes, (strategy as any).last_run_at, Date.now())) {
+        const effIntervalMin = (strategy as any).run_interval_minutes || DEFAULT_CADENCE_MIN;
+        const lastRunMs = (strategy as any).last_run_at ? new Date((strategy as any).last_run_at).getTime() : Date.now();
+        strategyResults.push({
+          strategy_id: strategy.id,
+          strategy_name: strategy.name,
+          mode: strategy.mode,
+          status: "skipped",
+          details: `cadence: next run in ${Math.max(0, Math.ceil(effIntervalMin - (Date.now() - lastRunMs) / 60000))}m`,
+        });
+        continue;
+      }
+      await supabase.from("strategies")
+        .update({ last_run_at: new Date().toISOString() })
+        .eq("id", strategy.id)
+        .then(null, () => {});
 
       try {
         // ── Per-strategy entitlement check ────────────────────────────────────
@@ -1466,13 +1495,16 @@ async function runS001SurfaceArb(
   // check with no LLM gate, no memory check, nothing. Fetch memory/lessons once
   // per cron cycle (shared across every leg below), mirroring S-002's pattern
   // (auto-trade/index.ts ~1573-1589) exactly rather than inventing a new one.
-  const { data: s001Memories } = await supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
+  const { data: s001Memories } = await applyMemoryTenantFilter(
+    supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence, exposed_confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("quarantined_at", null)
+      .is("merged_into", null),
+    { userId: strategy.user_id ?? null },
+  )
     .order("confidence", { ascending: false })
     .limit(5);
   const s001MemBlock = (s001Memories ?? [])
@@ -1987,13 +2019,16 @@ async function runS002LongshotBias(
   }
 
   // Fetch agent_memory and lessons once — shared across all candidates this cycle.
-  const { data: s002Memories } = await supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
+  const { data: s002Memories } = await applyMemoryTenantFilter(
+    supabase
+      .from("agent_memory")
+      .select("id, title, content, confidence, exposed_confidence")
+      .eq("strategy_id", strategy.id)
+      .eq("is_active", true)
+      .is("quarantined_at", null)
+      .is("merged_into", null),
+    { userId: strategy.user_id ?? null },
+  )
     .order("confidence", { ascending: false })
     .limit(5);
   const s002MemBlock = (s002Memories ?? [])
@@ -2453,37 +2488,39 @@ async function runS005WeatherEdge(
   const lessonsByCity = new Map<string, any[]>();
   const cityWinLoss = new Map<string, { wins: number; losses: number; totalPnl: number }>();
 
-  // Bayesian agent_memory: high-confidence distilled lessons for this strategy.
-  // Market-scoped: prioritize memories whose tags overlap with the candidate cities
-  // so irrelevant geography doesn't crowd out the relevant signal (Gap 6 fix).
-  const tagFilter = cityTags.length > 0
-    ? cityTags.map((c: string) => `tags.cs.{${c}}`).join(",")
-    : null;
-
-  const memBaseQuery = supabase
-    .from("agent_memory")
-    .select("id, title, content, confidence, exposed_confidence")
-    .eq("strategy_id", strategy.id)
-    .eq("is_active", true)
-    .is("quarantined_at", null)
-    .is("merged_into", null)
-    .order("confidence", { ascending: false })
-    .limit(5);
-
-  let { data: strategyMemories } = tagFilter
-    ? await memBaseQuery.or(tagFilter)
-    : await memBaseQuery;
-
-  // Fallback: if tag filter returned nothing, use top 5 by confidence globally
-  if (!strategyMemories || strategyMemories.length === 0) {
-    const fallback = await supabase
-      .from("agent_memory")
-      .select("id, title, content, confidence, exposed_confidence")
-      .eq("strategy_id", strategy.id)
-      .eq("is_active", true)
-      .is("merged_into", null)
+  // Bayesian agent_memory: high-confidence distilled lessons for this strategy,
+  // scoped to the strategy's owner plus platform rows. Market-scoped on top of
+  // that: prioritize memories whose tags overlap with the candidate cities so
+  // irrelevant geography doesn't crowd out the relevant signal (Gap 6 fix).
+  //
+  // The city filter is `tags && {city…}` rather than an OR of `tags.cs.{city}`
+  // terms — identical semantics for single-element containment, and one filter
+  // instead of two. (Repeated `or=` params do AND in PostgREST — verified against
+  // this project — so composing them would also be correct, just less direct.)
+  const scopedMemoryQuery = () =>
+    applyMemoryTenantFilter(
+      supabase
+        .from("agent_memory")
+        .select("id, title, content, confidence, exposed_confidence")
+        .eq("strategy_id", strategy.id)
+        .eq("is_active", true)
+        .is("quarantined_at", null)
+        .is("merged_into", null),
+      { userId: strategy.user_id ?? null },
+    )
       .order("confidence", { ascending: false })
       .limit(5);
+
+  let { data: strategyMemories } = cityTags.length > 0
+    ? await scopedMemoryQuery().overlaps("tags", cityTags)
+    : await scopedMemoryQuery();
+
+  // Fallback: if the city filter returned nothing, take this strategy's top 5 by
+  // confidence. Still owner-scoped, and still excludes quarantined memories —
+  // the fallback used to drop `quarantined_at IS NULL`, so a lesson the Bayesian
+  // layer had explicitly retired could reach the qualify prompt through here.
+  if (!strategyMemories || strategyMemories.length === 0) {
+    const fallback = await scopedMemoryQuery();
     strategyMemories = fallback.data;
   }
 

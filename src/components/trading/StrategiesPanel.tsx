@@ -322,7 +322,24 @@ export function StrategiesPanel({
                 </div>
                 <Switch
                   checked={strat.active}
-                  onCheckedChange={(checked) => updateStrategy(strat.id, { active: checked })}
+                  onCheckedChange={(checked) => {
+                    // Turning a suspended strategy back on is a deliberate override,
+                    // not a routine toggle — it must also clear the suspension and
+                    // reset the risk baseline (evaluate health from now on, not from
+                    // trades that predate whatever was fixed). Otherwise the next
+                    // hourly auto-reflect run re-evaluates the exact same trailing
+                    // window and immediately re-suspends it.
+                    if (checked && strat.suspended_until) {
+                      updateStrategy(strat.id, {
+                        active: true,
+                        suspended_until: null,
+                        suspension_reason: null,
+                        risk_baseline_reset_at: new Date().toISOString(),
+                      });
+                    } else {
+                      updateStrategy(strat.id, { active: checked });
+                    }
+                  }}
                   onClick={(e) => e.stopPropagation()}
                 />
               </div>
