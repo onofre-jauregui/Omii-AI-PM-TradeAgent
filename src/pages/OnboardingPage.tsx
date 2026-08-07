@@ -6,6 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle, Loader2, AlertCircle, ArrowRight, Zap } from "lucide-react";
+import { BILLING_LIVE, PAID_TIERS } from "@/lib/pricing";
+
+/** Cheapest paid plan — the tier a live-trading prompt names when billing is open. */
+const ENTRY_PAID_TIER = PAID_TIERS[0];
 
 const SUPABASE_URL    = import.meta.env.VITE_SUPABASE_URL ?? "";
 const KALSHI_PING_URL = `${SUPABASE_URL}/functions/v1/kalshi-ping`;
@@ -599,10 +603,14 @@ export default function OnboardingPage() {
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-sm">Live Trading</span>
-                  <span className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded-full font-medium">Requires Starter plan</span>
+                  <span className="text-[10px] bg-amber-500/10 text-amber-600 px-2 py-0.5 rounded-full font-medium">
+                    {BILLING_LIVE ? `Requires ${ENTRY_PAID_TIER.name} plan` : "Waitlist only"}
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Real orders placed on your Kalshi account. Requires an active API key and a paid subscription.
+                  {BILLING_LIVE
+                    ? "Real orders placed on your Kalshi account. Requires an active API key and a paid subscription."
+                    : "Real orders placed on your Kalshi account. Live accounts are in closed access — we'll add you to the waitlist and keep the agent on paper until a spot opens."}
                 </p>
               </button>
             </div>

@@ -10,6 +10,7 @@ import {
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { BILLING_LIVE, tierLabel } from "@/lib/pricing";
 
 const FALLBACK_MODELS = [
   { id: "openai/gpt-4.1",              name: "GPT-4.1",           provider: "openai",    providerLabel: "OpenAI",    tier: "recommended", color: "bg-emerald-500/10 text-emerald-500" },
@@ -269,8 +270,6 @@ export function SettingsPanel({ userId }: { userId?: string }) {
     }
   };
 
-  const tierLabel = (t: string) =>
-    ({ free: "Free Trial", starter: "Starter", pro: "Pro", prop: "Prop" }[t] ?? t);
   const tierColor = (t: string) =>
     t === "prop" ? "bg-amber-500/10 text-amber-500" :
     t === "pro"  ? "bg-primary/10 text-primary" :
@@ -470,16 +469,20 @@ export function SettingsPanel({ userId }: { userId?: string }) {
         <div className="px-6 py-5 space-y-3">
           <div className="flex items-center justify-between py-3 border border-border rounded-xl px-4">
             <div>
-              <p className="text-sm font-medium capitalize">{tierLabel(subscriptionTier)} plan</p>
+              <p className="text-sm font-medium">{tierLabel(subscriptionTier)} plan</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {subscriptionTier === "free" ? "Paper trading only · upgrade to go live" : "Live trading enabled"}
+                {subscriptionTier !== "free"
+                  ? "Live trading enabled"
+                  : BILLING_LIVE
+                    ? "Paper trading only · upgrade to go live"
+                    : "Paper trading only · live access is waitlist-only"}
               </p>
             </div>
             <button
               onClick={() => navigate("/billing")}
               className="flex items-center gap-1.5 text-xs font-medium text-primary hover:underline shrink-0"
             >
-              {subscriptionTier === "free" ? "Upgrade" : "Manage"}
+              {subscriptionTier !== "free" ? "Manage" : BILLING_LIVE ? "Upgrade" : "Join waitlist"}
               <ArrowUpRight className="h-3.5 w-3.5" />
             </button>
           </div>

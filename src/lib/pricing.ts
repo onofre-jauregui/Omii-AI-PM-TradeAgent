@@ -141,3 +141,31 @@ export function tierPriceLabel(tier: PricingTier): string {
 
 export const FREE_TIER = PRICING_TIERS[0];
 export const PAID_TIERS = PRICING_TIERS.filter((t) => t.monthlyPriceUsd > 0);
+
+/**
+ * Whether a user can actually buy a plan today. FALSE — paid access is closed
+ * waitlist, so every paid CTA collects a waitlist signup instead of opening
+ * Stripe checkout.
+ *
+ * This is not a placeholder. The live Stripe account has zero products and zero
+ * prices (verified 2026-08-06 against the live key), so a checkout session
+ * cannot be created; before this flag existed, clicking "Upgrade" hit Stripe,
+ * failed, and showed the user a raw API error on a page that had just promised
+ * them a plan.
+ *
+ * Flipping this to `true` is not sufficient on its own — `create-checkout` has
+ * its own server-side gate (`BILLING_ENABLED`), because a constant in a browser
+ * bundle stops nobody. Both must open, and the Stripe prices must exist first.
+ */
+export const BILLING_LIVE = false;
+
+/**
+ * Display name for a stored `subscriptions.tier` value. Panels used to each keep
+ * their own inline `{ free: "Free Trial", starter: "Starter", ... }` map, which
+ * is three copies of the same fact and three places for a renamed tier to go
+ * stale. Unknown values pass through rather than rendering blank — a tier that
+ * reaches the UI without a definition should look wrong, not invisible.
+ */
+export function tierLabel(id: string): string {
+  return PRICING_TIERS.find((t) => t.id === id)?.name ?? id;
+}

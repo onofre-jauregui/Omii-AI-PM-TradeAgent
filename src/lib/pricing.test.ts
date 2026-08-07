@@ -6,8 +6,17 @@
  * $100 caps, and the landing page omitted the $999 Prop tier entirely. Any future
  * edit to a price or a limit in one place and not the other fails here.
  */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
-import { PRICING_TIERS, tierFeatures, tierPriceLabel, FREE_TIER, LIVE_STRATEGIES } from "./pricing";
+import {
+  PRICING_TIERS,
+  tierFeatures,
+  tierPriceLabel,
+  tierLabel,
+  FREE_TIER,
+  LIVE_STRATEGIES,
+} from "./pricing";
 import { TIER_DEFINITIONS, type Tier } from "../../supabase/functions/_shared/billing";
 
 /** Strategy IDs a piece of pricing copy claims the plan includes. */
@@ -90,5 +99,60 @@ describe("UI pricing table vs server tier definitions", () => {
     expect(tierFeatures(prop)).toEqual(
       expect.arrayContaining(["1,000 trades / day", "$5,000 max position"])
     );
+  });
+
+  it("labels every server tier with its display name", () => {
+    for (const id of Object.keys(TIER_DEFINITIONS) as Tier[]) {
+      expect(tierLabel(id)).toBe(TIER_DEFINITIONS[id].displayName);
+    }
+  });
+
+  it("passes an unknown tier through rather than rendering blank", () => {
+    expect(tierLabel("enterprise")).toBe("enterprise");
+  });
+});
+
+/**
+ * Paid access is closed. The browser constant alone is not a gate — anyone can
+ * POST to the edge function directly — so the two must move together, and the
+ * server side has to stay shut on its own.
+ */
+describe("closed-billing gate", () => {
+  const repoFile = (rel: string) => readFileSync(resolve(process.cwd(), rel), "utf8");
+  const checkoutSource = repoFile("supabase/functions/create-checkout/index.ts");
+
+  it("keeps create-checkout closed unless BILLING_ENABLED is explicitly true", () => {
+    expect(checkoutSource).toContain('Deno.env.get("BILLING_ENABLED") !== "true"');
+  });
+
+  it("refuses before spending anything — the gate precedes auth and Stripe calls", () => {
+    const gateAt = checkoutSource.indexOf('Deno.env.get("BILLING_ENABLED")');
+    const authAt = checkoutSource.indexOf("anonClient.auth.getUser()");
+    const stripeAt = checkoutSource.indexOf("api.stripe.com");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeLessThan(authAt);
+    expect(gateAt).toBeLessThan(stripeAt);
+  });
+
+  it("routes the billing page CTA to the waitlist, with checkout as the gated branch", () => {
+    const billingPage = repoFile("src/pages/BillingPage.tsx");
+    // Checkout is the TRUE branch of `BILLING_LIVE ? … : …` and the waitlist join
+    // is the FALSE branch, so the closed state is what a user actually gets.
+    // Inverting the ternary — or dropping the gate — reorders these three.
+    const gate = billingPage.indexOf("BILLING_LIVE ? (");
+    const upgrade = billingPage.indexOf("handleUpgrade(plan.id)");
+    const waitlist = billingPage.indexOf("handleJoinWaitlist(plan.id)");
+    expect(gate, "BILLING_LIVE ternary around the plan CTA").toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(upgrade);
+    expect(upgrade).toBeLessThan(waitlist);
+  });
+
+  it("keeps the Stripe payment footer behind the same flag", () => {
+    const billingPage = repoFile("src/pages/BillingPage.tsx");
+    const footer = billingPage.indexOf("Payments are processed by Stripe");
+    expect(footer, "Stripe footer copy").toBeGreaterThan(-1);
+    // Telling a user their payment is processed by Stripe on a page that cannot
+    // take a payment is the exact mismatch this whole flag exists to prevent.
+    expect(footer - billingPage.lastIndexOf("BILLING_LIVE", footer)).toBeLessThan(120);
   });
 });
