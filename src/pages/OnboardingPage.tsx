@@ -131,8 +131,20 @@ export default function OnboardingPage() {
   const [pingError, setPingError] = useState<string | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
 
-  async function saveKalshiKey(): Promise<boolean> {
-    if (!keyId.trim() || !privateKey.trim()) return false;
+  // Editing either field invalidates a prior successful save. Without this the
+  // `saveStatus !== "saved"` guard in testConnection() would skip re-saving a
+  // corrected key and silently re-test the old one — so a user fixing a typo
+  // would keep seeing the original failure with no way to get past it.
+  useEffect(() => {
+    setSaveStatus("idle");
+    setPingStatus("idle");
+    setPingError(null);
+  }, [keyId, privateKey]);
+
+  async function saveKalshiKey(): Promise<{ ok: boolean; error?: string }> {
+    if (!keyId.trim() || !privateKey.trim()) {
+      return { ok: false, error: "Enter both your key ID and private key." };
+    }
     setKalshiSaving(true);
     setSaveStatus("idle");
     try {
@@ -145,13 +157,15 @@ export default function OnboardingPage() {
         },
         body: JSON.stringify({ key_id: keyId.trim(), private_key: privateKey.trim() }),
       });
-      const json = await resp.json();
-      if (!resp.ok || !json.ok) throw new Error(json.error ?? "Save failed");
+      const json = await resp.json().catch(() => ({ ok: false, error: `HTTP ${resp.status}` }));
+      if (!resp.ok || !json.ok) throw new Error(json.error ?? `Save failed (HTTP ${resp.status})`);
       setSaveStatus("saved");
-      return true;
-    } catch {
+      return { ok: true };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Could not save your key.";
+      console.error("Kalshi key save failed:", message);
       setSaveStatus("error");
-      return false;
+      return { ok: false, error: message };
     } finally {
       setKalshiSaving(false);
     }
@@ -159,8 +173,15 @@ export default function OnboardingPage() {
 
   async function testConnection() {
     if (saveStatus !== "saved") {
-      const ok = await saveKalshiKey();
-      if (!ok) return;
+      // Route a save failure through the same banner the ping failure uses —
+      // returning early here without setting pingStatus left the user staring
+      // at a button that spun and reset with no message at all.
+      const saved = await saveKalshiKey();
+      if (!saved.ok) {
+        setPingStatus("fail");
+        setPingError(saved.error ?? "Could not save your key.");
+        return;
+      }
     }
     setPingStatus("testing");
     setPingError(null);

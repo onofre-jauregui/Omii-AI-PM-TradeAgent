@@ -81,9 +81,14 @@ export default function BillingPage() {
     setUpgrading(tier);
     setError(null);
     try {
+      const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "";
       const resp = await fetch(WAITLIST_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+        },
         body: JSON.stringify({ email, plan_interest: tier }),
       });
       const json = await resp.json();
