@@ -20,6 +20,8 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot, Lock, LayoutDashboard, Settings, LogOut } from "lucide-react";
 import { PAID_TIERS, BILLING_LIVE, tierPriceLabel } from "@/lib/pricing";
+import { readUiState, writeUiState, clearUiState, DEFAULT_UI_STATE } from "@/lib/uiState";
+import type { AgentSubTab } from "@/lib/uiState";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -43,9 +45,13 @@ const TAB_LABELS: Record<Tab, string> = {
 };
 
 const Index = () => {
-  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  // Restored synchronously from localStorage so a reload or PWA relaunch paints
+  // the tab the user left on — no dashboard flash before the real tab appears.
+  // The restored state is discarded below if it belongs to a different account.
+  const restoredUiState = readUiState();
+  const [activeTab, setActiveTab] = useState<Tab>(restoredUiState.activeTab);
   const [mode, setMode] = useState<Mode>("paper");
-  const [agentSubTab, setAgentSubTab] = useState<"chat" | "strategies" | "risk" | "history" | "memory">("chat");
+  const [agentSubTab, setAgentSubTab] = useState<AgentSubTab>(restoredUiState.agentSubTab);
   const [userEmail, setUserEmail] = useState<string | undefined>();
   const [userId, setUserId] = useState<string | undefined>();
   const [subscriptionTier, setSubscriptionTier] = useState<"free" | "starter" | "pro" | "prop">("free");
@@ -58,9 +64,21 @@ const Index = () => {
   useEffect(() => {
     // onAuthStateChange fires immediately with the current session AND again after
     // OAuth redirects complete — so panels never render in an unauthenticated limbo.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       setUserEmail(session?.user?.email ?? undefined);
       setUserId(session?.user?.id ?? undefined);
+
+      // Two "initiation" boundaries reset the remembered tab: signing out, and a
+      // session belonging to a different account than the stored state. Both mean
+      // the next view should be the default paper Dashboard, not someone's leftover tab.
+      const storedOwner = readUiState().userId;
+      const isSignedOut = event === "SIGNED_OUT" || !session?.user?.id;
+      if (isSignedOut || (storedOwner && storedOwner !== session!.user.id)) {
+        clearUiState();
+        setActiveTab(DEFAULT_UI_STATE.activeTab);
+        setAgentSubTab(DEFAULT_UI_STATE.agentSubTab);
+      }
+
       if (session?.user?.id) {
         const [profileRes, subRes] = await Promise.all([
           supabase.from("profiles").select("trading_mode, is_admin").eq("id", session.user.id).single(),
@@ -77,6 +95,13 @@ const Index = () => {
     });
     return () => subscription.unsubscribe();
   }, []);
+
+  // Persist the current tab for this account on every change. Only runs once the
+  // session is known, so the stored row is always stamped with its real owner.
+  useEffect(() => {
+    if (!userId) return;
+    writeUiState({ userId, activeTab, agentSubTab });
+  }, [userId, activeTab, agentSubTab]);
 
   async function handleModeChange(next: Mode) {
     if (next === "live" && subscriptionTier === "free" && !isAdmin) {
