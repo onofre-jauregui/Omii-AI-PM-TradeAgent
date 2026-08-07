@@ -4,7 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { langfuseIngest, traceEvent, generationEvent, spanEvent } from "../_shared/langfuse.ts";
 import { captureException, captureMessage } from "../_shared/sentry.ts";
 import { checkEntitlement, resolveLimits, type SubscriptionRow } from "../_shared/billing.ts";
-import { evaluateRisk, DEFAULT_RISK_SETTINGS } from "../_shared/risk.ts";
+import { evaluateRisk, DEFAULT_RISK_SETTINGS, applyGearToAmount, type DrawdownGear } from "../_shared/risk.ts";
 import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared/encryption.ts";
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
 import { applyMemoryTenantFilter } from "../_shared/memory-scope.ts";
@@ -629,9 +629,9 @@ serve(async (req) => {
     // Guard: only run strategies whose owner has completed onboarding — prevents seeded/fake
     // accounts from consuming compute and generating trades under a foreign user_id.
     const [{ data: systemStrategies }, { data: userStrategies }, { data: onboardedProfiles }] = await Promise.all([
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at, current_gear")
         .eq("active", true).is("user_id", null).order("id"),
-      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at")
+      supabase.from("strategies").select("id, name, description, instructions, mode, starting_balance, user_id, template_id, run_interval_minutes, last_run_at, current_gear")
         .eq("active", true).not("user_id", "is", null).order("id"),
       supabase.from("profiles").select("id").eq("onboarding_completed", true),
     ]);
@@ -1702,7 +1702,12 @@ async function runS001SurfaceArb(
       const trueP = Math.min(0.99, marketP + perLegEdge / 100);
       // Clamped to MAX_LEG_USD (account's risk_settings.max_position_size) — kellySize's
       // own $10/$100 band is blind to the account's configured per-order ceiling.
-      const legAmount = Math.min(kellySize(trueP, marketP, Number(strategy.starting_balance) || 100), MAX_LEG_USD);
+      // Gear applies AFTER the account ceiling: the ceiling is what the account
+      // permits, the gear is what the strategy's own drawdown has earned.
+      const legAmount = applyGearToAmount(
+        Math.min(kellySize(trueP, marketP, Number(strategy.starting_balance) || 100), MAX_LEG_USD),
+        strategyGear(strategy),
+      );
 
       // LLM review gate — reuses S-002's exact qualifySetup/buildQualifyPrompt/
       // parseQualifyResponse pattern (auto-trade/index.ts ~1621-1642), fail-closed:
@@ -2114,7 +2119,7 @@ async function runS002LongshotBias(
       side,
       action: "buy",
       price: Math.round(price),
-      amount: AMOUNT_PER_TRADE,
+      amount: applyGearToAmount(AMOUNT_PER_TRADE, strategyGear(strategy)),
       strategy: strategy.name,
       strategyId: strategy.id,
       orderType: "limit",
@@ -2768,7 +2773,10 @@ async function runS005WeatherEdge(
       const winProb = sig.direction === "buy_yes" ? trueProb : (1 - trueProb);
       const loseProb = 1 - winProb;
       const kellyFraction = Math.max(0, Math.min(0.25, (winProb * payoutOdds - loseProb) / payoutOdds));
-      const amount = Math.max(5, Math.round(maxPositionUsd * kellyFraction));
+      const amount = applyGearToAmount(
+        Math.max(5, Math.round(maxPositionUsd * kellyFraction)),
+        strategyGear(strategy),
+      );
 
       const result = await callExecuteTrade(executeUrl, supabaseKey, supabase, {
           ticker: sig.ticker,
@@ -2849,6 +2857,25 @@ async function runS005WeatherEdge(
  * Kelly criterion position sizing with quarter-Kelly fraction cap.
  * Returns dollar amount, floored at $10, capped at $100.
  */
+/**
+ * The strategy's current de-levering gear, as written hourly by auto-reflect.
+ *
+ * A NULL/absent column means the strategy has never been evaluated — treat that
+ * as full size rather than as "stopped", so a brand-new strategy (or a database
+ * that has just taken the migration) trades normally instead of silently sizing
+ * to the floor.
+ *
+ * ENTRY sizing only. Exits — the S-001 stop-loss sweep, the S-002 time exit, the
+ * S-005 profit lock — must always close the position's real size. Degrading an
+ * exit would leave risk on the book precisely when the ladder has decided the
+ * strategy is in trouble, which is the opposite of the intent.
+ */
+function strategyGear(strategy: { current_gear?: number | null }): DrawdownGear {
+  const raw = Number(strategy.current_gear);
+  const multiplier = Number.isFinite(raw) && raw > 0 ? Math.min(1, raw) : 1;
+  return { multiplier, ratio: 0, stopped: false };
+}
+
 function kellySize(trueP: number, marketP: number, bankroll: number, fraction = 0.25): number {
   if (trueP <= 0 || trueP >= 1 || marketP <= 0 || marketP >= 1) return 20;
   const b = (1 - marketP) / marketP;

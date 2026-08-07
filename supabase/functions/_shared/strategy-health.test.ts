@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   applyRiskBaselineFilter,
   computeMaxDrawdownPct,
+  computeCurrentDrawdownPct,
   evaluateAutoResume,
   MIN_EXPECTANCY_SAMPLE,
 } from "./strategy-health";
@@ -163,5 +164,43 @@ describe("evaluateAutoResume — applied to an already-active strategy", () => {
     const window = [...repeat(-4, 18), ...repeat(3, 12)];
 
     expect(evaluateAutoResume(window)).toEqual(evaluateAutoResume(window));
+  });
+});
+
+describe("computeCurrentDrawdownPct", () => {
+  it("reports no drawdown when equity is at its peak", () => {
+    expect(computeCurrentDrawdownPct([10, 10, 10], 100)).toBe(0);
+    expect(computeCurrentDrawdownPct([], 100)).toBe(0);
+  });
+
+  it("measures how far below the peak equity currently sits", () => {
+    // 100 → 120 (peak) → 90. Down 30 from 120 = 25%.
+    expect(computeCurrentDrawdownPct([20, -30], 100)).toBeCloseTo(0.25, 6);
+  });
+
+  it("recovers as equity recovers — this is the gear, not a ratchet", () => {
+    // Same peak of 120 in both, but the second has climbed back.
+    const deep = computeCurrentDrawdownPct([20, -30], 100);
+    const recovered = computeCurrentDrawdownPct([20, -30, 20], 100);
+    expect(recovered).toBeLessThan(deep);
+    expect(recovered).toBeCloseTo(0.0833, 3);
+  });
+
+  it("differs from max drawdown once a strategy has climbed back", () => {
+    // The distinction the ladder depends on: max drawdown remembers the worst
+    // point forever, current drawdown forgets it once equity recovers.
+    const pnls = [20, -30, 30];
+    expect(computeMaxDrawdownPct(pnls, 100)).toBeGreaterThan(0);
+    expect(computeCurrentDrawdownPct(pnls, 100)).toBe(0);
+  });
+
+  it("stays bounded at 1 when equity is wiped out", () => {
+    const dd = computeCurrentDrawdownPct([-100], 100);
+    expect(dd).toBeLessThanOrEqual(1);
+    expect(dd).toBeCloseTo(1, 6);
+  });
+
+  it("treats a non-positive starting balance the same way max drawdown does", () => {
+    expect(computeCurrentDrawdownPct([-0.5], 0)).toBeCloseTo(0.5, 6);
   });
 });

@@ -30,6 +30,36 @@ export function computeMaxDrawdownPct(
 }
 
 /**
+ * Drawdown as it stands RIGHT NOW: how far below its own peak the strategy's
+ * equity currently sits, on the same base convention as computeMaxDrawdownPct.
+ *
+ * Distinct from computeMaxDrawdownPct on purpose, and the distinction is what
+ * makes a degradation ladder possible. Max drawdown is a high-water mark of pain
+ * that never falls while it remains inside the window, so a strategy sized off it
+ * could drop a gear and never climb back — a ratchet, not a gear. This measure
+ * improves the moment equity does, which is what lets a strategy trade its way
+ * back to full size.
+ *
+ * Returns 0 when equity is at or above its peak (including the empty case).
+ */
+export function computeCurrentDrawdownPct(
+  pnls: number[],
+  startingBalance: number,
+): number {
+  const base = startingBalance > 0 ? startingBalance : 1;
+  let peakEquity = base;
+  let equity = base;
+
+  for (const pnl of pnls) {
+    equity += pnl;
+    peakEquity = Math.max(peakEquity, equity);
+  }
+
+  if (peakEquity <= 0) return 1;
+  return Math.max(0, (peakEquity - equity) / peakEquity);
+}
+
+/**
  * Applies a strategy's risk-baseline reset to the trailing-trade-window query
  * used by Sharpe/drawdown/hit-rate/consecutive-loss evaluation.
  *
