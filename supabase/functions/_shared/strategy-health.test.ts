@@ -125,3 +125,43 @@ describe("evaluateAutoResume", () => {
     expect(verdict.resume).toBe(false);
   });
 });
+
+describe("evaluateAutoResume — applied to an already-active strategy", () => {
+  const repeat = (value: number, n: number) => Array.from({ length: n }, () => value);
+
+  it("deactivates a running strategy that is losing money on average", () => {
+    // The gap the resume gate alone left open: S-005 auto-resumed at 13:07 UTC
+    // and kept trading, because the resume verdict is only consulted on the way
+    // back in. The same window has to stop a strategy already in flight.
+    const verdict = evaluateAutoResume([...repeat(-11.7, 23), ...repeat(10.82, 7)]);
+
+    expect(verdict.resume).toBe(false);
+    expect(verdict.expectancy).toBeCloseTo(-6.45, 2);
+  });
+
+  it("leaves a running strategy alone while its window is profitable", () => {
+    // A losing streak inside a profitable window must not deactivate — that is
+    // what the timed consecutive-loss suspension is for.
+    const verdict = evaluateAutoResume([...repeat(6, 24), ...repeat(-3, 6)]);
+
+    expect(verdict.resume).toBe(true);
+    expect(verdict.reason).toBe("positive_expectancy");
+  });
+
+  it("never deactivates a strategy that has not yet reached the sample floor", () => {
+    // A new strategy must be allowed to build a record before this rule can
+    // touch it, however ugly its first few trades look.
+    const verdict = evaluateAutoResume(repeat(-25, MIN_EXPECTANCY_SAMPLE - 1));
+
+    expect(verdict.resume).toBe(true);
+    expect(verdict.reason).toBe("insufficient_sample");
+  });
+
+  it("agrees with itself across both call sites for the same window", () => {
+    // The resume path (§2a) and the running path (§2b) read the same pnl window.
+    // If they ever disagreed, a strategy would deactivate and immediately resume.
+    const window = [...repeat(-4, 18), ...repeat(3, 12)];
+
+    expect(evaluateAutoResume(window)).toEqual(evaluateAutoResume(window));
+  });
+});

@@ -195,6 +195,7 @@ serve(async (req) => {
     // becomes a deliberate human act. See evaluateAutoResume in strategy-health.ts.
     let strategiesResumed = 0;
     let strategiesHeld = 0;
+    let strategiesDeactivated = 0;
     const now = new Date();
     for (const strat of strategies || []) {
       if (strat.active) continue;
@@ -386,8 +387,78 @@ serve(async (req) => {
       const expectedHr = Number(strat.expected_hit_rate) || 0.50;
       const maxAcceptableDd = Number(strat.max_acceptable_drawdown) || 0.25;
 
-      // Suspension logic
-      if (sharpe < -1.0 && n >= 20) {
+      // Suspension logic.
+      //
+      // Negative expectancy is evaluated FIRST and deliberately outranks every
+      // timed suspension below. Those set suspended_until, and §2a lifts them
+      // when the clock runs out — which for a strategy that loses money on
+      // average is a revolving door, not a circuit breaker. S-005 rode that loop
+      // on a ~13h period at −$6.45/trade across every account that had it.
+      //
+      // §2a's evaluateAutoResume already refuses to re-enable such a strategy,
+      // but only at the moment it tries to come back. A strategy that is already
+      // active keeps trading until it happens to trip one of the timed rules, so
+      // the same verdict has to be applied on the way out as on the way back in.
+      // Reusing evaluateAutoResume rather than re-deriving the mean here is what
+      // keeps the two paths from ever disagreeing about the same window — pnls
+      // is the same rolling 30-trade set, already scoped by mode and filtered by
+      // risk_baseline_reset_at at the query above.
+      //
+      // Like the §2a hold, this clears suspended_until rather than extending it:
+      // no timer can lift it, so re-enabling is a deliberate human act, and the
+      // operator doing it sets risk_baseline_reset_at so evaluation restarts from
+      // the fix instead of re-reading the trades that caused the hold.
+      const expectancyVerdict = evaluateAutoResume(pnls);
+
+      if (!expectancyVerdict.resume) {
+        await supabase.from("strategies").update({
+          active: false,
+          suspended_until: null,
+          suspension_reason: "negative_expectancy_hold",
+          updated_at: now.toISOString(),
+        }).eq("id", strat.id);
+
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_deactivated_negative_expectancy",
+          severity: "warning",
+          message:
+            `Strategy "${strat.name}" deactivated — expectancy $${
+              expectancyVerdict.expectancy.toFixed(2)
+            }/trade over ${expectancyVerdict.sampleSize} settled trades. ` +
+            `It will not restart on a timer; re-enable manually once the cause is fixed.`,
+          metadata: {
+            strategy_id: strat.id,
+            expectancy: expectancyVerdict.expectancy,
+            sample_size: expectancyVerdict.sampleSize,
+            sharpe,
+            max_drawdown: maxDdPct,
+            hit_rate: hitRate,
+            totalPnl,
+          },
+          user_id: strat.user_id ?? null,
+        });
+
+        await alertOnce(
+          supabase,
+          "strategy_deactivated_negative_expectancy",
+          strat.id,
+          24,
+          `⏹️ <b>[TradeAgent] ${strat.name} deactivated</b>\n` +
+            `Expectancy $${expectancyVerdict.expectancy.toFixed(2)}/trade over ` +
+            `${expectancyVerdict.sampleSize} settled trades (${strat.mode}). It was losing money ` +
+            `on average, so it has been stopped rather than suspended on a timer — ` +
+            `re-enable it from the Strategies panel once the cause is fixed.`,
+        ).catch(() => {});
+
+        strategiesDeactivated++;
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          expectancy: expectancyVerdict.expectancy,
+          n: expectancyVerdict.sampleSize,
+          action: "deactivated_negative_expectancy",
+        });
+      } else if (sharpe < -1.0 && n >= 20) {
         const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000)
           .toISOString();
         await supabase.from("strategies").update({
@@ -531,6 +602,7 @@ serve(async (req) => {
       active_evaluated: activeStrategies.length,
       resumed: strategiesResumed,
       held_negative_expectancy: strategiesHeld,
+      deactivated_negative_expectancy: strategiesDeactivated,
       details: strategyResults,
     };
 
@@ -1347,7 +1419,7 @@ Return ONLY valid JSON, no markdown, no extra text:
       event_type: "auto_reflect_run",
       severity: "info",
       message:
-        `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${strategiesHeld} held (negative expectancy), ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${
+        `Auto-reflect v2: ${memoriesUpdated} memories updated (Bayesian), ${memoriesQuarantined} quarantined, ${strategiesResumed} strategies resumed, ${strategiesHeld} held + ${strategiesDeactivated} deactivated (negative expectancy), ${lessonsWritten} lessons written, ${unreflectedCount} unreflected, ${signalsUpdated} signal outcomes linked, compaction: ${
           compactionResult?.summarized || 0
         } summarized`,
       metadata: results,
