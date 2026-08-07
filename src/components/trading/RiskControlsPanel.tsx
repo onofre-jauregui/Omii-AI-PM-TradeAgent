@@ -115,9 +115,16 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const userId = user?.id ?? "";
-      const { data } = await supabase.from("risk_settings").select("*")
+      const { data, error } = await supabase.from("risk_settings").select("*")
         .eq("user_id", userId).eq("mode", mode).maybeSingle();
-      if (data) {
+      if (error) {
+        // maybeSingle() errors on 2+ rows for this (user_id, mode) — a real
+        // constraint violation, not "no settings yet". Surface it instead of
+        // silently falling through to defaults, which would quietly present a
+        // live-money risk gate as unconfigured when it's actually ambiguous.
+        console.error("RiskControlsPanel load failed:", error.message);
+        toast.error(`Couldn't load risk settings: ${error.message}`);
+      } else if (data) {
         setRiskSettings({
           maxDailyLoss:     [data.max_daily_loss],
           maxDrawdown:      [data.max_drawdown_pct],
@@ -174,17 +181,15 @@ export function RiskControlsPanel({ mode = "paper" }: { mode?: "paper" | "live" 
         updated_at: new Date().toISOString(),
       };
 
-      const { data: existing, error: selectErr } = await supabase
-        .from("risk_settings").select("id").eq("user_id", userId).eq("mode", mode).maybeSingle();
-      if (selectErr) throw new Error(`Failed to check existing settings: ${selectErr.message}`);
-
-      if (existing) {
-        const { error } = await supabase.from("risk_settings").update(riskPayload).eq("id", existing.id);
-        if (error) throw new Error(`Failed to update risk settings: ${error.message}`);
-      } else {
-        const { error } = await supabase.from("risk_settings").insert(riskPayload);
-        if (error) throw new Error(`Failed to save risk settings: ${error.message}`);
-      }
+      // upsert, not select-then-branch: the old pattern raced two rapid saves
+      // for the same (user_id, mode) with no existing row — both would pass the
+      // "does a row exist" check as null and both insert, silently doubling the
+      // row. onConflict makes concurrent saves resolve to one row deterministically,
+      // matching the same (user_id, mode) arbiter OnboardingPage.tsx already uses.
+      const { error: saveErr } = await supabase
+        .from("risk_settings")
+        .upsert(riskPayload, { onConflict: "user_id,mode" });
+      if (saveErr) throw new Error(`Failed to save risk settings: ${saveErr.message}`);
 
       // Save per-strategy starting_balance = totalBudget × allocation%
       const total = Math.max(0, parseInt(totalBudget, 10) || 0);

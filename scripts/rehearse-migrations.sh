@@ -210,5 +210,40 @@ if ! python3 "$REPO_ROOT/scripts/compare-schema-fingerprint.py" "$EXPECTED" "$FI
   exit 1
 fi
 
+# ── Planted-canary negative test ──────────────────────────────────────────
+# The fingerprint above proves the schema LOOKS right (the index exists by
+# name) — it does not prove the constraint actually rejects bad data. That gap
+# is exactly what let risk_settings_user_mode_idx be recorded as applied to
+# production twice while never enforcing anything there. Prove it here by
+# planting a real duplicate and asserting the second insert is rejected; if
+# it's silently allowed, fail loud instead of trusting that the index merely
+# exists.
+if ! "${PSQL[@]}" -f - <<'SQL'
+INSERT INTO public.risk_settings
+  (user_id, mode, max_position_size, max_open_positions, max_daily_loss, max_drawdown_pct, allocated_capital, max_daily_trades)
+VALUES ('00000000-0000-0000-0000-000000000000', 'paper', 20, 3, 100, 10, 500, 30);
+
+DO $$
+BEGIN
+  INSERT INTO public.risk_settings
+    (user_id, mode, max_position_size, max_open_positions, max_daily_loss, max_drawdown_pct, allocated_capital, max_daily_trades)
+  VALUES ('00000000-0000-0000-0000-000000000000', 'paper', 20, 3, 100, 10, 500, 30);
+  RAISE EXCEPTION 'CANARY FAILED: duplicate (user_id, mode) insert succeeded — risk_settings_user_mode_idx is not enforcing uniqueness';
+EXCEPTION
+  WHEN unique_violation THEN
+    RAISE NOTICE 'canary: duplicate (user_id, mode) correctly rejected by risk_settings_user_mode_idx';
+END $$;
+
+DELETE FROM public.risk_settings WHERE user_id = '00000000-0000-0000-0000-000000000000';
+SQL
+then
+  red ""
+  red "Planted-canary test failed: risk_settings allowed a duplicate (user_id, mode)"
+  red "row. The unique index exists in the fingerprint but is not actually enforcing"
+  red "uniqueness against real inserts — do not trust it applied to production either."
+  exit 1
+fi
+grn "planted canary: risk_settings (user_id, mode) uniqueness verified by rejection, not just by presence"
+
 echo
 grn "Rebuilt from zero — $APPLIED migrations applied clean, twice, catalog matches."

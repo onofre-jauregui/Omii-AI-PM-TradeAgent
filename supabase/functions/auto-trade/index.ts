@@ -222,8 +222,21 @@ async function computeWinStreak(supabase: any, userId: string): Promise<number> 
 async function fetchUserRiskSettings(supabase: any, userId: string, mode: "paper" | "live" = "paper"): Promise<any> {
   const cacheKey = `${userId}:${mode}`;
   if (riskSettingsCache.has(cacheKey)) return riskSettingsCache.get(cacheKey);
-  const { data } = await supabase.from("risk_settings").select("*")
+  const { data, error } = await supabase.from("risk_settings").select("*")
     .eq("user_id", userId).eq("mode", mode).maybeSingle();
+  if (error) {
+    // maybeSingle() errors on 2+ rows for this (user_id, mode) — a real
+    // constraint violation, not "no row configured". Falling back to
+    // DEFAULT_RISK_SETTINGS either way is the safe behavior (never blocks
+    // trading on an infra error), but doing it silently means a live-money
+    // risk gate downgrades to defaults with nobody able to see it happened.
+    await supabase.from("compliance_log").insert({
+      event_type: "risk_settings_read_error",
+      severity: "error",
+      message: `risk_settings lookup failed for user ${userId} mode ${mode}: ${error.message}`,
+      metadata: { user_id: userId, mode, error: error.message },
+    }).then(null, () => {});
+  }
   const settings = data ?? DEFAULT_RISK_SETTINGS;
   riskSettingsCache.set(cacheKey, settings);
   return settings;
