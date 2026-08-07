@@ -37,16 +37,31 @@ const queryClient = new QueryClient({
 });
 
 /** Gate that checks profiles.is_admin — DB is the source of truth, works for any admin. */
-function AdminRoute({ element }: { element: React.ReactElement }) {
+export function AdminRoute({ element }: { element: React.ReactElement }) {
   const [state, setState] = useState<"loading" | "ok" | "denied" | "login">("loading");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
 
-  const checkAdmin = useCallback(async () => {
+  // `knownSession` is how the auth-state listener hands over the session it already
+  // holds. supabase-js keeps its auth lock held for the duration of every listener
+  // callback, so awaiting getSession() — or any PostgREST call, which fetches the
+  // access token the same way — from inside one can never acquire that lock. The
+  // promise then never settles, `state` stays "loading", and the page is a permanent
+  // spinner. Passing the session through, and deferring the profiles query to a task
+  // outside the callback, keeps this path off the lock entirely.
+  const checkAdmin = useCallback(async (knownSession?: Session | null) => {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      let session = knownSession ?? null;
+      if (knownSession === undefined) {
+        const { data, error } = await supabase.auth.getSession();
+        // A rejected refresh token (400 on /token?grant_type=refresh_token) stays in
+        // localStorage and fails identically on every reload. Clear it so the operator
+        // lands on the login form instead of retrying a token that can never succeed.
+        if (error) await supabase.auth.signOut();
+        session = data.session;
+      }
       if (!session?.user) return setState("login");
       const { data } = await supabase
         .from("profiles")
@@ -63,7 +78,9 @@ function AdminRoute({ element }: { element: React.ReactElement }) {
     // getSession() may race with localStorage rehydration — also listen for auth
     // state changes so the check re-runs once the session is fully available.
     checkAdmin();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => checkAdmin());
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setTimeout(() => checkAdmin(session), 0);
+    });
     return () => subscription.unsubscribe();
   }, [checkAdmin]);
 
