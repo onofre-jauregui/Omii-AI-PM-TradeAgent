@@ -2,7 +2,13 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { alertOnce, sendTelegramAlert } from "../_shared/telegram.ts";
-import { applyRiskBaselineFilter, computeMaxDrawdownPct, evaluateAutoResume } from "../_shared/strategy-health.ts";
+import {
+  applyRiskBaselineFilter,
+  computeCurrentDrawdownPct,
+  computeMaxDrawdownPct,
+  evaluateAutoResume,
+} from "../_shared/strategy-health.ts";
+import { computeDrawdownGear, EQUITY_FLOOR_PCT } from "../_shared/risk.ts";
 import { applyLessonDedupeFilters } from "../_shared/lesson-dedupe.ts";
 
 /**
@@ -173,7 +179,7 @@ serve(async (req) => {
     // Replaces consecutive-loss counting with rolling metrics over last 30 trades.
     // Suspension triggers:
     //   Sharpe < -1.0 with n≥20 → suspend 24h (sharpe_collapse)
-    //   Max drawdown > max_acceptable_drawdown → suspend 24h (drawdown_breach)
+    //   Drawdown → position-size gear (no suspension; see the gear block below)
     //   Hit rate < expected - 0.20 with n≥20 → suspend 72h (hit_rate_regime_shift)
     //   5+ consecutive losses → suspend 12h (consecutive_loss_streak)
 
@@ -408,7 +414,121 @@ serve(async (req) => {
       // no timer can lift it, so re-enabling is a deliberate human act, and the
       // operator doing it sets risk_baseline_reset_at so evaluation restarts from
       // the fix instead of re-reading the trades that caused the hold.
+      // ── Drawdown gear ────────────────────────────────────────────────────
+      // Drawdown no longer suspends anything. It sets the position-size
+      // multiplier auto-trade reads on its next tick, so a strategy that is down
+      // trades smaller rather than not at all and can size back up as it
+      // recovers. Written on every pass, including the healthy one, so the
+      // column is never stale.
+      //
+      // computeCurrentDrawdownPct, not computeMaxDrawdownPct: max drawdown never
+      // falls while it stays inside the 30-trade window, so sizing off it would
+      // be a ratchet a strategy could never climb out of.
+      const currentDdPct = computeCurrentDrawdownPct(pnls, startingBalance);
+      const equityPct = (startingBalance + totalPnl) / startingBalance;
+      const gear = computeDrawdownGear(currentDdPct, maxAcceptableDd, equityPct);
+
+      await supabase.from("strategies").update({
+        current_gear: gear.multiplier,
+        current_drawdown_pct: currentDdPct,
+      }).eq("id", strat.id);
+
+      // The equity floor is the one condition that stops a strategy outright.
+      if (gear.stopped) {
+        await supabase.from("strategies").update({
+          active: false,
+          suspended_until: null,
+          suspension_reason: "equity_floor",
+          updated_at: now.toISOString(),
+        }).eq("id", strat.id);
+
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_stopped_equity_floor",
+          severity: "critical",
+          message:
+            `Strategy "${strat.name}" stopped — equity $${(startingBalance + totalPnl).toFixed(2)} is ` +
+            `${(equityPct * 100).toFixed(1)}% of its $${startingBalance} starting balance, below the ` +
+            `${EQUITY_FLOOR_PCT * 100}% floor. This is the ladder's hard stop; re-enable manually.`,
+          metadata: {
+            strategy_id: strat.id,
+            equity_pct: equityPct,
+            starting_balance: startingBalance,
+            total_pnl: totalPnl,
+          },
+          user_id: strat.user_id ?? null,
+        });
+
+        await alertOnce(
+          supabase,
+          "strategy_stopped_equity_floor",
+          strat.id,
+          24,
+          `🛑 <b>[TradeAgent] ${strat.name} stopped at the equity floor</b>\n` +
+            `Equity is ${(equityPct * 100).toFixed(1)}% of its $${startingBalance} starting balance ` +
+            `(${strat.mode}). Position sizing had already degraded to minimum gear; this is the hard stop.`,
+        ).catch(() => {});
+
+        strategiesDeactivated++;
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          equity_pct: equityPct,
+          action: "stopped_equity_floor",
+        });
+        continue;
+      }
+
       const expectancyVerdict = evaluateAutoResume(pnls);
+
+      // Negative expectancy is answered differently by mode, because the cost of
+      // being wrong differs by mode.
+      //
+      // In PAPER the strategy drops to minimum gear and keeps trading. A stopped
+      // strategy generates no evidence, so the only route back would be a human
+      // switching it on at full size having learned nothing — the worst moment to
+      // resize up. At minimum gear it keeps producing settled trades (S-005 runs
+      // ~5/day, clearing the 20-trade floor in about four days) and can prove
+      // recovery on its own.
+      //
+      // In LIVE it stops. Real money does not fund experiments, and the same
+      // argument that makes paper cheap makes live expensive.
+      const isPaper = strat.mode !== "live";
+
+      if (!expectancyVerdict.resume && isPaper) {
+        // Probation, not a stop: minimum gear, still active.
+        await supabase.from("strategies").update({
+          current_gear: 0.10,
+          suspension_reason: "negative_expectancy_probation",
+          updated_at: now.toISOString(),
+        }).eq("id", strat.id);
+
+        await supabase.from("compliance_log").insert({
+          event_type: "strategy_probation_negative_expectancy",
+          severity: "warning",
+          message:
+            `Strategy "${strat.name}" dropped to minimum gear — expectancy $${
+              expectancyVerdict.expectancy.toFixed(2)
+            }/trade over ${expectancyVerdict.sampleSize} settled trades. Paper mode, so it keeps ` +
+            `trading at reduced size to prove whether it recovers.`,
+          metadata: {
+            strategy_id: strat.id,
+            expectancy: expectancyVerdict.expectancy,
+            sample_size: expectancyVerdict.sampleSize,
+            gear: 0.10,
+          },
+          user_id: strat.user_id ?? null,
+        });
+
+        strategyResults.push({
+          id: strat.id,
+          name: strat.name,
+          expectancy: expectancyVerdict.expectancy,
+          n: expectancyVerdict.sampleSize,
+          gear: 0.10,
+          action: "probation_negative_expectancy",
+        });
+        continue;
+      }
 
       if (!expectancyVerdict.resume) {
         await supabase.from("strategies").update({
@@ -490,37 +610,14 @@ serve(async (req) => {
           sharpe,
           action: "suspended_sharpe",
         });
-      } else if (maxDdPct > maxAcceptableDd && n >= 10) {
-        const suspendUntil = new Date(now.getTime() + 24 * 60 * 60 * 1000)
-          .toISOString();
-        await supabase.from("strategies").update({
-          active: false,
-          suspended_until: suspendUntil,
-          suspension_reason: "drawdown_breach",
-          updated_at: now.toISOString(),
-        }).eq("id", strat.id);
-
-        await supabase.from("compliance_log").insert({
-          event_type: "strategy_suspended_drawdown",
-          severity: "warning",
-          message: `Strategy "${strat.name}" suspended 24h — max drawdown ${
-            (maxDdPct * 100).toFixed(1)
-          }% exceeds ${(maxAcceptableDd * 100).toFixed(0)}% threshold.`,
-          metadata: {
-            strategy_id: strat.id,
-            max_drawdown: maxDdPct,
-            threshold: maxAcceptableDd,
-            n,
-            totalPnl,
-          },
-        });
-
-        strategyResults.push({
-          id: strat.id,
-          name: strat.name,
-          max_drawdown: maxDdPct,
-          action: "suspended_drawdown",
-        });
+        // NOTE: the drawdown_breach branch that sat here is gone on purpose.
+        // A 24h suspension on drawdown is what switched live S-001 off over a
+        // −$20 loss on a $100 account, and it could only ever revolve: suspend,
+        // wait, resume at full size, breach again. Drawdown is now expressed as
+        // the gear multiplier written above — the strategy stays in the market
+        // at reduced size and sizes back up as it recovers. The equity floor is
+        // the only thing that stops it. Sharpe, hit-rate and loss-streak
+        // suspensions below are unchanged; they detect different failures.
       } else if (hitRate < expectedHr - 0.20 && n >= 20) {
         const suspendUntil = new Date(now.getTime() + 72 * 60 * 60 * 1000)
           .toISOString();

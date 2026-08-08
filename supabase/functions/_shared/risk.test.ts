@@ -4,6 +4,10 @@ import {
   evaluateCapitalCap,
   evaluateBasketConcentration,
   computeConcentrationCapPct,
+  computeDrawdownGear,
+  applyGearToAmount,
+  EQUITY_FLOOR_PCT,
+  MIN_POSITION_USD,
   type RiskSettings,
   type RiskState,
 } from "./risk";
@@ -146,27 +150,46 @@ describe("evaluateRisk", () => {
     });
   });
 
-  describe("drawdown limit", () => {
-    it("rejects when drawdown exceeds max_drawdown_pct", () => {
-      // Peak 1000, daily P&L -250 → drawdown = 25%, exceeds 20%
+  describe("drawdown no longer halts on its own", () => {
+    // Drawdown governs position size via computeDrawdownGear, not pass/fail here.
+    // The equity floor lives with the gear so it can be measured against the
+    // strategy's own starting balance rather than allocated_capital.
+
+    it("passes an order that the old daily_pnl-vs-peak check would have rejected", () => {
+      // Peak 1000, daily P&L -250 → 25% by the old measure, over the 20% limit.
+      // This is the exact case that switched live S-001 off; it must now pass and
+      // be handled by sizing instead.
       const result = evaluateRisk(100, "live", baseSettings, {
         ...baseState,
         daily_pnl: -250,
         peak_portfolio_value: 1000,
       });
-      expect(result.passed).toBe(false);
-      expect(result.code).toBe("drawdown_limit");
-      expect(result.newHaltReason).toBeDefined();
+      expect(result.passed).toBe(true);
     });
 
-    it("allows when drawdown is within limit", () => {
-      // Peak 1000, daily P&L -100 → drawdown = 10%, under 20%
+    it("passes even at a drawdown far beyond the configured limit", () => {
+      // -499 against a 1000 peak is a ~50% drawdown, well past the 20% limit,
+      // while staying inside max_daily_loss (500) so the daily-loss check —
+      // which correctly fires first — isn't what we end up asserting on.
       const result = evaluateRisk(100, "live", baseSettings, {
         ...baseState,
-        daily_pnl: -100,
+        daily_pnl: -499,
         peak_portfolio_value: 1000,
       });
       expect(result.passed).toBe(true);
+    });
+
+    it("never returns a drawdown_limit rejection", () => {
+      // The code is retained on the type for the halt-state reason string, but
+      // evaluateRisk must no longer be a source of it.
+      for (const dailyPnl of [-100, -250, -400, -499]) {
+        const result = evaluateRisk(100, "live", baseSettings, {
+          ...baseState,
+          daily_pnl: dailyPnl,
+          peak_portfolio_value: 1000,
+        });
+        expect(result.code).not.toBe("drawdown_limit");
+      }
     });
   });
 
@@ -342,5 +365,79 @@ describe("evaluateBasketConcentration", () => {
     const r = evaluateBasketConcentration([], 100, 25);
     expect(r.scaled).toBe(false);
     expect(r.amounts).toEqual([]);
+  });
+});
+
+describe("computeDrawdownGear", () => {
+  const LIMIT = 0.20; // 20% configured drawdown limit
+
+  it("runs at full size while drawdown is under a quarter of the limit", () => {
+    expect(computeDrawdownGear(0, LIMIT).multiplier).toBe(1);
+    expect(computeDrawdownGear(0.049, LIMIT).multiplier).toBe(1);
+  });
+
+  it("steps down through each gear as drawdown deepens", () => {
+    expect(computeDrawdownGear(0.05, LIMIT).multiplier).toBe(0.75); // 25% of limit
+    expect(computeDrawdownGear(0.10, LIMIT).multiplier).toBe(0.5);  // 50%
+    expect(computeDrawdownGear(0.15, LIMIT).multiplier).toBe(0.25); // 75%
+    expect(computeDrawdownGear(0.20, LIMIT).multiplier).toBe(0.10); // at the limit
+  });
+
+  it("keeps trading in minimum gear past the limit rather than stopping", () => {
+    // The whole point of the ladder: at and beyond the limit the strategy is
+    // still in the market, small, and can trade its way back.
+    const wayPast = computeDrawdownGear(0.60, LIMIT);
+    expect(wayPast.multiplier).toBe(0.10);
+    expect(wayPast.stopped).toBe(false);
+  });
+
+  it("raises the gear again as equity recovers — a gear, not a ratchet", () => {
+    const deep = computeDrawdownGear(0.18, LIMIT).multiplier;
+    const recovered = computeDrawdownGear(0.06, LIMIT).multiplier;
+    const healed = computeDrawdownGear(0.01, LIMIT).multiplier;
+    expect(deep).toBeLessThan(recovered);
+    expect(recovered).toBeLessThan(healed);
+    expect(healed).toBe(1);
+  });
+
+  it("stops only when equity falls through the floor", () => {
+    const justAbove = computeDrawdownGear(0.5, LIMIT, EQUITY_FLOOR_PCT);
+    expect(justAbove.stopped).toBe(false);
+
+    const below = computeDrawdownGear(0.5, LIMIT, EQUITY_FLOOR_PCT - 0.01);
+    expect(below.stopped).toBe(true);
+    expect(below.multiplier).toBe(0);
+  });
+
+  it("runs at full size when no drawdown limit is configured", () => {
+    expect(computeDrawdownGear(0.9, 0).multiplier).toBe(1);
+    expect(computeDrawdownGear(0.9, -1).multiplier).toBe(1);
+  });
+
+  it("treats a negative drawdown (equity above peak) as no drawdown", () => {
+    expect(computeDrawdownGear(-0.1, LIMIT).multiplier).toBe(1);
+  });
+});
+
+describe("applyGearToAmount", () => {
+  it("scales the order by the gear", () => {
+    expect(applyGearToAmount(100, computeDrawdownGear(0.10, 0.20))).toBe(50);
+    expect(applyGearToAmount(100, computeDrawdownGear(0.05, 0.20))).toBe(75);
+  });
+
+  it("clamps up to the minimum order rather than down to nothing", () => {
+    // $15 leg at minimum gear is $1.50 — below what is worth placing. The ladder
+    // floors it at MIN_POSITION_USD so the strategy keeps trading.
+    const minGear = computeDrawdownGear(0.30, 0.20);
+    expect(applyGearToAmount(15, minGear)).toBe(MIN_POSITION_USD);
+  });
+
+  it("returns zero only when the gear says stop", () => {
+    const stopped = computeDrawdownGear(0.5, 0.20, 0.1);
+    expect(applyGearToAmount(100, stopped)).toBe(0);
+  });
+
+  it("leaves a full-gear order untouched", () => {
+    expect(applyGearToAmount(15, computeDrawdownGear(0, 0.20))).toBe(15);
   });
 });

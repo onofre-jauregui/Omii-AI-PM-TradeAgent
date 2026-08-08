@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
+import { bannerBottomOffset } from "./lib/swUpdateBanner";
 import "./index.css";
 
 // Canonical domain enforcement — redirect any non-production origin before React mounts.
@@ -31,12 +32,20 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     const banner = document.createElement("div");
     banner.id = "sw-update-banner";
+    // On mobile the app renders a fixed bottom nav. At bottom:1rem this banner
+    // landed inside that 56px strip and, being z-index:9999 against the nav's
+    // z-50, swallowed every tap on the middle tabs — so after each deploy the
+    // nav stopped responding until the user reloaded. Clear the nav's real
+    // height plus the safe-area inset instead of assuming a gap is there.
+    const bottomNav = document.querySelector("[data-bottom-nav]");
+    const bottomOffset = bannerBottomOffset(bottomNav?.getBoundingClientRect().height ?? 0);
     banner.style.cssText = [
-      "position:fixed","bottom:1rem","left:50%","transform:translateX(-50%)",
+      "position:fixed",`bottom:${bottomOffset}`,"left:50%","transform:translateX(-50%)",
       "background:#1c1917","color:#f5f5f4","border:1px solid #44403c",
       "border-radius:0.75rem","padding:0.625rem 1rem","font-size:12px",
       "display:flex","align-items:center","gap:0.75rem","z-index:9999",
       "box-shadow:0 4px 24px rgba(0,0,0,0.4)","white-space:nowrap",
+      "max-width:calc(100vw - 2rem)",
     ].join(";");
     banner.innerHTML = `
       <span>New version available</span>

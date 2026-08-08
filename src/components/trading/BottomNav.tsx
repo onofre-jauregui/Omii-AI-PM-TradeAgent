@@ -18,6 +18,10 @@ const NAV_ITEMS = [
 export function BottomNav({ activeTab, onNavigate, mode, tier }: BottomNavProps) {
   return (
     <nav
+      // Marks the strip that overlays the bottom of the viewport. The service
+      // worker update banner in main.tsx measures this to sit above the nav
+      // instead of on top of it.
+      data-bottom-nav=""
       className="fixed bottom-0 left-0 right-0 z-50 frosted-glass border-t border-border"
       style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
     >
@@ -28,6 +32,11 @@ export function BottomNav({ activeTab, onNavigate, mode, tier }: BottomNavProps)
             <button
               key={id}
               onClick={() => onNavigate(id)}
+              // The active tab was signalled only by colour and a pill indicator,
+              // which neither a screen reader nor a test can read. aria-current is
+              // the accessible name for "you are here" and is what the tab
+              // persistence E2E asserts against.
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[44px]",
                 "transition-all duration-150 active:scale-95",

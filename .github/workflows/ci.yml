@@ -359,6 +359,18 @@ jobs:
           E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
           E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
 
+      # The dashboard reopens on the tab the user left on, and a fresh sign-in
+      # resets to the Dashboard. Both behaviours depend on the mount-time
+      # restore, the auth callback and the persistence effect agreeing, which
+      # unit tests on the storage module cannot observe. Runs at desktop and
+      # mobile viewports because they mount different navigation components.
+      - name: Dashboard tab persistence gate
+        run: npm run test:e2e:tab-persistence
+        env:
+          BASE_URL: https://kalshitradeagent.live
+          E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+
   # ─── Job 5: Apply migrations → production DB (main push only) ─────────────
   # NOTE: requires one-time migration history repair on prod before enabling
   migrate-production:

@@ -7,17 +7,14 @@
   "policies, three column types and four constraints differed from production.",
   "Regenerate in the same commit as any intentional schema change so the diff gets reviewed."
  ],
- "_production_delta_2026_08_06": [
-  "Objects this rebuild has that production does NOT \u2014 production-side gaps, not migration bugs.",
-  "All trace to 20260504120000 aborting partway (invalid trailing upsert clause on cron.schedule)",
-  "and 20260610 failing on an unguarded ADD CONSTRAINT, both recorded as applied anyway:",
-  "  table  compaction_log (+ compaction_log_pkey, idx_compaction_log_result)",
-  "  view   open_positions",
-  "  index  idx_agent_memory_exposed, idx_agent_memory_quarantined, idx_agent_memory_system_version,",
-  "         idx_signals_shadow_settled, idx_signals_system_version, idx_trades_source_signal,",
-  "         idx_trades_system_version",
-  "  index  risk_settings_user_unique \u2014 production has 11 user_ids with duplicate risk_settings rows,",
-  "         so this constraint cannot be added until they are deduplicated."
+ "_drawdown_gear_2026_08_07": [
+  "Regenerated when the drawdown gear ladder merged (PR #225). Deliberate deltas:",
+  "  + column strategies.current_gear :: numeric NOT NULL DEFAULT 1.0",
+  "           Position-size multiplier from computeDrawdownGear. 1.0 = full size,",
+  "           0.10 = minimum gear, 0 = stopped at the equity floor. Constrained to",
+  "           [0, 1] by strategies_current_gear_range; written hourly by auto-reflect.",
+  "  + column strategies.current_drawdown_pct :: numeric",
+  "           Current equity below peak as a fraction. Observability for the gear."
  ],
  "_phase0_changes_2026_08_06": [
   "Regenerated when the agent_memory tenant-isolation work merged. Deliberate deltas vs the",
@@ -29,6 +26,18 @@
   "  - policy   agent_memory 'Users can manage own memories' \u2014 FOR ALL, USING (true), which OR'd",
   "             past the four correctly-scoped agent_memory_{select,insert,update,delete} policies.",
   "             Same defect class as 'Allow all access to api_keys'. anon now has no policy here."
+ ],
+ "_production_delta_2026_08_06": [
+  "Objects this rebuild has that production does NOT \u2014 production-side gaps, not migration bugs.",
+  "All trace to 20260504120000 aborting partway (invalid trailing upsert clause on cron.schedule)",
+  "and 20260610 failing on an unguarded ADD CONSTRAINT, both recorded as applied anyway:",
+  "  table  compaction_log (+ compaction_log_pkey, idx_compaction_log_result)",
+  "  view   open_positions",
+  "  index  idx_agent_memory_exposed, idx_agent_memory_quarantined, idx_agent_memory_system_version,",
+  "         idx_signals_shadow_settled, idx_signals_system_version, idx_trades_source_signal,",
+  "         idx_trades_system_version",
+  "  index  risk_settings_user_unique \u2014 production has 11 user_ids with duplicate risk_settings rows,",
+  "         so this constraint cannot be added until they are deduplicated."
  ],
  "columns": [
   "agent_memory.alpha :: numeric DEFAULT 1",
@@ -268,6 +277,8 @@
   "spread_history.yes_bid :: integer",
   "strategies.active :: boolean NOT NULL DEFAULT false",
   "strategies.created_at :: timestamp with time zone NOT NULL DEFAULT now()",
+  "strategies.current_drawdown_pct :: numeric",
+  "strategies.current_gear :: numeric NOT NULL DEFAULT 1.0",
   "strategies.description :: text NOT NULL DEFAULT ''::text",
   "strategies.expected_hit_rate :: numeric DEFAULT 0.50",
   "strategies.id :: text NOT NULL",
@@ -511,6 +522,7 @@
   "signals::signals_signal_strength_check c",
   "signals::signals_ticker_source_unique u",
   "spread_history::spread_history_pkey p",
+  "strategies::strategies_current_gear_range c",
   "strategies::strategies_mode_check c",
   "strategies::strategies_pkey p",
   "strategies::strategies_run_interval_positive c",
