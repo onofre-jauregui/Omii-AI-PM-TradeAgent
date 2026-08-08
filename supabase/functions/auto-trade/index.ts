@@ -9,6 +9,7 @@ import { importMasterKey, decryptSecret, type EncryptedSecret } from "../_shared
 import { sanitizeMarketData, parseQualifyResponse, DEFAULT_FIELD_MAX_LEN } from "../_shared/prompt-safety.ts";
 import { applyMemoryTenantFilter } from "../_shared/memory-scope.ts";
 import { kalshiPriceToCents, marketFieldCents } from "../_shared/kalshi-prices.ts";
+import { dominantRejectReason, feeHurdleCentsAt, screenLegs } from "../_shared/leg-screen.ts";
 import { sendTelegramAlert } from "../_shared/telegram.ts";
 import { sendUserNotification } from "../_shared/notifications.ts";
 import {
@@ -1621,44 +1622,65 @@ async function runS001SurfaceArb(
       continue;
     }
 
-    // Per-leg fee-adjusted edge filter.
-    // Kalshi charges 7% of gross winnings on a winning NO contract.
-    // On a $15 leg buying NO at P cents: gross_win = $15 * (100 - P) / P; fee = gross_win * 0.07.
-    // Fee expressed in edge-cent equivalent: feeHurdle = ((100 - P) / P) * 7.
-    //   P=50c: feeHurdle=7c  (need >7c per-leg edge to break even)
-    //   P=20c: feeHurdle=28c (need >28c per-leg edge)
-    // We require per-leg edge to exceed BOTH the price-adjusted hurdle AND the 8c absolute floor.
-    const feeHurdleCentsAt = (noPrice: number): number =>
-      ((100 - noPrice) / noPrice) * KALSHI_FEE_RATE * 100;
-
-    const tradeable = eventMarkets
-      .filter((m: any) => {
-        const ask = yesAskCents(m);
-        const noPrice = 100 - ask;
-        if (ask < 5 || ask > 92) return false;    // original price band: floor ensures payout; ceiling ensures commission coverage
-        // Break-even win rate for a NO leg is ≈ its entry price, so legs bought
-        // above MAX_ENTRY_PRICE_CENTS need a win rate the strategy has never
-        // actually delivered. See the constant's definition for the per-band data.
-        if (noPrice > MAX_ENTRY_PRICE_CENTS) return false;
-        if (openTickers.has(m.ticker)) return false;
-        // Per-leg fee check: distribute the alert's total expected edge evenly across legs.
-        // Rejects arbs where total excess (e.g. 3c across a 3-leg basket) is eaten by fees.
-        const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
-        const feeHurdle = feeHurdleCentsAt(noPrice);
-        if (perLegEdge < feeHurdle || perLegEdge < MIN_NET_EDGE_PER_LEG_CENTS) return false;
-        return true;
-      })
-      .map((m: any) => ({
+    // Per-leg screen — price band, entry-price cap, already-held, fee hurdle.
+    // The gates and their order live in _shared/leg-screen.ts so each rejected
+    // leg is attributed to exactly one reason and the tally can be logged; the
+    // per-leg fee arithmetic is documented on feeHurdleCentsAt there.
+    // Edge is distributed evenly across the basket's legs, which rejects arbs
+    // where a small total excess (e.g. 3c across 3 legs) is eaten by fees.
+    const perLegEdgeCents = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
+    const { tradeable: survivingLegs, summary: legScreen } = screenLegs(
+      eventMarkets.map((m: any) => ({
         ticker: m.ticker,
-        yesAsk: yesAskCents(m),
-        noPrice: 100 - yesAskCents(m),
+        yesAskCents: yesAskCents(m),
+        isOpenTicker: openTickers.has(m.ticker),
+        perLegEdgeCents,
         title: m.title || m.ticker,
         closeTime: m.close_time,
+      })),
+      {
+        minAskCents: 5,   // floor ensures the NO payout is worth the fee
+        maxAskCents: 92,  // ceiling ensures commission coverage
+        maxEntryPriceCents: MAX_ENTRY_PRICE_CENTS,
+        feeRate: KALSHI_FEE_RATE,
+        minNetEdgePerLegCents: MIN_NET_EDGE_PER_LEG_CENTS,
+      },
+    );
+
+    const tradeable = survivingLegs
+      .map((leg) => ({
+        ticker: leg.ticker,
+        yesAsk: leg.yesAskCents,
+        noPrice: 100 - leg.yesAskCents,
+        title: leg.title,
+        closeTime: leg.closeTime,
       }))
-      .sort((a: any, b: any) => b.yesAsk - a.yesAsk) // highest YES ask = most overpriced relative to fair value
+      .sort((a, b) => b.yesAsk - a.yesAsk) // highest YES ask = most overpriced relative to fair value
       .slice(0, MAX_LEGS_PER_EVENT);
 
-    if (tradeable.length === 0) continue;
+    if (tradeable.length === 0) {
+      // A silent `continue` here made a day of zero orders indistinguishable
+      // from a day of zero opportunities — the open question about whether the
+      // sub-80c band is reachable with real money. Log which gate emptied the
+      // basket and what the book was actually offering.
+      const dominant = dominantRejectReason(legScreen);
+      await supabase.from("compliance_log").insert({
+        event_type: "s001_no_tradeable_legs",
+        severity: "info",
+        message: `S-001: ${eventTicker} — 0 of ${legScreen.considered} legs tradeable` +
+          (dominant ? ` (mostly ${dominant})` : ""),
+        metadata: {
+          event_ticker: eventTicker,
+          considered: legScreen.considered,
+          rejects: legScreen.rejects,
+          dominant_reject: dominant,
+          no_prices_seen: legScreen.noPricesSeen,
+          per_leg_edge_cents: perLegEdgeCents,
+          run_id: runId,
+        },
+      }).then(null, () => {});
+      continue;
+    }
 
     // Stop-loss for held positions runs in the sweep at step 2b, before this loop —
     // it must not be re-added here, where the `alreadyInMarket` continue above makes
@@ -1689,8 +1711,10 @@ async function runS001SurfaceArb(
       // already know is underfunded.
       if (accountDepleted) break;
 
-      const feeHurdle = feeHurdleCentsAt(leg.noPrice);
-      const perLegEdge = (alert.expected_edge_cents ?? 0) / MAX_LEGS_PER_EVENT;
+      // Same hurdle the screen above applied; recomputed here only so the
+      // executed order's notes can record what it cleared.
+      const feeHurdle = feeHurdleCentsAt(leg.noPrice, KALSHI_FEE_RATE);
+      const perLegEdge = perLegEdgeCents;
       // Quarter-Kelly sizing instead of a flat AMOUNT_PER_LEG for every signal
       // regardless of edge strength. marketP is the price we're actually paying;
       // trueP is our own fair-value estimate for this leg — marketP plus the

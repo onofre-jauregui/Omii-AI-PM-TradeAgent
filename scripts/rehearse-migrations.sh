@@ -195,8 +195,42 @@ dim "Rebuilt from zero in $((SECONDS - started))s"
 "${PSQL[@]}" -tA --no-psqlrc -f "$REPO_ROOT/scripts/schema-fingerprint.sql" > "$FINGERPRINT_OUT"
 
 if [[ $WRITE_FINGERPRINT -eq 1 ]]; then
-  python3 -c 'import json,sys; json.dump(json.load(open(sys.argv[1])), open(sys.argv[2],"w"), indent=1, sort_keys=True)' \
-    "$FINGERPRINT_OUT" "$EXPECTED"
+  # Carry forward every "_"-prefixed key from the existing fingerprint.
+  #
+  # Those keys are prose, not schema: compare-schema-fingerprint.py skips them
+  # by design, so they are the only place the file records WHY it looks the way
+  # it does — which objects production is missing and why, which deltas were
+  # reviewed and accepted. Dumping the raw catalog over the top erased all of
+  # it, and it erased silently: the comparator ignores the keys, so CI stayed
+  # green while the explanation disappeared. That happened on 2026-08-07 with
+  # the drawdown-gear regeneration, taking with it the note that production has
+  # 11 user_ids with duplicate risk_settings rows — a fact that then had to be
+  # rediscovered by hand.
+  #
+  # Regenerated schema always wins for real keys; annotations survive. If an
+  # annotation goes stale, edit or delete it deliberately.
+  python3 - "$FINGERPRINT_OUT" "$EXPECTED" <<'PY'
+import json
+import os
+import sys
+
+fingerprint_path, expected_path = sys.argv[1], sys.argv[2]
+
+with open(fingerprint_path) as handle:
+    merged = json.load(handle)
+
+if os.path.exists(expected_path):
+    with open(expected_path) as handle:
+        previous = json.load(handle)
+    carried = [k for k in previous if k.startswith("_")]
+    for key in carried:
+        merged[key] = previous[key]
+    if carried:
+        print(f"carried forward {len(carried)} annotation(s): {', '.join(sorted(carried))}")
+
+with open(expected_path, "w") as handle:
+    json.dump(merged, handle, indent=1, sort_keys=True)
+PY
   grn "wrote $EXPECTED"
   exit 0
 fi
