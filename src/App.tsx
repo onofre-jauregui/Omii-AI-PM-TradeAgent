@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { StrategiesProvider } from "@/lib/strategiesContext";
 import { ChatProvider } from "@/lib/chatContext";
 import { supabase } from "@/integrations/supabase/client";
+import { signOut } from "@/lib/auth";
 import type { Session } from "@supabase/supabase-js";
 import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
@@ -59,7 +60,9 @@ export function AdminRoute({ element }: { element: React.ReactElement }) {
         // A rejected refresh token (400 on /token?grant_type=refresh_token) stays in
         // localStorage and fails identically on every reload. Clear it so the operator
         // lands on the login form instead of retrying a token that can never succeed.
-        if (error) await supabase.auth.signOut();
+        // Local scope on purpose: a token this browser can't use says nothing about
+        // the user's session on their phone, and must not end it.
+        if (error) await signOut();
         session = data.session;
       }
       if (!session?.user) return setState("login");

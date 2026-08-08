@@ -20,6 +20,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Bot, Lock, LayoutDashboard, Settings, LogOut } from "lucide-react";
 import { PAID_TIERS, BILLING_LIVE, tierPriceLabel } from "@/lib/pricing";
+import { signOut } from "@/lib/auth";
 import { readUiState, writeUiState, clearUiState, DEFAULT_UI_STATE } from "@/lib/uiState";
 import type { AgentSubTab } from "@/lib/uiState";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -253,7 +254,7 @@ const Index = () => {
                     <Settings className="h-4 w-4" /> Settings
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive" onClick={() => supabase.auth.signOut()}>
+                  <DropdownMenuItem className="text-sm cursor-pointer gap-2 text-destructive" onClick={() => signOut()}>
                     <LogOut className="h-4 w-4" /> Sign out
                   </DropdownMenuItem>
                 </DropdownMenuContent>
