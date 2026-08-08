@@ -71,7 +71,8 @@ export interface TierDefinition {
  * S-005 (weather) is the evidence-backed strategy and is included from the Pro
  * tier upward (it's the differentiated value add).
  */
-const ALL_STRATEGIES = ["S-001", "S-002", "S-005"];
+export const HANDLED_STRATEGIES = ["S-001", "S-002", "S-005"];
+const ALL_STRATEGIES = HANDLED_STRATEGIES;
 
 export const TIER_DEFINITIONS: Record<Tier, TierDefinition> = {
   free: {

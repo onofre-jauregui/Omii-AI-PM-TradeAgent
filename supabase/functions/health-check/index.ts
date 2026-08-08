@@ -4,6 +4,7 @@ import { corsHeaders, preflight } from "../_shared/cors.ts";
 import { getKalshiCredentials, generateAuthHeaders, KALSHI_BASE_URL } from "../_shared/kalshi-auth.ts";
 import { fetchMarketStatus } from "../_shared/kalshi-market-data.ts";
 import { countTradesInWindow } from "../_shared/limits.ts";
+import { HANDLED_STRATEGIES } from "../_shared/billing.ts";
 
 /**
  * health-check: Monitors the trading agent and alerts via Telegram.
@@ -767,6 +768,57 @@ serve(async (req) => {
         severity: "warning",
         message: `${notAdvancing.length} order(s) resting on non-tradeable markets; worst ${worst.ticker} (${worst.status}, ${worst.ageHours}h)`,
         metadata: { count: notAdvancing.length, tickers, worst },
+      });
+    }
+
+    // ── 15. Active strategy with no code handler ───────────────────────
+    // auto-trade's dispatcher hard-rejects any strategy.template_id it doesn't
+    // have a runS0xx() handler for, logging unknown_strategy_skipped at `warning`
+    // (never a Telegram alert) and moving on — by design, so a bad row can't
+    // trigger unguarded LLM usage. But that means an active-but-unhandled row
+    // is silent-by-default: it can sit skipped every single tick indefinitely
+    // and nothing pages. This happened for real on 2026-08-07 — S-003
+    // "Economic Consensus" was inserted directly into `strategies` with
+    // active=true despite HANDLED_STRATEGIES (billing.ts) documenting it was
+    // deliberately never built ("the Fed paper shows Kalshi macro markets are
+    // efficient") — and it sat skipped hourly for 24h before anyone noticed.
+    // Same failure class as this log's other "written but not wired" gaps
+    // (104th run's unapplied migration, 106th's unseeded config): the fix
+    // isn't to build the missing handler unattended, it's to close the silent
+    // window — self-heal by deactivating (an inert data flip, reversible the
+    // moment a real handler ships and this run's own author starts routing to
+    // it) and alert, so the next occurrence pages in under an hour instead of
+    // sitting quiet for a day.
+    const { data: unhandledActive } = await supabase
+      .from("strategies")
+      .select("id, name, template_id, active")
+      .eq("active", true);
+
+    const unhandled = (unhandledActive ?? []).filter(
+      (s: any) => !HANDLED_STRATEGIES.includes(s.template_id ?? s.id)
+    );
+
+    if (unhandled.length > 0) {
+      let deactivated = 0;
+      for (const s of unhandled as any[]) {
+        const { error: deactErr } = await supabase
+          .from("strategies")
+          .update({ active: false, updated_at: new Date().toISOString() })
+          .eq("id", s.id);
+        if (!deactErr) deactivated++;
+      }
+      const names = unhandled.map((s: any) => `${s.id} (${s.name})`).join(", ");
+      pendingAlerts.push({
+        type: "unhandled_strategy_active",
+        fingerprint: `unhandled_active_${unhandled.map((s: any) => s.id).sort().join(",")}`,
+        cooldownHours: 24,
+        message: `🧩 [TradeAgent] Active strategy with no code handler: ${names} — auto-trade skips it every tick and never trades. Deactivated ${deactivated}/${unhandled.length}; re-activate once a real handler ships.`,
+      });
+      await supabase.from("compliance_log").insert({
+        event_type: "unhandled_strategy_deactivated",
+        severity: "warning",
+        message: `${unhandled.length} active strategy row(s) with no handler in HANDLED_STRATEGIES: ${names}. Auto-deactivated ${deactivated}/${unhandled.length}.`,
+        metadata: { strategies: unhandled.map((s: any) => s.id), deactivated },
       });
     }
 
