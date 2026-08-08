@@ -10,6 +10,7 @@ import {
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { signOut } from "@/lib/auth";
 import { BILLING_LIVE, tierLabel } from "@/lib/pricing";
 
 const FALLBACK_MODELS = [
@@ -489,7 +490,7 @@ export function SettingsPanel({ userId }: { userId?: string }) {
           <Button
             variant="outline"
             className="w-full rounded-full gap-2 text-sm border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive hover:border-destructive"
-            onClick={() => supabase.auth.signOut()}
+            onClick={() => signOut()}
           >
             <LogOut className="h-4 w-4" />
             Sign out

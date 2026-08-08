@@ -20,8 +20,20 @@
  */
 import { expect, type Page, test } from "@playwright/test";
 
-const EMAIL = process.env.E2E_USER_EMAIL ?? process.env.TRADEAGENT_E2E_TEST_USER_EMAIL;
-const PASSWORD = process.env.E2E_USER_PASSWORD ?? process.env.TRADEAGENT_E2E_TEST_USER_PASSWORD;
+// This is the only suite that signs out. Until 2026-08-08 that was a
+// global-scope sign-out, so running it revoked every session the shared QA
+// account held anywhere — including a human's browser mid-audit. src/lib/auth.ts
+// now scopes sign-out to the local browser, which removes the collision at the
+// source; E2E_SIGNOUT_USER_* is belt-and-braces so this suite can be moved onto
+// its own account by setting a secret, with no code change.
+const EMAIL =
+  process.env.E2E_SIGNOUT_USER_EMAIL ??
+  process.env.E2E_USER_EMAIL ??
+  process.env.TRADEAGENT_E2E_TEST_USER_EMAIL;
+const PASSWORD =
+  process.env.E2E_SIGNOUT_USER_PASSWORD ??
+  process.env.E2E_USER_PASSWORD ??
+  process.env.TRADEAGENT_E2E_TEST_USER_PASSWORD;
 
 const HAVE_CREDS = Boolean(EMAIL && PASSWORD);
 
